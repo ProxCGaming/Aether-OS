@@ -31,6 +31,21 @@ from aether_ui.ws_client import AetherWSClient
 
 logger = logging.getLogger("aether_ui.main")
 
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class _MINMAXINFO(ctypes.Structure):
+    _fields_ = [
+        ("ptReserved", _POINT),
+        ("ptMaxSize", _POINT),
+        ("ptMaxPosition", _POINT),
+        ("ptMinTrackSize", _POINT),
+        ("ptMaxTrackSize", _POINT),
+    ]
+
+
 _TB_BTN = """QPushButton {{
     background: transparent; color: #8B949E; border: none; font-size: {fs}px;
 }} QPushButton:hover {{ background: {hover}; color: #FFFFFF; }}"""
@@ -102,16 +117,19 @@ class AetherWindow(QWidget):
         title.setStyleSheet("font-weight:700; font-size:12px; color:#38BDF8;")
         tl.addWidget(title)
         tl.addStretch()
-        for icon, fs, hover, slot in [
-            ("🗕", 13, "#1E293B", self.showMinimized),
-            ("✕", 12, "#EF4444", self.close),
-        ]:
-            b = QPushButton(icon)
-            b.setFixedSize(28, 28)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setStyleSheet(_TB_BTN.format(fs=fs, hover=hover))
-            b.clicked.connect(slot)
-            tl.addWidget(b)
+        self.btn_min = QPushButton("🗕")
+        self.btn_min.setFixedSize(28, 28)
+        self.btn_min.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_min.setStyleSheet(_TB_BTN.format(fs=13, hover="#1E293B"))
+        self.btn_min.clicked.connect(self._minimize_window)
+        tl.addWidget(self.btn_min)
+
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setFixedSize(28, 28)
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setStyleSheet(_TB_BTN.format(fs=12, hover="#EF4444"))
+        self.btn_close.clicked.connect(self.close)
+        tl.addWidget(self.btn_close)
         ml.addWidget(tb)
 
         # Main content column (orb + hud)
@@ -298,10 +316,22 @@ class AetherWindow(QWidget):
         elif t in (EventType.TOOL_APPROVAL_GRANTED, EventType.TOOL_APPROVAL_REJECTED, EventType.WORKER_EXECUTION_COMPLETED):
             self.approval_drawer.hide_drawer()
 
+    def _minimize_window(self):
+        self._drag = QPoint()
+        QApplication.restoreOverrideCursor()
+        self.showMinimized()
+
     # Frameless drag
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and e.position().y() <= 40:
-            self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            pt = e.position().toPoint()
+            child = self.childAt(pt)
+            if child is None or child not in (
+                getattr(self, "btn_gear", None),
+                getattr(self, "btn_min", None),
+                getattr(self, "btn_close", None),
+            ):
+                self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
@@ -316,13 +346,34 @@ class AetherWindow(QWidget):
     def nativeEvent(self, eventType, message):
         if sys.platform == "win32" and eventType == b"windows_generic_MSG":
             msg = wintypes.MSG.from_address(message.__int__())
+
+            if msg.message == 0x0024:  # WM_GETMINMAXINFO
+                info = _MINMAXINFO.from_address(msg.lParam)
+                dpr = self.devicePixelRatio()
+                info.ptMinTrackSize.x = int(420 * dpr)
+                info.ptMinTrackSize.y = int(_MIN_WINDOW_H * dpr)
+                info.ptMaxTrackSize.x = int(_MAX_WINDOW_W * dpr)
+                info.ptMaxTrackSize.y = int(_MAX_WINDOW_H * dpr)
+                return True, 0
+
             if msg.message == 0x0084:  # WM_NCHITTEST
-                x = ctypes.c_short(msg.lParam & 0xFFFF).value
-                y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
-                pt = self.mapFromGlobal(QPoint(x, y))
-                margin = 8
+                # Use Qt's DPI-aware logical global cursor position
+                pt = self.mapFromGlobal(self.cursor().pos())
                 w, h = self.width(), self.height()
 
+                # If cursor is outside window bounds or over interactive buttons/drawers, return HTCLIENT
+                if pt.x() < 0 or pt.x() > w or pt.y() < 0 or pt.y() > h:
+                    return super().nativeEvent(eventType, message)
+
+                child = self.childAt(pt)
+                if child is not None:
+                    if (
+                        child in (getattr(self, "btn_gear", None), getattr(self, "btn_min", None), getattr(self, "btn_close", None))
+                        or (hasattr(self, "drawer") and self.drawer.isVisible() and self.drawer.rect().contains(pt))
+                    ):
+                        return True, 1  # HTCLIENT
+
+                margin = 8
                 left = pt.x() < margin
                 right = pt.x() >= w - margin
                 top = pt.y() < margin
