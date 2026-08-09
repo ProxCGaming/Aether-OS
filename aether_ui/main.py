@@ -64,11 +64,22 @@ class AetherWindow(QWidget):
 
         # Load persisted config for window geometry memory
         self.user_config = load_config()
-        start_w = max(420, self.user_config.window_width)
-        start_h = max(_MIN_WINDOW_H, self.user_config.window_height)
+        screen = QApplication.primaryScreen().availableGeometry() if QApplication.primaryScreen() else None
+        screen_w = screen.width() if screen else 1920
+        screen_h = screen.height() if screen else 1080
+
+        start_w = self.user_config.window_width or 480
+        start_h = self.user_config.window_height or 720
+        if start_w >= screen_w or start_h >= screen_h:
+            start_w = min(500, screen_w - 100)
+            start_h = min(720, screen_h - 100)
+
+        start_w = max(420, start_w)
+        start_h = max(_MIN_WINDOW_H, start_h)
 
         self.resize(start_w, start_h)
         self.setMinimumSize(420, _MIN_WINDOW_H)
+        self._normal_geometry = self.geometry()
 
         # State machine + WS client
         self._current_default_provider = self.user_config.default_provider or "google_gemini"
@@ -79,7 +90,6 @@ class AetherWindow(QWidget):
         )
 
         self._drag = QPoint()
-        self._is_maximized = False
         self._build_ui()
 
         # Connect state machine updates to Orb
@@ -231,12 +241,20 @@ class AetherWindow(QWidget):
             self.approval_drawer.update_geometry()
         self._save_window_geometry()
 
+    @property
+    def is_maximized_or_fullscreen(self) -> bool:
+        """Helper to determine if the window is in a maximized or fullscreen state."""
+        return bool(self.windowState() & (Qt.WindowState.WindowMaximized | Qt.WindowState.WindowFullScreen))
+
     def _save_window_geometry(self):
         """Persist current window dimensions to ~/.aether/config.json."""
-        if not self.isMinimized() and self.width() >= 380 and self.height() >= _MIN_WINDOW_H:
-            self.user_config.window_width = self.width()
-            self.user_config.window_height = self.height()
-            save_config(self.user_config)
+        if not self.isMinimized() and not self.is_maximized_or_fullscreen:
+            screen = QApplication.primaryScreen().availableGeometry() if QApplication.primaryScreen() else None
+            if screen is None or (self.width() < screen.width() and self.height() < screen.height()):
+                if self.width() >= 380 and self.height() >= _MIN_WINDOW_H:
+                    self.user_config.window_width = self.width()
+                    self.user_config.window_height = self.height()
+                    save_config(self.user_config)
 
     def _toggle_settings(self):
         self.drawer.toggle()
@@ -333,31 +351,29 @@ class AetherWindow(QWidget):
     def _toggle_maximize(self):
         self._drag = QPoint()
         QApplication.restoreOverrideCursor()
-        if self._is_maximized:
-            self._is_maximized = False
-            self.btn_max.setText("🗖")
+        if self.is_maximized_or_fullscreen:
             self.showNormal()
+            if hasattr(self, "_normal_geometry") and self._normal_geometry and not self._normal_geometry.isEmpty():
+                self.setGeometry(self._normal_geometry)
+            self.btn_max.setText("🗖")
         else:
-            self._is_maximized = True
-            self.btn_max.setText("🗗")
+            self._normal_geometry = self.geometry()
             self.showMaximized()
+            self.btn_max.setText("🗗")
 
     def changeEvent(self, e):
-        """Keep the maximize button icon in sync when the window state changes
-        through means other than clicking our button (e.g. Win+Up, taskbar)."""
+        """Single source of truth for the maximize button icon."""
         from PySide6.QtCore import QEvent
-        if e.type() == QEvent.Type.WindowStateChange:
-            if self.isMaximized() and not self._is_maximized:
-                self._is_maximized = True
+        if e.type() == QEvent.Type.WindowStateChange and hasattr(self, "btn_max"):
+            if self.is_maximized_or_fullscreen:
                 self.btn_max.setText("🗗")
-            elif not self.isMaximized() and self._is_maximized:
-                self._is_maximized = False
+            else:
                 self.btn_max.setText("🗖")
         super().changeEvent(e)
 
-    # Frameless drag
-    def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton and e.position().y() <= 40:
+    # Frameless drag & double-click titlebar
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and e.position().y() <= 36:
             pt = e.position().toPoint()
             child = self.childAt(pt)
             if child is None or child not in (
@@ -366,7 +382,22 @@ class AetherWindow(QWidget):
                 getattr(self, "btn_max", None),
                 getattr(self, "btn_close", None),
             ):
-                self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                self._toggle_maximize()
+                return
+        super().mouseDoubleClickEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and e.position().y() <= 40:
+            if not self.is_maximized_or_fullscreen:
+                pt = e.position().toPoint()
+                child = self.childAt(pt)
+                if child is None or child not in (
+                    getattr(self, "btn_gear", None),
+                    getattr(self, "btn_min", None),
+                    getattr(self, "btn_max", None),
+                    getattr(self, "btn_close", None),
+                ):
+                    self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
@@ -406,6 +437,9 @@ class AetherWindow(QWidget):
                     ):
                         return True, 1  # HTCLIENT
 
+                if self.is_maximized_or_fullscreen:
+                    return True, 1  # HTCLIENT: no edge resizing when maximized
+
                 margin = 8
                 left = pt.x() < margin
                 right = pt.x() >= w - margin
@@ -425,7 +459,11 @@ class AetherWindow(QWidget):
 
     def closeEvent(self, e):
         self._save_window_geometry()
-        asyncio.create_task(self.ws_client.disconnect())
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.ws_client.disconnect())
+        except RuntimeError:
+            pass
         super().closeEvent(e)
 
 
