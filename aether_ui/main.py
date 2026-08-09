@@ -79,6 +79,7 @@ class AetherWindow(QWidget):
         )
 
         self._drag = QPoint()
+        self._is_maximized = False
         self._build_ui()
 
         # Connect state machine updates to Orb
@@ -332,12 +333,27 @@ class AetherWindow(QWidget):
     def _toggle_maximize(self):
         self._drag = QPoint()
         QApplication.restoreOverrideCursor()
-        if self.isMaximized():
-            self.showNormal()
+        if self._is_maximized:
+            self._is_maximized = False
             self.btn_max.setText("🗖")
+            self.showNormal()
         else:
-            self.showMaximized()
+            self._is_maximized = True
             self.btn_max.setText("🗗")
+            self.showMaximized()
+
+    def changeEvent(self, e):
+        """Keep the maximize button icon in sync when the window state changes
+        through means other than clicking our button (e.g. Win+Up, taskbar)."""
+        from PySide6.QtCore import QEvent
+        if e.type() == QEvent.Type.WindowStateChange:
+            if self.isMaximized() and not self._is_maximized:
+                self._is_maximized = True
+                self.btn_max.setText("🗗")
+            elif not self.isMaximized() and self._is_maximized:
+                self._is_maximized = False
+                self.btn_max.setText("🗖")
+        super().changeEvent(e)
 
     # Frameless drag
     def mousePressEvent(self, e):
