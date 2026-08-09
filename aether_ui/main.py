@@ -69,7 +69,6 @@ class AetherWindow(QWidget):
 
         self.resize(start_w, start_h)
         self.setMinimumSize(420, _MIN_WINDOW_H)
-        self.setMaximumSize(_MAX_WINDOW_W, _MAX_WINDOW_H)
 
         # State machine + WS client
         self._current_default_provider = self.user_config.default_provider or "google_gemini"
@@ -123,6 +122,13 @@ class AetherWindow(QWidget):
         self.btn_min.setStyleSheet(_TB_BTN.format(fs=13, hover="#1E293B"))
         self.btn_min.clicked.connect(self._minimize_window)
         tl.addWidget(self.btn_min)
+
+        self.btn_max = QPushButton("🗖")
+        self.btn_max.setFixedSize(28, 28)
+        self.btn_max.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_max.setStyleSheet(_TB_BTN.format(fs=13, hover="#1E293B"))
+        self.btn_max.clicked.connect(self._toggle_maximize)
+        tl.addWidget(self.btn_max)
 
         self.btn_close = QPushButton("✕")
         self.btn_close.setFixedSize(28, 28)
@@ -321,6 +327,16 @@ class AetherWindow(QWidget):
         QApplication.restoreOverrideCursor()
         self.showMinimized()
 
+    def _toggle_maximize(self):
+        self._drag = QPoint()
+        QApplication.restoreOverrideCursor()
+        if self.isMaximized():
+            self.showNormal()
+            self.btn_max.setText("🗖")
+        else:
+            self.showMaximized()
+            self.btn_max.setText("🗗")
+
     # Frameless drag
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and e.position().y() <= 40:
@@ -329,6 +345,7 @@ class AetherWindow(QWidget):
             if child is None or child not in (
                 getattr(self, "btn_gear", None),
                 getattr(self, "btn_min", None),
+                getattr(self, "btn_max", None),
                 getattr(self, "btn_close", None),
             ):
                 self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -352,8 +369,6 @@ class AetherWindow(QWidget):
                 dpr = self.devicePixelRatio()
                 info.ptMinTrackSize.x = int(420 * dpr)
                 info.ptMinTrackSize.y = int(_MIN_WINDOW_H * dpr)
-                info.ptMaxTrackSize.x = int(_MAX_WINDOW_W * dpr)
-                info.ptMaxTrackSize.y = int(_MAX_WINDOW_H * dpr)
                 return True, 0
 
             if msg.message == 0x0084:  # WM_NCHITTEST
@@ -368,7 +383,7 @@ class AetherWindow(QWidget):
                 child = self.childAt(pt)
                 if child is not None:
                     if (
-                        child in (getattr(self, "btn_gear", None), getattr(self, "btn_min", None), getattr(self, "btn_close", None))
+                        child in (getattr(self, "btn_gear", None), getattr(self, "btn_min", None), getattr(self, "btn_max", None), getattr(self, "btn_close", None))
                         or (hasattr(self, "drawer") and self.drawer.isVisible() and self.drawer.rect().contains(pt))
                     ):
                         return True, 1  # HTCLIENT
