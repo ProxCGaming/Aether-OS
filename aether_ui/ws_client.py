@@ -226,10 +226,12 @@ class AetherWSClient:
             request_id=request_id or str(uuid.uuid4()),
         ))
 
-    async def send_approval(self, granted: bool, approval_key: Optional[str] = None, request_id: Optional[str] = None):
+    async def send_approval(self, granted: bool, approval_key: Optional[str] = None, request_id: Optional[str] = None, override_class: Optional[str] = None):
         payload = {}
         if approval_key:
             payload["approval_key"] = approval_key
+        if override_class:
+            payload["override_class"] = override_class
         await self._send(Event(
             type=(EventType.TOOL_APPROVAL_GRANTED if granted else EventType.TOOL_APPROVAL_REJECTED),
             request_id=request_id or str(uuid.uuid4()),

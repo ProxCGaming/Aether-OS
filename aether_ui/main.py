@@ -156,7 +156,7 @@ class AetherWindow(QWidget):
         self.approval_drawer = ApprovalDrawer(self)
         self.approval_drawer.hide()
         self.approval_drawer.approve_btn.clicked.connect(
-            lambda: asyncio.create_task(self.ws_client.send_approval(True, self.approval_drawer._approval_key))
+            lambda: asyncio.create_task(self.ws_client.send_approval(True, self.approval_drawer._approval_key, override_class=self.approval_drawer.class_dropdown.currentText()))
         )
         self.approval_drawer.reject_btn.clicked.connect(
             lambda: asyncio.create_task(self.ws_client.send_approval(False, self.approval_drawer._approval_key))

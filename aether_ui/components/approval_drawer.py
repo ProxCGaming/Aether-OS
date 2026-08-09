@@ -1,5 +1,5 @@
 from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect, Qt
-from PySide6.QtWidgets import QPushButton, QVBoxLayout, QLabel, QWidget
+from PySide6.QtWidgets import QPushButton, QVBoxLayout, QLabel, QWidget, QComboBox
 
 
 class ApprovalDrawer(QWidget):
@@ -28,6 +28,11 @@ class ApprovalDrawer(QWidget):
         self.details.setStyleSheet("color:#C9D1D9; font-size:12px;")
         layout.addWidget(self.details)
 
+        self.class_dropdown = QComboBox()
+        self.class_dropdown.addItems(["instant", "quick", "standard", "heavy", "custom"])
+        self.class_dropdown.setStyleSheet("background:#21262D; color:#C9D1D9; border:1px solid #30363D; border-radius:4px; padding:4px;")
+        layout.addWidget(self.class_dropdown)
+
         buttons = QVBoxLayout()
         self.approve_btn = QPushButton("Approve")
         self.reject_btn = QPushButton("Reject")
@@ -41,7 +46,14 @@ class ApprovalDrawer(QWidget):
         self._approval_key = payload.get("approval_key")
         tool_name = payload.get("tool_name", "tool")
         args = payload.get("args", {})
-        self.details.setText(f"Tool: {tool_name}\nArgs: {args}")
+        task_class = payload.get("task_class", "standard")
+        idx = self.class_dropdown.findText(task_class)
+        if idx >= 0:
+            self.class_dropdown.setCurrentIndex(idx)
+        roots = payload.get("workspace_roots", [])
+        roots_str = ", ".join(roots) if roots else "None"
+        
+        self.details.setText(f"Tool: {tool_name}\nArgs: {args}\nWorkspace: {roots_str}")
         self._show()
 
     def _show(self):
