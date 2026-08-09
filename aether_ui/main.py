@@ -174,7 +174,7 @@ class AetherWindow(QWidget):
         self.approval_drawer = ApprovalDrawer(self)
         self.approval_drawer.hide()
         self.approval_drawer.approve_btn.clicked.connect(
-            lambda: asyncio.create_task(self.ws_client.send_approval(True, self.approval_drawer._approval_key, override_class=self.approval_drawer.class_dropdown.currentText()))
+            lambda: asyncio.create_task(self.ws_client.send_approval(True, self.approval_drawer._approval_key, override_class=self.approval_drawer.get_selected_class()))
         )
         self.approval_drawer.reject_btn.clicked.connect(
             lambda: asyncio.create_task(self.ws_client.send_approval(False, self.approval_drawer._approval_key))
@@ -220,6 +220,8 @@ class AetherWindow(QWidget):
         super().resizeEvent(e)
         if hasattr(self, "drawer"):
             self.drawer.update_geometry()
+        if hasattr(self, "approval_drawer") and self.approval_drawer.isVisible():
+            self.approval_drawer.update_geometry()
         self._save_window_geometry()
 
     def _save_window_geometry(self):
