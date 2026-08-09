@@ -57,6 +57,10 @@ class ApprovalDrawer(QWidget):
         self._show()
 
     def _show(self):
+        try:
+            self._animation.finished.disconnect(self._final_hide)
+        except RuntimeError:
+            pass
         parent = self.parentWidget()
         if not parent:
             return
@@ -79,3 +83,7 @@ class ApprovalDrawer(QWidget):
 
     def _final_hide(self):
         self.hide()
+        try:
+            self._animation.finished.disconnect(self._final_hide)
+        except RuntimeError:
+            pass

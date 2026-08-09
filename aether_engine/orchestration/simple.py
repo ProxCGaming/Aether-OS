@@ -103,15 +103,6 @@ async def run_task(
                         else:
                             requires_approval = tc.name in {"write_file", "delete_file", "execute_shell"}
                             if requires_approval and approval_handler is not None:
-                                yield Event(
-                                    type=EventType.TOOL_APPROVAL_REQUEST,
-                                    request_id=request_id,
-                                    payload={
-                                        "task_id": task_id,
-                                        "tool_name": tc.name,
-                                        "args": tc.args,
-                                    },
-                                )
                                 approved = await approval_handler(tc.name, tc.args, request_id)
                                 if not approved:
                                     result = f"Tool approval rejected for '{tc.name}'."
