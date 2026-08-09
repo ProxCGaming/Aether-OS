@@ -10,7 +10,7 @@ class TestPreFlightValidation(unittest.TestCase):
     def test_delete_file_validation_requires_existing_target(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             target = Path(tmp_dir) / "missing.txt"
-            result = validate_tool_request("delete_file", {"path": str(target)})
+            result = validate_tool_request("delete_file", {"path": str(target)}, workspace_roots=[tmp_dir])
 
         self.assertFalse(result.is_valid)
         self.assertIn("does not exist", result.error)
@@ -18,7 +18,7 @@ class TestPreFlightValidation(unittest.TestCase):
     def test_write_file_validation_requires_existing_parent(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             target = Path(tmp_dir) / "child" / "notes.txt"
-            result = validate_tool_request("write_file", {"path": str(target)})
+            result = validate_tool_request("write_file", {"path": str(target)}, workspace_roots=[tmp_dir])
 
         self.assertFalse(result.is_valid)
         self.assertIn("parent directory", result.error)
