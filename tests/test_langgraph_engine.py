@@ -1,4 +1,5 @@
 import pytest
+pytest.importorskip("langgraph")
 from typing import Dict, Any
 
 from aether_engine.langgraph.state import AetherState

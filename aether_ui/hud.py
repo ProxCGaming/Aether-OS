@@ -1,5 +1,6 @@
 """HUD Panel: Status header, model selector, prompt bar, and live streaming event log."""
 import datetime
+from typing import Optional
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
@@ -56,6 +57,22 @@ _MODEL_INDICATOR_CSS = """QLabel {
 }"""
 
 
+def _format_provider_name(provider: Optional[str]) -> str:
+    if not provider:
+        return "Active Provider"
+    mapping = {
+        "google_gemini": "Google Gemini",
+        "openai": "OpenAI",
+        "anthropic": "Anthropic",
+        "groq": "Groq",
+        "mistral": "Mistral",
+        "deepseek": "DeepSeek",
+        "openrouter": "OpenRouter",
+        "ollama": "Ollama (Local)",
+    }
+    return mapping.get(provider.lower(), provider.replace("_", " ").title())
+
+
 class HudWidget(QWidget):
     start_task_requested = Signal(str, str)  # (prompt, model)
     cancel_task_requested = Signal()
@@ -66,6 +83,8 @@ class HudWidget(QWidget):
         self.sm = state_machine
         self.heartbeat = 0
         self._suppress_model_signal = False
+        self._active_provider = "google_gemini"
+        self._active_model_name = ""
         self._build_ui()
 
         self._hb_timer = QTimer(self)
@@ -141,14 +160,13 @@ class HudWidget(QWidget):
 
         self.log = QTextEdit()
         self.log.setReadOnly(True)
-        self.log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.log.setMinimumHeight(120)
-        self.log.setStyleSheet("""QTextEdit {
-            background:#0D1117; color:#58A6FF; font-family:Consolas,monospace;
-            font-size:11px; border:1px solid #30363D; border-radius:6px; padding:8px;}""")
+        self.log.setStyleSheet(
+            "background: #090D12; color: #C9D1D9; border: 1px solid #1E293B; "
+            "border-radius: 6px; padding: 8px; font-family: monospace; font-size: 11px;"
+        )
         lo.addWidget(self.log, 1)
 
-    def _make_btn(self, text, bg, hover):
+    def _make_btn(self, text: str, bg: str, hover: str) -> QPushButton:
         btn = QPushButton(text)
         btn.setFixedHeight(32)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -156,13 +174,17 @@ class HudWidget(QWidget):
         return btn
 
     def _on_send(self):
-        text = self.inp_prompt.text().strip() or "Say hello"
+        text = self.inp_prompt.text().strip()
+        if not text:
+            return
+        self.inp_prompt.clear()
         model = self.cmb_model.currentText()
         self.sm.clear_error()
         self.start_task_requested.emit(text, model)
 
     def _on_model_changed(self, model: str):
         if not self._suppress_model_signal and model:
+            self._active_model_name = model
             self.model_changed_by_user.emit(model)
 
     @staticmethod
@@ -175,8 +197,12 @@ class HudWidget(QWidget):
 
     def set_active_model(self, provider_display: str, model: str):
         """Update the HUD model indicator and dropdown from external source."""
-        self.lbl_model.setText(f"{model}")
-        self.lbl_model.setVisible(bool(model))
+        if provider_display:
+            self._active_provider = provider_display
+        if model:
+            self._active_model_name = model
+            self.lbl_model.setText(f"{model}")
+            self.lbl_model.setVisible(True)
         # Sync dropdown without re-emitting signal
         self._suppress_model_signal = True
         idx = self.cmb_model.findText(model)
@@ -207,33 +233,89 @@ class HudWidget(QWidget):
         elif t == EventType.ROUTING_DECISION:
             reason = p.get("reason", "")
             model = p.get("model", "")
+            prov = p.get("provider", "")
+            if prov:
+                self._active_provider = prov
             self.routing_banner.set_decision(model_label=model, reason=reason)
             self.log.append(f'<span style="color:#58A6FF;">[{ts}] <b>⚡ Routing:</b> {reason}</span>')
         elif t == EventType.FALLBACK_STARTED:
             reason = p.get("reason", "")
             to_model = p.get("to_model", "")
+            from_prov = p.get("from_provider", "")
+            to_prov = p.get("to_provider", "")
+            if to_prov:
+                self._active_provider = to_prov
+            self.health_badge.update_health(
+                status="degraded",
+                latency_ms=0.0,
+                provider_name=_format_provider_name(from_prov or self._active_provider),
+                last_error=reason,
+            )
             self.routing_banner.set_decision(model_label=to_model, reason=reason, is_fallback=True)
             self.log.append(f'<span style="color:#FFA657;">[{ts}] <b>🔀 Fallback:</b> {reason}</span>')
         elif t == EventType.FALLBACK_COMPLETED:
             prov = p.get("provider", "")
             mod = p.get("model", "")
+            latency = p.get("latency_ms", 0.0)
+            if prov:
+                self._active_provider = prov
+            self.health_badge.update_health(
+                status="healthy",
+                latency_ms=latency,
+                provider_name=_format_provider_name(self._active_provider),
+            )
             self.log.append(f'<span style="color:#56D364;">[{ts}] <b>✔ Fallback Succeeded:</b> Completed with {prov} ({mod})</span>')
         elif t == EventType.FALLBACK_FAILED:
+            self.health_badge.update_health(
+                status="offline",
+                latency_ms=0.0,
+                provider_name=_format_provider_name(self._active_provider),
+                last_error=p.get("error"),
+            )
             self.log.append(f'<span style="color:#F85149;">[{ts}] <b>✖ Fallback Failed:</b> {p.get("error")}</span>')
         elif t == EventType.PROVIDER_HEALTH_UPDATE:
             health_map = p.get("health", {})
-            current_model = self.cmb_model.currentText()
-            # Find matching provider or default
-            for pname, hinfo in health_map.items():
-                if pname == "google_gemini":
+            active_p = p.get("provider") or self._active_provider or "google_gemini"
+            hinfo = health_map.get(active_p)
+            if not hinfo and health_map:
+                active_p, hinfo = next(iter(health_map.items()))
+            if hinfo:
+                self.health_badge.update_health(
+                    status=hinfo.get("status", "healthy"),
+                    latency_ms=hinfo.get("latency_ms", 0.0),
+                    provider_name=_format_provider_name(active_p),
+                    last_error=hinfo.get("last_error"),
+                )
+        elif t in (EventType.PROVIDER_VALIDATE_RESPONSE, EventType.SETTINGS_PROVIDER_VALIDATE_RESULT):
+            pname = p.get("provider", "")
+            v_status = p.get("status", "")
+            latency = p.get("latency_ms", 0.0)
+            msg = p.get("message", "")
+            if pname and (pname == self._active_provider or not self._active_provider):
+                if v_status == "connected":
                     self.health_badge.update_health(
-                        status=hinfo.get("status", "healthy"),
-                        latency_ms=hinfo.get("latency_ms", 0.0),
-                        provider_name="Google Gemini",
-                        last_error=hinfo.get("last_error"),
+                        status="healthy",
+                        latency_ms=latency,
+                        provider_name=_format_provider_name(pname),
                     )
-                    break
+                elif v_status == "invalid_key":
+                    self.health_badge.update_health(
+                        status="offline",
+                        latency_ms=0.0,
+                        provider_name=_format_provider_name(pname),
+                        last_error=msg or "Invalid API key",
+                    )
+                elif v_status in ("error", "offline", "degraded"):
+                    self.health_badge.update_health(
+                        status="degraded",
+                        latency_ms=0.0,
+                        provider_name=_format_provider_name(pname),
+                        last_error=msg,
+                    )
         elif t == EventType.TASK_CREATED:
+            prov = p.get("routing", {}).get("provider") or p.get("provider")
+            if prov:
+                self._active_provider = prov
             self.log.append(f'<span style="color:#D2A8FF;">[{ts}] <b>Task Created:</b> {p.get("task_id", "")[:8]}</span>')
         elif t == EventType.TASK_PROGRESS:
             if "tool_call" in p:
@@ -245,15 +327,54 @@ class HudWidget(QWidget):
                 self.log.ensureCursorVisible()
         elif t == EventType.TASK_COMPLETED:
             resp = p.get("response", "")
-            self.log.append(f'\n<span style="color:#56D364;">[{ts}] <b>✔ Completed:</b> {resp}</span>')
+            latency = p.get("latency_ms", 0.0)
+            prov = p.get("provider") or self._active_provider
+            if prov:
+                self._active_provider = prov
+            self.health_badge.update_health(
+                status="healthy",
+                latency_ms=latency,
+                provider_name=_format_provider_name(self._active_provider),
+            )
+            lat_str = f" ({int(latency)}ms)" if latency > 0 else ""
+            self.log.append(f'\n<span style="color:#56D364;">[{ts}] <b>✔ Completed{lat_str}:</b> {resp}</span>')
         elif t == EventType.TASK_CANCELLED:
             self.log.append(f'\n<span style="color:#F0883E;">[{ts}] <b>⊘ Cancelled</b></span>')
         elif t == EventType.TASK_FAILED:
-            self.log.append(f'\n<span style="color:#F85149;">[{ts}] <b>✖ Failed:</b> {p.get("error")}</span>')
+            err = p.get("error", "Task failed")
+            retriable = p.get("retriable", False)
+            prov = p.get("provider") or self._active_provider
+            self.health_badge.update_health(
+                status="degraded" if retriable else "offline",
+                latency_ms=0.0,
+                provider_name=_format_provider_name(prov),
+                last_error=err,
+            )
+            self.log.append(f'\n<span style="color:#F85149;">[{ts}] <b>✖ Failed:</b> {err}</span>')
         elif t == EventType.HELLO:
             self.log.append(f'<span style="color:#58A6FF;">[{ts}] <b>Engine Ready:</b> {p.get("message")}</span>')
-            if p.get("active_model"):
-                self.set_active_model(p.get("active_provider", ""), p["active_model"])
+            prov = p.get("active_provider", "")
+            mod = p.get("active_model", "")
+            if prov:
+                self._active_provider = prov
+            if mod:
+                self.set_active_model(prov, mod)
+            health_map = p.get("health", {})
+            hinfo = health_map.get(self._active_provider, {})
+            if hinfo and hinfo.get("last_successful_request"):
+                self.health_badge.update_health(
+                    status=hinfo.get("status", "healthy"),
+                    latency_ms=hinfo.get("latency_ms", 0.0),
+                    provider_name=_format_provider_name(self._active_provider),
+                    last_error=hinfo.get("last_error"),
+                )
+            else:
+                self.health_badge.update_health(
+                    status=hinfo.get("status", "unknown") if hinfo else "unknown",
+                    latency_ms=hinfo.get("latency_ms", 0.0) if hinfo else 0.0,
+                    provider_name=_format_provider_name(self._active_provider),
+                    last_error=hinfo.get("last_error") if hinfo else None,
+                )
         elif t == EventType.TOOL_APPROVAL_REQUEST:
             self.log.append(f'<span style="color:#E3B341;">[{ts}] <b>⚠ Approval Required:</b> {p.get("tool_name", "tool")} {p.get("args", {})}</span>')
         elif t in (EventType.TOOL_APPROVAL_GRANTED, EventType.TOOL_APPROVAL_REJECTED):

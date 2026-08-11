@@ -7,7 +7,7 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from pathlib import Path
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, status
@@ -72,6 +72,42 @@ from aether_engine.routing.task_class_router import infer_task_class
 from aether_engine.workers.job_object import WorkerJobObject
 
 logger = logging.getLogger("aether_engine")
+
+
+# ---------------------------------------------------------------------------
+# Provider health broadcasting & active WebSockets
+# ---------------------------------------------------------------------------
+_active_websockets: Set[WebSocket] = set()
+
+
+async def broadcast_provider_health(provider_name: Optional[str] = None):
+    """Broadcast current provider health statuses to all connected UI clients."""
+    statuses = GLOBAL_HEALTH_MANAGER.get_all_statuses()
+    active_prov = provider_name
+    if not active_prov and "engine_state" in globals():
+        active_prov = getattr(engine_state, "active_provider", "google_gemini")
+    event = Event(
+        type=EventType.PROVIDER_HEALTH_UPDATE,
+        payload={
+            "health": statuses,
+            "provider": active_prov or "google_gemini",
+        },
+    )
+    raw = event.to_json()
+    for client_ws in list(_active_websockets):
+        try:
+            await client_ws.send_text(raw)
+        except Exception:
+            pass
+
+
+def _on_provider_status_change(prov: str, state: ProviderHealthState):
+    try:
+        loop = asyncio.get_running_loop()
+        if loop and loop.is_running():
+            loop.create_task(broadcast_provider_health(prov))
+    except RuntimeError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +422,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
         return
 
     await ws.accept()
+    _active_websockets.add(ws)
     engine_state.audit_logger.log_connection(True, ip, port, "Authenticated successfully")
     logger.info(f"Accepted authenticated connection from {ip}:{port}")
 
@@ -524,6 +561,8 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
                     async for ev in task_generator:
                         if ev.type == EventType.TASK_CREATED:
+                            ev.payload["provider"] = decision.provider
+                            ev.payload["model"] = decision.model
                             ev.payload["routing"] = {
                                 "provider": decision.provider,
                                 "model": decision.model,
@@ -549,14 +588,17 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                                 ev.payload,
                             )
 
-                        if ev.type == EventType.TASK_FAILED and first_event and ev.payload.get("retriable"):
-                            primary_failed = True
-                            failure_event = ev
-                            break
+                        if ev.type == EventType.TASK_FAILED:
+                            ev.payload["provider"] = p_name
+                            if first_event and ev.payload.get("retriable"):
+                                primary_failed = True
+                                failure_event = ev
+                                break
                         first_event = False
 
                         if ev.type == EventType.TASK_COMPLETED:
                             latency = ev.payload.get("latency_ms", 100.0)
+                            ev.payload["provider"] = p_name
                             engine_state.health_manager.record_success(p_name, latency)
 
                         await ws.send_text(ev.to_json())
@@ -603,6 +645,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                             async for alt_ev in run_task(prompt=prompt, provider=alt_provider_inst, tools=tools, request_id=req_id, approval_handler=approval_handler, workspace_roots=workspace_roots):
                                 if alt_ev.type == EventType.TASK_COMPLETED:
                                     latency = alt_ev.payload.get("latency_ms", 100.0)
+                                    alt_ev.payload["provider"] = fb_provider
                                     engine_state.health_manager.record_success(fb_provider, latency)
                                     engine_state.audit_logger.log_event("FALLBACK_COMPLETED", {
                                         "provider": fb_provider,
@@ -612,8 +655,10 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                                     await ws.send_text(Event(
                                         type=EventType.FALLBACK_COMPLETED,
                                         request_id=req_id,
-                                        payload={"provider": fb_provider, "model": fb_model},
+                                        payload={"provider": fb_provider, "model": fb_model, "latency_ms": latency},
                                     ).to_json())
+                                elif alt_ev.type == EventType.TASK_FAILED:
+                                    alt_ev.payload["provider"] = fb_provider
                                 await ws.send_text(alt_ev.to_json())
                         except Exception as fb_err:
                             engine_state.audit_logger.log_event("FALLBACK_FAILED", {
@@ -929,3 +974,5 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
         logger.error(f"WebSocket session error: {e}")
         if task_runner and not task_runner.done():
             task_runner.cancel()
+    finally:
+        _active_websockets.discard(ws)

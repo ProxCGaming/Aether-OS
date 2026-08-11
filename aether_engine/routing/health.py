@@ -51,7 +51,7 @@ class ProviderHealthManager:
         state.cooldown_until = 0.0
         state.last_error = None
 
-        if prev_status != "healthy" and self.on_status_change:
+        if self.on_status_change:
             self.on_status_change(provider, state)
         return state
 
@@ -65,6 +65,7 @@ class ProviderHealthManager:
         prev_status = state.status
         state.consecutive_failures += 1
         state.last_error = error
+        state.latency_ms = 0.0
 
         now = time.time()
         if not is_retriable:
@@ -80,7 +81,7 @@ class ProviderHealthManager:
                 state.status = "degraded"
                 state.cooldown_until = now + min(60.0, 15.0 * state.consecutive_failures)
 
-        if prev_status != state.status and self.on_status_change:
+        if self.on_status_change:
             self.on_status_change(provider, state)
         return state
 
