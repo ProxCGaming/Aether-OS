@@ -25,9 +25,8 @@ class RoutingDecision:
 
 
 _CODE_KEYWORDS = {
-    "code", "python", "javascript", "typescript", "rust", "c++", "c#", "java", "sql",
-    "html", "css", "function", "def ", "class ", "bug", "refactor", "algorithm",
-    "script", "regex", "api", "endpoint", "syntax", "compile", "traceback"
+    "code", "sql", "html", "css", "function", "def ", "class ", "bug", "refactor",
+    "algorithm", "script", "regex", "api", "endpoint", "syntax", "compile", "traceback"
 }
 
 _REASONING_KEYWORDS = {

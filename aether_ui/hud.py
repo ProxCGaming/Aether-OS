@@ -241,7 +241,25 @@ class HudWidget(QWidget):
             elif "tool_result" in p:
                 self.log.append(f'<span style="color:#79C0FF;">[{ts}] <b>➔ Tool Result:</b> {p.get("result")}</span>')
             elif "text_delta" in p:
-                self.log.insertPlainText(p["text_delta"])
+                import markdown
+                import re
+                text = p["text_delta"]
+                # Format <think> tags to a nice block
+                text = re.sub(
+                    r'<think>(.*?)</think>', 
+                    r'<div style="color: #8B949E; border-left: 2px solid #30363D; padding-left: 10px; margin-bottom: 10px; margin-top: 10px;"><i>🤔 Thinking...<br/>\1</i></div>', 
+                    text, 
+                    flags=re.DOTALL
+                )
+                # Fallback for unclosed <think> tag
+                text = re.sub(
+                    r'<think>(.*)$', 
+                    r'<div style="color: #8B949E; border-left: 2px solid #30363D; padding-left: 10px; margin-bottom: 10px; margin-top: 10px;"><i>🤔 Thinking...<br/>\1</i></div>', 
+                    text, 
+                    flags=re.DOTALL
+                )
+                html = markdown.markdown(text, extensions=['fenced_code', 'tables'])
+                self.log.append(f'<div style="color:#C9D1D9; margin-top: 5px;">{html}</div>')
                 self.log.ensureCursorVisible()
         elif t == EventType.TASK_COMPLETED:
             resp = p.get("response", "")

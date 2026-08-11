@@ -28,9 +28,12 @@ class Tool:
 
     def to_definition(self) -> Dict[str, Any]:
         return {
-            "name": self.name,
-            "description": self.description,
-            "parameters": self.input_schema,
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
+            }
         }
 
 
@@ -100,6 +103,39 @@ def create_file_tools() -> List[Tool]:
             },
             execute_fn=_execute_shell,
         ),
+    ]
+
+
+def create_web_tools() -> List[Tool]:
+    def _search_web(query: str, max_results: int = 5) -> str:
+        from ddgs import DDGS
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=max_results))
+                if not results:
+                    return "No results found."
+                
+                output = []
+                for r in results:
+                    output.append(f"Title: {r.get('title')}\nURL: {r.get('href')}\nSnippet: {r.get('body')}\n")
+                return "\n".join(output)
+        except Exception as e:
+            return f"Search failed: {e}"
+
+    return [
+        Tool(
+            name="search_web",
+            description="Search the web for information using DuckDuckGo. Returns search results.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query"},
+                    "max_results": {"type": "integer", "description": "Maximum number of results to return (default 5)"}
+                },
+                "required": ["query"],
+            },
+            execute_fn=_search_web,
+        )
     ]
 
 

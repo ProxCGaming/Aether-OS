@@ -1,63 +1,69 @@
+import json
 import litellm
 from aether_engine.langgraph.state import AetherState
 from aether_engine.routing.capability_router import GLOBAL_CAPABILITY_ROUTER
 from aether_engine.artifacts.manager import save_artifact
+from langchain_core.runnables import RunnableConfig
 
-# Define native tools (in a real implementation these would map to python functions)
-researcher_tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "Search the web for information",
-            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read a file from the workspace",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "summarize",
-            "description": "Summarize text content",
-            "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
-        }
-    }
-]
-
-async def researcher_node(state: AetherState) -> dict:
+async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
     """
     Researcher node gathers info and updates the state.
     """
-    model = await GLOBAL_CAPABILITY_ROUTER.select(intent="research")
+    model, api_key, api_base = await GLOBAL_CAPABILITY_ROUTER.select(intent="research")
     
-    # In a real implementation we would also pull in MCP tools from registry here.
-    # mcp_tools = get_mcp_tools_for_node("researcher")
-    # combined_tools = researcher_tools + mcp_tools
+    registry = config.get("configurable", {}).get("tool_registry")
+    tools = registry.get_definitions() if registry else []
     
     system_prompt = "You are a Researcher agent. Gather information and synthesize findings for other specialists."
     messages = [{"role": "system", "content": system_prompt}] + state.get("messages", [])
     
-    response = await litellm.acompletion(
-        model=model,
-        messages=messages,
-        tools=researcher_tools
-        # LiteLLM fallback chains and audit logging will handle failure inherently.
-    )
+    if messages and messages[-1].get("role") != "user":
+        messages.append({
+            "role": "user",
+            "content": "Please proceed with gathering information and synthesizing findings based on the current state."
+        })
     
-    content = response.choices[0].message.content or ""
+    kwargs = {"model": model, "messages": messages, "api_key": api_key}
+    if api_base:
+        kwargs["api_base"] = api_base
+    if tools:
+        kwargs["tools"] = tools
+    response = await litellm.acompletion(**kwargs)
     
-    # Save the output as a durable artifact rather than stuffing it directly in state.
+    msg = response.choices[0].message
+    
+    if hasattr(msg, "tool_calls") and msg.tool_calls:
+        tc = msg.tool_calls[0]
+        func = tc.function
+        args = json.loads(func.arguments) if isinstance(func.arguments, str) else func.arguments
+        
+        # We must add the assistant message that made the tool call to the state
+        # so the LLM remembers it called the tool.
+        assistant_msg = {
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": func.name, "arguments": func.arguments}
+                }
+            ]
+        }
+        
+        return {
+            "messages": [assistant_msg],
+            "pending_tool_call": {
+                "name": func.name,
+                "args": args,
+                "call_id": tc.id
+            }
+        }
+    
+    content = msg.content or ""
     task_id = state.get("task_id", "default_task")
     artifact_path = save_artifact(task_id, "research", "researcher_output.txt", content)
     
-    # Update state: Note how we don't accumulate artifact_paths, we overwrite.
     return {
         "current_phase": "researching",
         "artifact_paths": {"researcher_output": artifact_path},

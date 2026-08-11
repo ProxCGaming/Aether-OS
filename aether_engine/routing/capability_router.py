@@ -215,6 +215,25 @@ class CapabilityRouter:
             "routed_by": "capability_matcher",
         }
 
+    async def select(self, intent: str = "general") -> tuple[str, str, str]:
+        """Select a model string (provider/model) for a given intent. 
+        Used by LangGraph nodes.
+        Returns (litellm_model_string, api_key, api_base)"""
+        from aether_engine.config import load_config
+        from aether_engine.providers.litellm_provider import resolve_litellm_model
+        from aether_engine.secrets.storage import SecretStore
+        cfg = load_config()
+        provider = cfg.default_provider
+        model_str = resolve_litellm_model(cfg.default_model, provider)
+        
+        try:
+            api_key = SecretStore().load_provider(provider)
+        except Exception:
+            api_key = ""
+            
+        base_url = cfg.custom_base_urls.get(provider, "")
+        return model_str, api_key, base_url
+
 
 # Global capability router singleton
 GLOBAL_CAPABILITY_ROUTER = CapabilityRouter()

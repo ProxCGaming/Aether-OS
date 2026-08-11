@@ -19,17 +19,23 @@ def supervisor_router(state: AetherState) -> Literal["researcher", "planner", "c
             return next_node
     return "__end__"
 
-def tool_router(state: AetherState) -> Literal["execute_tool", "pause_for_approval"]:
+def tool_router(state: AetherState) -> Literal["execute_tool", "pause_for_approval", "supervisor"]:
     # Conditional edge classifying tool as risky or safe
     pending = state.get("pending_tool_call")
     if not pending:
         # If no tool call, go back to supervisor
-        return "supervisor" # Wait, the router return type in this context should be updated
+        return "supervisor"
     
     tool_name = pending.get("name")
     if tool_name in RISKY_TOOLS:
         return "pause_for_approval"
     return "execute_tool"
+
+def after_tool_router(state: AetherState) -> str:
+    active = state.get("active_specialist")
+    if active in ["researcher", "planner", "coder"]:
+        return active
+    return "supervisor"
 
 def create_graph():
     workflow = StateGraph(AetherState)
@@ -40,9 +46,11 @@ def create_graph():
     workflow.add_node("planner", planner_node)
     workflow.add_node("coder", coder_node)
     
-    # We would add tool execution nodes here in a full implementation
-    # workflow.add_node("execute_tool", execute_tool_node)
-    # workflow.add_node("pause_for_approval", dummy_pause_node)
+    # Add tool execution nodes
+    from aether_engine.langgraph.nodes.execute_tool import execute_tool_node
+    from aether_engine.langgraph.nodes.pause import dummy_pause_node
+    workflow.add_node("execute_tool", execute_tool_node)
+    workflow.add_node("pause_for_approval", dummy_pause_node)
     
     # Add edges
     workflow.add_edge(START, "supervisor")
@@ -59,10 +67,16 @@ def create_graph():
         }
     )
     
-    # Specialists return to supervisor (simplified for this scaffolding)
-    workflow.add_edge("researcher", "supervisor")
-    workflow.add_edge("planner", "supervisor")
-    workflow.add_edge("coder", "supervisor")
+    # Specialists check if they need to call a tool or return to supervisor
+    workflow.add_conditional_edges("researcher", tool_router)
+    workflow.add_conditional_edges("planner", tool_router)
+    workflow.add_conditional_edges("coder", tool_router)
+
+    # Tool execution returns to the active specialist
+    workflow.add_conditional_edges("execute_tool", after_tool_router)
+    
+    # Pause node goes to execute tool after un-paused
+    workflow.add_edge("pause_for_approval", "execute_tool")
     
     # Set recursion limit to 25 to prevent unbounded loops
     # This is set during compile or run time
@@ -70,8 +84,4 @@ def create_graph():
 
 def compile_graph(checkpointer=None):
     workflow = create_graph()
-    
-    # If we had the pause node, we'd do:
-    # return workflow.compile(checkpointer=checkpointer, interrupt_before=["pause_for_approval"])
-    
     return workflow.compile(checkpointer=checkpointer)

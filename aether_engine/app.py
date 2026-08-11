@@ -36,7 +36,7 @@ from aether_engine.config import (
     save_config,
 )
 from aether_engine.models.local_models import OllamaManager
-from aether_engine.orchestration.simple import run_task
+from aether_engine.langgraph.executor import run_langgraph_task
 from aether_engine.providers.discovery import fetch_available_models
 from aether_engine.providers.litellm_provider import LiteLLMProvider, validate_api_key
 from aether_engine.routing.fallback import (
@@ -67,7 +67,7 @@ from aether_engine.routing.startup import (
 from aether_engine.scheduler.capability_jobs import CapabilitySchedulerManager
 from aether_engine.secrets.dpapi import SecretDecryptionError
 from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
-from aether_engine.tools.registry import ToolRegistry, create_current_time_tool, create_file_tools
+from aether_engine.tools.registry import ToolRegistry, create_current_time_tool, create_file_tools, create_web_tools
 from aether_engine.routing.task_class_router import infer_task_class
 from aether_engine.workers.job_object import WorkerJobObject
 
@@ -472,7 +472,15 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
                 tools = ToolRegistry()
                 tools.register(create_current_time_tool())
-                for tool in create_file_tools():
+                
+                reqs = infer_task_requirements(prompt)
+                
+                # Only give file/shell tools if it's a coding task or explicitly requested
+                if reqs.wants_code or (requested_model is not None):
+                    for tool in create_file_tools():
+                        tools.register(tool)
+                # Always provide web search as a safe fallback
+                for tool in create_web_tools():
                     tools.register(tool)
 
                 workspace_roots = [str(Path.home() / "AetherWorkspace")]
@@ -509,124 +517,131 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     return await _execute_tool_in_worker(tool_name, args, final_task_class)
 
                 async def execute_task_with_fallback(primary_provider, p_name: str, p_model: str):
-                    task_generator = run_task(
-                        prompt=prompt,
-                        provider=primary_provider,
-                        tools=tools,
-                        request_id=req_id,
-                        approval_handler=approval_handler,
-                        workspace_roots=workspace_roots,
-                    )
-
-                    first_event = True
-                    primary_failed = False
-                    failure_event = None
-
-                    async for ev in task_generator:
-                        if ev.type == EventType.TASK_CREATED:
-                            ev.payload["routing"] = {
-                                "provider": decision.provider,
-                                "model": decision.model,
-                                "reason": decision.reason,
-                                "capabilities": decision.capabilities,
-                            }
-                            engine_state.audit_logger.log_task_transition(
-                                ev.payload.get("task_id", "unknown"),
-                                TaskState.PENDING,
-                                TaskState.RUNNING,
-                                ev.payload,
-                            )
-                        elif ev.type in (EventType.TASK_COMPLETED, EventType.TASK_CANCELLED, EventType.TASK_FAILED):
-                            to = {
-                                EventType.TASK_COMPLETED: TaskState.SUCCEEDED,
-                                EventType.TASK_CANCELLED: TaskState.CANCELLED,
-                                EventType.TASK_FAILED: TaskState.FAILED,
-                            }[ev.type]
-                            engine_state.audit_logger.log_task_transition(
-                                ev.payload.get("task_id", "unknown"),
-                                TaskState.RUNNING,
-                                to,
-                                ev.payload,
-                            )
-
-                        if ev.type == EventType.TASK_FAILED and first_event and ev.payload.get("retriable"):
-                            primary_failed = True
-                            failure_event = ev
-                            break
-                        first_event = False
-
-                        if ev.type == EventType.TASK_COMPLETED:
-                            latency = ev.payload.get("latency_ms", 100.0)
-                            engine_state.health_manager.record_success(p_name, latency)
-
-                        await ws.send_text(ev.to_json())
-
-                    if primary_failed and failure_event:
-                        err_msg = failure_event.payload.get("error", "Unknown error")
-                        engine_state.health_manager.record_failure(p_name, err_msg, is_retriable=True)
-
-                        fallbacks = get_fallback_candidates(
-                            failed_provider=p_name,
-                            configured_providers=engine_state.configured_providers,
-                            health_manager=engine_state.health_manager,
-                            registry=engine_state.model_registry,
+                    try:
+                        task_generator = run_langgraph_task(
+                            prompt=prompt,
+                            provider=primary_provider,
+                            tools=tools,
+                            request_id=req_id,
+                            approval_handler=approval_handler,
+                            workspace_roots=workspace_roots,
                         )
 
-                        if not fallbacks:
-                            await ws.send_text(failure_event.to_json())
-                            return
+                        first_event = True
+                        primary_failed = False
+                        failure_event = None
 
-                        fallback_candidate = fallbacks[0]
-                        fb_provider = fallback_candidate.provider
-                        fb_model = fallback_candidate.id
+                        async for ev in task_generator:
+                            if ev.type == EventType.TASK_CREATED:
+                                ev.payload["routing"] = {
+                                    "provider": decision.provider,
+                                    "model": decision.model,
+                                    "reason": decision.reason,
+                                    "capabilities": decision.capabilities,
+                                }
+                                engine_state.audit_logger.log_task_transition(
+                                    ev.payload.get("task_id", "unknown"),
+                                    TaskState.PENDING,
+                                    TaskState.RUNNING,
+                                    ev.payload,
+                                )
+                            elif ev.type in (EventType.TASK_COMPLETED, EventType.TASK_CANCELLED, EventType.TASK_FAILED):
+                                to = {
+                                    EventType.TASK_COMPLETED: TaskState.SUCCEEDED,
+                                    EventType.TASK_CANCELLED: TaskState.CANCELLED,
+                                    EventType.TASK_FAILED: TaskState.FAILED,
+                                }[ev.type]
+                                engine_state.audit_logger.log_task_transition(
+                                    ev.payload.get("task_id", "unknown"),
+                                    TaskState.RUNNING,
+                                    to,
+                                    ev.payload,
+                                )
 
-                        engine_state.audit_logger.log_event("FALLBACK_TRIGGERED", {
-                            "from_provider": p_name,
-                            "to_provider": fb_provider,
-                            "to_model": fb_model,
-                            "reason": err_msg,
-                        })
+                            if ev.type == EventType.TASK_FAILED and first_event and ev.payload.get("retriable"):
+                                primary_failed = True
+                                failure_event = ev
+                                break
+                            first_event = False
 
-                        await ws.send_text(Event(
-                            type=EventType.FALLBACK_STARTED,
-                            request_id=req_id,
-                            payload={
+                            if ev.type == EventType.TASK_COMPLETED:
+                                latency = ev.payload.get("latency_ms", 100.0)
+                                engine_state.health_manager.record_success(p_name, latency)
+
+                            await ws.send_text(ev.to_json())
+
+                        if primary_failed and failure_event:
+                            err_msg = failure_event.payload.get("error", "Unknown error")
+                            engine_state.health_manager.record_failure(p_name, err_msg, is_retriable=True)
+
+                            fallbacks = get_fallback_candidates(
+                                failed_provider=p_name,
+                                configured_providers=engine_state.configured_providers,
+                                health_manager=engine_state.health_manager,
+                                registry=engine_state.model_registry,
+                            )
+
+                            if not fallbacks:
+                                await ws.send_text(failure_event.to_json())
+                                return
+
+                            fallback_candidate = fallbacks[0]
+                            fb_provider = fallback_candidate.provider
+                            fb_model = fallback_candidate.id
+
+                            engine_state.audit_logger.log_event("FALLBACK_TRIGGERED", {
                                 "from_provider": p_name,
                                 "to_provider": fb_provider,
                                 "to_model": fb_model,
-                                "reason": f"{p_name} failed ({err_msg}) — retrying with {fb_provider} ({fb_model})",
-                            },
-                        ).to_json())
-
-                        try:
-                            alt_provider_inst = _create_provider_instance(fb_provider, fb_model, secret_store)
-                            async for alt_ev in run_task(prompt=prompt, provider=alt_provider_inst, tools=tools, request_id=req_id, approval_handler=approval_handler, workspace_roots=workspace_roots):
-                                if alt_ev.type == EventType.TASK_COMPLETED:
-                                    latency = alt_ev.payload.get("latency_ms", 100.0)
-                                    engine_state.health_manager.record_success(fb_provider, latency)
-                                    engine_state.audit_logger.log_event("FALLBACK_COMPLETED", {
-                                        "provider": fb_provider,
-                                        "model": fb_model,
-                                        "latency_ms": latency,
-                                    })
-                                    await ws.send_text(Event(
-                                        type=EventType.FALLBACK_COMPLETED,
-                                        request_id=req_id,
-                                        payload={"provider": fb_provider, "model": fb_model},
-                                    ).to_json())
-                                await ws.send_text(alt_ev.to_json())
-                        except Exception as fb_err:
-                            engine_state.audit_logger.log_event("FALLBACK_FAILED", {
-                                "from_provider": p_name,
-                                "to_provider": fb_provider,
-                                "error": str(fb_err),
+                                "reason": err_msg,
                             })
+
                             await ws.send_text(Event(
-                                type=EventType.FALLBACK_FAILED,
+                                type=EventType.FALLBACK_STARTED,
                                 request_id=req_id,
-                                payload={"error": str(fb_err)},
+                                payload={
+                                    "from_provider": p_name,
+                                    "to_provider": fb_provider,
+                                    "to_model": fb_model,
+                                    "reason": f"{p_name} failed ({err_msg}) — retrying with {fb_provider} ({fb_model})",
+                                },
                             ).to_json())
-                            await ws.send_text(failure_event.to_json())
+
+                            try:
+                                alt_provider_inst = _create_provider_instance(fb_provider, fb_model, secret_store)
+                                async for alt_ev in run_langgraph_task(prompt=prompt, provider=alt_provider_inst, tools=tools, request_id=req_id, approval_handler=approval_handler, workspace_roots=workspace_roots):
+                                    if alt_ev.type == EventType.TASK_FAILED and alt_ev.payload.get("retriable"):
+                                        raise ProviderError("Fallback provider also failed")
+                                    if alt_ev.type == EventType.TASK_COMPLETED:
+                                        latency = alt_ev.payload.get("latency_ms", 100.0)
+                                        engine_state.health_manager.record_success(fb_provider, latency)
+                                        engine_state.audit_logger.log_event("FALLBACK_COMPLETED", {
+                                            "provider": fb_provider,
+                                            "model": fb_model,
+                                            "latency_ms": latency,
+                                        })
+                                        await ws.send_text(Event(
+                                            type=EventType.FALLBACK_COMPLETED,
+                                            request_id=req_id,
+                                            payload={"provider": fb_provider, "model": fb_model},
+                                        ).to_json())
+                                    await ws.send_text(alt_ev.to_json())
+                            except Exception as fb_err:
+                                engine_state.audit_logger.log_event("FALLBACK_FAILED", {
+                                    "from_provider": p_name,
+                                    "to_provider": fb_provider,
+                                    "error": str(fb_err),
+                                })
+                                await ws.send_text(Event(
+                                    type=EventType.FALLBACK_FAILED,
+                                    request_id=req_id,
+                                    payload={"error": str(fb_err)},
+                                ).to_json())
+                                await ws.send_text(failure_event.to_json())
+                    except asyncio.CancelledError:
+                        # Log cancellation but do not await ws.send_text here as it will raise CancelledError again
+                        engine_state.audit_logger.log_event("TASK_CANCELLED", {"task_id": "unknown"})
+                        raise
 
                 task_runner = asyncio.create_task(
                     execute_task_with_fallback(provider_instance, decision.provider, decision.model)
@@ -636,6 +651,11 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 if task_runner and not task_runner.done():
                     task_runner.cancel()
                     logger.info("Cancellation requested for active task runner.")
+                    await ws.send_text(Event(
+                        type=EventType.TASK_CANCELLED,
+                        request_id=req_id,
+                        payload={"task_id": "unknown", "state": TaskState.CANCELLED.value},
+                    ).to_json())
                 else:
                     await ws.send_text(Event(
                         type=EventType.ERROR,

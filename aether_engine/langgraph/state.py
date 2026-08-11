@@ -13,6 +13,7 @@ class AetherState(TypedDict):
     artifact_paths: Dict[str, str]
     tool_results_summary: Dict[str, str]
     pending_tool_call: Optional[Dict[str, Any]]
+    active_specialist: Optional[str]
     
     # Structured log entries for delegation decisions
     delegation_log: Annotated[List[Dict[str, Any]], operator.add]

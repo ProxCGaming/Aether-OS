@@ -141,6 +141,14 @@ class AetherWindow(QWidget):
         self.btn_max.clicked.connect(self._toggle_maximize)
         tl.addWidget(self.btn_max)
 
+        self.btn_fs = QPushButton("⛶")
+        self.btn_fs.setFixedSize(28, 28)
+        self.btn_fs.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_fs.setToolTip("Toggle Fullscreen")
+        self.btn_fs.setStyleSheet(_TB_BTN.format(fs=14, hover="#1E293B"))
+        self.btn_fs.clicked.connect(self._toggle_fullscreen)
+        tl.addWidget(self.btn_fs)
+
         self.btn_close = QPushButton("✕")
         self.btn_close.setFixedSize(28, 28)
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -374,6 +382,18 @@ class AetherWindow(QWidget):
             self.showMaximized()
             self.btn_max.setText("🗗")
 
+    def _toggle_fullscreen(self):
+        self._drag = QPoint()
+        QApplication.restoreOverrideCursor()
+        if self.isFullScreen():
+            self.showNormal()
+            if hasattr(self, "_normal_geometry") and self._normal_geometry and not self._normal_geometry.isEmpty():
+                self.setGeometry(self._normal_geometry)
+        else:
+            if not self.is_maximized_or_fullscreen:
+                self._normal_geometry = self.geometry()
+            self.showFullScreen()
+
     def changeEvent(self, e):
         """Single source of truth for the maximize button icon."""
         from PySide6.QtCore import QEvent
@@ -393,6 +413,7 @@ class AetherWindow(QWidget):
                 getattr(self, "btn_gear", None),
                 getattr(self, "btn_min", None),
                 getattr(self, "btn_max", None),
+                getattr(self, "btn_fs", None),
                 getattr(self, "btn_close", None),
             ):
                 self._toggle_maximize()

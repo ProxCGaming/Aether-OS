@@ -1,61 +1,64 @@
+import json
 import litellm
 from aether_engine.langgraph.state import AetherState
 from aether_engine.routing.capability_router import GLOBAL_CAPABILITY_ROUTER
 from aether_engine.artifacts.manager import save_artifact
+from langchain_core.runnables import RunnableConfig
 
-coder_tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write or overwrite a file",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "execute_shell",
-            "description": "Execute a shell command",
-            "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read a file from the workspace",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "test_code",
-            "description": "Run unit tests and return results",
-            "parameters": {"type": "object", "properties": {"test_command": {"type": "string"}}, "required": ["test_command"]}
-        }
-    }
-]
-
-async def coder_node(state: AetherState) -> dict:
+async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
     """
     Coder node writes, tests, and debugs code.
     """
-    model = await GLOBAL_CAPABILITY_ROUTER.select(intent="code")
+    model, api_key, api_base = await GLOBAL_CAPABILITY_ROUTER.select(intent="code")
     
-    # In a real implementation we would pull dev-oriented MCP tools here.
+    registry = config.get("configurable", {}).get("tool_registry")
+    tools = registry.get_definitions() if registry else []
     
     system_prompt = "You are a Coder agent. Write, test, and debug code based on the current plan."
     messages = [{"role": "system", "content": system_prompt}] + state.get("messages", [])
     
-    response = await litellm.acompletion(
-        model=model,
-        messages=messages,
-        tools=coder_tools
-    )
+    if messages and messages[-1].get("role") != "user":
+        messages.append({
+            "role": "user",
+            "content": "Please proceed with writing, testing, or debugging the code based on the current state."
+        })
     
-    content = response.choices[0].message.content or ""
+    kwargs = {"model": model, "messages": messages, "api_key": api_key}
+    if api_base:
+        kwargs["api_base"] = api_base
+    if tools:
+        kwargs["tools"] = tools
+    response = await litellm.acompletion(**kwargs)
+    
+    msg = response.choices[0].message
+    
+    if hasattr(msg, "tool_calls") and msg.tool_calls:
+        tc = msg.tool_calls[0]
+        func = tc.function
+        args = json.loads(func.arguments) if isinstance(func.arguments, str) else func.arguments
+        
+        assistant_msg = {
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": func.name, "arguments": func.arguments}
+                }
+            ]
+        }
+        
+        return {
+            "messages": [assistant_msg],
+            "pending_tool_call": {
+                "name": func.name,
+                "args": args,
+                "call_id": tc.id
+            }
+        }
+    
+    content = msg.content or ""
     task_id = state.get("task_id", "default_task")
     artifact_path = save_artifact(task_id, "code", "coder_output.txt", content)
     
