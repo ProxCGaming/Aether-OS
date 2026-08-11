@@ -1,4 +1,4 @@
-"""Main PySide6 Window: integrated frameless border, glowing Orb, HUD stream, persistent window geometry memory, and resizable Models & Settings drawer."""
+"""Main PySide6 Window: integrated frameless border, glowing Orb, HUD stream, persistent window geometry memory, and linked Settings modal overlay with background blur."""
 import asyncio
 import ctypes
 from ctypes import wintypes
@@ -12,6 +12,7 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QGraphicsBlurEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -22,11 +23,20 @@ from PySide6.QtWidgets import (
 from aether_common.contracts import Event, EventType
 from aether_engine.config import load_config, save_config
 from aether_ui.components.approval_drawer import ApprovalDrawer
+from aether_ui.settings_window import AetherConfigWindow
 from aether_ui.hud import HudWidget
-from aether_ui.models_panel import ModelsPanel
 from aether_ui.orb import OrbWidget
-from aether_ui.settings_drawer import SettingsDrawer
 from aether_ui.state import UIStateMachine
+from aether_ui.theme import (
+    BRAND_ENGINE,
+    BRAND_FRONTEND,
+    STATUS_OFFLINE,
+    SURFACE_BG,
+    SURFACE_BORDER,
+    SURFACE_PANEL,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+)
 from aether_ui.ws_client import AetherWSClient
 
 logger = logging.getLogger("aether_ui.main")
@@ -47,12 +57,12 @@ class _MINMAXINFO(ctypes.Structure):
 
 
 _TB_BTN = """QPushButton {{
-    background: transparent; color: #8B949E; border: none; font-size: {fs}px;
-}} QPushButton:hover {{ background: {hover}; color: #FFFFFF; }}"""
+    background: transparent; color: #8A8FA3; border: none; font-size: {fs}px; font-weight: bold;
+}} QPushButton:hover {{ background: {hover}; color: #FFFFFF; border-radius: 4px; }}"""
 
-_MIN_CHAT_W = 380
+_MIN_CHAT_W = 440
 _MAX_WINDOW_W = 1400
-_MIN_WINDOW_H = 500
+_MIN_WINDOW_H = 540
 _MAX_WINDOW_H = 1000
 
 
@@ -68,17 +78,17 @@ class AetherWindow(QWidget):
         screen_w = screen.width() if screen else 1920
         screen_h = screen.height() if screen else 1080
 
-        start_w = self.user_config.window_width or 480
-        start_h = self.user_config.window_height or 720
+        start_w = self.user_config.window_width or 520
+        start_h = self.user_config.window_height or 740
         if start_w >= screen_w or start_h >= screen_h:
-            start_w = min(500, screen_w - 100)
-            start_h = min(720, screen_h - 100)
+            start_w = min(540, screen_w - 100)
+            start_h = min(740, screen_h - 100)
 
-        start_w = max(420, start_w)
+        start_w = max(_MIN_CHAT_W, start_w)
         start_h = max(_MIN_WINDOW_H, start_h)
 
         self.resize(start_w, start_h)
-        self.setMinimumSize(420, _MIN_WINDOW_H)
+        self.setMinimumSize(_MIN_CHAT_W, _MIN_WINDOW_H)
         self._normal_geometry = self.geometry()
 
         # State machine + WS client
@@ -102,42 +112,56 @@ class AetherWindow(QWidget):
             self.orb.set_state(sm.state)
 
     def _build_ui(self):
-        ml = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        # Container widget for Main HUD (to apply QGraphicsBlurEffect cleanly)
+        self.hud_container = QWidget(self)
+        root_layout.addWidget(self.hud_container)
+
+        ml = QVBoxLayout(self.hud_container)
         ml.setContentsMargins(0, 0, 0, 0)
         ml.setSpacing(0)
 
-        # Title bar (gear icon + title + min/close)
+        # Title bar matching Ionized Void specifications
         tb = QWidget()
-        tb.setFixedHeight(36)
-        tb.setStyleSheet("background: #090D12; border-bottom: 1px solid #1E293B;")
+        tb.setFixedHeight(40)
+        tb.setStyleSheet(f"background: {SURFACE_BG}; border-bottom: 1px solid {SURFACE_BORDER};")
         tl = QHBoxLayout(tb)
-        tl.setContentsMargins(8, 0, 8, 0)
-        tl.setSpacing(4)
+        tl.setContentsMargins(10, 0, 10, 0)
+        tl.setSpacing(6)
 
-        # Gear button
+        # Gear button for Settings Modal
         self.btn_gear = QPushButton("⚙")
-        self.btn_gear.setFixedSize(28, 28)
+        self.btn_gear.setFixedSize(30, 30)
         self.btn_gear.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_gear.setToolTip("Settings & Models")
-        self.btn_gear.setStyleSheet(_TB_BTN.format(fs=14, hover="#1E293B"))
+        self.btn_gear.setToolTip("Settings")
+        self.btn_gear.setStyleSheet(_TB_BTN.format(fs=14, hover=SURFACE_PANEL))
         self.btn_gear.clicked.connect(self._toggle_settings)
         tl.addWidget(self.btn_gear)
 
+        dot = QLabel("●")
+        dot.setStyleSheet(f"color:{BRAND_FRONTEND}; font-size:10px; margin-left:2px;")
+        tl.addWidget(dot)
+
         title = QLabel("AETHER")
-        title.setStyleSheet("font-weight:700; font-size:12px; color:#38BDF8;")
+        title.setStyleSheet(f"font-weight:700; font-size:12px; color:{TEXT_PRIMARY}; font-family:'Segoe UI', sans-serif; letter-spacing:1px;")
         tl.addWidget(title)
+
         tl.addStretch()
-        self.btn_min = QPushButton("🗕")
-        self.btn_min.setFixedSize(28, 28)
+
+        self.btn_min = QPushButton("—")
+        self.btn_min.setFixedSize(30, 30)
         self.btn_min.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_min.setStyleSheet(_TB_BTN.format(fs=13, hover="#1E293B"))
+        self.btn_min.setStyleSheet(_TB_BTN.format(fs=13, hover=SURFACE_PANEL))
         self.btn_min.clicked.connect(self._minimize_window)
         tl.addWidget(self.btn_min)
 
         self.btn_max = QPushButton("🗖")
-        self.btn_max.setFixedSize(28, 28)
+        self.btn_max.setFixedSize(30, 30)
         self.btn_max.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_max.setStyleSheet(_TB_BTN.format(fs=13, hover="#1E293B"))
+        self.btn_max.setStyleSheet(_TB_BTN.format(fs=13, hover=SURFACE_PANEL))
         self.btn_max.clicked.connect(self._toggle_maximize)
         tl.addWidget(self.btn_max)
 
@@ -150,9 +174,9 @@ class AetherWindow(QWidget):
         tl.addWidget(self.btn_fs)
 
         self.btn_close = QPushButton("✕")
-        self.btn_close.setFixedSize(28, 28)
+        self.btn_close.setFixedSize(30, 30)
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_close.setStyleSheet(_TB_BTN.format(fs=12, hover="#EF4444"))
+        self.btn_close.setStyleSheet(_TB_BTN.format(fs=12, hover=STATUS_OFFLINE))
         self.btn_close.clicked.connect(self.close)
         tl.addWidget(self.btn_close)
         ml.addWidget(tb)
@@ -162,23 +186,23 @@ class AetherWindow(QWidget):
         main_col.setContentsMargins(0, 0, 0, 0)
         main_col.setSpacing(0)
 
-        # Orb
+        # Orb visualizer container
         oc = QWidget()
         oc.setStyleSheet("background:transparent;")
         ol = QVBoxLayout(oc)
-        ol.setContentsMargins(0, 16, 0, 8)
+        ol.setContentsMargins(0, 12, 0, 4)
         ol.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.orb = OrbWidget(self, 170)
+        self.orb = OrbWidget(self, 190)
         ol.addWidget(self.orb)
         main_col.addWidget(oc)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setFixedHeight(1)
-        sep.setStyleSheet("background:#1E293B;")
+        sep.setStyleSheet(f"background:{SURFACE_BORDER};")
         main_col.addWidget(sep)
 
-        # HUD
+        # HUD Stream Widget
         self.hud = HudWidget(self.sm, self)
         self.hud.start_task_requested.connect(
             lambda prompt, model: asyncio.create_task(self.ws_client.start_task(prompt, model))
@@ -193,9 +217,34 @@ class AetherWindow(QWidget):
 
         ml.addLayout(main_col, 1)
 
-        # Overlay Settings & Models Drawer (appears OVER all content)
-        self.drawer = SettingsDrawer(self)
-        self.models_panel = self.drawer.models_panel
+        # Settings Modal Overlay (Linked to main window with blur backdrop)
+        self.config_modal = AetherConfigWindow(self)
+        self.config_modal.hide()
+        self.config_modal.closed.connect(self._on_settings_closed)
+
+        self.config_modal.validate_requested.connect(
+            lambda p, k, u="": asyncio.create_task(self.ws_client.validate_provider(p, k, base_url=u))
+        )
+        self.config_modal.save_requested.connect(
+            lambda p, k, d, m, u="": asyncio.create_task(self.ws_client.save_provider(p, k, d, m, base_url=u))
+        )
+        self.config_modal.remove_requested.connect(
+            lambda p: asyncio.create_task(self.ws_client.remove_provider(p))
+        )
+        self.config_modal.refresh_models_requested.connect(
+            lambda p: asyncio.create_task(self.ws_client.refresh_models(p))
+        )
+        self.config_modal.reveal_key_requested.connect(
+            lambda p: asyncio.create_task(self.ws_client.reveal_provider_key(p))
+        )
+        self.config_modal.download_local_model_requested.connect(
+            lambda m, d: asyncio.create_task(self.ws_client.start_local_model_download(m, d))
+        )
+        self.config_modal.delete_local_model_requested.connect(
+            lambda m: asyncio.create_task(self.ws_client.delete_local_model(m))
+        )
+
+        # Tool Approval Drawer
         self.approval_drawer = ApprovalDrawer(self)
         self.approval_drawer.hide()
         self.approval_drawer.approve_btn.clicked.connect(
@@ -205,49 +254,14 @@ class AetherWindow(QWidget):
             lambda: asyncio.create_task(self.ws_client.send_approval(False, self.approval_drawer._approval_key))
         )
 
-        self.drawer.opened.connect(self._on_drawer_opened)
-
-        # Connect Cloud Provider events
-        self.models_panel.validate_requested.connect(
-            lambda p, k, u="": asyncio.create_task(self.ws_client.validate_provider(p, k, base_url=u))
-        )
-        self.models_panel.save_requested.connect(
-            lambda p, k, d, m, u="": asyncio.create_task(self.ws_client.save_provider(p, k, d, m, base_url=u))
-        )
-        self.models_panel.remove_requested.connect(
-            lambda p: asyncio.create_task(self.ws_client.remove_provider(p))
-        )
-        self.models_panel.refresh_models_requested.connect(
-            lambda p: asyncio.create_task(self.ws_client.refresh_models(p))
-        )
-        self.models_panel.reveal_key_requested.connect(
-            lambda p: asyncio.create_task(self.ws_client.reveal_provider_key(p))
-        )
-
-        # Connect Local Models & Task Download events
-        self.models_panel.download_local_model_requested.connect(
-            lambda m, d: asyncio.create_task(self.ws_client.start_local_model_download(m, d))
-        )
-        self.models_panel.delete_local_model_requested.connect(
-            lambda m: asyncio.create_task(self.ws_client.delete_local_model(m))
-        )
-
-        # Connect Capabilities Check Scheduler events
-        self.models_panel.set_capability_schedule_requested.connect(
-            lambda s, m: asyncio.create_task(self.ws_client.set_capability_schedule(s, m))
-        )
-        self.models_panel.run_capability_now_requested.connect(
-            lambda m: asyncio.create_task(self.ws_client.run_capability_check_now(m))
-        )
-
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#0D1219"))
+        painter.fillRect(self.rect(), QColor(SURFACE_BG))
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        if hasattr(self, "drawer"):
-            self.drawer.update_geometry()
+        if hasattr(self, "config_modal") and self.config_modal.isVisible():
+            self.config_modal.update_geometry()
         if hasattr(self, "approval_drawer") and self.approval_drawer.isVisible():
             self.approval_drawer.update_geometry()
         self._save_window_geometry()
@@ -262,21 +276,35 @@ class AetherWindow(QWidget):
         if not self.isMinimized() and not self.is_maximized_or_fullscreen:
             screen = QApplication.primaryScreen().availableGeometry() if QApplication.primaryScreen() else None
             if screen is None or (self.width() < screen.width() and self.height() < screen.height()):
-                if self.width() >= 380 and self.height() >= _MIN_WINDOW_H:
+                if self.width() >= _MIN_CHAT_W and self.height() >= _MIN_WINDOW_H:
                     self.user_config.window_width = self.width()
                     self.user_config.window_height = self.height()
                     save_config(self.user_config)
 
     def _toggle_settings(self):
-        self.drawer.toggle()
+        if self.config_modal.isVisible():
+            self.config_modal.close_modal()
+        else:
+            # Apply blur effect on the main HUD container
+            blur = QGraphicsBlurEffect(self)
+            blur.setBlurRadius(16)
+            self.hud_container.setGraphicsEffect(blur)
 
-    def _on_drawer_opened(self):
-        asyncio.create_task(self.ws_client.request_provider_list())
-        asyncio.create_task(self.ws_client.request_local_models_list())
-        asyncio.create_task(self.ws_client.request_capability_history())
+            # Show modal overlay centered over main window
+            self.config_modal.update_geometry()
+            self.config_modal.show()
+            self.config_modal.raise_()
+            self.config_modal.setFocus()
+
+            asyncio.create_task(self.ws_client.request_provider_list())
+            asyncio.create_task(self.ws_client.request_local_models_list())
+
+    def _on_settings_closed(self):
+        """Remove blur effect when settings modal closes."""
+        self.hud_container.setGraphicsEffect(None)
 
     def _on_ws_event(self, event: Event):
-        """Dispatch incoming WebSocket events to HUD and Models panel."""
+        """Dispatch incoming WebSocket events to HUD and Settings modal."""
         self.hud.log_event(event)
 
         p = event.payload or {}
@@ -288,11 +316,8 @@ class AetherWindow(QWidget):
             default_model = p.get("default_model", "")
             self._current_default_provider = default_provider
 
-            self.models_panel.populate_providers(providers)
-
-            # Reset refreshing states
-            for row in self.models_panel._provider_rows.values():
-                row.detail.set_refreshing(False)
+            if self.config_modal is not None:
+                self.config_modal.populate_providers(providers)
 
             models = []
             for prov in providers:
@@ -314,48 +339,30 @@ class AetherWindow(QWidget):
                 target_model = default_model if (default_model and default_model in models) else models[0]
                 self.hud.set_active_model(self._current_default_provider, target_model)
 
-        elif t == EventType.LOCAL_MODEL_LIST_RESPONSE:
-            self.models_panel.populate_local_models(p.get("models", []))
-
-        elif t == EventType.LOCAL_MODEL_DOWNLOAD_PROGRESS:
-            m_name = p.get("model", "")
-            pct = p.get("download_percent", 0.0)
-            self.models_panel.update_download_progress(m_name, pct)
-
-        elif t == EventType.LOCAL_MODEL_DELETE_RESPONSE:
-            asyncio.create_task(self.ws_client.request_local_models_list())
-
-        elif t == EventType.CAPABILITY_CHECK_HISTORY_RESPONSE:
-            history = p.get("history", [])
-            summary = p.get("summary")
-            self.models_panel.cap_row.update_history(history, summary)
-
-        elif t in (EventType.PROVIDER_SAVE_RESPONSE, EventType.PROVIDER_REMOVE_RESPONSE):
-            asyncio.create_task(self.ws_client.request_provider_list())
-
         elif t in (EventType.PROVIDER_VALIDATE_RESPONSE, EventType.SETTINGS_PROVIDER_VALIDATE_RESULT):
             provider_name = p.get("provider", "")
             models = p.get("models", [])
-            if provider_name in self.models_panel._provider_rows:
-                row = self.models_panel._provider_rows[provider_name]
-                status = p.get("status", "no_key")
-                row.set_badge(status)
+            status = p.get("status", "no_key")
+            latency = p.get("latency_ms", 0.0)
+
+            if self.config_modal is not None and provider_name in self.config_modal._provider_cards:
+                card = self.config_modal._provider_cards[provider_name]
+                card.set_badge(status)
                 if models:
-                    row.update_models(models)
-                    if row.detail.chk_default.isChecked() or getattr(row, "is_default", False):
+                    card.update_models(models)
+                    if card.chk_default.isChecked() or getattr(card, "is_default", False):
                         self.hud.set_available_models(models)
             elif models:
                 self.hud.set_available_models(models)
 
+            if self.config_modal is not None and latency > 0:
+                self.config_modal.update_latency(latency)
+
         elif t == EventType.PROVIDER_REVEAL_KEY_RESPONSE:
             provider_name = p.get("provider", "")
-            if p.get("success") and provider_name in self.models_panel._provider_rows:
-                row = self.models_panel._provider_rows[provider_name]
-                row.detail.reveal_key(p.get("api_key", ""))
-            elif provider_name in self.models_panel._provider_rows:
-                row = self.models_panel._provider_rows[provider_name]
-                row.detail.btn_show_key.setText("Show Key")
-                row.detail.btn_show_key.setEnabled(True)
+            if self.config_modal is not None and p.get("success") and provider_name in self.config_modal._provider_cards:
+                card = self.config_modal._provider_cards[provider_name]
+                card.inp_key.setText(p.get("api_key", ""))
 
         elif t == EventType.TOOL_APPROVAL_REQUEST:
             self.approval_drawer.show_for_request(p)
@@ -406,7 +413,7 @@ class AetherWindow(QWidget):
 
     # Frameless drag & double-click titlebar
     def mouseDoubleClickEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton and e.position().y() <= 36:
+        if e.button() == Qt.MouseButton.LeftButton and e.position().y() <= 40:
             pt = e.position().toPoint()
             child = self.childAt(pt)
             if child is None or child not in (
@@ -450,29 +457,24 @@ class AetherWindow(QWidget):
             if msg.message == 0x0024:  # WM_GETMINMAXINFO
                 info = _MINMAXINFO.from_address(msg.lParam)
                 dpr = self.devicePixelRatio()
-                info.ptMinTrackSize.x = int(420 * dpr)
+                info.ptMinTrackSize.x = int(_MIN_CHAT_W * dpr)
                 info.ptMinTrackSize.y = int(_MIN_WINDOW_H * dpr)
                 return True, 0
 
             if msg.message == 0x0084:  # WM_NCHITTEST
-                # Use Qt's DPI-aware logical global cursor position
                 pt = self.mapFromGlobal(self.cursor().pos())
                 w, h = self.width(), self.height()
 
-                # If cursor is outside window bounds or over interactive buttons/drawers, return HTCLIENT
                 if pt.x() < 0 or pt.x() > w or pt.y() < 0 or pt.y() > h:
                     return super().nativeEvent(eventType, message)
 
                 child = self.childAt(pt)
                 if child is not None:
-                    if (
-                        child in (getattr(self, "btn_gear", None), getattr(self, "btn_min", None), getattr(self, "btn_max", None), getattr(self, "btn_close", None))
-                        or (hasattr(self, "drawer") and self.drawer.isVisible() and self.drawer.rect().contains(pt))
-                    ):
+                    if child in (getattr(self, "btn_gear", None), getattr(self, "btn_min", None), getattr(self, "btn_max", None), getattr(self, "btn_close", None)):
                         return True, 1  # HTCLIENT
 
                 if self.is_maximized_or_fullscreen:
-                    return True, 1  # HTCLIENT: no edge resizing when maximized
+                    return True, 1  # HTCLIENT
 
                 margin = 8
                 left = pt.x() < margin
@@ -493,6 +495,10 @@ class AetherWindow(QWidget):
 
     def closeEvent(self, e):
         self._save_window_geometry()
+        if hasattr(self, "orb") and self.orb is not None:
+            self.orb.stop()
+        if hasattr(self, "config_modal") and self.config_modal is not None:
+            self.config_modal.close()
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self.ws_client.disconnect())
