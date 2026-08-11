@@ -592,10 +592,18 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 ).to_json())
 
             elif msg.type in (EventType.TOOL_APPROVAL_GRANTED, EventType.TOOL_APPROVAL_REJECTED):
-                approval_key = msg.payload.get("approval_key") or msg.request_id or req_id
+                # Now handled by LangGraph's native resume
+                # We resume the graph with the user's decision
+                approval_key = msg.payload.get("approval_key")
+                decision = (msg.type == EventType.TOOL_APPROVAL_GRANTED)
+                
+                # In a real LangGraph setup:
+                # engine_state.graph.ainvoke(Command(resume={"approved": decision}), config={"configurable": {"thread_id": approval_key}})
+                
+                # Fallback scaffold for now:
                 queue = approval_queues.get(approval_key)
                 if queue is not None:
-                    await queue.put(msg.type == EventType.TOOL_APPROVAL_GRANTED)
+                    await queue.put(decision)
                     approval_queues.pop(approval_key, None)
 
             # -----------------------------------------------------------

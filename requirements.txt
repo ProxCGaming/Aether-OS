@@ -9,3 +9,6 @@ pytest-asyncio>=0.23.0
 google-genai>=2.0.0
 litellm>=1.70.0
 APScheduler>=3.10.4
+langgraph>=0.1.19
+langchain-mcp>=0.1.0
+langgraph-checkpoint-sqlite>=1.0.0

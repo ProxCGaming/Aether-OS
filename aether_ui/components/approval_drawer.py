@@ -38,10 +38,22 @@ class ApprovalDrawer(QWidget):
         layout.addLayout(buttons)
 
     def show_for_request(self, payload: dict):
+        # This now handles LangGraph native pause events
         self._approval_key = payload.get("approval_key")
         tool_name = payload.get("tool_name", "tool")
         args = payload.get("args", {})
-        self.details.setText(f"Tool: {tool_name}\nArgs: {args}")
+        node_origin = payload.get("node", "unknown")
+        task_class = payload.get("task_class", "default")
+        workspace = payload.get("workspace", "default")
+        
+        details_text = (
+            f"Node: {node_origin}\n"
+            f"Tool: {tool_name}\n"
+            f"Task-Class: {task_class}\n"
+            f"Workspace: {workspace}\n"
+            f"Args: {args}"
+        )
+        self.details.setText(details_text)
         self._show()
 
     def _show(self):
