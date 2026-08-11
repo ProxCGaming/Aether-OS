@@ -124,17 +124,28 @@ class ApprovalDrawer(QWidget):
         return text
 
     def show_for_request(self, payload: dict):
+        # This now handles LangGraph native pause events
         self._approval_key = payload.get("approval_key")
         tool_name = payload.get("tool_name", "tool")
         args = payload.get("args", {})
+        node_origin = payload.get("node", "unknown")
         task_class = payload.get("task_class", "standard")
+        
         idx = self.class_dropdown.findText(task_class)
         if idx >= 0:
             self.class_dropdown.setCurrentIndex(idx)
+            
         roots = payload.get("workspace_roots", [])
-        roots_str = ", ".join(roots) if roots else "None"
-
-        self.details.setText(f"Tool: {tool_name}\nArgs: {args}\nWorkspace: {roots_str}")
+        roots_str = ", ".join(roots) if roots else payload.get("workspace", "None")
+        
+        details_text = (
+            f"Node: {node_origin}\n"
+            f"Tool: {tool_name}\n"
+            f"Task-Class: {task_class}\n"
+            f"Workspace: {roots_str}\n"
+            f"Args: {args}"
+        )
+        self.details.setText(details_text)
         self._show()
 
     def update_geometry(self):
