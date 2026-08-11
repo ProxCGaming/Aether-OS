@@ -1,28 +1,62 @@
-"""Routing transparency and fallback alert banner widget."""
+"""Routing transparency and fallback alert banner widget matching Figma Page 9."""
 from typing import Optional
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from aether_ui.theme import (
+    BRAND_FRONTEND,
+    STATUS_DEGRADED,
+    SURFACE_BORDER,
+    SURFACE_PANEL,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+)
 
 
 class RoutingBanner(QWidget):
-    """Compact banner displaying real-time routing decisions and fallback notices."""
+    """Card banner displaying real-time routing decisions and fallback notices."""
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setFixedHeight(28)
         self.setVisible(False)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 2, 10, 2)
-        layout.setSpacing(8)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(4)
 
-        self.icon = QLabel("⚡")
-        self.icon.setStyleSheet("font-size:12px; color:#58A6FF;")
-        layout.addWidget(self.icon)
+        self.lbl_tag = QLabel("ROUTING")
+        self.lbl_tag.setStyleSheet(
+            f"font-size: 10px; font-weight: 700; color: {BRAND_FRONTEND}; "
+            "letter-spacing: 0.5px; font-family: 'Segoe UI', sans-serif;"
+        )
+        layout.addWidget(self.lbl_tag)
 
         self.lbl_text = QLabel("")
-        self.lbl_text.setStyleSheet("font-size:11px; color:#C9D1D9; font-weight:500;")
-        layout.addWidget(self.lbl_text, 1)
+        self.lbl_text.setWordWrap(True)
+        self.lbl_text.setStyleSheet(
+            f"font-size: 12px; color: {TEXT_PRIMARY}; font-weight: 400; line-height: 1.4; "
+            "font-family: 'Segoe UI', sans-serif;"
+        )
+        layout.addWidget(self.lbl_text)
+
+        self._apply_normal_style()
+
+    def _apply_normal_style(self):
+        self.setStyleSheet(f"""
+            RoutingBanner {{
+                background-color: {SURFACE_PANEL};
+                border: 1px solid {BRAND_FRONTEND}40;
+                border-radius: 8px;
+            }}
+        """)
+
+    def _apply_fallback_style(self):
+        self.setStyleSheet(f"""
+            RoutingBanner {{
+                background-color: #1F1710;
+                border: 1px solid {STATUS_DEGRADED}60;
+                border-radius: 8px;
+            }}
+        """)
 
     def set_decision(
         self,
@@ -31,27 +65,25 @@ class RoutingBanner(QWidget):
         is_fallback: bool = False,
     ):
         if is_fallback:
-            self.icon.setText("🔀")
-            self.icon.setStyleSheet("font-size:12px; color:#FFA657;")
-            self.lbl_text.setText(f"Fallback: {reason}")
-            self.setStyleSheet("""
-                RoutingBanner {
-                    background-color: rgba(56, 35, 12, 0.7);
-                    border: 1px solid rgba(210, 153, 34, 0.4);
-                    border-radius: 6px;
-                }
-            """)
+            self.lbl_tag.setText("FALLBACK ROUTING")
+            self.lbl_tag.setStyleSheet(
+                f"font-size: 10px; font-weight: 700; color: {STATUS_DEGRADED}; "
+                "letter-spacing: 0.5px; font-family: 'Segoe UI', sans-serif;"
+            )
+            self.lbl_text.setText(f"Fallback to {model_label} — {reason}")
+            self._apply_fallback_style()
         else:
-            self.icon.setText("⚡")
-            self.icon.setStyleSheet("font-size:12px; color:#58A6FF;")
-            self.lbl_text.setText(f"{reason}")
-            self.setStyleSheet("""
-                RoutingBanner {
-                    background-color: rgba(22, 27, 34, 0.85);
-                    border: 1px solid rgba(88, 166, 255, 0.25);
-                    border-radius: 6px;
-                }
-            """)
+            self.lbl_tag.setText("ROUTING")
+            self.lbl_tag.setStyleSheet(
+                f"font-size: 10px; font-weight: 700; color: {BRAND_FRONTEND}; "
+                "letter-spacing: 0.5px; font-family: 'Segoe UI', sans-serif;"
+            )
+            if model_label and not reason.startswith(f"Routed to {model_label}"):
+                self.lbl_text.setText(f"Routed to {model_label} — {reason}")
+            else:
+                self.lbl_text.setText(reason)
+            self._apply_normal_style()
+
         self.setVisible(True)
 
     def clear_banner(self):

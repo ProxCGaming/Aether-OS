@@ -1,3 +1,4 @@
+"""Tool Approval Drawer / Modal matching Figma Page 11 Ionized Void styling."""
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt
 from PySide6.QtWidgets import (
     QComboBox,
@@ -8,18 +9,32 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from aether_ui.theme import (
+    BRAND_ENGINE,
+    COMBO_CSS,
+    SCROLLBAR_CSS,
+    STATUS_DEGRADED,
+    STATUS_HEALTHY,
+    STATUS_OFFLINE,
+    SURFACE_BG,
+    SURFACE_BORDER,
+    SURFACE_PANEL,
+    TEXT_MUTED,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+)
 
 
 class ApprovalDrawer(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-        self.setStyleSheet("""
-            ApprovalDrawer {
-                background: #0F172A;
-                border: 1px solid #334155;
+        self.setStyleSheet(f"""
+            ApprovalDrawer {{
+                background: {SURFACE_PANEL};
+                border: 1px solid {STATUS_DEGRADED}80;
                 border-radius: 10px;
-            }
+            }}
         """)
         self._approval_key = None
         self._build_ui()
@@ -29,88 +44,82 @@ class ApprovalDrawer(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
 
-        # Compact Header
-        self.title = QLabel("🛡️ Tool Approval Required")
-        self.title.setStyleSheet("font-weight:700; font-size:12px; color:#F8FAFC; border:none; background:transparent;")
-        layout.addWidget(self.title)
+        # Header Row
+        hdr = QHBoxLayout()
+        hdr.setSpacing(6)
+        dot = QLabel("●")
+        dot.setStyleSheet(f"font-size:12px; color:{STATUS_DEGRADED};")
+        hdr.addWidget(dot)
+
+        self.title = QLabel("Tool Approval Required")
+        self.title.setStyleSheet(f"font-weight:700; font-size:12px; color:{TEXT_PRIMARY}; border:none; background:transparent; font-family:'Segoe UI', sans-serif;")
+        hdr.addWidget(self.title)
+        hdr.addStretch()
+        layout.addLayout(hdr)
 
         # Details in a compact scroll area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { background: #020617; border: 1px solid #1E293B; border-radius: 6px; }")
-        scroll.setMinimumHeight(48)
-        scroll.setMaximumHeight(85)
+        scroll.setStyleSheet(f"QScrollArea {{ background: {SURFACE_BG}; border: 1px solid {SURFACE_BORDER}; border-radius: 6px; }} {SCROLLBAR_CSS}")
+        scroll.setMinimumHeight(55)
+        scroll.setMaximumHeight(95)
 
         self.details = QLabel("")
         self.details.setWordWrap(True)
-        self.details.setStyleSheet("color:#E2E8F0; font-family: Consolas, 'Courier New', monospace; font-size:10px; padding:4px; background:transparent; border:none;")
+        self.details.setStyleSheet(f"color:{TEXT_SECONDARY}; font-family: Consolas, 'Cascadia Code', monospace; font-size:11px; padding:6px; background:transparent; border:none;")
         scroll.setWidget(self.details)
         layout.addWidget(scroll)
 
-        # Dropdown with Standard / High Settings
-        dropdown_label = QLabel("Task Class / Settings:")
-        dropdown_label.setStyleSheet("color:#94A3B8; font-size:10px; font-weight:600; border:none; background:transparent;")
+        # Task Class Row
+        dropdown_label = QLabel("Task Class / Sandboxing Level:")
+        dropdown_label.setStyleSheet(f"color:{TEXT_MUTED}; font-size:10px; font-weight:600; border:none; background:transparent;")
         layout.addWidget(dropdown_label)
 
         self.class_dropdown = QComboBox()
         self.class_dropdown.addItems(["standard", "high", "heavy", "quick", "instant", "custom"])
         self.class_dropdown.setMinimumHeight(28)
-        self.class_dropdown.setStyleSheet("""
-            QComboBox {
-                background: #1E293B;
-                color: #F8FAFC;
-                border: 1px solid #475569;
-                border-radius: 5px;
-                padding: 2px 6px;
-                font-size: 11px;
-                font-weight: 600;
-            }
-            QComboBox::drop-down { border: none; }
-            QComboBox QAbstractItemView {
-                background: #1E293B;
-                color: #F8FAFC;
-                selection-background-color: #3B82F6;
-            }
-        """)
+        self.class_dropdown.setStyleSheet(COMBO_CSS)
         layout.addWidget(self.class_dropdown)
 
         # Action Buttons
         btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(6)
+        btn_layout.setSpacing(8)
 
-        self.approve_btn = QPushButton("✓ Approve")
-        self.approve_btn.setMinimumHeight(30)
+        self.approve_btn = QPushButton("✓ Allow")
+        self.approve_btn.setMinimumHeight(32)
         self.approve_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.approve_btn.setStyleSheet("""
-            QPushButton {
-                background: #10B981;
-                color: #FFFFFF;
+        self.approve_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {STATUS_HEALTHY};
+                color: #07150E;
                 border: none;
-                border-radius: 5px;
+                border-radius: 6px;
                 font-weight: 700;
                 font-size: 12px;
-                padding: 4px 8px;
-            }
-            QPushButton:hover { background: #059669; }
+                font-family: 'Segoe UI', sans-serif;
+                padding: 6px 12px;
+            }}
+            QPushButton:hover {{ background: #38E5AC; }}
         """)
 
-        self.reject_btn = QPushButton("✕ Reject")
-        self.reject_btn.setMinimumHeight(30)
+        self.reject_btn = QPushButton("✕ Deny")
+        self.reject_btn.setMinimumHeight(32)
         self.reject_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.reject_btn.setStyleSheet("""
-            QPushButton {
-                background: #EF4444;
+        self.reject_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {STATUS_OFFLINE};
                 color: #FFFFFF;
                 border: none;
-                border-radius: 5px;
+                border-radius: 6px;
                 font-weight: 700;
                 font-size: 12px;
-                padding: 4px 8px;
-            }
-            QPushButton:hover { background: #DC2626; }
+                font-family: 'Segoe UI', sans-serif;
+                padding: 6px 12px;
+            }}
+            QPushButton:hover {{ background: #FA5870; }}
         """)
 
         btn_layout.addWidget(self.approve_btn, 1)
@@ -124,7 +133,6 @@ class ApprovalDrawer(QWidget):
         return text
 
     def show_for_request(self, payload: dict):
-        # This now handles LangGraph native pause events
         self._approval_key = payload.get("approval_key")
         tool_name = payload.get("tool_name", "tool")
         args = payload.get("args", {})
@@ -139,9 +147,9 @@ class ApprovalDrawer(QWidget):
         roots_str = ", ".join(roots) if roots else payload.get("workspace", "None")
         
         details_text = (
-            f"Node: {node_origin}\n"
             f"Tool: {tool_name}\n"
-            f"Task-Class: {task_class}\n"
+            f"Node: {node_origin}\n"
+            f"Class: {task_class}\n"
             f"Workspace: {roots_str}\n"
             f"Args: {args}"
         )
@@ -149,16 +157,15 @@ class ApprovalDrawer(QWidget):
         self._show()
 
     def update_geometry(self):
-        """Keep compact drawer snapped to top-right corner of parent window without overlapping main controls."""
         parent = self.parentWidget()
         if not parent or not self.isVisible():
             return
         rect = parent.rect()
-        target_w = min(250, max(210, int(rect.width() * 0.5)))
+        target_w = min(280, max(230, int(rect.width() * 0.55)))
         content_h = self.sizeHint().height()
-        target_h = max(200, min(content_h, rect.height() - 50))
-        target_x = max(10, rect.width() - target_w - 12)
-        target = QRect(target_x, 40, target_w, target_h)
+        target_h = max(210, min(content_h, rect.height() - 50))
+        target_x = max(10, rect.width() - target_w - 14)
+        target = QRect(target_x, 46, target_w, target_h)
         self.setGeometry(target)
         self.raise_()
 
@@ -171,11 +178,11 @@ class ApprovalDrawer(QWidget):
         if not parent:
             return
         rect = parent.rect()
-        target_w = min(250, max(210, int(rect.width() * 0.5)))
+        target_w = min(280, max(230, int(rect.width() * 0.55)))
         content_h = self.sizeHint().height()
-        target_h = max(200, min(content_h, rect.height() - 50))
-        target_x = max(10, rect.width() - target_w - 12)
-        target = QRect(target_x, 40, target_w, target_h)
+        target_h = max(210, min(content_h, rect.height() - 50))
+        target_x = max(10, rect.width() - target_w - 14)
+        target = QRect(target_x, 46, target_w, target_h)
 
         self.setGeometry(target)
         self.raise_()
