@@ -10,7 +10,11 @@ from aether_engine.providers.base import (
     StreamChunk,
     ToolCall,
 )
-from aether_engine.tools.registry import ToolRegistry, create_current_time_tool
+from aether_engine.tools.registry import (
+    ToolRegistry,
+    create_current_time_tool,
+    create_file_tools,
+)
 
 
 class FakeProvider(BaseProvider):
@@ -107,6 +111,8 @@ class TestOrchestrationSimple(unittest.IsolatedAsyncioTestCase):
             ]
         )
         registry = ToolRegistry()
+        for t in create_file_tools():
+            registry.register(t)
         approvals = []
 
         async def approval_handler(tool_name, args, request_id):

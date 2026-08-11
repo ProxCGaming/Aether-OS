@@ -8,6 +8,7 @@ import sys
 from contextlib import asynccontextmanager
 import time
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
@@ -67,6 +68,8 @@ from aether_engine.scheduler.capability_jobs import CapabilitySchedulerManager
 from aether_engine.secrets.dpapi import SecretDecryptionError
 from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
 from aether_engine.tools.registry import ToolRegistry, create_current_time_tool, create_file_tools
+from aether_engine.routing.task_class_router import infer_task_class
+from aether_engine.workers.job_object import WorkerJobObject
 
 logger = logging.getLogger("aether_engine")
 
@@ -289,9 +292,21 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
     return LiteLLMProvider(api_key=api_key, model=model, provider_name=provider_name, base_url=base_url)
 
 
-async def _execute_tool_in_worker(tool_name: str, args: Dict[str, Any]) -> Any:
+async def _execute_tool_in_worker(tool_name: str, args: Dict[str, Any], task_class: str) -> Any:
     """Run an approved risky tool in a dedicated worker subprocess and return its result."""
     payload = json.dumps({"tool_name": tool_name, "args": args})
+    
+    limits = engine_state.user_config.task_classes.get(task_class, engine_state.user_config.task_classes.get("standard", {"time_cap_seconds": 1800, "memory_cap_mb": 4096}))
+    time_cap = limits["time_cap_seconds"]
+    mem_cap = limits["memory_cap_mb"]
+    
+    job_obj = None
+    try:
+        job_obj = WorkerJobObject(time_cap, mem_cap)
+    except Exception as e:
+        logger.warning(f"Failed to create Job Object: {e}")
+
+    start_time = time.time()
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
@@ -301,9 +316,43 @@ async def _execute_tool_in_worker(tool_name: str, args: Dict[str, Any]) -> Any:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    
+    if job_obj and proc.pid:
+        try:
+            job_obj.assign_process(proc.pid)
+        except Exception:
+            pass
+
+    try:
+        stdout, stderr = await proc.communicate()
+    except Exception as e:
+        logger.error(f"Worker process error: {e}")
+        engine_state.audit_logger.log_event("WORKER_EXECUTION_TERMINATED", {
+            "tool": tool_name,
+            "task_class": task_class,
+            "reason": str(e),
+            "wall_clock_seconds": round(time.time() - start_time, 2)
+        })
+        raise RuntimeError(f"Worker terminated: {e}")
+
+    wall_clock = time.time() - start_time
     if proc.returncode != 0:
-        raise RuntimeError(stderr.decode(errors="ignore") or stdout.decode(errors="ignore") or "worker failed")
+        err_msg = stderr.decode(errors="ignore") or stdout.decode(errors="ignore") or f"worker failed (code {proc.returncode})"
+        engine_state.audit_logger.log_event("WORKER_EXECUTION_TERMINATED", {
+            "tool": tool_name,
+            "task_class": task_class,
+            "exit_code": proc.returncode,
+            "reason": "Limit breach or internal error",
+            "wall_clock_seconds": round(wall_clock, 2)
+        })
+        raise RuntimeError(err_msg)
+
+    engine_state.audit_logger.log_event("WORKER_EXECUTION_COMPLETED", {
+        "tool": tool_name,
+        "task_class": task_class,
+        "wall_clock_seconds": round(wall_clock, 2)
+    })
+
     text = stdout.decode(errors="ignore").strip()
     if not text:
         return None
@@ -426,9 +475,14 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 for tool in create_file_tools():
                     tools.register(tool)
 
+                workspace_roots = [str(Path.home() / "AetherWorkspace")]
+
                 async def approval_handler(tool_name: str, args: Dict[str, Any], request_id: Optional[str] = None) -> Any:
                     approval_key = request_id or req_id or f"approval-{tool_name}"
                     queue: asyncio.Queue = asyncio.Queue()
+                    
+                    task_class = infer_task_class(tool_name, args)
+                    
                     approval_queues[approval_key] = queue
                     await ws.send_text(Event(
                         type=EventType.TOOL_APPROVAL_REQUEST,
@@ -438,6 +492,8 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                             "args": args,
                             "task_id": req_id,
                             "approval_key": approval_key,
+                            "task_class": task_class,
+                            "workspace_roots": workspace_roots,
                         },
                     ).to_json())
                     try:
@@ -448,7 +504,9 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         approval_queues.pop(approval_key, None)
                     if not decision:
                         return False
-                    return await _execute_tool_in_worker(tool_name, args)
+                    
+                    final_task_class = decision if isinstance(decision, str) else task_class
+                    return await _execute_tool_in_worker(tool_name, args, final_task_class)
 
                 async def execute_task_with_fallback(primary_provider, p_name: str, p_model: str):
                     task_generator = run_task(
@@ -457,6 +515,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         tools=tools,
                         request_id=req_id,
                         approval_handler=approval_handler,
+                        workspace_roots=workspace_roots,
                     )
 
                     first_event = True
@@ -541,7 +600,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
                         try:
                             alt_provider_inst = _create_provider_instance(fb_provider, fb_model, secret_store)
-                            async for alt_ev in run_task(prompt=prompt, provider=alt_provider_inst, tools=tools, request_id=req_id):
+                            async for alt_ev in run_task(prompt=prompt, provider=alt_provider_inst, tools=tools, request_id=req_id, approval_handler=approval_handler, workspace_roots=workspace_roots):
                                 if alt_ev.type == EventType.TASK_COMPLETED:
                                     latency = alt_ev.payload.get("latency_ms", 100.0)
                                     engine_state.health_manager.record_success(fb_provider, latency)
@@ -603,7 +662,11 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 # Fallback scaffold for now:
                 queue = approval_queues.get(approval_key)
                 if queue is not None:
-                    await queue.put(decision)
+                    if msg.type == EventType.TOOL_APPROVAL_GRANTED:
+                        override = msg.payload.get("override_class")
+                        await queue.put(override if override else True)
+                    else:
+                        await queue.put(False)
                     approval_queues.pop(approval_key, None)
 
             # -----------------------------------------------------------

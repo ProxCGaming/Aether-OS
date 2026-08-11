@@ -32,6 +32,7 @@ async def run_task(
     request_id: Optional[str] = None,
     max_turns: int = 5,
     approval_handler: Optional[Any] = None,
+    workspace_roots: Optional[List[str]] = None,
 ) -> AsyncGenerator[Event, None]:
     """Execute a task prompt against an LLM provider with multi-turn on-demand tool execution."""
     task_id = task_id or str(uuid.uuid4())
@@ -95,7 +96,7 @@ async def run_task(
                     if not tools:
                         result = f"Error: Tool '{tc.name}' not found (no tool registry configured)."
                     else:
-                        validation = validate_tool_request(tc.name, tc.args)
+                        validation = validate_tool_request(tc.name, tc.args, workspace_roots=workspace_roots)
                         if not validation.is_valid:
                             logger.warning(f"Pre-flight validation failed for tool '{tc.name}': {validation.error}")
                             result = f"Validation failed: {validation.error}"
@@ -106,9 +107,8 @@ async def run_task(
                                     type=EventType.TOOL_APPROVAL_REQUEST,
                                     request_id=request_id,
                                     payload={
-                                        "task_id": task_id,
                                         "tool_name": tc.name,
-                                        "args": tc.args,
+                                        "tool_args": tc.args,
                                     },
                                 )
                                 approved = await approval_handler(tc.name, tc.args, request_id)
