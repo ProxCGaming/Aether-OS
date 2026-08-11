@@ -62,6 +62,9 @@ class EventType(str, Enum):
     # Reachability & Refresh
     REFRESH_MODELS_REQUEST = "REFRESH_MODELS_REQUEST"
     REFRESH_MODELS_RESPONSE = "REFRESH_MODELS_RESPONSE"
+    # Reveal stored key (decrypt & return to UI)
+    PROVIDER_REVEAL_KEY_REQUEST = "PROVIDER_REVEAL_KEY_REQUEST"
+    PROVIDER_REVEAL_KEY_RESPONSE = "PROVIDER_REVEAL_KEY_RESPONSE"
 
 
 class TaskState(str, Enum):

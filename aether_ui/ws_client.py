@@ -170,6 +170,13 @@ class AetherWSClient:
             payload={"provider": provider},
         ))
 
+    async def reveal_provider_key(self, provider: str, request_id: Optional[str] = None):
+        await self._send(Event(
+            type=EventType.PROVIDER_REVEAL_KEY_REQUEST,
+            request_id=request_id or str(uuid.uuid4()),
+            payload={"provider": provider},
+        ))
+
     async def set_default_model(self, provider: str, model: str, request_id: Optional[str] = None):
         await self._send(Event(
             type=EventType.MODEL_SET_DEFAULT,

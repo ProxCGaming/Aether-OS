@@ -777,6 +777,22 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     payload={"provider": pname, "deleted": deleted},
                 ).to_json())
 
+            elif msg.type == EventType.PROVIDER_REVEAL_KEY_REQUEST:
+                pname = msg.payload.get("provider", "")
+                try:
+                    decrypted_key = secret_store.load_provider(pname)
+                    await ws.send_text(Event(
+                        type=EventType.PROVIDER_REVEAL_KEY_RESPONSE,
+                        request_id=req_id,
+                        payload={"provider": pname, "api_key": decrypted_key, "success": True},
+                    ).to_json())
+                except Exception as e:
+                    await ws.send_text(Event(
+                        type=EventType.PROVIDER_REVEAL_KEY_RESPONSE,
+                        request_id=req_id,
+                        payload={"provider": pname, "success": False, "error": str(e)},
+                    ).to_json())
+
             elif msg.type == EventType.MODEL_SET_DEFAULT:
                 pname = msg.payload.get("provider", engine_state.user_config.default_provider)
                 model = msg.payload.get("model", "")

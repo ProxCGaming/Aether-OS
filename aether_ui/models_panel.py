@@ -1,5 +1,6 @@
 """Wide models panel (~440-560px) with Cloud, Local (Ollama) tabs, Capabilities Check scheduler row, proportional edge resizing, and full dark theme."""
 import datetime
+import functools
 from pathlib import Path
 from typing import Optional
 import webbrowser
@@ -8,6 +9,7 @@ from PySide6.QtCore import (
     Property,
     QEasingCurve,
     QPropertyAnimation,
+    QTimer,
     Qt,
     Signal,
 )
@@ -383,6 +385,7 @@ class ProviderRow(QWidget):
     """Accordion expandable row for Cloud providers."""
     toggled = Signal(str, bool)
     refresh_requested = Signal(str)
+    reveal_key_requested = Signal(str)
 
     def __init__(
         self,
@@ -452,6 +455,7 @@ class ProviderRow(QWidget):
             base_url=self.base_url,
         )
         self.detail.refresh_requested.connect(self.refresh_requested.emit)
+        self.detail.reveal_key_requested.connect(lambda prov: self.reveal_key_requested.emit(prov))
         self.detail.setVisible(False)
         lo.addWidget(self.detail)
 
@@ -483,6 +487,7 @@ class ProviderDetailPanel(QFrame):
     save_requested = Signal(str, str, bool, str, str)    # provider, api_key, is_default, default_model, base_url
     remove_requested = Signal(str)
     refresh_requested = Signal(str)
+    reveal_key_requested = Signal(str)                   # provider
 
     def __init__(
         self,
@@ -532,6 +537,17 @@ class ProviderDetailPanel(QFrame):
         self.btn_validate.setStyleSheet(_SMALL_BTN.format(bg="#1E293B", fg="#E2E8F0", hover="#334155"))
         self.btn_validate.clicked.connect(self._on_validate)
         klo.addWidget(self.btn_validate)
+
+        self.btn_show_key = QPushButton("Show Key")
+        self.btn_show_key.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_show_key.setToolTip("Decrypt and reveal the stored API key (auto-hides after 30s)")
+        self.btn_show_key.setStyleSheet(_SMALL_BTN.format(bg="#7C3AED", fg="#FFFFFF", hover="#8B5CF6"))
+        self.btn_show_key.clicked.connect(self._on_show_key)
+        klo.addWidget(self.btn_show_key)
+
+        self._reveal_timer = QTimer(self)
+        self._reveal_timer.setSingleShot(True)
+        self._reveal_timer.timeout.connect(self._hide_key)
 
         self.btn_get_key = QPushButton("Get Key ↗")
         self.btn_get_key.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -587,6 +603,41 @@ class ProviderDetailPanel(QFrame):
         if key or base_url:
             self.set_searching(True)
             self.validate_requested.emit(self.provider, key, base_url)
+
+    def _on_show_key(self):
+        """Request the engine to decrypt and return the stored key."""
+        self.btn_show_key.setText("Loading…")
+        self.btn_show_key.setEnabled(False)
+        self.reveal_key_requested.emit(self.provider)
+
+    def reveal_key(self, api_key: str):
+        """Populate the input with the decrypted key in cleartext, auto-hide after 30s."""
+        self.inp_key.setEchoMode(QLineEdit.EchoMode.Normal)
+        self.inp_key.setText(api_key)
+        self.btn_show_key.setText("Hide Key")
+        self.btn_show_key.setEnabled(True)
+        self.btn_show_key.setStyleSheet(_SMALL_BTN.format(bg="#DC2626", fg="#FFFFFF", hover="#EF4444"))
+        try:
+            self.btn_show_key.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self.btn_show_key.clicked.connect(self._hide_key)
+        self._reveal_timer.start(30_000)  # auto-hide after 30 seconds
+
+    def _hide_key(self):
+        """Re-mask the API key input and reset the Show Key button."""
+        self._reveal_timer.stop()
+        self.inp_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.inp_key.clear()
+        self.inp_key.setPlaceholderText("••••••••••••••••")
+        self.btn_show_key.setText("Show Key")
+        self.btn_show_key.setEnabled(True)
+        self.btn_show_key.setStyleSheet(_SMALL_BTN.format(bg="#7C3AED", fg="#FFFFFF", hover="#8B5CF6"))
+        try:
+            self.btn_show_key.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self.btn_show_key.clicked.connect(self._on_show_key)
 
     def _on_refresh(self):
         self.set_refreshing(True)
@@ -649,6 +700,7 @@ class ModelsPanel(QWidget):
     save_requested = Signal(str, str, bool, str, str)    # provider, api_key, is_default, default_model, base_url
     remove_requested = Signal(str)
     refresh_models_requested = Signal(str)
+    reveal_key_requested = Signal(str)                   # provider
     model_changed = Signal(str, str)
     download_local_model_requested = Signal(str, str) # model, dest_dir
     delete_local_model_requested = Signal(str)       # model
@@ -791,6 +843,7 @@ class ModelsPanel(QWidget):
             row.detail.save_requested.connect(self.save_requested)
             row.detail.remove_requested.connect(self.remove_requested)
             row.refresh_requested.connect(self.refresh_models_requested.emit)
+            row.reveal_key_requested.connect(self.reveal_key_requested.emit)
             if p.get("models"):
                 row.detail.cmb_model.currentTextChanged.connect(
                     lambda model, pname=p["name"]: self.model_changed.emit(pname, model)

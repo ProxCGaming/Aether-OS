@@ -212,6 +212,9 @@ class AetherWindow(QWidget):
         self.models_panel.refresh_models_requested.connect(
             lambda p: asyncio.create_task(self.ws_client.refresh_models(p))
         )
+        self.models_panel.reveal_key_requested.connect(
+            lambda p: asyncio.create_task(self.ws_client.reveal_provider_key(p))
+        )
 
         # Connect Local Models & Task Download events
         self.models_panel.download_local_model_requested.connect(
@@ -335,6 +338,16 @@ class AetherWindow(QWidget):
                         self.hud.set_available_models(models)
             elif models:
                 self.hud.set_available_models(models)
+
+        elif t == EventType.PROVIDER_REVEAL_KEY_RESPONSE:
+            provider_name = p.get("provider", "")
+            if p.get("success") and provider_name in self.models_panel._provider_rows:
+                row = self.models_panel._provider_rows[provider_name]
+                row.detail.reveal_key(p.get("api_key", ""))
+            elif provider_name in self.models_panel._provider_rows:
+                row = self.models_panel._provider_rows[provider_name]
+                row.detail.btn_show_key.setText("Show Key")
+                row.detail.btn_show_key.setEnabled(True)
 
         elif t == EventType.TOOL_APPROVAL_REQUEST:
             self.approval_drawer.show_for_request(p)

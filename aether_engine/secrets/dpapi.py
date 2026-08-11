@@ -11,25 +11,34 @@ import os
 import sys
 
 
+import abc
+
 class SecretDecryptionError(Exception):
     """Raised when a stored secret cannot be decrypted."""
 
+class BaseProtector(abc.ABC):
+    @abc.abstractmethod
+    def protect(self, data: bytes) -> bytes:
+        """Encrypt bytes."""
+        pass
 
-def _encrypt(plaintext: str) -> bytes:
-    """Encrypt a string using Windows DPAPI (or base64 fallback)."""
-    data = plaintext.encode("utf-8")
-    if sys.platform == "win32":
-        return _dpapi_encrypt(data)
-    # Non-Windows fallback: base64 encoding (not secure, dev only)
-    return base64.b64encode(data)
+    @abc.abstractmethod
+    def unprotect(self, data: bytes) -> bytes:
+        """Decrypt bytes."""
+        pass
 
+class WindowsDPAPIProtector(BaseProtector):
+    def protect(self, data: bytes) -> bytes:
+        if sys.platform == "win32":
+            return _dpapi_encrypt(data)
+        # Non-Windows fallback: base64 encoding (not secure, dev only)
+        return base64.b64encode(data)
 
-def _decrypt(ciphertext: bytes) -> str:
-    """Decrypt bytes using Windows DPAPI (or base64 fallback)."""
-    if sys.platform == "win32":
-        return _dpapi_decrypt(ciphertext).decode("utf-8")
-    # Non-Windows fallback
-    return base64.b64decode(ciphertext).decode("utf-8")
+    def unprotect(self, data: bytes) -> bytes:
+        if sys.platform == "win32":
+            return _dpapi_decrypt(data)
+        # Non-Windows fallback
+        return base64.b64decode(data)
 
 
 if sys.platform == "win32":
