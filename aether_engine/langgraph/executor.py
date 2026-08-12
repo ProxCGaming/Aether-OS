@@ -4,8 +4,18 @@ import uuid
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+try:
+    from langchain_core.runnables import RunnableConfig
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from aether_engine.langgraph.graph import compile_graph
+    from aether_engine.langgraph.state import AetherState
+    _LANGGRAPH_AVAILABLE = True
+except ImportError:
+    RunnableConfig = Any  # type: ignore
+    AsyncSqliteSaver = Any  # type: ignore
+    compile_graph = None  # type: ignore
+    AetherState = Any  # type: ignore
+    _LANGGRAPH_AVAILABLE = False
 import aiosqlite
 
 from aether_common.contracts import (
@@ -16,8 +26,6 @@ from aether_common.contracts import (
 )
 from aether_engine.providers.base import BaseProvider
 from aether_engine.tools.registry import ToolRegistry
-from aether_engine.langgraph.graph import compile_graph
-from aether_engine.langgraph.state import AetherState
 
 logger = logging.getLogger("aether_engine.langgraph.executor")
 

@@ -165,14 +165,6 @@ class AetherWindow(QWidget):
         self.btn_max.clicked.connect(self._toggle_maximize)
         tl.addWidget(self.btn_max)
 
-        self.btn_fs = QPushButton("⛶")
-        self.btn_fs.setFixedSize(28, 28)
-        self.btn_fs.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_fs.setToolTip("Toggle Fullscreen")
-        self.btn_fs.setStyleSheet(_TB_BTN.format(fs=14, hover="#1E293B"))
-        self.btn_fs.clicked.connect(self._toggle_fullscreen)
-        tl.addWidget(self.btn_fs)
-
         self.btn_close = QPushButton("✕")
         self.btn_close.setFixedSize(30, 30)
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -358,6 +350,14 @@ class AetherWindow(QWidget):
             if self.config_modal is not None and latency > 0:
                 self.config_modal.update_latency(latency)
 
+        elif t == EventType.PROVIDER_SAVE_RESPONSE:
+            provider_name = p.get("provider", "")
+            if p.get("success"):
+                if self.config_modal is not None and provider_name in self.config_modal._provider_cards:
+                    card = self.config_modal._provider_cards[provider_name]
+                    card.on_saved_success()
+                asyncio.create_task(self.ws_client.request_provider_list())
+
         elif t == EventType.PROVIDER_REVEAL_KEY_RESPONSE:
             provider_name = p.get("provider", "")
             if self.config_modal is not None and p.get("success") and provider_name in self.config_modal._provider_cards:
@@ -420,7 +420,6 @@ class AetherWindow(QWidget):
                 getattr(self, "btn_gear", None),
                 getattr(self, "btn_min", None),
                 getattr(self, "btn_max", None),
-                getattr(self, "btn_fs", None),
                 getattr(self, "btn_close", None),
             ):
                 self._toggle_maximize()

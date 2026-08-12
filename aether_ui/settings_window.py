@@ -5,6 +5,10 @@ Matches the reference layout:
 - Model View with active Provider/Model dropdowns, Apply button, Reasoning level, and Auxiliary Models breakdown
   (Vision, Web extract, Compression, Skills hub, Approval, MCP, Title gen) with "Set to main" and "Change" actions.
 - Providers View with API key inputs, Test, Show Key, Get Key, and Ollama local models.
+  * Clear visual feedback for configured keys (masked bullets, connected badge).
+  * Save button disables after saving and re-enables on edits.
+  * Refined reveal button styling.
+  * Mutually exclusive default provider toggle with automatic persistence.
 - Tools & Approvals View matching sandbox policies.
 - Security & About Views.
 - Full modal overlay behavior: centers over main window, applies QGraphicsBlurEffect to background HUD,
@@ -16,20 +20,18 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import webbrowser
 
-from PySide6.QtCore import QPoint, QRect, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
     QFrame,
-    QGraphicsBlurEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -41,7 +43,6 @@ from aether_ui.theme import (
     CHECKBOX_CSS,
     COMBO_CSS,
     INPUT_CSS,
-    SCROLLBAR_CSS,
     STATUS_DEGRADED,
     STATUS_HEALTHY,
     STATUS_OFFLINE,
@@ -57,14 +58,7 @@ from aether_ui.theme import (
     TEXT_SECONDARY,
 )
 
-_PROVIDER_ICONS = {
-    "google_gemini": "✦",
-    "openai": "⛁",
-    "anthropic": "⚙",
-    "deepseek": "⟨/⟩",
-    "openrouter": "∿",
-    "custom": ">_",
-}
+_MASKED_PLACEHOLDER = "••••••••••••••••••••••••••••"
 
 _PROVIDER_DOCS = {
     "google_gemini": "https://aistudio.google.com/app/apikey",
@@ -72,31 +66,48 @@ _PROVIDER_DOCS = {
     "anthropic": "https://console.anthropic.com/settings/keys",
     "deepseek": "https://platform.deepseek.com/api_keys",
     "openrouter": "https://openrouter.ai/keys",
-    "custom": "https://github.com/ollama/ollama",
+    "custom": "https://ollama.com",
 }
+
+_PROVIDER_ICONS = {
+    "google_gemini": "✦",
+    "openai": "🗲",
+    "anthropic": "⚙",
+    "deepseek": "⟨/⟩",
+    "openrouter": "∿",
+    "custom": ">_",
+}
+
+_PROVIDERS_CONFIG = [
+    ("google_gemini", "Google Gemini"),
+    ("openai", "OpenAI (GPT-4o)"),
+    ("anthropic", "Anthropic Claude"),
+    ("deepseek", "DeepSeek Coder"),
+    ("openrouter", "OpenRouter Meta API"),
+    ("custom", "Custom OpenAI Compatible Host"),
+]
 
 
 class ProviderAccordionCard(QWidget):
-    """Accordion card widget for a cloud LLM provider."""
+    """Clean Provider Card with masked key display, smart save state, and mutual default toggle."""
 
-    validate_requested = Signal(str, str, str)
-    save_requested = Signal(str, str, bool, str, str)
-    remove_requested = Signal(str)
-    refresh_models_requested = Signal(str)
-    reveal_key_requested = Signal(str)
+    validate_requested = Signal(str, str, str)  # (provider, key, base_url)
+    save_requested = Signal(str, str, bool, str, str)  # (provider, key, is_default, model, base_url)
+    remove_requested = Signal(str)  # (provider)
+    refresh_models_requested = Signal(str)  # (provider)
+    reveal_key_requested = Signal(str)  # (provider)
+    default_toggled = Signal(str)  # (provider)
 
-    def __init__(self, key: str, display_name: str, parent=None):
+    def __init__(self, provider_key: str, display_name: str, parent=None):
         super().__init__(parent)
-        self.provider_key = key
+        self.provider_key = provider_key
         self.display_name = display_name
         self.is_expanded = False
-        self.is_default = False
         self.status = "no_key"
+        self.is_default = False
+        self.has_saved_key = False
+        self._is_revealed = False
 
-        self._build_ui()
-        self.set_expanded(False)
-
-    def _build_ui(self):
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(0)
@@ -152,6 +163,7 @@ class ProviderAccordionCard(QWidget):
         self.inp_key.setPlaceholderText("Enter API Key…")
         self.inp_key.setStyleSheet(INPUT_CSS)
         self.inp_key.setFixedHeight(30)
+        self.inp_key.textChanged.connect(self._on_input_modified)
         kl.addWidget(self.inp_key, 1)
 
         self.btn_test = QPushButton("Test")
@@ -161,10 +173,10 @@ class ProviderAccordionCard(QWidget):
         self.btn_test.clicked.connect(self._on_test)
         kl.addWidget(self.btn_test)
 
-        self.btn_show_key = QPushButton("👁 Show Key")
+        self.btn_show_key = QPushButton("⬡ Reveal")
         self.btn_show_key.setFixedHeight(30)
         self.btn_show_key.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_show_key.setStyleSheet(self._btn_css("rgba(124, 111, 255, 0.15)", "#9D93FF", "rgba(124, 111, 255, 0.28)", border_col="rgba(124, 111, 255, 0.35)"))
+        self.btn_show_key.setStyleSheet(self._btn_css("rgba(124, 111, 255, 0.14)", "#B2A8FF", "rgba(124, 111, 255, 0.25)", border_col="rgba(124, 111, 255, 0.35)"))
         self.btn_show_key.clicked.connect(self._on_toggle_show_key)
         kl.addWidget(self.btn_show_key)
 
@@ -189,6 +201,7 @@ class ProviderAccordionCard(QWidget):
         self.inp_base_url.setPlaceholderText("http://localhost:11434/v1")
         self.inp_base_url.setStyleSheet(INPUT_CSS)
         self.inp_base_url.setFixedHeight(30)
+        self.inp_base_url.textChanged.connect(self._on_input_modified)
         c_layout.addWidget(self.inp_base_url, 1)
         dl.addWidget(self.custom_row)
         self.custom_row.setVisible(self.provider_key == "custom")
@@ -204,10 +217,12 @@ class ProviderAccordionCard(QWidget):
         self.cmb_models = QComboBox()
         self.cmb_models.setStyleSheet(COMBO_CSS)
         self.cmb_models.setFixedHeight(30)
+        self.cmb_models.currentIndexChanged.connect(self._on_input_modified)
         ml.addWidget(self.cmb_models, 1)
 
         self.chk_default = QCheckBox("Set default")
         self.chk_default.setStyleSheet(CHECKBOX_CSS)
+        self.chk_default.clicked.connect(self._on_default_clicked)
         ml.addWidget(self.chk_default)
 
         self.btn_refresh = QPushButton("↻ Refresh")
@@ -220,7 +235,7 @@ class ProviderAccordionCard(QWidget):
         self.btn_save = QPushButton("Save")
         self.btn_save.setFixedHeight(30)
         self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_save.setStyleSheet(self._btn_css(STATUS_HEALTHY, "#07150E", "#38E5AC", font_weight="700"))
+        self._update_save_button_state(is_dirty=False)
         self.btn_save.clicked.connect(self._on_save)
         ml.addWidget(self.btn_save)
 
@@ -233,6 +248,7 @@ class ProviderAccordionCard(QWidget):
         dl.addLayout(ml)
 
         self.layout.addWidget(self.detail)
+        self.set_expanded(False)
 
     def _btn_css(self, bg: str, fg: str, hover: str, border_col: str = "transparent", font_weight: str = "600") -> str:
         return f"""
@@ -249,7 +265,32 @@ class ProviderAccordionCard(QWidget):
             QPushButton:hover {{
                 background-color: {hover};
             }}
+            QPushButton:disabled {{
+                background-color: rgba(43, 217, 160, 0.18);
+                color: rgba(255, 255, 255, 0.35);
+                border: 1px solid rgba(43, 217, 160, 0.15);
+            }}
         """
+
+    def _update_save_button_state(self, is_dirty: bool):
+        if is_dirty:
+            self.btn_save.setEnabled(True)
+            self.btn_save.setText("Save")
+            self.btn_save.setStyleSheet(self._btn_css(STATUS_HEALTHY, "#07150E", "#38E5AC", font_weight="700"))
+        else:
+            self.btn_save.setEnabled(False)
+            self.btn_save.setText("Saved ✓" if self.has_saved_key else "Save")
+            self.btn_save.setStyleSheet(self._btn_css("rgba(43, 217, 160, 0.20)", "rgba(255, 255, 255, 0.45)", "rgba(43, 217, 160, 0.20)", border_col="rgba(43, 217, 160, 0.2)"))
+
+    def _on_input_modified(self):
+        text = self.inp_key.text()
+        if text != _MASKED_PLACEHOLDER:
+            self._update_save_button_state(is_dirty=True)
+
+    def _on_default_clicked(self, checked: bool):
+        if checked:
+            self.default_toggled.emit(self.provider_key)
+        self._on_save()
 
     def toggle_expanded(self):
         self.set_expanded(not self.is_expanded)
@@ -307,33 +348,47 @@ class ProviderAccordionCard(QWidget):
 
     def update_models(self, models: List[str], current: Optional[str] = None):
         cur = current or self.cmb_models.currentText()
+        self.cmb_models.blockSignals(True)
         self.cmb_models.clear()
         self.cmb_models.addItems(models)
         idx = self.cmb_models.findText(cur)
         if idx >= 0:
             self.cmb_models.setCurrentIndex(idx)
+        self.cmb_models.blockSignals(False)
+
+    def get_raw_key(self) -> str:
+        t = self.inp_key.text().strip()
+        return "" if t == _MASKED_PLACEHOLDER else t
+
+    def on_saved_success(self):
+        self.has_saved_key = True
+        self.set_badge("connected")
+        self._update_save_button_state(is_dirty=False)
 
     def _on_test(self):
-        k = self.inp_key.text().strip()
+        k = self.get_raw_key()
         url = self.inp_base_url.text().strip() if self.provider_key == "custom" else ""
         self.validate_requested.emit(self.provider_key, k, url)
 
     def _on_save(self):
-        k = self.inp_key.text().strip()
+        k = self.get_raw_key()
         d = self.chk_default.isChecked()
         m = self.cmb_models.currentText()
         url = self.inp_base_url.text().strip() if self.provider_key == "custom" else ""
+        self._update_save_button_state(is_dirty=False)
         self.save_requested.emit(self.provider_key, k, d, m, url)
 
     def _on_toggle_show_key(self):
-        if self.inp_key.echoMode() == QLineEdit.EchoMode.Password:
-            if not self.inp_key.text():
+        if not self._is_revealed:
+            if not self.inp_key.text() or self.inp_key.text() == _MASKED_PLACEHOLDER:
                 self.reveal_key_requested.emit(self.provider_key)
             self.inp_key.setEchoMode(QLineEdit.EchoMode.Normal)
-            self.btn_show_key.setText("Hide Key")
+            self.btn_show_key.setText("✕ Hide")
+            self._is_revealed = True
         else:
             self.inp_key.setEchoMode(QLineEdit.EchoMode.Password)
-            self.btn_show_key.setText("👁 Show Key")
+            self.btn_show_key.setText("⬡ Reveal")
+            self._is_revealed = False
 
     def _on_get_key(self):
         url = _PROVIDER_DOCS.get(self.provider_key, "https://google.com")
@@ -341,8 +396,9 @@ class ProviderAccordionCard(QWidget):
 
 
 class AetherConfigWindow(QWidget):
-    """Full-featured Settings Modal matching the reference sidebar layout & Figma tokens."""
+    """Full Reference-Styled Modal Settings Window."""
 
+    closed = Signal()
     validate_requested = Signal(str, str, str)
     save_requested = Signal(str, str, bool, str, str)
     remove_requested = Signal(str)
@@ -350,46 +406,45 @@ class AetherConfigWindow(QWidget):
     reveal_key_requested = Signal(str)
     download_local_model_requested = Signal(str, str)
     delete_local_model_requested = Signal(str)
-    closed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setWindowFlags(Qt.WindowType.SubWindow)
 
         self._provider_cards: Dict[str, ProviderAccordionCard] = {}
         self._sidebar_buttons: List[QPushButton] = []
         self._build_ui()
 
     def _build_ui(self):
-        # Outermost container: full-window backdrop overlay
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(20, 20, 20, 20)
+        root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # Center Card Frame (The Settings Dialog Box)
-        self.card = QFrame()
-        self.card.setObjectName("settings_modal_card")
+        # Center Dialog Card
+        self.card = QFrame(self)
+        self.card.setObjectName("settings_card")
         self.card.setStyleSheet(f"""
-            QFrame#settings_modal_card {{
-                background-color: {SURFACE_PANEL};
+            QFrame#settings_card {{
+                background-color: {SURFACE_BG};
                 border: 1px solid {SURFACE_BORDER};
                 border-radius: 12px;
             }}
         """)
+        self.card.setFixedSize(720, 580)
+
         card_layout = QHBoxLayout(self.card)
         card_layout.setContentsMargins(0, 0, 0, 0)
         card_layout.setSpacing(0)
 
         # -------------------------------------------------------------------
-        # 1. Left Sidebar Navigation (Matching Reference Image)
+        # LEFT SIDEBAR NAVIGATION
         # -------------------------------------------------------------------
         sidebar = QFrame()
-        sidebar.setObjectName("settings_sidebar")
-        sidebar.setFixedWidth(200)
+        sidebar.setFixedWidth(180)
         sidebar.setStyleSheet(f"""
-            QFrame#settings_sidebar {{
-                background-color: {SURFACE_BG};
+            QFrame {{
+                background-color: {SURFACE_PANEL};
                 border-right: 1px solid {SURFACE_BORDER};
                 border-top-left-radius: 12px;
                 border-bottom-left-radius: 12px;
@@ -415,55 +470,50 @@ class AetherConfigWindow(QWidget):
         ]
 
         for label, idx in nav_items:
-            btn = self._make_sidebar_btn(label, idx)
-            self._sidebar_buttons.append(btn)
-            s_layout.addWidget(btn)
+            b = self._make_sidebar_btn(label, idx)
+            s_layout.addWidget(b)
+            self._sidebar_buttons.append(b)
 
         s_layout.addStretch()
 
-        # Sidebar bottom icon toolbar (download, upload, refresh)
-        bot_bar = QHBoxLayout()
-        bot_bar.setContentsMargins(6, 0, 6, 0)
-        bot_bar.setSpacing(8)
-
+        # Bottom sidebar toolbar
+        tb_bar = QHBoxLayout()
+        tb_bar.setSpacing(6)
         btn_dl = QPushButton("↓")
-        btn_dl.setToolTip("Export Configuration")
-        btn_dl.setFixedSize(26, 26)
+        btn_dl.setToolTip("Export config")
         btn_dl.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_dl.setStyleSheet(f"background:transparent; color:{TEXT_SECONDARY}; border:none; font-size:13px; font-weight:bold;")
 
         btn_ul = QPushButton("↑")
-        btn_ul.setToolTip("Import Configuration")
-        btn_ul.setFixedSize(26, 26)
+        btn_ul.setToolTip("Import config")
         btn_ul.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_ul.setStyleSheet(f"background:transparent; color:{TEXT_SECONDARY}; border:none; font-size:13px; font-weight:bold;")
 
         btn_rf = QPushButton("↻")
-        btn_rf.setToolTip("Reload All Settings")
-        btn_rf.setFixedSize(26, 26)
+        btn_rf.setToolTip("Reload engine")
         btn_rf.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_rf.setStyleSheet(f"background:transparent; color:{TEXT_SECONDARY}; border:none; font-size:13px; font-weight:bold;")
-        btn_rf.clicked.connect(lambda: self.refresh_models_requested.emit("google_gemini"))
 
-        bot_bar.addWidget(btn_dl)
-        bot_bar.addWidget(btn_ul)
-        bot_bar.addWidget(btn_rf)
-        bot_bar.addStretch()
-        s_layout.addLayout(bot_bar)
+        tb_bar.addWidget(btn_dl)
+        tb_bar.addWidget(btn_ul)
+        tb_bar.addWidget(btn_rf)
+        tb_bar.addStretch()
+        s_layout.addLayout(tb_bar)
 
         card_layout.addWidget(sidebar)
 
         # -------------------------------------------------------------------
-        # 2. Main Content Area (QStackedWidget + Top Close Button)
+        # RIGHT MAIN CONTENT AREA
         # -------------------------------------------------------------------
         main_content = QWidget()
-        main_content.setStyleSheet("background:transparent; border:none;")
         mc_layout = QVBoxLayout(main_content)
-        mc_layout.setContentsMargins(24, 16, 24, 18)
+        mc_layout.setContentsMargins(18, 14, 18, 14)
         mc_layout.setSpacing(12)
 
-        # Top Header Bar: Status + Close Button
+        # Top Header Bar
         top_bar = QHBoxLayout()
+        top_bar.setSpacing(8)
+
         self.lbl_sys_ok = QLabel("SYS_OK: 145ms")
         self.lbl_sys_ok.setStyleSheet(f"font-size:11px; color:{TEXT_MUTED}; font-family:Consolas, monospace;")
         top_bar.addWidget(self.lbl_sys_ok)
@@ -471,19 +521,21 @@ class AetherConfigWindow(QWidget):
         self.lbl_online = QLabel("● ONLINE")
         self.lbl_online.setStyleSheet(f"""
             font-size: 10px; font-weight: 700; color: {STATUS_HEALTHY};
-            background: #0E241C; border: 1px solid #194D3B; border-radius: 10px; padding: 2px 8px;
+            background: rgba(43, 217, 160, 0.12);
+            border: 1px solid rgba(43, 217, 160, 0.25);
+            border-radius: 4px; padding: 2px 6px;
         """)
         top_bar.addWidget(self.lbl_online)
 
         top_bar.addStretch()
 
-        self.btn_close = QPushButton("✕")
-        self.btn_close.setFixedSize(28, 28)
-        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_close.setStyleSheet(f"""
+        btn_close = QPushButton("✕")
+        btn_close.setFixedSize(26, 26)
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.setStyleSheet(f"""
             QPushButton {{
                 background: transparent;
-                color: {TEXT_SECONDARY};
+                color: {TEXT_MUTED};
                 font-size: 13px;
                 font-weight: bold;
                 border: none;
@@ -494,15 +546,15 @@ class AetherConfigWindow(QWidget):
                 color: #FFFFFF;
             }}
         """)
-        self.btn_close.clicked.connect(self.close_modal)
-        top_bar.addWidget(self.btn_close)
+        btn_close.clicked.connect(self.close_modal)
+        top_bar.addWidget(btn_close)
         mc_layout.addLayout(top_bar)
 
         # Stacked Views
         self.stack = QStackedWidget()
         self.stack.setStyleSheet("background:transparent; border:none;")
 
-        # Tab 0: Model & Routing (Matching Reference Image)
+        # Tab 0: Model & Routing
         self.view_model = self._build_model_routing_tab()
         self.stack.addWidget(self.view_model)
 
@@ -581,7 +633,6 @@ class AetherConfigWindow(QWidget):
                         border-radius: 6px;
                         text-align: left;
                         padding-left: 12px;
-                        font-family: 'Segoe UI', sans-serif;
                     }}
                 """)
             else:
@@ -591,27 +642,25 @@ class AetherConfigWindow(QWidget):
                         color: {TEXT_SECONDARY};
                         font-size: 12px;
                         font-weight: 500;
-                        border: 1px solid transparent;
+                        border: none;
                         border-radius: 6px;
                         text-align: left;
                         padding-left: 12px;
-                        font-family: 'Segoe UI', sans-serif;
                     }}
                     QPushButton:hover {{
+                        background-color: {SURFACE_CARD};
                         color: {TEXT_PRIMARY};
-                        background-color: {SURFACE_PANEL_HOVER};
                     }}
                 """)
 
     def _build_model_routing_tab(self) -> QWidget:
-        """Model & Routing View matching the user's reference image."""
+        """Builds Model selection & Auxiliary Models breakdown matching reference screenshot."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(SCROLLBAR_CSS)
+        scroll.setStyleSheet("background:transparent; border:none;")
 
-        content = QWidget()
-        content.setStyleSheet("background:transparent; border:none;")
-        lo = QVBoxLayout(content)
+        container = QWidget()
+        lo = QVBoxLayout(container)
         lo.setContentsMargins(0, 0, 8, 0)
         lo.setSpacing(14)
 
@@ -621,82 +670,87 @@ class AetherConfigWindow(QWidget):
         lbl_desc.setStyleSheet(f"font-size:12px; color:{TEXT_SECONDARY}; line-height:1.4; background:transparent; border:none;")
         lo.addWidget(lbl_desc)
 
-        # Provider Selector Dropdown
-        self.cmb_main_provider = QComboBox()
-        self.cmb_main_provider.addItems(["Google Gemini (Google AI Studio)", "Anthropic Claude", "OpenAI (GPT-4o)", "DeepSeek Coder", "OpenRouter Meta API", "Custom OpenAI / Ollama"])
-        self.cmb_main_provider.setStyleSheet(COMBO_CSS)
-        self.cmb_main_provider.setFixedHeight(34)
-        lo.addWidget(self.cmb_main_provider)
+        # Primary Provider Dropdown
+        self.cmb_primary_provider = QComboBox()
+        self.cmb_primary_provider.setStyleSheet(COMBO_CSS)
+        self.cmb_primary_provider.setFixedHeight(34)
+        for p_key, p_name in _PROVIDERS_CONFIG:
+            self.cmb_primary_provider.addItem(p_name, p_key)
+        lo.addWidget(self.cmb_primary_provider)
 
-        # Model Selector Dropdown
-        self.cmb_main_model = QComboBox()
-        self.cmb_main_model.addItems(["gemini-2.0-flash", "gemini-1.5-pro-latest", "gemini-1.5-flash-latest", "claude-3-7-sonnet", "gpt-4o", "deepseek-coder-v2"])
-        self.cmb_main_model.setStyleSheet(COMBO_CSS)
-        self.cmb_main_model.setFixedHeight(34)
-        lo.addWidget(self.cmb_main_model)
+        # Primary Model Dropdown
+        self.cmb_primary_model = QComboBox()
+        self.cmb_primary_model.setStyleSheet(COMBO_CSS)
+        self.cmb_primary_model.setFixedHeight(34)
+        self.cmb_primary_model.addItems(["gemini-3-flash-preview", "gemini-2.5-pro", "claude-3-7-sonnet", "gpt-4o", "deepseek-reasoner"])
+        lo.addWidget(self.cmb_primary_model)
 
-        # Action Bar: Apply + Defaults + Reasoning
-        act_bar = QHBoxLayout()
-        act_bar.setSpacing(12)
+        # Apply + Defaults & Reasoning Row
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setSpacing(12)
 
         self.btn_apply_model = QPushButton("Apply")
-        self.btn_apply_model.setFixedHeight(32)
+        self.btn_apply_model.setFixedHeight(30)
+        self.btn_apply_model.setFixedWidth(75)
         self.btn_apply_model.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_apply_model.setStyleSheet(f"""
             QPushButton {{
-                background-color: #2563EB;
+                background-color: #2D68FF;
                 color: #FFFFFF;
                 font-size: 12px;
                 font-weight: 700;
                 border: none;
                 border-radius: 6px;
-                padding: 4px 18px;
             }}
-            QPushButton:hover {{ background-color: #3B82F6; }}
+            QPushButton:hover {{
+                background-color: #4077FF;
+            }}
         """)
-        self.btn_apply_model.clicked.connect(self._on_apply_primary_model)
-        act_bar.addWidget(self.btn_apply_model)
+        ctrl_row.addWidget(self.btn_apply_model)
 
         lbl_defs = QLabel("Defaults")
         lbl_defs.setStyleSheet(f"font-size:11px; color:{TEXT_MUTED}; font-weight:600;")
-        act_bar.addWidget(lbl_defs)
+        ctrl_row.addWidget(lbl_defs)
 
         lbl_reason = QLabel("Reasoning")
         lbl_reason.setStyleSheet(f"font-size:12px; font-weight:600; color:{TEXT_PRIMARY}; margin-left:8px;")
-        act_bar.addWidget(lbl_reason)
+        ctrl_row.addWidget(lbl_reason)
 
         self.cmb_reasoning = QComboBox()
-        self.cmb_reasoning.addItems(["Standard", "Medium", "Deep Thinking"])
         self.cmb_reasoning.setStyleSheet(COMBO_CSS)
         self.cmb_reasoning.setFixedHeight(28)
-        act_bar.addWidget(self.cmb_reasoning)
-        act_bar.addStretch()
+        self.cmb_reasoning.setFixedWidth(110)
+        self.cmb_reasoning.addItems(["Standard", "Medium", "Deep Thinking"])
+        self.cmb_reasoning.setCurrentIndex(1)
+        ctrl_row.addWidget(self.cmb_reasoning)
 
-        lo.addLayout(act_bar)
+        ctrl_row.addStretch()
+        lo.addLayout(ctrl_row)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setFixedHeight(1)
-        sep.setStyleSheet(f"background:{SURFACE_BORDER};")
+        sep.setStyleSheet(f"background:{SURFACE_BORDER}; margin-top:8px; margin-bottom:8px;")
         lo.addWidget(sep)
 
-        # Auxiliary Models Section (Matching Reference Image)
-        aux_hdr = QHBoxLayout()
+        # Auxiliary Models Section
+        aux_header = QHBoxLayout()
         lbl_aux_title = QLabel("⚙ Auxiliary models")
         lbl_aux_title.setStyleSheet(f"font-size:13px; font-weight:700; color:{TEXT_PRIMARY};")
-        aux_hdr.addWidget(lbl_aux_title)
-        aux_hdr.addStretch()
+        aux_header.addWidget(lbl_aux_title)
+        aux_header.addStretch()
 
         btn_reset_aux = QPushButton("Reset all to main")
         btn_reset_aux.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_reset_aux.setStyleSheet(f"background:transparent; color:{TEXT_SECONDARY}; font-size:11px; font-weight:600; border:none;")
-        aux_hdr.addWidget(btn_reset_aux)
-        lo.addLayout(aux_hdr)
+        aux_header.addWidget(btn_reset_aux)
+        lo.addLayout(aux_header)
 
         lbl_aux_sub = QLabel("Helper tasks run on the main model by default. Assign a dedicated model to any task to override.")
         lbl_aux_sub.setStyleSheet(f"font-size:11px; color:{TEXT_MUTED};")
         lo.addWidget(lbl_aux_sub)
 
+        # Auxiliary tasks rows
         aux_tasks = [
             ("Vision", "Image analysis", "auto · use main model"),
             ("Web extract", "Page summarization", "auto · use main model"),
@@ -707,167 +761,144 @@ class AetherConfigWindow(QWidget):
             ("Title gen", "Session titles", "auto · use main model"),
         ]
 
-        for name, tag, status_txt in aux_tasks:
-            row = self._create_aux_row(name, tag, status_txt)
-            lo.addWidget(row)
+        for name, tag, sub in aux_tasks:
+            card = self._make_aux_task_row(name, tag, sub)
+            lo.addWidget(card)
 
         lo.addStretch()
-        scroll.setWidget(content)
+        scroll.setWidget(container)
         return scroll
 
-    def _create_aux_row(self, name: str, tag: str, status_txt: str) -> QFrame:
-        row = QFrame()
-        row.setStyleSheet(f"""
+    def _make_aux_task_row(self, name: str, tag: str, sub: str) -> QFrame:
+        card = QFrame()
+        card.setStyleSheet(f"""
             QFrame {{
                 background-color: {SURFACE_CARD};
                 border: 1px solid {SURFACE_BORDER};
                 border-radius: 8px;
                 padding: 10px 14px;
             }}
+            QFrame:hover {{
+                border-color: {SURFACE_BORDER_LIGHT};
+            }}
         """)
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(4, 2, 4, 2)
-        rl.setSpacing(10)
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(4)
 
-        # Name + Tag
-        nl = QVBoxLayout()
-        nl.setSpacing(2)
-
-        name_row = QHBoxLayout()
+        top = QHBoxLayout()
         lbl_n = QLabel(name)
         lbl_n.setStyleSheet(f"font-size:12px; font-weight:700; color:{TEXT_PRIMARY}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
-        name_row.addWidget(lbl_n)
+        top.addWidget(lbl_n)
 
         lbl_t = QLabel(tag)
         lbl_t.setStyleSheet(f"font-size:10px; color:{TEXT_MUTED}; background:transparent; border:none; margin-left:4px;")
-        name_row.addWidget(lbl_t)
-        name_row.addStretch()
-        nl.addLayout(name_row)
+        top.addWidget(lbl_t)
+        top.addStretch()
 
-        lbl_s = QLabel(status_txt)
+        cl.addLayout(top)
+
+        bottom = QHBoxLayout()
+        lbl_s = QLabel(sub)
         lbl_s.setStyleSheet(f"font-size:11px; color:{TEXT_SECONDARY}; font-family:Consolas, monospace; background:transparent; border:none;")
-        nl.addWidget(lbl_s)
-        rl.addLayout(nl, 1)
+        bottom.addWidget(lbl_s)
+        bottom.addStretch()
 
-        # Actions
         btn_main = QPushButton("Set to main")
         btn_main.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_main.setStyleSheet(f"background:transparent; color:{TEXT_SECONDARY}; font-size:11px; font-weight:600; border:none; padding:4px 8px;")
-        rl.addWidget(btn_main)
+        bottom.addWidget(btn_main)
 
         btn_chg = QPushButton("Change")
         btn_chg.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_chg.setStyleSheet(f"background:transparent; color:{BRAND_FRONTEND}; font-size:11px; font-weight:600; border:none; padding:4px 8px;")
-        rl.addWidget(btn_chg)
+        bottom.addWidget(btn_chg)
 
-        return row
-
-    def _on_apply_primary_model(self):
-        prov_map = {
-            0: "google_gemini",
-            1: "anthropic",
-            2: "openai",
-            3: "deepseek",
-            4: "openrouter",
-            5: "custom",
-        }
-        prov = prov_map.get(self.cmb_main_provider.currentIndex(), "google_gemini")
-        mod = self.cmb_main_model.currentText()
-        if prov in self._provider_cards:
-            card = self._provider_cards[prov]
-            k = card.inp_key.text().strip()
-            url = card.inp_base_url.text().strip() if prov == "custom" else ""
-            self.save_requested.emit(prov, k, True, mod, url)
+        cl.addLayout(bottom)
+        return card
 
     def _build_providers_tab(self) -> QWidget:
-        """Providers & API Keys View."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(SCROLLBAR_CSS)
+        scroll.setStyleSheet("background:transparent; border:none;")
 
-        content = QWidget()
-        content.setStyleSheet("background:transparent; border:none;")
-        lo = QVBoxLayout(content)
+        container = QWidget()
+        lo = QVBoxLayout(container)
         lo.setContentsMargins(0, 0, 8, 0)
         lo.setSpacing(10)
 
-        lbl_t = QLabel("Provider Connections & API Keys")
-        lbl_t.setStyleSheet(f"font-size:14px; font-weight:700; color:{TEXT_PRIMARY};")
-        lo.addWidget(lbl_t)
-
-        default_providers = [
-            ("google_gemini", "Google Gemini"),
-            ("openai", "OpenAI (GPT-4o)"),
-            ("anthropic", "Anthropic Claude"),
-            ("deepseek", "DeepSeek Coder"),
-            ("openrouter", "OpenRouter Meta API"),
-            ("custom", "Custom OpenAI Compatible Host"),
-        ]
-
-        for pkey, pname in default_providers:
-            card = ProviderAccordionCard(pkey, pname)
+        # Provider Accordion Cards
+        for p_key, p_name in _PROVIDERS_CONFIG:
+            card = ProviderAccordionCard(p_key, p_name, self)
             card.validate_requested.connect(self.validate_requested.emit)
             card.save_requested.connect(self.save_requested.emit)
             card.remove_requested.connect(self.remove_requested.emit)
             card.refresh_models_requested.connect(self.refresh_models_requested.emit)
             card.reveal_key_requested.connect(self.reveal_key_requested.emit)
-            self._provider_cards[pkey] = card
+            card.default_toggled.connect(self._on_provider_default_toggled)
+
+            self._provider_cards[p_key] = card
             lo.addWidget(card)
 
+        # Expand Google Gemini by default
         if "google_gemini" in self._provider_cards:
             self._provider_cards["google_gemini"].set_expanded(True)
 
         lo.addStretch()
-        scroll.setWidget(content)
+        scroll.setWidget(container)
         return scroll
 
+    def _on_provider_default_toggled(self, selected_provider: str):
+        """Ensure mutual exclusion for default provider checkbox across all provider cards."""
+        for p_key, card in self._provider_cards.items():
+            if p_key != selected_provider:
+                card.chk_default.blockSignals(True)
+                card.chk_default.setChecked(False)
+                card.is_default = False
+                card.chk_default.blockSignals(False)
+            else:
+                card.is_default = True
+
     def _build_tools_tab(self) -> QWidget:
-        """Tools Tab matching Tool Approvals & Sandboxing from Figma Page 11."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(SCROLLBAR_CSS)
+        scroll.setStyleSheet("background:transparent; border:none;")
 
-        content = QWidget()
-        content.setStyleSheet("background:transparent; border:none;")
-        lo = QVBoxLayout(content)
+        container = QWidget()
+        lo = QVBoxLayout(container)
         lo.setContentsMargins(0, 0, 8, 0)
-        lo.setSpacing(10)
+        lo.setSpacing(12)
 
-        t = QLabel("Tool Approvals & Isolation Policies")
-        t.setStyleSheet(f"font-size:14px; font-weight:700; color:{TEXT_PRIMARY};")
-        lo.addWidget(t)
+        lbl_t = QLabel("Tool Execution & Policy Sandbox")
+        lbl_t.setStyleSheet(f"font-size:14px; font-weight:700; color:{TEXT_PRIMARY};")
+        lo.addWidget(lbl_t)
 
-        tools_readonly = [
-            ("read_file", "Read-only · In-process"),
-            ("list_dir", "Read-only · In-process"),
-            ("get_current_time", "Read-only · In-process"),
+        tools = [
+            ("search_web", "Web search and live duckduckgo extraction", "READONLY · In-Process", "#2BD9A0", True),
+            ("read_url_content", "Fetch public markdown/HTML pages", "READONLY · In-Process", "#2BD9A0", True),
+            ("view_file", "Read local project files", "READONLY · In-Process", "#2BD9A0", True),
+            ("list_dir", "Inspect directory trees", "READONLY · In-Process", "#2BD9A0", True),
+            ("grep_search", "Ripgrep pattern matching", "READONLY · In-Process", "#2BD9A0", True),
+            ("run_command", "PowerShell sandbox execution", "MUTATING · Sub-Process", "#F2A93B", False),
+            ("write_to_file", "Create or overwrite filesystem files", "MUTATING · In-Process", "#F2A93B", False),
+            ("replace_file_content", "Modify source code blocks", "MUTATING · In-Process", "#F2A93B", False),
         ]
-        for tname, desc in tools_readonly:
-            card = self._create_tool_card(tname, desc, requires_approval=False)
-            lo.addWidget(card)
 
-        tools_mutating = [
-            ("write_file", "Standard / Mutating · Sandboxed (Job Object)"),
-            ("delete_file", "Critical / Mutating · Sandboxed (Job Object)"),
-            ("execute_shell", "Critical / Execution · Sandboxed (Job Object)"),
-        ]
-        for tname, desc in tools_mutating:
-            card = self._create_tool_card(tname, desc, requires_approval=True)
+        for name, desc, tag, col, auto_appr in tools:
+            card = self._make_tool_policy_card(name, desc, tag, col, auto_appr)
             lo.addWidget(card)
 
         lo.addStretch()
-        scroll.setWidget(content)
+        scroll.setWidget(container)
         return scroll
 
-    def _create_tool_card(self, name: str, desc: str, requires_approval: bool) -> QFrame:
+    def _make_tool_policy_card(self, name: str, desc: str, tag: str, dot_col: str, auto_appr: bool) -> QFrame:
         card = QFrame()
         card.setStyleSheet(f"background:{SURFACE_CARD}; border:1px solid {SURFACE_BORDER}; border-radius:8px; padding:10px 14px;")
         cl = QHBoxLayout(card)
-        cl.setContentsMargins(4, 2, 4, 2)
-        cl.setSpacing(12)
+        cl.setSpacing(10)
 
         dot = QLabel("●")
-        dot_col = STATUS_DEGRADED if requires_approval else STATUS_HEALTHY
         dot.setStyleSheet(f"color:{dot_col}; font-size:11px; background:transparent; border:none;")
         cl.addWidget(dot)
 
@@ -876,44 +907,21 @@ class AetherConfigWindow(QWidget):
         lbl_name = QLabel(name)
         lbl_name.setStyleSheet(f"font-size:12px; font-weight:700; color:{TEXT_PRIMARY}; font-family:Consolas, monospace; background:transparent; border:none;")
         vl.addWidget(lbl_name)
-
-        lbl_desc = QLabel(desc)
+        lbl_desc = QLabel(f"{desc} · [{tag}]")
         lbl_desc.setStyleSheet(f"font-size:10px; color:{TEXT_SECONDARY}; background:transparent; border:none;")
         vl.addWidget(lbl_desc)
         cl.addLayout(vl, 1)
 
-        if not requires_approval:
-            lbl_tag = QLabel("No approval needed")
-            lbl_tag.setStyleSheet(f"""
+        cmb = QComboBox()
+        cmb.setStyleSheet(f"""
+            QComboBox {{
                 font-size: 11px; color: {TEXT_MUTED}; background: {SURFACE_BG};
-                border: 1px solid {SURFACE_BORDER}; border-radius: 6px; padding: 4px 10px;
-            """)
-            cl.addWidget(lbl_tag)
-        else:
-            btn_allow = QPushButton("Allow")
-            btn_allow.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_allow.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent; color: {STATUS_HEALTHY};
-                    border: 1px solid {STATUS_HEALTHY}80; border-radius: 5px; padding: 4px 12px;
-                    font-size: 11px; font-weight: 600;
-                }}
-                QPushButton:hover {{ background: rgba(43, 217, 160, 0.15); }}
-            """)
-            cl.addWidget(btn_allow)
-
-            btn_deny = QPushButton("Deny")
-            btn_deny.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_deny.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent; color: {STATUS_OFFLINE};
-                    border: 1px solid {STATUS_OFFLINE}80; border-radius: 5px; padding: 4px 12px;
-                    font-size: 11px; font-weight: 600;
-                }}
-                QPushButton:hover {{ background: rgba(242, 65, 91, 0.15); }}
-            """)
-            cl.addWidget(btn_deny)
-
+                border: 1px solid {SURFACE_BORDER}; border-radius: 4px; padding: 3px 8px;
+            }}
+        """)
+        cmb.addItems(["Always Allow", "Require Approval", "Deny"])
+        cmb.setCurrentIndex(0 if auto_appr else 1)
+        cl.addWidget(cmb)
         return card
 
     def _build_security_tab(self) -> QWidget:
@@ -922,7 +930,7 @@ class AetherConfigWindow(QWidget):
         lo.setContentsMargins(0, 0, 8, 0)
         lo.setSpacing(12)
 
-        t = QLabel("Security & Isolation")
+        t = QLabel("Security & Sandbox Isolation")
         t.setStyleSheet(f"font-size:14px; font-weight:700; color:{TEXT_PRIMARY};")
         lo.addWidget(t)
 
@@ -1040,11 +1048,31 @@ class AetherConfigWindow(QWidget):
             if name in self._provider_cards:
                 card = self._provider_cards[name]
                 card.is_default = prov.get("is_default", False)
+                card.chk_default.blockSignals(True)
                 card.chk_default.setChecked(card.is_default)
+                card.chk_default.blockSignals(False)
+
                 if prov.get("models"):
                     card.update_models(prov.get("models", []))
-                status = "connected" if prov.get("has_key") else "no_key"
-                card.set_badge(status)
+
+                has_key = prov.get("has_key", False)
+                if has_key:
+                    card.has_saved_key = True
+                    card.set_badge("connected")
+                    # Display masked key if input is empty or already masked
+                    if not card.inp_key.text() or card.inp_key.text() == _MASKED_PLACEHOLDER:
+                        card.inp_key.blockSignals(True)
+                        card.inp_key.setText(_MASKED_PLACEHOLDER)
+                        card.inp_key.blockSignals(False)
+                    card._update_save_button_state(is_dirty=False)
+                else:
+                    card.has_saved_key = False
+                    card.set_badge("no_key")
+                    if card.inp_key.text() == _MASKED_PLACEHOLDER:
+                        card.inp_key.blockSignals(True)
+                        card.inp_key.clear()
+                        card.inp_key.blockSignals(False)
+                    card._update_save_button_state(is_dirty=False)
 
     def update_latency(self, latency_ms: float):
         if latency_ms > 0:
