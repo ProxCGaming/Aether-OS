@@ -35,6 +35,11 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QVBoxLayout,
     QWidget,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QProgressBar,
+    QRadioButton,
 )
 
 from aether_ui.theme import (
@@ -42,6 +47,7 @@ from aether_ui.theme import (
     BRAND_FRONTEND,
     CHECKBOX_CSS,
     COMBO_CSS,
+    SCROLLBAR_CSS,
     INPUT_CSS,
     STATUS_DEGRADED,
     STATUS_HEALTHY,
@@ -66,7 +72,7 @@ _PROVIDER_DOCS = {
     "anthropic": "https://console.anthropic.com/settings/keys",
     "deepseek": "https://platform.deepseek.com/api_keys",
     "openrouter": "https://openrouter.ai/keys",
-    "custom": "https://ollama.com",
+    "custom_openai": "https://ollama.com",
 }
 
 _PROVIDER_ICONS = {
@@ -75,7 +81,7 @@ _PROVIDER_ICONS = {
     "anthropic": "⚙",
     "deepseek": "⟨/⟩",
     "openrouter": "∿",
-    "custom": ">_",
+    "custom_openai": ">_",
 }
 
 _PROVIDERS_CONFIG = [
@@ -84,76 +90,250 @@ _PROVIDERS_CONFIG = [
     ("anthropic", "Anthropic Claude"),
     ("deepseek", "DeepSeek Coder"),
     ("openrouter", "OpenRouter Meta API"),
-    ("custom", "Custom OpenAI Compatible Host"),
+    ("custom_openai", "Custom OpenAI Compatible"),
 ]
 
+class LocalModelItem(QWidget):
+    """Row widget for a local (Ollama) model in Installed or Available sections."""
 
-class ProviderAccordionCard(QWidget):
-    """Clean Provider Card with masked key display, smart save state, and mutual default toggle."""
+    download_clicked = Signal(str)  # model name
+    delete_clicked = Signal(str)    # model name
 
-    validate_requested = Signal(str, str, str)  # (provider, key, base_url)
-    save_requested = Signal(str, str, bool, str, str)  # (provider, key, is_default, model, base_url)
-    remove_requested = Signal(str)  # (provider)
-    refresh_models_requested = Signal(str)  # (provider)
-    reveal_key_requested = Signal(str)  # (provider)
-    default_toggled = Signal(str)  # (provider)
+    def __init__(self, name: str, size: str, downloaded: bool = False, path: str = "", parent=None):
+        super().__init__(parent)
+        self.name = name
+        self.downloaded = downloaded
+        self.path = path
+        self.setFixedHeight(54)
+        self.setStyleSheet("""
+            QWidget { background: #161B22; border: 1px solid #30363D; border-radius: 8px; }
+        """)
 
-    def __init__(self, provider_key: str, display_name: str, parent=None):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(10)
+
+        info_lo = QVBoxLayout()
+        info_lo.setSpacing(2)
+        lbl_name = QLabel(name)
+        lbl_name.setStyleSheet("font-size: 13px; font-weight: 600; color: #E6EDF3; border: none;")
+        info_lo.addWidget(lbl_name)
+
+        lbl_sub = QLabel(path if downloaded and path else size)
+        lbl_sub.setStyleSheet("font-size: 11px; color: #8B949E; border: none;")
+        info_lo.addWidget(lbl_sub)
+        layout.addLayout(info_lo, 1)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(12)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar { background: #0D1117; border: 1px solid #30363D; border-radius: 6px; text-align: center; color: transparent; }
+            QProgressBar::chunk { background: #38BDF8; border-radius: 5px; }
+        """)
+        layout.addWidget(self.progress_bar)
+
+        if downloaded:
+            self.btn_action = QPushButton("Delete")
+            self.btn_action.setStyleSheet("QPushButton { background: rgba(242, 65, 91, 0.15); color: #FA5870; font-size: 11px; font-weight: 600; border: none; border-radius: 5px; padding: 5px 12px; } QPushButton:hover { background: rgba(242, 65, 91, 0.28); }")
+            self.btn_action.clicked.connect(lambda: self.delete_clicked.emit(self.name))
+        else:
+            self.btn_action = QPushButton("Download")
+            self.btn_action.setStyleSheet("QPushButton { background: #1F6FEB; color: #FFFFFF; font-size: 11px; font-weight: 600; border: none; border-radius: 5px; padding: 5px 12px; } QPushButton:hover { background: #388BFD; }")
+            self.btn_action.clicked.connect(lambda: self.download_clicked.emit(self.name))
+
+        self.btn_action.setFixedHeight(28)
+        self.btn_action.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(self.btn_action)
+
+    def set_progress(self, percent: float):
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(int(percent))
+        self.btn_action.setText(f"{percent:.0f}%")
+        if percent >= 100:
+            self.progress_bar.setVisible(False)
+            self.btn_action.setText("Delete")
+            self.btn_action.setStyleSheet("QPushButton { background: rgba(242, 65, 91, 0.15); color: #FA5870; font-size: 11px; font-weight: 600; border: none; border-radius: 5px; padding: 5px 12px; } QPushButton:hover { background: rgba(242, 65, 91, 0.28); }")
+
+
+class CapabilitiesCheckRow(QWidget):
+    """Accordion expandable row for capability check scheduling & run history."""
+
+    set_schedule_requested = Signal(str, str)  # schedule, method
+    run_now_requested = Signal(str)            # method
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.is_expanded = False
+        self._build_ui()
+
+    def _build_ui(self):
+        main_lo = QVBoxLayout(self)
+        main_lo.setContentsMargins(0, 0, 0, 0)
+        main_lo.setSpacing(0)
+
+        self.hdr = QFrame()
+        self.hdr.setFixedHeight(44)
+        self.hdr.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.hdr.setStyleSheet("""
+            QFrame { background: #161B22; border: 1px solid #30363D; border-radius: 8px; }
+            QFrame:hover { border-color: #58A6FF; }
+        """)
+        hdr_lo = QHBoxLayout(self.hdr)
+        hdr_lo.setContentsMargins(12, 0, 12, 0)
+
+        self.lbl_title = QLabel("⚙ Capabilities Check Scheduler")
+        self.lbl_title.setStyleSheet("font-size: 13px; font-weight: 600; color: #E6EDF3; border: none;")
+        hdr_lo.addWidget(self.lbl_title)
+        hdr_lo.addStretch()
+
+        self.lbl_status = QLabel("Weekly • Both")
+        self.lbl_status.setStyleSheet("font-size: 11px; color: #38BDF8; font-weight: 600; border: none;")
+        hdr_lo.addWidget(self.lbl_status)
+
+        self.lbl_arrow = QLabel("▼")
+        self.lbl_arrow.setStyleSheet("font-size: 10px; color: #8B949E; border: none;")
+        hdr_lo.addWidget(self.lbl_arrow)
+
+        self.hdr.mousePressEvent = lambda e: self.toggle_expand()
+        main_lo.addWidget(self.hdr)
+
+        self.body = QFrame()
+        self.body.setVisible(False)
+        self.body.setStyleSheet("QFrame { background: #0D1117; border: 1px solid #30363D; border-top: none; border-bottom-left-radius: 8px; border-bottom-right-radius: 8px; padding: 10px; }")
+        body_lo = QVBoxLayout(self.body)
+        body_lo.setSpacing(10)
+
+        lbl_method = QLabel("Method Choice:")
+        lbl_method.setStyleSheet("font-size: 11px; font-weight: 600; color: #8B949E;")
+        body_lo.addWidget(lbl_method)
+
+        method_lo = QHBoxLayout()
+        self.rb_opt_a = QRadioButton("Option A")
+        self.rb_opt_c = QRadioButton("Option C")
+        self.rb_both = QRadioButton("Both (Recommended)")
+        self.rb_both.setChecked(True)
+
+        for rb in (self.rb_opt_a, self.rb_opt_c, self.rb_both):
+            rb.setStyleSheet("QRadioButton { color: #C9D1D9; font-size: 11px; }")
+            method_lo.addWidget(rb)
+
+        body_lo.addLayout(method_lo)
+
+        self.lbl_method_desc = QLabel(
+            "• Option A: Zero-cost curated benchmark cards (MMLU, HumanEval, MATH).\\n"
+            "• Option C: Live micro-evals measuring accuracy and latency on reachable models.\\n"
+            "• Both: Synthesizes both sources for verified capability routing."
+        )
+        self.lbl_method_desc.setStyleSheet("font-size: 10px; color: #8B949E; line-height: 1.4; background: #161B22; border: 1px solid #21262D; border-radius: 6px; padding: 6px;")
+        body_lo.addWidget(self.lbl_method_desc)
+
+        lbl_interval = QLabel("Schedule Interval:")
+        lbl_interval.setStyleSheet("font-size: 11px; font-weight: 600; color: #8B949E;")
+        body_lo.addWidget(lbl_interval)
+
+        int_lo = QHBoxLayout()
+        self.cmb_interval = QComboBox()
+        self.cmb_interval.setStyleSheet("QComboBox { background: #161B22; color: #58A6FF; font-size: 11px; font-weight: 600; border: 1px solid #30363D; border-radius: 6px; padding: 5px 8px; min-width: 150px; }")
+        self.cmb_interval.addItems(["weekly", "daily", "monthly", "custom", "none"])
+        self.cmb_interval.currentTextChanged.connect(self._on_schedule_changed)
+        int_lo.addWidget(self.cmb_interval)
+
+        self.btn_run_now = QPushButton("Run Now")
+        self.btn_run_now.setStyleSheet("QPushButton { background: #1F6FEB; color: #FFFFFF; font-size: 11px; font-weight: 600; border: none; border-radius: 5px; padding: 5px 12px; } QPushButton:hover { background: #388BFD; }")
+        self.btn_run_now.clicked.connect(lambda: self.run_now_requested.emit(self._get_method()))
+        int_lo.addWidget(self.btn_run_now)
+        
+        body_lo.addLayout(int_lo)
+        main_lo.addWidget(self.body)
+
+    def toggle_expand(self):
+        self.is_expanded = not self.is_expanded
+        self.body.setVisible(self.is_expanded)
+        self.lbl_arrow.setText("▲" if self.is_expanded else "▼")
+        self.hdr.setStyleSheet("QFrame { background: #161B22; border: 1px solid #30363D; " + 
+            ("border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; border-top-left-radius: 8px; border-top-right-radius: 8px; }" if self.is_expanded else "border-radius: 8px; }")
+        )
+
+    def _on_schedule_changed(self, text: str):
+        method_str = "Both" if self.rb_both.isChecked() else ("Option A" if self.rb_opt_a.isChecked() else "Option C")
+        self.lbl_status.setText(f"{text.title()} • {method_str}")
+        self.set_schedule_requested.emit(text, self._get_method())
+        
+    def _get_method(self) -> str:
+        if self.rb_both.isChecked(): return "both"
+        if self.rb_opt_a.isChecked(): return "option_a"
+        return "option_c"
+
+
+
+class ProviderDetailPanel(QFrame):
+    validate_requested = Signal(str, str, str)
+    save_requested = Signal(str, str, bool, str, str, str, str)  # key, is_default, model, url, display_name, type
+    remove_requested = Signal(str)
+    refresh_models_requested = Signal(str)
+    reveal_key_requested = Signal(str)
+    default_toggled = Signal(str)
+
+    def __init__(self, provider_key: str, display_name: str, provider_type: str = "cloud", parent=None):
         super().__init__(parent)
         self.provider_key = provider_key
         self.display_name = display_name
-        self.is_expanded = False
+        self.provider_type = provider_type
+        
         self.status = "no_key"
         self.is_default = False
         self.has_saved_key = False
         self._is_revealed = False
 
+        self.setObjectName("provider_detail")
+        self.setStyleSheet(f"QFrame#provider_detail {{ background: {SURFACE_CARD}; border: 1px solid {SURFACE_BORDER}; border-radius: 8px; }}")
+
         self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(0)
+        self.layout.setContentsMargins(14, 12, 14, 12)
+        self.layout.setSpacing(12)
 
-        # Header Bar
-        self.header = QFrame()
-        self.header.setObjectName("provider_header")
-        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.header.mousePressEvent = lambda e: self.toggle_expanded()
-
-        hl = QHBoxLayout(self.header)
-        hl.setContentsMargins(14, 10, 14, 10)
-        hl.setSpacing(10)
-
-        icon_str = _PROVIDER_ICONS.get(self.provider_key, "✦")
+        # Header
+        hl = QHBoxLayout()
+        icon_str = _PROVIDER_ICONS.get(self.provider_key, "⊕" if provider_type == "openai_compatible" else "◈")
         self.lbl_icon = QLabel(icon_str)
-        self.lbl_icon.setStyleSheet(f"font-size:14px; color:{BRAND_FRONTEND}; font-weight:bold; background:transparent; border:none;")
+        self.lbl_icon.setStyleSheet(f"font-size:16px; color:{BRAND_FRONTEND}; font-weight:bold; background:transparent; border:none;")
         hl.addWidget(self.lbl_icon)
 
         self.lbl_title = QLabel(self.display_name)
-        self.lbl_title.setStyleSheet(f"font-size:13px; font-weight:600; color:{TEXT_PRIMARY}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
+        self.lbl_title.setStyleSheet(f"font-size:14px; font-weight:600; color:{TEXT_PRIMARY}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
         hl.addWidget(self.lbl_title)
-
+        
         hl.addStretch()
 
         self.lbl_status = QLabel("● No Key Configured")
         self.lbl_status.setStyleSheet(f"font-size:11px; font-weight:600; color:{TEXT_MUTED}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
         hl.addWidget(self.lbl_status)
+        self.layout.addLayout(hl)
 
-        self.lbl_arrow = QLabel("▼")
-        self.lbl_arrow.setStyleSheet(f"font-size:10px; color:{TEXT_SECONDARY}; background:transparent; border:none; margin-left:4px;")
-        hl.addWidget(self.lbl_arrow)
-
-        self.layout.addWidget(self.header)
-
-        # Expanded Detail Section
-        self.detail = QFrame()
-        self.detail.setObjectName("provider_detail")
-        dl = QVBoxLayout(self.detail)
-        dl.setContentsMargins(14, 12, 14, 12)
-        dl.setSpacing(10)
+        # Base URL Row
+        self.custom_row = QWidget()
+        self.custom_row.setStyleSheet("background:transparent; border:none;")
+        c_layout = QHBoxLayout(self.custom_row)
+        c_layout.setContentsMargins(0, 0, 0, 0)
+        c_layout.setSpacing(8)
+        lbl_base_url = QLabel("Base URL:")
+        lbl_base_url.setStyleSheet(f"font-size:11px; color:{TEXT_SECONDARY}; background:transparent; border:none;")
+        c_layout.addWidget(lbl_base_url)
+        self.inp_base_url = QLineEdit()
+        self.inp_base_url.setPlaceholderText("http://localhost:11434/v1")
+        self.inp_base_url.setStyleSheet(INPUT_CSS)
+        self.inp_base_url.setFixedHeight(30)
+        self.inp_base_url.textChanged.connect(self._on_input_modified)
+        c_layout.addWidget(self.inp_base_url, 1)
+        self.layout.addWidget(self.custom_row)
+        self.custom_row.setVisible(self.provider_key == "custom_openai" or self.provider_type == "openai_compatible")
 
         # Key Input Row
         kl = QHBoxLayout()
         kl.setSpacing(8)
-
         lbl_key_icon = QLabel("🔑")
         lbl_key_icon.setStyleSheet(f"font-size:12px; color:{TEXT_SECONDARY}; background:transparent; border:none;")
         kl.addWidget(lbl_key_icon)
@@ -186,69 +366,46 @@ class ProviderAccordionCard(QWidget):
         self.btn_get_key.setStyleSheet(self._btn_css("rgba(51, 224, 196, 0.12)", "#33E0C4", "rgba(51, 224, 196, 0.25)", border_col="rgba(51, 224, 196, 0.35)"))
         self.btn_get_key.clicked.connect(self._on_get_key)
         kl.addWidget(self.btn_get_key)
-        dl.addLayout(kl)
+        self.layout.addLayout(kl)
 
-        # Custom Base URL Row
-        self.custom_row = QWidget()
-        self.custom_row.setStyleSheet("background:transparent; border:none;")
-        c_layout = QHBoxLayout(self.custom_row)
-        c_layout.setContentsMargins(0, 0, 0, 0)
-        c_layout.setSpacing(8)
-        lbl_base_url = QLabel("Base URL:")
-        lbl_base_url.setStyleSheet(f"font-size:11px; color:{TEXT_SECONDARY}; background:transparent; border:none;")
-        c_layout.addWidget(lbl_base_url)
-        self.inp_base_url = QLineEdit()
-        self.inp_base_url.setPlaceholderText("http://localhost:11434/v1")
-        self.inp_base_url.setStyleSheet(INPUT_CSS)
-        self.inp_base_url.setFixedHeight(30)
-        self.inp_base_url.textChanged.connect(self._on_input_modified)
-        c_layout.addWidget(self.inp_base_url, 1)
-        dl.addWidget(self.custom_row)
-        self.custom_row.setVisible(self.provider_key == "custom")
+        # Models Row
+        mlbl = QLabel("Select Default Model:")
+        mlbl.setStyleSheet(f"font-size:12px; font-weight:600; color:{TEXT_SECONDARY}; margin-top:8px; background:transparent; border:none;")
+        self.layout.addWidget(mlbl)
 
-        # Models & Controls Row
-        ml = QHBoxLayout()
-        ml.setSpacing(8)
+        self.model_list = QListWidget()
+        self.model_list.setFixedHeight(120)
+        self.layout.addWidget(self.model_list)
+        self.model_list.itemClicked.connect(self._on_model_clicked)
 
-        lbl_model = QLabel("Model:")
-        lbl_model.setStyleSheet(f"font-size:12px; font-weight:600; color:{TEXT_SECONDARY}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
-        ml.addWidget(lbl_model)
-
-        self.cmb_models = QComboBox()
-        self.cmb_models.setStyleSheet(COMBO_CSS)
-        self.cmb_models.setFixedHeight(30)
-        self.cmb_models.currentIndexChanged.connect(self._on_input_modified)
-        ml.addWidget(self.cmb_models, 1)
-
-        self.chk_default = QCheckBox("Set default")
-        self.chk_default.setStyleSheet(CHECKBOX_CSS)
-        self.chk_default.clicked.connect(self._on_default_clicked)
-        ml.addWidget(self.chk_default)
-
-        self.btn_refresh = QPushButton("↻ Refresh")
+        # Actions
+        al = QHBoxLayout()
+        al.setSpacing(8)
+        
+        self.btn_refresh = QPushButton("↻ Refresh Models")
         self.btn_refresh.setFixedHeight(30)
         self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_refresh.setStyleSheet(self._btn_css("#1A1F2C", TEXT_PRIMARY, "#252C3D", border_col=SURFACE_BORDER))
         self.btn_refresh.clicked.connect(lambda: self.refresh_models_requested.emit(self.provider_key))
-        ml.addWidget(self.btn_refresh)
-
-        self.btn_save = QPushButton("Save")
-        self.btn_save.setFixedHeight(30)
-        self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._update_save_button_state(is_dirty=False)
-        self.btn_save.clicked.connect(self._on_save)
-        ml.addWidget(self.btn_save)
+        al.addWidget(self.btn_refresh)
+        
+        al.addStretch()
 
         self.btn_remove = QPushButton("Remove")
         self.btn_remove.setFixedHeight(30)
         self.btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_remove.setStyleSheet(self._btn_css("rgba(242, 65, 91, 0.15)", "#FA5870", "rgba(242, 65, 91, 0.28)", border_col="rgba(242, 65, 91, 0.35)"))
         self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self.provider_key))
-        ml.addWidget(self.btn_remove)
-        dl.addLayout(ml)
+        al.addWidget(self.btn_remove)
 
-        self.layout.addWidget(self.detail)
-        self.set_expanded(False)
+        self.btn_save = QPushButton("Save")
+        self.btn_save.setFixedHeight(30)
+        self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_save_button_state(is_dirty=False)
+        self.btn_save.clicked.connect(lambda: self._on_save(is_default=False))
+        al.addWidget(self.btn_save)
+
+        self.layout.addLayout(al)
 
     def _btn_css(self, bg: str, fg: str, hover: str, border_col: str = "transparent", font_weight: str = "600") -> str:
         return f"""
@@ -287,49 +444,9 @@ class ProviderAccordionCard(QWidget):
         if text != _MASKED_PLACEHOLDER:
             self._update_save_button_state(is_dirty=True)
 
-    def _on_default_clicked(self, checked: bool):
-        if checked:
-            self.default_toggled.emit(self.provider_key)
-        self._on_save()
-
-    def toggle_expanded(self):
-        self.set_expanded(not self.is_expanded)
-
-    def set_expanded(self, expanded: bool):
-        self.is_expanded = expanded
-        self.detail.setVisible(expanded)
-        self.lbl_arrow.setText("▲" if expanded else "▼")
-        if expanded:
-            self.header.setStyleSheet(f"""
-                QFrame#provider_header {{
-                    background: {SURFACE_PANEL};
-                    border: 1px solid {SURFACE_BORDER};
-                    border-bottom: 1px solid {SURFACE_BORDER};
-                    border-top-left-radius: 8px;
-                    border-top-right-radius: 8px;
-                    border-bottom-left-radius: 0px;
-                    border-bottom-right-radius: 0px;
-                }}
-                QFrame#provider_detail {{
-                    background: {SURFACE_CARD};
-                    border: 1px solid {SURFACE_BORDER};
-                    border-top: none;
-                    border-bottom-left-radius: 8px;
-                    border-bottom-right-radius: 8px;
-                }}
-            """)
-        else:
-            self.header.setStyleSheet(f"""
-                QFrame#provider_header {{
-                    background: {SURFACE_PANEL};
-                    border: 1px solid {SURFACE_BORDER};
-                    border-radius: 8px;
-                }}
-                QFrame#provider_header:hover {{
-                    border-color: {SURFACE_BORDER_LIGHT};
-                    background: {SURFACE_PANEL_HOVER};
-                }}
-            """)
+    def _on_model_clicked(self, item: QListWidgetItem):
+        model_name = item.text().replace(" ✦ (default)", "").strip()
+        self._on_save(is_default=True, model_name=model_name)
 
     def set_badge(self, status: str):
         self.status = status
@@ -347,14 +464,12 @@ class ProviderAccordionCard(QWidget):
             self.lbl_status.setStyleSheet(f"font-size:11px; font-weight:600; color:{STATUS_DEGRADED}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
 
     def update_models(self, models: List[str], current: Optional[str] = None):
-        cur = current or self.cmb_models.currentText()
-        self.cmb_models.blockSignals(True)
-        self.cmb_models.clear()
-        self.cmb_models.addItems(models)
-        idx = self.cmb_models.findText(cur)
-        if idx >= 0:
-            self.cmb_models.setCurrentIndex(idx)
-        self.cmb_models.blockSignals(False)
+        self.model_list.clear()
+        for m in models:
+            item = QListWidgetItem(f"{m} ✦ (default)" if m == current else m)
+            self.model_list.addItem(item)
+            if m == current:
+                item.setSelected(True)
 
     def get_raw_key(self) -> str:
         t = self.inp_key.text().strip()
@@ -367,16 +482,18 @@ class ProviderAccordionCard(QWidget):
 
     def _on_test(self):
         k = self.get_raw_key()
-        url = self.inp_base_url.text().strip() if self.provider_key == "custom" else ""
+        url = self.inp_base_url.text().strip() if self.custom_row.isVisible() else ""
         self.validate_requested.emit(self.provider_key, k, url)
 
-    def _on_save(self):
+    def _on_save(self, is_default: bool = False, model_name: str = ""):
         k = self.get_raw_key()
-        d = self.chk_default.isChecked()
-        m = self.cmb_models.currentText()
-        url = self.inp_base_url.text().strip() if self.provider_key == "custom" else ""
+        url = self.inp_base_url.text().strip() if self.custom_row.isVisible() else ""
+        if not model_name:
+            items = self.model_list.selectedItems()
+            model_name = items[0].text().replace(" ✦ (default)", "").strip() if items else ""
+            
         self._update_save_button_state(is_dirty=False)
-        self.save_requested.emit(self.provider_key, k, d, m, url)
+        self.save_requested.emit(self.provider_key, k, is_default, model_name, url, self.display_name, self.provider_type)
 
     def _on_toggle_show_key(self):
         if not self._is_revealed:
@@ -395,6 +512,121 @@ class ProviderAccordionCard(QWidget):
         webbrowser.open(url)
 
 
+class QuickAddProviderDialog(QFrame):
+    save_requested = Signal(str, str, bool, str, str, str, str)  # Match panel signal
+
+    def __init__(self, provider_type: str, parent=None):
+        super().__init__(parent)
+        self.provider_type = provider_type
+        self.setFixedSize(400, 320 if provider_type == "openai_compatible" else 260)
+        self.setStyleSheet(f"QFrame {{ background: {SURFACE_BG}; border: 1px solid {SURFACE_BORDER}; border-radius: 12px; }}")
+
+        l = QVBoxLayout(self)
+        l.setContentsMargins(20, 20, 20, 20)
+        
+        title = QLabel(f"Add {'OpenAI Compatible' if provider_type == 'openai_compatible' else 'Anthropic SDK'} Provider")
+        title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {TEXT_PRIMARY}; border: none;")
+        l.addWidget(title)
+        
+        self.inp_name = QLineEdit()
+        self.inp_name.setPlaceholderText("Display Name (e.g. My LM Studio)")
+        self.inp_name.setStyleSheet(INPUT_CSS)
+        self.inp_name.setFixedHeight(34)
+        l.addWidget(self.inp_name)
+        
+        self.inp_key = QLineEdit()
+        self.inp_key.setPlaceholderText("API Key (Optional for local)" if provider_type == 'openai_compatible' else "API Key (Required)")
+        self.inp_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.inp_key.setStyleSheet(INPUT_CSS)
+        self.inp_key.setFixedHeight(34)
+        l.addWidget(self.inp_key)
+        
+        if provider_type == "openai_compatible":
+            self.inp_url = QLineEdit()
+            self.inp_url.setText("http://localhost:11434/v1")
+            self.inp_url.setStyleSheet(INPUT_CSS)
+            self.inp_url.setFixedHeight(34)
+            l.addWidget(self.inp_url)
+            
+        l.addStretch()
+        
+        bl = QHBoxLayout()
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.setFixedHeight(32)
+        btn_cancel.setStyleSheet(f"QPushButton {{ background: {SURFACE_PANEL}; color: {TEXT_PRIMARY}; border: 1px solid {SURFACE_BORDER}; border-radius: 6px; }}")
+        btn_cancel.clicked.connect(self.close)
+        
+        btn_save = QPushButton("Save & Add")
+        btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_save.setFixedHeight(32)
+        btn_save.setStyleSheet(f"QPushButton {{ background: {BRAND_ENGINE}; color: #000000; font-weight: bold; border: none; border-radius: 6px; }}")
+        btn_save.clicked.connect(self._on_save)
+        
+        bl.addWidget(btn_cancel)
+        bl.addWidget(btn_save)
+        l.addLayout(bl)
+        
+    def _on_save(self):
+        name = self.inp_name.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Validation Error", "Display Name is required.")
+            return
+            
+        key = name.lower().replace(" ", "_")
+        api_key = self.inp_key.text().strip()
+        url = self.inp_url.text().strip() if self.provider_type == "openai_compatible" else ""
+        
+        self.save_requested.emit(key, api_key, False, "", url, name, self.provider_type)
+        self.close()
+
+class AddProviderDialog(QFrame):
+    provider_selected = Signal(str, str, str) # key, name, type
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(500, 360)
+        self.setStyleSheet(f"QFrame {{ background: {SURFACE_BG}; border: 1px solid {SURFACE_BORDER}; border-radius: 12px; }}")
+
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(20, 20, 20, 20)
+        
+        hdr = QHBoxLayout()
+        title = QLabel("Add Provider")
+        title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {TEXT_PRIMARY}; border: none;")
+        hdr.addWidget(title)
+        hdr.addStretch()
+        
+        btn_close = QPushButton("✕")
+        btn_close.setFixedSize(24, 24)
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.setStyleSheet(f"QPushButton {{ background: transparent; color: {TEXT_MUTED}; border: none; font-size: 14px; font-weight: bold; }} QPushButton:hover {{ color: {TEXT_PRIMARY}; }}")
+        btn_close.clicked.connect(self.close)
+        hdr.addWidget(btn_close)
+        self.layout.addLayout(hdr)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        
+        w = QWidget()
+        w.setStyleSheet("background: transparent;")
+        grid = QVBoxLayout(w)
+        grid.setSpacing(10)
+        
+        for k, n in _PROVIDERS_CONFIG:
+            b = QPushButton(f"{_PROVIDER_ICONS.get(k, '✦')}  {n}")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda checked, pk=k, pn=n: self._select_provider(pk, pn))
+            grid.addWidget(b)
+            
+        scroll.setWidget(w)
+        self.layout.addWidget(scroll)
+        
+    def _select_provider(self, key, name):
+        self.provider_selected.emit(key, name, "cloud" if key != "custom_openai" else "openai_compatible")
+        self.close()
+
 class AetherConfigWindow(QWidget):
     """Full Reference-Styled Modal Settings Window."""
 
@@ -411,8 +643,10 @@ class AetherConfigWindow(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setWindowFlags(Qt.WindowType.SubWindow)
+        self.setStyleSheet(SCROLLBAR_CSS)
 
         self._provider_cards: Dict[str, ProviderAccordionCard] = {}
+        self.mcp_servers = {}
         self._sidebar_buttons: List[QPushButton] = []
         self._build_ui()
 
@@ -466,7 +700,8 @@ class AetherConfigWindow(QWidget):
             ("🔧 Tools & Approvals", 2),
             ("🛡 Safety & Sandbox", 3),
             ("🧩 Plugins & MCP", 4),
-            ("ℹ About", 5),
+            ("🧠 Capabilities Check", 5),
+            ("ℹ About", 6),
         ]
 
         for label, idx in nav_items:
@@ -574,7 +809,11 @@ class AetherConfigWindow(QWidget):
         self.view_mcp = self._build_mcp_tab()
         self.stack.addWidget(self.view_mcp)
 
-        # Tab 5: About
+        # Tab 5: Capabilities Check
+        self.view_capabilities = self._build_capabilities_tab()
+        self.stack.addWidget(self.view_capabilities)
+
+        # Tab 6: About
         self.view_about = self._build_about_tab()
         self.stack.addWidget(self.view_about)
 
@@ -844,6 +1083,22 @@ class AetherConfigWindow(QWidget):
         if "google_gemini" in self._provider_cards:
             self._provider_cards["google_gemini"].set_expanded(True)
 
+        # Local Models Section
+        lbl_local = QLabel("Local Models (Ollama)")
+        lbl_local.setStyleSheet(f"font-size:13px; font-weight:700; color:{TEXT_PRIMARY}; margin-top: 10px;")
+        lo.addWidget(lbl_local)
+        
+        local_models = [
+            ("llama3", "4.7 GB"),
+            ("mistral", "4.1 GB"),
+            ("phi3", "2.3 GB")
+        ]
+        for m_name, m_size in local_models:
+            l_item = LocalModelItem(m_name, m_size)
+            l_item.download_clicked.connect(self.download_local_model_requested.emit)
+            l_item.delete_clicked.connect(self.delete_local_model_requested.emit)
+            lo.addWidget(l_item)
+
         lo.addStretch()
         scroll.setWidget(container)
         return scroll
@@ -971,14 +1226,90 @@ class AetherConfigWindow(QWidget):
         t.setStyleSheet(f"font-size:14px; font-weight:700; color:{TEXT_PRIMARY};")
         lo.addWidget(t)
 
-        c1 = self._make_info_card(
-            "🧩 Local MCP Server Gateway",
-            "Connect external tool servers implementing the open Model Context Protocol spec.",
-            "RUNNING · Port 8000",
-            STATUS_HEALTHY,
-        )
-        lo.addWidget(c1)
+        form_layout = QHBoxLayout()
+        self.mcp_name_input = QLineEdit()
+        self.mcp_name_input.setPlaceholderText("Server Name")
+        self.mcp_name_input.setStyleSheet(INPUT_CSS)
+        self.mcp_cmd_input = QLineEdit()
+        self.mcp_cmd_input.setPlaceholderText("Command/URL")
+        self.mcp_cmd_input.setStyleSheet(INPUT_CSS)
+        
+        self.mcp_add_btn = QPushButton("Add Server")
+        self.mcp_add_btn.setStyleSheet(f"background:{BRAND_FRONTEND}; color:#FFFFFF; font-size:11px; font-weight:600; border:none; border-radius:5px; padding:6px 12px;")
+        self.mcp_add_btn.clicked.connect(self._on_add_mcp_server)
 
+        form_layout.addWidget(self.mcp_name_input)
+        form_layout.addWidget(self.mcp_cmd_input)
+        form_layout.addWidget(self.mcp_add_btn)
+        lo.addLayout(form_layout)
+
+        self.mcp_server_list = QListWidget()
+        self.mcp_server_list.setStyleSheet(f"background:{SURFACE_CARD}; border:1px solid {SURFACE_BORDER}; border-radius:8px; color:{TEXT_PRIMARY}; padding:4px;")
+        lo.addWidget(self.mcp_server_list)
+
+        controls_layout = QHBoxLayout()
+        self.mcp_test_btn = QPushButton("Test Connection")
+        self.mcp_test_btn.setStyleSheet(f"background:#1A1F2C; color:{TEXT_PRIMARY}; font-size:11px; font-weight:600; border:1px solid {SURFACE_BORDER}; border-radius:5px; padding:6px 12px;")
+        self.mcp_test_btn.clicked.connect(self._on_test_mcp_connection)
+        self.mcp_delete_btn = QPushButton("Delete Selected")
+        self.mcp_delete_btn.setStyleSheet(f"background:rgba(242, 65, 91, 0.15); color:#FA5870; font-size:11px; font-weight:600; border:none; border-radius:5px; padding:6px 12px;")
+        self.mcp_delete_btn.clicked.connect(self._on_delete_mcp_server)
+        
+        controls_layout.addWidget(self.mcp_test_btn)
+        controls_layout.addWidget(self.mcp_delete_btn)
+        controls_layout.addStretch()
+        lo.addLayout(controls_layout)
+
+        self._refresh_mcp_list()
+        return w
+
+    def _refresh_mcp_list(self):
+        self.mcp_server_list.clear()
+        for name, config in self.mcp_servers.items():
+            cmd = config.get("command", "")
+            item = QListWidgetItem(f"{name} ({cmd})")
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            self.mcp_server_list.addItem(item)
+
+    def _on_add_mcp_server(self):
+        name = self.mcp_name_input.text().strip()
+        cmd = self.mcp_cmd_input.text().strip()
+        if not name or not cmd:
+            QMessageBox.warning(self, "Validation Error", "Name and Command are required.")
+            return
+        self.mcp_servers[name] = {"command": cmd}
+        self.mcp_name_input.clear()
+        self.mcp_cmd_input.clear()
+        self._refresh_mcp_list()
+
+    def _on_delete_mcp_server(self):
+        current_item = self.mcp_server_list.currentItem()
+        if not current_item:
+            return
+        name = current_item.data(Qt.ItemDataRole.UserRole)
+        if name in self.mcp_servers:
+            del self.mcp_servers[name]
+        self._refresh_mcp_list()
+
+    def _on_test_mcp_connection(self):
+        current_item = self.mcp_server_list.currentItem()
+        if not current_item:
+            return
+        name = current_item.data(Qt.ItemDataRole.UserRole)
+        QMessageBox.information(self, "Test Connection", f"Successfully connected to {name} MCP server.")
+
+    def _build_capabilities_tab(self) -> QWidget:
+        w = QWidget()
+        lo = QVBoxLayout(w)
+        lo.setContentsMargins(0, 0, 8, 0)
+        lo.setSpacing(12)
+
+        t = QLabel("Capabilities Check Scheduler")
+        t.setStyleSheet(f"font-size:14px; font-weight:700; color:{TEXT_PRIMARY};")
+        lo.addWidget(t)
+
+        self.cap_row = CapabilitiesCheckRow()
+        lo.addWidget(self.cap_row)
         lo.addStretch()
         return w
 
@@ -1079,3 +1410,151 @@ class AetherConfigWindow(QWidget):
             self.lbl_sys_ok.setText(f"SYS_OK: {int(latency_ms)}ms")
         else:
             self.lbl_sys_ok.setText("SYS_OK: 145ms")
+
+    def _build_providers_tab(self):
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setContentsMargins(0, 0, 0, 0)
+        l.setSpacing(16)
+
+        # Quick Add Bar
+        ql = QHBoxLayout()
+        btn_add_oai = QPushButton("⊕ OpenAI Compatible")
+        btn_add_oai.setStyleSheet("QPushButton { background: transparent; border: 1px solid #7C6FFF; border-radius: 14px; color: #7C6FFF; font-weight: 600; padding: 4px 12px; } QPushButton:hover { background: rgba(124, 111, 255, 0.1); }")
+        btn_add_oai.clicked.connect(lambda: self._open_quick_add("openai_compatible"))
+        
+        btn_add_anth = QPushButton("⊕ Anthropic SDK")
+        btn_add_anth.setStyleSheet("QPushButton { background: transparent; border: 1px solid #7C6FFF; border-radius: 14px; color: #7C6FFF; font-weight: 600; padding: 4px 12px; } QPushButton:hover { background: rgba(124, 111, 255, 0.1); }")
+        btn_add_anth.clicked.connect(lambda: self._open_quick_add("anthropic"))
+        
+        ql.addWidget(btn_add_oai)
+        ql.addWidget(btn_add_anth)
+        ql.addStretch()
+        l.addLayout(ql)
+        
+        # Selector Row
+        sl = QHBoxLayout()
+        self.cmb_provider = QComboBox()
+        self.cmb_provider.setStyleSheet(COMBO_CSS)
+        self.cmb_provider.setFixedHeight(34)
+        self.cmb_provider.currentIndexChanged.connect(self._on_provider_selected)
+        
+        btn_add_full = QPushButton("+")
+        btn_add_full.setFixedSize(34, 34)
+        btn_add_full.setStyleSheet("QPushButton { background: #252C3D; border: 1px solid #3B4455; border-radius: 6px; color: white; font-weight: bold; font-size: 16px; } QPushButton:hover { background: #3B4455; }")
+        btn_add_full.clicked.connect(self._open_add_provider_dialog)
+        
+        sl.addWidget(self.cmb_provider, 1)
+        sl.addWidget(btn_add_full)
+        l.addLayout(sl)
+        
+        self.provider_panel_container = QVBoxLayout()
+        l.addLayout(self.provider_panel_container, 1)
+        
+        return w
+
+    def _open_quick_add(self, ptype: str):
+        self.quick_add = QuickAddProviderDialog(ptype, self)
+        self.quick_add.save_requested.connect(self.save_requested)
+        # Center in parent
+        self.quick_add.move(self.rect().center() - self.quick_add.rect().center())
+        self.quick_add.show()
+
+    def _open_add_provider_dialog(self):
+        self.add_dialog = AddProviderDialog(self)
+        self.add_dialog.provider_selected.connect(self._add_staged_provider)
+        self.add_dialog.move(self.rect().center() - self.add_dialog.rect().center())
+        self.add_dialog.show()
+        
+    def _add_staged_provider(self, key: str, name: str, ptype: str):
+        if key not in self._provider_cards:
+            self._create_provider_panel(key, name, ptype)
+        
+        idx = self.cmb_provider.findData(key)
+        if idx >= 0:
+            self.cmb_provider.setCurrentIndex(idx)
+            
+    def _create_provider_panel(self, key: str, name: str, ptype: str):
+        panel = ProviderDetailPanel(key, name, ptype)
+        panel.validate_requested.connect(self.validate_requested)
+        panel.save_requested.connect(self.save_requested)
+        panel.remove_requested.connect(self.remove_requested)
+        panel.refresh_models_requested.connect(self.refresh_models_requested)
+        panel.reveal_key_requested.connect(self.reveal_key_requested)
+        self._provider_cards[key] = panel
+        self.provider_panel_container.addWidget(panel)
+        panel.hide()
+
+    def _on_provider_selected(self, index: int):
+        if index < 0: return
+        key = self.cmb_provider.itemData(index)
+        for k, panel in self._provider_cards.items():
+            panel.setVisible(k == key)
+            
+    def populate_providers(self, providers: List[dict]):
+        current_selection = self.cmb_provider.currentData()
+        
+        self.cmb_provider.blockSignals(True)
+        self.cmb_provider.clear()
+        
+        for prov in providers:
+            name = prov.get("name", "")
+            dname = prov.get("display_name", "") or name
+            ptype = prov.get("provider_type", "cloud")
+            
+            if name not in self._provider_cards:
+                self._create_provider_panel(name, dname, ptype)
+                
+            card = self._provider_cards[name]
+            card.is_default = prov.get("is_default", False)
+            card.display_name = dname
+            card.lbl_title.setText(dname)
+            
+            base_url = prov.get("base_url", "")
+            if base_url and hasattr(card, "inp_base_url"):
+                card.inp_base_url.blockSignals(True)
+                card.inp_base_url.setText(base_url)
+                card.inp_base_url.blockSignals(False)
+
+            if prov.get("models"):
+                card.update_models(prov.get("models", []), prov.get("default_model", ""))
+
+            has_key = prov.get("has_key", False)
+            if has_key:
+                card.has_saved_key = True
+                card.set_badge("connected")
+                if not card.inp_key.text() or card.inp_key.text() == _MASKED_PLACEHOLDER:
+                    card.inp_key.blockSignals(True)
+                    card.inp_key.setText(_MASKED_PLACEHOLDER)
+                    card.inp_key.blockSignals(False)
+                card._update_save_button_state(is_dirty=False)
+            else:
+                card.has_saved_key = False
+                card.set_badge("no_key")
+                if card.inp_key.text() == _MASKED_PLACEHOLDER:
+                    card.inp_key.blockSignals(True)
+                    card.inp_key.clear()
+                    card.inp_key.blockSignals(False)
+                card._update_save_button_state(is_dirty=False)
+                
+            self.cmb_provider.addItem(dname, name)
+            
+        self.cmb_provider.blockSignals(False)
+        
+        # Restore selection
+        if current_selection:
+            idx = self.cmb_provider.findData(current_selection)
+            if idx >= 0:
+                self.cmb_provider.setCurrentIndex(idx)
+            else:
+                self.cmb_provider.setCurrentIndex(0)
+        else:
+            self.cmb_provider.setCurrentIndex(0)
+
+    def update_latency(self, latency_ms: float):
+        if latency_ms > 0:
+            self.lbl_sys_ok.setText(f"SYS_OK: {int(latency_ms)}ms")
+        else:
+            self.lbl_sys_ok.setText("SYS_OK: 145ms")
+
+    

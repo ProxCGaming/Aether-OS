@@ -1,7 +1,7 @@
-"""Unit test for Settings window provider card states, default mutual exclusion, and save state."""
+"""Unit test for Settings window provider card states and save state."""
 import pytest
-from PySide6.QtWidgets import QApplication
-from aether_ui.settings_window import AetherConfigWindow, ProviderAccordionCard, _MASKED_PLACEHOLDER
+from PySide6.QtWidgets import QApplication, QListWidgetItem
+from aether_ui.settings_window import AetherConfigWindow, ProviderDetailPanel, _MASKED_PLACEHOLDER
 
 @pytest.fixture(scope="session")
 def qapp():
@@ -30,12 +30,10 @@ def test_settings_masked_key_and_save_button_state(qapp):
     assert gemini_card.has_saved_key is True
     assert gemini_card.btn_save.isEnabled() is False
     assert gemini_card.btn_save.text() == "Saved ✓"
-    assert gemini_card.chk_default.isChecked() is True
     
     assert openrouter_card.inp_key.text() == _MASKED_PLACEHOLDER
     assert openrouter_card.has_saved_key is True
     assert openrouter_card.btn_save.isEnabled() is False
-    assert openrouter_card.chk_default.isChecked() is False
     
     assert openai_card.inp_key.text() == ""
     assert openai_card.has_saved_key is False
@@ -46,12 +44,25 @@ def test_settings_masked_key_and_save_button_state(qapp):
     assert openai_card.btn_save.isEnabled() is True
     assert openai_card.btn_save.text() == "Save"
     
-    # 3. Default toggle mutual exclusion
-    # Switching default to openrouter should uncheck google_gemini
-    openrouter_card.chk_default.click()
+    # 3. Model click → Default emit
+    # Clicking a model in openrouter should emit save_requested with is_default=True
+    event_emitted = False
     
-    assert openrouter_card.chk_default.isChecked() is True
-    assert gemini_card.chk_default.isChecked() is False
+    def on_save_req(p, k, is_def, m, url, dn, pt):
+        nonlocal event_emitted
+        assert p == "openrouter"
+        assert is_def is True
+        assert m == "liquid/lfm-2.5-2.6b:free"
+        event_emitted = True
+        
+    openrouter_card.save_requested.connect(on_save_req)
+    
+    # Simulate list item click
+    if openrouter_card.model_list.count() > 0:
+        item = openrouter_card.model_list.item(0)
+        openrouter_card._on_model_clicked(item)
+    
+    assert event_emitted is True
     
     # 4. Reveal / Hide toggle
     assert openrouter_card.btn_show_key.text() == "⬡ Reveal"

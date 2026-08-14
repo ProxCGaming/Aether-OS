@@ -147,6 +147,8 @@ class AetherWSClient:
         is_default: bool,
         default_model: str,
         base_url: Optional[str] = None,
+        display_name: Optional[str] = None,
+        provider_type: Optional[str] = None,
         request_id: Optional[str] = None,
     ):
         payload = {
@@ -157,6 +159,10 @@ class AetherWSClient:
         }
         if base_url is not None:
             payload["base_url"] = base_url
+        if display_name:
+            payload["display_name"] = display_name
+        if provider_type:
+            payload["provider_type"] = provider_type
         await self._send(Event(
             type=EventType.PROVIDER_SAVE_REQUEST,
             request_id=request_id or str(uuid.uuid4()),

@@ -48,23 +48,52 @@ QScrollArea > QWidget > QWidget {{
     background: transparent;
 }}
 QScrollBar:vertical {{
-    background: {SURFACE_BG};
+    background: transparent;
     width: 6px;
-    margin: 0px;
+    margin: 2px;
     border-radius: 3px;
 }}
 QScrollBar::handle:vertical {{
-    background: {SURFACE_BORDER};
-    min-height: 24px;
+    background: {SURFACE_BORDER_LIGHT};
+    min-height: 30px;
     border-radius: 3px;
 }}
 QScrollBar::handle:vertical:hover {{
-    background: {BRAND_FRONTEND};
+    background: {TEXT_MUTED};
+}}
+QScrollBar::handle:vertical:pressed {{
+    background: {TEXT_SECONDARY};
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0px;
+    background: none;
 }}
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: none;
+}}
+
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 6px;
+    margin: 2px;
+    border-radius: 3px;
+}}
+QScrollBar::handle:horizontal {{
+    background: {SURFACE_BORDER_LIGHT};
+    min-width: 30px;
+    border-radius: 3px;
+}}
+QScrollBar::handle:horizontal:hover {{
+    background: {TEXT_MUTED};
+}}
+QScrollBar::handle:horizontal:pressed {{
+    background: {TEXT_SECONDARY};
+}}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0px;
+    background: none;
+}}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
     background: none;
 }}
 """
@@ -134,25 +163,81 @@ QComboBox QAbstractItemView {{
 CHECKBOX_CSS = f"""
 QCheckBox {{
     color: {TEXT_SECONDARY};
-    font-size: 12px;
-    spacing: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    spacing: 10px;
 }}
 QCheckBox:hover {{
     color: {TEXT_PRIMARY};
 }}
 QCheckBox::indicator {{
-    width: 16px;
-    height: 16px;
-    border: 1px solid {SURFACE_BORDER};
+    width: 18px;
+    height: 18px;
+    border: 1.5px solid {SURFACE_BORDER_LIGHT};
     border-radius: 4px;
     background: #0D1017;
 }}
 QCheckBox::indicator:hover {{
-    border-color: {BRAND_ENGINE};
+    border-color: {BRAND_FRONTEND};
+    background: #141824;
 }}
 QCheckBox::indicator:checked {{
     background: {BRAND_ENGINE};
     border-color: {BRAND_ENGINE};
-    image: none;
+}}
+QCheckBox::indicator:checked:hover {{
+    background: #45F0D5;
+    border-color: #45F0D5;
+}}
+"""
+
+PROVIDER_TILE_CSS = f"""
+QPushButton {{
+    background: {SURFACE_PANEL};
+    border: 1px solid {SURFACE_BORDER};
+    border-radius: 8px;
+    text-align: left;
+    padding: 12px;
+    color: {TEXT_PRIMARY};
+}}
+QPushButton:hover {{
+    background: #141824;
+    border: 1px solid {BRAND_FRONTEND};
+}}
+"""
+
+MODEL_ROW_CSS = f"""
+QListWidget {{
+    background: #090B10;
+    border: 1px solid {SURFACE_BORDER};
+    border-radius: 6px;
+    padding: 4px;
+}}
+QListWidget::item {{
+    color: {TEXT_PRIMARY};
+    padding: 8px;
+    border-radius: 4px;
+}}
+QListWidget::item:hover {{
+    background: {SURFACE_PANEL};
+}}
+QListWidget::item:selected {{
+    background: {BRAND_ENGINE}33; /* transparent teal */
+    color: {BRAND_ENGINE};
+    border-left: 3px solid {BRAND_ENGINE};
+}}
+"""
+
+QUICK_ADD_BTN_CSS = f"""
+QPushButton {{
+    background: transparent;
+    border: 1px solid {BRAND_FRONTEND};
+    border-radius: 14px;
+    color: {BRAND_FRONTEND};
+    font-weight: 600;
+    padding: 4px 12px;
+}}
+QPushButton:hover {{
+    background: {BRAND_FRONTEND}22;
 }}
 """

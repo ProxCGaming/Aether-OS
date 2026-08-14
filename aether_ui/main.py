@@ -218,7 +218,7 @@ class AetherWindow(QWidget):
             lambda p, k, u="": asyncio.create_task(self.ws_client.validate_provider(p, k, base_url=u))
         )
         self.config_modal.save_requested.connect(
-            lambda p, k, d, m, u="": asyncio.create_task(self.ws_client.save_provider(p, k, d, m, base_url=u))
+            lambda p, k, d, m, u="", dn="", pt="": asyncio.create_task(self.ws_client.save_provider(p, k, d, m, base_url=u, display_name=dn, provider_type=pt))
         )
         self.config_modal.remove_requested.connect(
             lambda p: asyncio.create_task(self.ws_client.remove_provider(p))
@@ -329,7 +329,11 @@ class AetherWindow(QWidget):
             if models:
                 self.hud.set_available_models(models)
                 target_model = default_model if (default_model and default_model in models) else models[0]
-                self.hud.set_active_model(self._current_default_provider, target_model)
+            else:
+                self.hud.set_available_models([])
+                target_model = default_model or "No Model"
+                
+            self.hud.set_active_model(self._current_default_provider, target_model)
 
         elif t in (EventType.PROVIDER_VALIDATE_RESPONSE, EventType.SETTINGS_PROVIDER_VALIDATE_RESULT):
             provider_name = p.get("provider", "")

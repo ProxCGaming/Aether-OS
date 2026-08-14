@@ -81,6 +81,8 @@ class UserConfig:
     window_height: int = 680
     provider_models: Dict[str, List[str]] = field(default_factory=dict)
     custom_base_urls: Dict[str, str] = field(default_factory=dict)
+    custom_provider_names: Dict[str, str] = field(default_factory=dict)
+    custom_provider_types: Dict[str, str] = field(default_factory=dict)
     task_classes: Dict[str, Dict[str, int]] = field(default_factory=lambda: {
         "instant": {"time_cap_seconds": 30, "memory_cap_mb": 256},
         "quick": {"time_cap_seconds": 300, "memory_cap_mb": 1024},
@@ -97,6 +99,8 @@ class UserConfig:
             "window_height": self.window_height,
             "provider_models": self.provider_models,
             "custom_base_urls": self.custom_base_urls,
+            "custom_provider_names": self.custom_provider_names,
+            "custom_provider_types": self.custom_provider_types,
             "task_classes": self.task_classes,
         }
 
@@ -112,6 +116,8 @@ class UserConfig:
             window_height=int(d.get("window_height", 680)),
             provider_models=d.get("provider_models", {}),
             custom_base_urls=d.get("custom_base_urls", {}),
+            custom_provider_names=d.get("custom_provider_names", {}),
+            custom_provider_types=d.get("custom_provider_types", {}),
             task_classes=d.get("task_classes", {
                 "instant": {"time_cap_seconds": 30, "memory_cap_mb": 256},
                 "quick": {"time_cap_seconds": 300, "memory_cap_mb": 1024},

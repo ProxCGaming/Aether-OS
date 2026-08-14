@@ -227,6 +227,31 @@ async def _build_provider_list_async(store: SecretStore) -> list:
             "default_model": cfg.default_model if cfg.default_provider == p.name else (models[0] if models else ""),
             "health": engine_state.health_manager.get_state(p.name).status,
         })
+
+    # --- Dynamic custom providers (user-added, not in CLOUD_PROVIDERS) ---
+    known_names = {p.name for p in CLOUD_PROVIDERS}
+    all_custom = set(cfg.custom_base_urls.keys()) | set(cfg.provider_models.keys()) | stored
+    dynamic = all_custom - known_names
+    for pname in sorted(dynamic):
+        models = cfg.provider_models.get(pname, [])
+        base_url = cfg.custom_base_urls.get(pname, "")
+        display_name = cfg.custom_provider_names.get(pname, pname.replace("_", " ").title())
+        provider_type = cfg.custom_provider_types.get(pname, "openai_compatible")
+        result.append({
+            "name": pname,
+            "display_name": display_name,
+            "icon": "⊕" if provider_type == "openai_compatible" else "◈",
+            "key_url": "",
+            "supports_custom_url": True,
+            "base_url": base_url,
+            "models": models,
+            "has_key": pname in stored,
+            "is_default": cfg.default_provider == pname,
+            "default_model": cfg.default_model if cfg.default_provider == pname else (models[0] if models else ""),
+            "health": engine_state.health_manager.get_state(pname).status,
+            "provider_type": provider_type,
+        })
+        
     return result
 
 
@@ -732,8 +757,14 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 is_default = msg.payload.get("is_default", False)
                 default_model = msg.payload.get("default_model", "")
                 models = msg.payload.get("models", [])
+                display_name = msg.payload.get("display_name", "")
+                provider_type = msg.payload.get("provider_type", "")
                 try:
-                    if base_url or pname in engine_state.user_config.custom_base_urls or pname == "custom_openai":
+                    if display_name:
+                        engine_state.user_config.custom_provider_names[pname] = display_name
+                    if provider_type:
+                        engine_state.user_config.custom_provider_types[pname] = provider_type
+                    if base_url or pname in engine_state.user_config.custom_base_urls or pname == "custom_openai" or (provider_type == "openai_compatible"):
                         engine_state.user_config.custom_base_urls[pname] = base_url
                     if key:
                         secret_store.save_provider(pname, key)
@@ -786,6 +817,10 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     del engine_state.user_config.provider_models[pname]
                 if pname in engine_state.user_config.custom_base_urls:
                     del engine_state.user_config.custom_base_urls[pname]
+                if pname in engine_state.user_config.custom_provider_names:
+                    del engine_state.user_config.custom_provider_names[pname]
+                if pname in engine_state.user_config.custom_provider_types:
+                    del engine_state.user_config.custom_provider_types[pname]
                 if engine_state.user_config.default_provider == pname:
                     engine_state.user_config.default_provider = "google_gemini"
                     engine_state.user_config.default_model = "gemini-2.5-flash"
