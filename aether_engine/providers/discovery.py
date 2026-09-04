@@ -47,6 +47,11 @@ async def fetch_available_models(
             return []
 
         if filter_reachability and raw_models:
+            # Skip exhaustive reachability testing if there are too many models (saves time and API limits)
+            if len(raw_models) > 30:
+                logger.info(f"Skipping reachability sweep for {provider_name} due to large model list ({len(raw_models)} models).")
+                return raw_models
+                
             from aether_engine.models.reachability import GLOBAL_REACHABILITY_CHECKER
             return await GLOBAL_REACHABILITY_CHECKER.filter_reachable_models(
                 provider_name=provider_name,

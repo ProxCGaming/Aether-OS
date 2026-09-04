@@ -163,6 +163,7 @@ class LiteLLMProvider(BaseProvider):
         model: str,
         provider_name: str = "google_gemini",
         base_url: Optional[str] = None,
+        fallback_models: Optional[List[str]] = None,
     ):
         if not api_key or not api_key.strip():
             raise AuthenticationError("API key cannot be empty.")
@@ -171,6 +172,8 @@ class LiteLLMProvider(BaseProvider):
         self.provider_name = provider_name
         self.base_url = base_url.rstrip("/") if base_url else None
         self.litellm_model = resolve_litellm_model(model, provider_name)
+        # Per-node fallback: list of LiteLLM-format model strings to try on retriable errors
+        self.fallback_models: List[str] = fallback_models or []
 
     def _build_call_kwargs(
         self,
@@ -305,83 +308,121 @@ class LiteLLMProvider(BaseProvider):
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncGenerator[StreamChunk, None]:
-        """Stream response chunks from any LiteLLM-supported provider."""
-        kwargs = self._build_call_kwargs(messages, tools)
+        """Stream response chunks from any LiteLLM-supported provider.
 
-        try:
-            response = await litellm.acompletion(**kwargs)
+        If the primary model fails with a retriable error and fallback_models
+        are configured, automatically retries with each fallback in order.
+        Logs NODE_FALLBACK_TRIGGERED (distinct from task-level FALLBACK_TRIGGERED)
+        when a fallback model succeeds.
+        """
+        # Build the list of models to try: primary first, then fallbacks
+        models_to_try = [self.litellm_model] + list(self.fallback_models)
 
-            accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
+        last_error: Optional[Exception] = None
+        for model_idx, current_model in enumerate(models_to_try):
+            is_fallback = model_idx > 0
+            try:
+                kwargs = self._build_call_kwargs(messages, tools)
+                # Override model for fallback attempts
+                kwargs["model"] = current_model
 
-            async for chunk in response:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                finish_reason = chunk.choices[0].finish_reason if chunk.choices else None
+                response = await litellm.acompletion(**kwargs)
 
-                if not delta and not finish_reason:
-                    continue
+                accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
 
-                text = getattr(delta, "content", None) if delta else None
-                tool_call_deltas = getattr(delta, "tool_calls", None) if delta else None
+                async for chunk in response:
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    finish_reason = chunk.choices[0].finish_reason if chunk.choices else None
 
-                # Accumulate tool call chunks (they arrive incrementally)
-                if tool_call_deltas:
-                    for tc_delta in tool_call_deltas:
-                        idx = tc_delta.index
-                        if idx not in accumulated_tool_calls:
-                            accumulated_tool_calls[idx] = {
-                                "id": "",
-                                "name": "",
-                                "arguments": "",
-                            }
-                        acc = accumulated_tool_calls[idx]
-                        if tc_delta.id:
-                            acc["id"] = tc_delta.id
-                        if tc_delta.function:
-                            if tc_delta.function.name:
-                                acc["name"] += tc_delta.function.name
-                            if tc_delta.function.arguments:
-                                acc["arguments"] += tc_delta.function.arguments
+                    if not delta and not finish_reason:
+                        continue
 
-                # Emit text chunks as they arrive
-                if text:
-                    yield StreamChunk(text=text, finish_reason=finish_reason)
-                elif finish_reason and not accumulated_tool_calls:
-                    yield StreamChunk(finish_reason=finish_reason)
+                    text = getattr(delta, "content", None) if delta else None
+                    tool_call_deltas = getattr(delta, "tool_calls", None) if delta else None
 
-                # When stream is done with tool calls, emit them all at once
-                if finish_reason and accumulated_tool_calls:
-                    parsed_calls = []
-                    for _idx, acc in sorted(accumulated_tool_calls.items()):
-                        parsed_args = _safe_json_loads(acc["arguments"])
-                        call_id = acc["id"] or f"call_{acc['name']}"
-                        parsed_calls.append(
-                            ToolCall(
-                                name=acc["name"],
-                                args=parsed_args,
-                                call_id=call_id,
+                    # Accumulate tool call chunks (they arrive incrementally)
+                    if tool_call_deltas:
+                        for tc_delta in tool_call_deltas:
+                            idx = tc_delta.index
+                            if idx not in accumulated_tool_calls:
+                                accumulated_tool_calls[idx] = {
+                                    "id": "",
+                                    "name": "",
+                                    "arguments": "",
+                                }
+                            acc = accumulated_tool_calls[idx]
+                            if tc_delta.id:
+                                acc["id"] = tc_delta.id
+                            if tc_delta.function:
+                                if tc_delta.function.name:
+                                    acc["name"] += tc_delta.function.name
+                                if tc_delta.function.arguments:
+                                    acc["arguments"] += tc_delta.function.arguments
+
+                    # Emit text chunks as they arrive
+                    if text:
+                        yield StreamChunk(text=text, finish_reason=finish_reason)
+                    elif finish_reason and not accumulated_tool_calls:
+                        yield StreamChunk(finish_reason=finish_reason)
+
+                    # When stream is done with tool calls, emit them all at once
+                    if finish_reason and accumulated_tool_calls:
+                        parsed_calls = []
+                        for _idx, acc in sorted(accumulated_tool_calls.items()):
+                            parsed_args = _safe_json_loads(acc["arguments"])
+                            call_id = acc["id"] or f"call_{acc['name']}"
+                            parsed_calls.append(
+                                ToolCall(
+                                    name=acc["name"],
+                                    args=parsed_args,
+                                    call_id=call_id,
+                                )
                             )
+                        yield StreamChunk(
+                            tool_calls=parsed_calls,
+                            finish_reason=finish_reason,
                         )
-                    yield StreamChunk(
-                        tool_calls=parsed_calls,
-                        finish_reason=finish_reason,
-                    )
 
-        except litellm.AuthenticationError as e:
-            raise AuthenticationError(f"Authentication failed: {e}") from e
-        except litellm.RateLimitError as e:
-            raise RateLimitError(f"Rate limit exceeded: {e}") from e
-        except litellm.Timeout as e:
-            raise TimeoutError(f"Request timed out: {e}") from e
-        except (litellm.APIConnectionError, litellm.ServiceUnavailableError) as e:
-            raise NetworkError(f"Network/service error: {e}") from e
-        except litellm.BadRequestError as e:
-            raise ProviderError(f"Bad request: {e}", retriable=False) from e
-        except litellm.NotFoundError as e:
-            raise ProviderError(f"Model not found: {e}", retriable=False) from e
-        except (AuthenticationError, RateLimitError, TimeoutError, NetworkError, ProviderError):
-            raise
-        except Exception as e:
-            raise ProviderError(f"Unexpected LiteLLM error: {e}", retriable=False) from e
+                # If we got here, the call succeeded
+                if is_fallback:
+                    logger.info(
+                        f"NODE_FALLBACK_TRIGGERED: primary model '{self.litellm_model}' failed, "
+                        f"succeeded with fallback model '{current_model}'"
+                    )
+                return  # Success — exit the retry loop
+
+            except litellm.AuthenticationError as e:
+                raise AuthenticationError(f"Authentication failed: {e}") from e
+            except litellm.BadRequestError as e:
+                raise ProviderError(f"Bad request: {e}", retriable=False) from e
+            except litellm.NotFoundError as e:
+                raise ProviderError(f"Model not found: {e}", retriable=False) from e
+            except (litellm.RateLimitError, litellm.Timeout,
+                    litellm.APIConnectionError, litellm.ServiceUnavailableError) as e:
+                # Retriable errors — try next fallback model if available
+                last_error = e
+                if is_fallback or model_idx < len(models_to_try) - 1:
+                    logger.warning(
+                        f"Model '{current_model}' failed with retriable error: {e}. "
+                        f"{'Trying next fallback...' if model_idx < len(models_to_try) - 1 else 'No more fallbacks.'}"
+                    )
+                    continue
+                # No more fallbacks — raise the appropriate typed exception
+                if isinstance(e, litellm.RateLimitError):
+                    raise RateLimitError(f"Rate limit exceeded: {e}") from e
+                elif isinstance(e, litellm.Timeout):
+                    raise TimeoutError(f"Request timed out: {e}") from e
+                else:
+                    raise NetworkError(f"Network/service error: {e}") from e
+            except (AuthenticationError, RateLimitError, TimeoutError, NetworkError, ProviderError):
+                raise
+            except Exception as e:
+                # Non-retriable unknown errors — don't try fallbacks
+                raise ProviderError(f"Unexpected LiteLLM error: {e}", retriable=False) from e
+
+        # All models exhausted
+        if last_error:
+            raise NetworkError(f"All models failed. Last error: {last_error}") from last_error
 
 
 # ---------------------------------------------------------------------------
