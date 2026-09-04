@@ -2,6 +2,7 @@ import asyncio
 import logging
 import uuid
 import time
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 try:
@@ -53,8 +54,10 @@ async def run_langgraph_task(
         payload={"task_id": task_id, "prompt": prompt, "state": state_enum.value},
     )
 
-    # Note: Using an in-memory saver for simplicity. In production, this should be persistent.
-    async with AsyncSqliteSaver.from_conn_string(":memory:") as saver:
+    # Persistent checkpointer: disk-backed SQLite so paused tasks survive Engine restarts (ADR 0011 §4).
+    db_path = Path.home() / ".aether" / "checkpoints.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    async with AsyncSqliteSaver.from_conn_string(str(db_path)) as saver:
         await saver.setup()
         
         graph = compile_graph(checkpointer=saver)
@@ -67,6 +70,8 @@ async def run_langgraph_task(
                 "tool_registry": tools,
                 "approval_handler": approval_handler,
                 "request_id": request_id,
+                "workspace_roots": workspace_roots or [],
+                "task_class": "standard",
             }
         }
         
