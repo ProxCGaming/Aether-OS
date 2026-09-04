@@ -38,6 +38,7 @@ from aether_engine.config import (
 from aether_engine.models.local_models import OllamaManager
 from aether_engine.langgraph.executor import run_langgraph_task
 from aether_engine.providers.discovery import fetch_available_models
+from aether_engine.providers.base import ProviderError
 from aether_engine.providers.litellm_provider import LiteLLMProvider, validate_api_key
 from aether_engine.routing.fallback import (
     classify_provider_error,
@@ -311,81 +312,51 @@ async def _validate_provider_key(provider_name: str, api_key: str, base_url: Opt
 
 
 def _create_provider_instance(provider_name: str, model: str, secret_store: SecretStore):
-    """Factory for LLM provider instances — all providers route through LiteLLM."""
+    """Factory for LLM provider instances — all providers route through LiteLLM.
+
+    Computes per-node fallback candidates from the health manager and model registry
+    so that retriable errors within a single node's call can automatically retry with
+    a different provider (Fix 4, Phase 5.1).
+    """
     api_key = secret_store.load_provider(provider_name)
     base_url = engine_state.user_config.custom_base_urls.get(provider_name)
-    return LiteLLMProvider(api_key=api_key, model=model, provider_name=provider_name, base_url=base_url)
+
+    # Build fallback model list for per-node retry (uses existing get_fallback_candidates)
+    from aether_engine.providers.litellm_provider import resolve_litellm_model
+    fallback_models: List[str] = []
+    try:
+        candidates = get_fallback_candidates(
+            failed_provider=provider_name,
+            configured_providers=engine_state.configured_providers,
+            health_manager=engine_state.health_manager,
+            registry=engine_state.model_registry,
+        )
+        for entry in candidates:
+            fallback_models.append(resolve_litellm_model(entry.id, entry.provider))
+    except Exception:
+        pass  # Fallback computation is best-effort
+
+    return LiteLLMProvider(
+        api_key=api_key,
+        model=model,
+        provider_name=provider_name,
+        base_url=base_url,
+        fallback_models=fallback_models,
+    )
+
 
 
 async def _execute_tool_in_worker(tool_name: str, args: Dict[str, Any], task_class: str) -> Any:
-    """Run an approved risky tool in a dedicated worker subprocess and return its result."""
-    payload = json.dumps({"tool_name": tool_name, "args": args})
-    
-    limits = engine_state.user_config.task_classes.get(task_class, engine_state.user_config.task_classes.get("standard", {"time_cap_seconds": 1800, "memory_cap_mb": 4096}))
-    time_cap = limits["time_cap_seconds"]
-    mem_cap = limits["memory_cap_mb"]
-    
-    job_obj = None
-    try:
-        job_obj = WorkerJobObject(time_cap, mem_cap)
-    except Exception as e:
-        logger.warning(f"Failed to create Job Object: {e}")
-
-    start_time = time.time()
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "aether_worker",
-        "--payload",
-        payload,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    """Run an approved risky tool via the shared sandbox worker. Thin wrapper that injects engine_state context."""
+    from aether_engine.workers.sandbox import execute_tool_in_worker
+    return await execute_tool_in_worker(
+        tool_name=tool_name,
+        args=args,
+        task_class=task_class,
+        audit_logger=engine_state.audit_logger,
+        task_classes=engine_state.user_config.task_classes,
     )
-    
-    if job_obj and proc.pid:
-        try:
-            job_obj.assign_process(proc.pid)
-        except Exception:
-            pass
 
-    try:
-        stdout, stderr = await proc.communicate()
-    except Exception as e:
-        logger.error(f"Worker process error: {e}")
-        engine_state.audit_logger.log_event("WORKER_EXECUTION_TERMINATED", {
-            "tool": tool_name,
-            "task_class": task_class,
-            "reason": str(e),
-            "wall_clock_seconds": round(time.time() - start_time, 2)
-        })
-        raise RuntimeError(f"Worker terminated: {e}")
-
-    wall_clock = time.time() - start_time
-    if proc.returncode != 0:
-        err_msg = stderr.decode(errors="ignore") or stdout.decode(errors="ignore") or f"worker failed (code {proc.returncode})"
-        engine_state.audit_logger.log_event("WORKER_EXECUTION_TERMINATED", {
-            "tool": tool_name,
-            "task_class": task_class,
-            "exit_code": proc.returncode,
-            "reason": "Limit breach or internal error",
-            "wall_clock_seconds": round(wall_clock, 2)
-        })
-        raise RuntimeError(err_msg)
-
-    engine_state.audit_logger.log_event("WORKER_EXECUTION_COMPLETED", {
-        "tool": tool_name,
-        "task_class": task_class,
-        "wall_clock_seconds": round(wall_clock, 2)
-    })
-
-    text = stdout.decode(errors="ignore").strip()
-    if not text:
-        return None
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return text
-    return parsed
 
 
 # ---------------------------------------------------------------------------

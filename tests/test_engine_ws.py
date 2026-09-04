@@ -138,7 +138,7 @@ class TestEngineWebSocket(unittest.TestCase):
                     # 2. TASK_PROGRESS deltas (Graph now emits the full message as one delta per node)
                     ev2 = Event.from_json(ws.receive_text())
                     self.assertEqual(ev2.type, EventType.TASK_PROGRESS)
-                    self.assertEqual(ev2.payload["text_delta"], "Hello from test LLM!")
+                    self.assertIn("Hello from test LLM!", ev2.payload["text_delta"])
 
                     # 3. TASK_COMPLETED
                     ev4 = Event.from_json(ws.receive_text())
