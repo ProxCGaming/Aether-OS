@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from aether_engine.secrets.storage import SecretStore
+from aether_engine.audit import AuditLogger
 
 
 EXPORT_PATH = Path.home() / ".aether" / "exported_keys.json"
@@ -56,6 +57,17 @@ def main():
     # Write export file
     EXPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     EXPORT_PATH.write_text(json.dumps(exported, indent=2), encoding="utf-8")
+
+    # Audit log: record that secrets were exported (provider names only, NOT key values)
+    try:
+        audit = AuditLogger()
+        audit.log_event("SECRETS_EXPORTED", {
+            "providers": list(exported.keys()),
+            "count": len(exported),
+            "export_path": str(EXPORT_PATH),
+        })
+    except Exception as e:
+        print(f"  [WARN] Failed to write audit log: {e}")
 
     print()
     print(f"[SUCCESS] Exported {len(exported)} key(s) to:")

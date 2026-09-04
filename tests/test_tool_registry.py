@@ -26,9 +26,9 @@ class TestToolRegistry(unittest.TestCase):
         self.registry.register(tool)
         defs = self.registry.get_definitions()
         self.assertEqual(len(defs), 1)
-        self.assertEqual(defs[0]["name"], "test_tool")
-        self.assertEqual(defs[0]["description"], "A test tool")
-        self.assertEqual(defs[0]["parameters"]["type"], "object")
+        self.assertEqual(defs[0]["function"]["name"], "test_tool")
+        self.assertEqual(defs[0]["function"]["description"], "A test tool")
+        self.assertEqual(defs[0]["function"]["parameters"]["type"], "object")
 
     def test_sync_tool_execution(self):
         tool = Tool(
