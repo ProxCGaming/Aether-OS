@@ -47,6 +47,7 @@ from aether_ui.theme import (
     BRAND_FRONTEND,
     CHECKBOX_CSS,
     COMBO_CSS,
+    LIST_CSS,
     SCROLLBAR_CSS,
     INPUT_CSS,
     STATUS_DEGRADED,
@@ -375,6 +376,7 @@ class ProviderDetailPanel(QFrame):
 
         self.model_list = QListWidget()
         self.model_list.setFixedHeight(120)
+        self.model_list.setStyleSheet(LIST_CSS)
         self.layout.addWidget(self.model_list)
         self.model_list.itemClicked.connect(self._on_model_clicked)
 
@@ -607,7 +609,7 @@ class AddProviderDialog(QFrame):
         
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.setStyleSheet(f"QScrollArea {{ border: none; background: transparent; }}\n{SCROLLBAR_CSS}")
         
         w = QWidget()
         w.setStyleSheet("background: transparent;")
@@ -615,8 +617,24 @@ class AddProviderDialog(QFrame):
         grid.setSpacing(10)
         
         for k, n in _PROVIDERS_CONFIG:
-            b = QPushButton(f"{_PROVIDER_ICONS.get(k, '✦')}  {n}")
+            b = QPushButton(f"  {_PROVIDER_ICONS.get(k, '✦')}    {n}")
             b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(f"""
+                QPushButton {{ 
+                    background: {SURFACE_PANEL}; 
+                    color: {TEXT_PRIMARY}; 
+                    border: 1px solid {SURFACE_BORDER}; 
+                    border-radius: 6px; 
+                    padding: 12px; 
+                    text-align: left; 
+                    font-size: 13px;
+                    font-weight: 500;
+                }}
+                QPushButton:hover {{ 
+                    background: {SURFACE_CARD}; 
+                    border: 1px solid {BRAND_FRONTEND}; 
+                }}
+            """)
             b.clicked.connect(lambda checked, pk=k, pn=n: self._select_provider(pk, pn))
             grid.addWidget(b)
             

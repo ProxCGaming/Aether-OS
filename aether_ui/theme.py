@@ -149,14 +149,41 @@ QComboBox::down-arrow {{
     margin-right: 8px;
 }}
 QComboBox QAbstractItemView {{
-    background: {SURFACE_PANEL};
-    color: {TEXT_PRIMARY};
-    selection-background-color: #242247;
-    selection-color: {BRAND_FRONTEND};
+    background-color: {SURFACE_PANEL};
     border: 1px solid {SURFACE_BORDER};
-    border-radius: 6px;
+    border-radius: 4px;
+    selection-background-color: {SURFACE_CARD};
+    selection-color: {BRAND_FRONTEND};
+    color: {TEXT_PRIMARY};
     padding: 4px;
     outline: none;
+}}
+"""
+
+LIST_CSS = f"""
+QListWidget {{
+    background: #0D1017;
+    border: 1px solid {SURFACE_BORDER};
+    border-radius: 6px;
+    color: {TEXT_PRIMARY};
+    font-size: 12px;
+    font-family: 'Segoe UI', -apple-system, sans-serif;
+    outline: none;
+}}
+QListWidget::item {{
+    padding: 8px 12px;
+    border-radius: 4px;
+    margin: 2px 4px;
+    color: {TEXT_PRIMARY};
+}}
+QListWidget::item:hover {{
+    background: {SURFACE_BORDER};
+}}
+QListWidget::item:selected {{
+    background: rgba(124, 111, 255, 0.15);
+    color: {BRAND_FRONTEND};
+    font-weight: bold;
+    border: 1px solid rgba(124, 111, 255, 0.3);
 }}
 """
 
