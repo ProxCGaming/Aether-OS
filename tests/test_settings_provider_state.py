@@ -1,7 +1,7 @@
 """Unit test for Settings window provider card states and save state."""
 import pytest
 from PySide6.QtWidgets import QApplication, QListWidgetItem
-from aether_ui.settings_window import AetherConfigWindow, ProviderDetailPanel, _MASKED_PLACEHOLDER
+from aether_ui.settings_window import AetherConfigWindow, ProviderAccordionCard, _MASKED_PLACEHOLDER
 
 @pytest.fixture(scope="session")
 def qapp():

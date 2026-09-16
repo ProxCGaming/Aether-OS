@@ -25,10 +25,11 @@ def classify_provider_error(exc: Exception) -> Tuple[bool, str]:
     - Connection resets / DNS failures / Network errors
     - 429 Rate limits
     - 5xx Server errors
+    - 400 Model not found / invalid model (try next fallback)
 
     Forbidden automatic fallback:
     - Authentication / Invalid API key
-    - Malformed requests
+    - Malformed requests (other than model not found)
     - Policy / Safety rejections
     """
     if isinstance(exc, TimeoutError):
@@ -48,6 +49,22 @@ def classify_provider_error(exc: Exception) -> Tuple[bool, str]:
 
     if isinstance(exc, AuthenticationError) or "API_KEY_INVALID" in err_str or "401" in err_str or "403" in err_str:
         return False, "Authentication failed (invalid API key)."
+
+    # 400 errors: check if it's a "model not found" / "invalid model" error - these should be retriable for fallback
+    if "400" in err_str:
+        model_not_found_indicators = [
+            "not a valid model",
+            "model not found",
+            "invalid model",
+            "does not exist",
+            "unknown model",
+            "model.*not.*support",
+            "no such model",
+        ]
+        import re
+        for pattern in model_not_found_indicators:
+            if re.search(pattern, err_str, re.IGNORECASE):
+                return True, f"Model not available: {err_str}"
 
     if isinstance(exc, InvalidResponseError):
         return False, "Invalid response from provider."

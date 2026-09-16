@@ -270,7 +270,7 @@ class CapabilitiesCheckRow(QWidget):
 
 
 
-class ProviderDetailPanel(QFrame):
+class ProviderAccordionCard(QFrame):
     validate_requested = Signal(str, str, str)
     save_requested = Signal(str, str, bool, str, str, str, str)  # key, is_default, model, url, display_name, type
     remove_requested = Signal(str)
@@ -308,6 +308,38 @@ class ProviderDetailPanel(QFrame):
         hl.addWidget(self.lbl_title)
         
         hl.addStretch()
+
+        # Default provider checkbox
+        self.chk_default = QCheckBox("Default")
+        self.chk_default.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chk_default.setStyleSheet(f"""
+            QCheckBox {{
+                font-size: 11px;
+                color: {TEXT_SECONDARY};
+                font-weight: 600;
+                font-family: 'Segoe UI', sans-serif;
+                background: transparent;
+                border: none;
+                padding: 4px 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 14px;
+                height: 14px;
+                border-radius: 3px;
+                border: 1px solid {SURFACE_BORDER};
+                background: {SURFACE_BG};
+            }}
+            QCheckBox::indicator:checked {{
+                background: {STATUS_HEALTHY};
+                border: 1px solid {STATUS_HEALTHY};
+                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPg==);
+            }}
+            QCheckBox::indicator:hover {{
+                border: 1px solid {BRAND_FRONTEND};
+            }}
+        """)
+        self.chk_default.toggled.connect(self._on_default_toggled)
+        hl.addWidget(self.chk_default)
 
         self.lbl_status = QLabel("● No Key Configured")
         self.lbl_status.setStyleSheet(f"font-size:11px; font-weight:600; color:{TEXT_MUTED}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
@@ -512,6 +544,11 @@ class ProviderDetailPanel(QFrame):
     def _on_get_key(self):
         url = _PROVIDER_DOCS.get(self.provider_key, "https://google.com")
         webbrowser.open(url)
+
+    def _on_default_toggled(self, checked: bool):
+        self.is_default = checked
+        if checked:
+            self.default_changed.emit(self.provider_key)
 
 
 class QuickAddProviderDialog(QFrame):
@@ -1493,7 +1530,7 @@ class AetherConfigWindow(QWidget):
             self.cmb_provider.setCurrentIndex(idx)
             
     def _create_provider_panel(self, key: str, name: str, ptype: str):
-        panel = ProviderDetailPanel(key, name, ptype)
+        panel = ProviderAccordionCard(key, name, ptype)
         panel.validate_requested.connect(self.validate_requested)
         panel.save_requested.connect(self.save_requested)
         panel.remove_requested.connect(self.remove_requested)

@@ -1,15 +1,18 @@
 import json
-import litellm
-from aether_engine.langgraph.state import AetherState
-from aether_engine.routing.capability_router import GLOBAL_CAPABILITY_ROUTER
-from aether_engine.artifacts.manager import save_artifact
 from langchain_core.runnables import RunnableConfig
+from aether_engine.langgraph.state import AetherState
+from aether_engine.artifacts.manager import save_artifact
+from aether_engine.providers.litellm_provider import LiteLLMProvider
+from aether_engine.providers.base import StreamChunk, ToolCall
 
 async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
     """
     Coder node writes, tests, and debugs code.
+    Uses LiteLLMProvider from config for per-node fallback (ADR 0014 Fix 4).
     """
-    model, api_key, api_base = await GLOBAL_CAPABILITY_ROUTER.select(intent="code")
+    provider = config.get("configurable", {}).get("provider")
+    if not provider or not isinstance(provider, LiteLLMProvider):
+        raise RuntimeError("LiteLLMProvider not found in graph config")
     
     registry = config.get("configurable", {}).get("tool_registry")
     tools = registry.get_definitions() if registry else []
@@ -23,28 +26,34 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
             "content": "Please proceed with writing, testing, or debugging the code based on the current state."
         })
     
-    kwargs = {"model": model, "messages": messages, "api_key": api_key}
-    if api_base:
-        kwargs["api_base"] = api_base
-    if tools:
-        kwargs["tools"] = tools
-    response = await litellm.acompletion(**kwargs)
+    content_parts = []
+    accumulated_tool_calls = {}
     
-    msg = response.choices[0].message
+    async for chunk in provider.call_stream(messages, tools=tools):
+        if chunk.text:
+            content_parts.append(chunk.text)
+        if chunk.tool_calls:
+            for tc in chunk.tool_calls:
+                if tc.call_id not in accumulated_tool_calls:
+                    accumulated_tool_calls[tc.call_id] = tc
+        if chunk.finish_reason:
+            break
     
-    if hasattr(msg, "tool_calls") and msg.tool_calls:
-        tc = msg.tool_calls[0]
-        func = tc.function
-        args = json.loads(func.arguments) if isinstance(func.arguments, str) else func.arguments
+    content = "".join(content_parts)
+    
+    if accumulated_tool_calls:
+        # Take the first tool call
+        tc = next(iter(accumulated_tool_calls.values()))
+        args = tc.args if isinstance(tc.args, dict) else {}
         
         assistant_msg = {
             "role": "assistant",
-            "content": msg.content or "",
+            "content": content or "",
             "tool_calls": [
                 {
-                    "id": tc.id,
+                    "id": tc.call_id,
                     "type": "function",
-                    "function": {"name": func.name, "arguments": func.arguments}
+                    "function": {"name": tc.name, "arguments": json.dumps(args)}
                 }
             ]
         }
@@ -52,13 +61,12 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
         return {
             "messages": [assistant_msg],
             "pending_tool_call": {
-                "name": func.name,
+                "name": tc.name,
                 "args": args,
-                "call_id": tc.id
+                "call_id": tc.call_id
             }
         }
     
-    content = msg.content or ""
     task_id = state.get("task_id", "default_task")
     artifact_path = save_artifact(task_id, "code", "coder_output.txt", content)
     

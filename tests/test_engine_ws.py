@@ -15,6 +15,7 @@ from aether_common.contracts import (
 )
 from aether_engine.app import app, engine_state
 from aether_engine.providers.base import BaseProvider, StreamChunk
+from aether_engine.providers.litellm_provider import LiteLLMProvider
 from aether_engine.secrets.storage import SecretStore
 
 
@@ -102,25 +103,20 @@ class TestEngineWebSocket(unittest.TestCase):
         with TestClient(app) as client:
             valid_token = engine_state.auth_token
             
-            async def mock_acompletion(*args, **kwargs):
-                class DummyMessage:
-                    content = "Hello from test LLM!"
-                    tool_calls = None
-                class DummyChoice:
-                    message = DummyMessage()
-                class DummyResponse:
-                    choices = [DummyChoice()]
-                return DummyResponse()
+            async def mock_call_stream(messages, tools=None):
+                yield StreamChunk(text="Hello from test LLM!")
 
             with patch("aether_engine.app.SecretStore") as mock_store_cls, \
-                 patch("aether_engine.app._create_provider_instance") as mock_factory, \
-                 patch("aether_engine.langgraph.nodes.researcher.litellm.acompletion", new=mock_acompletion), \
-                 patch("aether_engine.langgraph.nodes.planner.litellm.acompletion", new=mock_acompletion), \
-                 patch("aether_engine.langgraph.nodes.coder.litellm.acompletion", new=mock_acompletion):
+                 patch("aether_engine.app._create_provider_instance") as mock_factory:
 
                 mock_store = mock_store_cls.return_value
                 mock_store.load_provider.return_value = "fake-key"
-                mock_factory.return_value = DummyProvider() # Still mocked so it doesn't crash initialization
+                
+                # Create a real LiteLLMProvider but mock its call_stream
+                from aether_engine.providers.litellm_provider import LiteLLMProvider
+                mock_provider = LiteLLMProvider(api_key="fake-key", model="test-model", provider_name="test")
+                mock_provider.call_stream = mock_call_stream
+                mock_factory.return_value = mock_provider
 
                 with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
                     ws.receive_text()  # HELLO
@@ -152,28 +148,23 @@ class TestEngineWebSocket(unittest.TestCase):
         self.assertIn("SUCCEEDED", audit_content)
 
     def test_websocket_task_cancellation_flow(self):
-        async def mock_acompletion(*args, **kwargs):
+        async def slow_call_stream(messages, tools=None):
             await asyncio.sleep(5)  # Simulate a slow query
-            class DummyMessage:
-                content = "Done"
-                tool_calls = None
-            class DummyChoice:
-                message = DummyMessage()
-            class DummyResponse:
-                choices = [DummyChoice()]
-            return DummyResponse()
+            yield StreamChunk(text="Done")
 
         with TestClient(app) as client:
             valid_token = engine_state.auth_token
             with patch("aether_engine.app.SecretStore") as mock_store_cls, \
-                 patch("aether_engine.app._create_provider_instance") as mock_factory, \
-                 patch("aether_engine.langgraph.nodes.researcher.litellm.acompletion", new=mock_acompletion), \
-                 patch("aether_engine.langgraph.nodes.planner.litellm.acompletion", new=mock_acompletion), \
-                 patch("aether_engine.langgraph.nodes.coder.litellm.acompletion", new=mock_acompletion):
+                 patch("aether_engine.app._create_provider_instance") as mock_factory:
 
                 mock_store = mock_store_cls.return_value
                 mock_store.load_provider.return_value = "fake-key"
-                mock_factory.return_value = DummyProvider() # Just so initialization doesn't crash
+                
+                # Create a real LiteLLMProvider but mock its call_stream
+                from aether_engine.providers.litellm_provider import LiteLLMProvider
+                mock_provider = LiteLLMProvider(api_key="fake-key", model="test-model", provider_name="test")
+                mock_provider.call_stream = slow_call_stream
+                mock_factory.return_value = mock_provider
 
                 with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
                     ws.receive_text()  # HELLO
