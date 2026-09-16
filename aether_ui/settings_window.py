@@ -846,9 +846,12 @@ class AetherConfigWindow(QWidget):
             ("⚡ Providers", 1),
             ("🔧 Tools & Approvals", 2),
             ("🛡 Safety & Sandbox", 3),
-            ("🧩 Plugins & MCP", 4),
-            ("🧠 Capabilities Check", 5),
-            ("ℹ About", 6),
+            ("🧩 Plugins", 4),
+            ("🤖 Agents", 5),
+            ("📚 Skills", 6),
+            ("🔌 MCP Servers", 7),
+            ("🧠 Capabilities Check", 8),
+            ("ℹ About", 9),
         ]
 
         for label, idx in nav_items:
@@ -952,15 +955,31 @@ class AetherConfigWindow(QWidget):
         self.view_security = self._build_security_tab()
         self.stack.addWidget(self.view_security)
 
-        # Tab 4: Plugins & MCP
+        # Tab 4: Plugins
+        from aether_ui.settings.plugins_tab import PluginsTab
+        # main_window holds ws_client in self.parent() but let's try to pass ws_client safely
+        self.view_plugins = PluginsTab(ws_client=getattr(self.parent(), 'ws_client', None))
+        self.stack.addWidget(self.view_plugins)
+
+        # Tab 5: Agents
+        from aether_ui.settings.agents_tab import AgentsTab
+        self.view_agents = AgentsTab()
+        self.stack.addWidget(self.view_agents)
+
+        # Tab 6: Skills
+        from aether_ui.settings.skills_tab import SkillsTab
+        self.view_skills = SkillsTab()
+        self.stack.addWidget(self.view_skills)
+
+        # Tab 7: MCP Servers
         self.view_mcp = self._build_mcp_tab()
         self.stack.addWidget(self.view_mcp)
 
-        # Tab 5: Capabilities Check
+        # Tab 8: Capabilities Check
         self.view_capabilities = self._build_capabilities_tab()
         self.stack.addWidget(self.view_capabilities)
 
-        # Tab 6: About
+        # Tab 9: About
         self.view_about = self._build_about_tab()
         self.stack.addWidget(self.view_about)
 
@@ -1060,15 +1079,13 @@ class AetherConfigWindow(QWidget):
         self.cmb_primary_provider = QComboBox()
         self.cmb_primary_provider.setStyleSheet(COMBO_CSS)
         self.cmb_primary_provider.setFixedHeight(34)
-        for p_key, p_name in _PROVIDERS_CONFIG:
-            self.cmb_primary_provider.addItem(p_name, p_key)
+        self.cmb_primary_provider.currentTextChanged.connect(self._on_primary_provider_changed)
         lo.addWidget(self.cmb_primary_provider)
 
         # Primary Model Dropdown
         self.cmb_primary_model = QComboBox()
         self.cmb_primary_model.setStyleSheet(COMBO_CSS)
         self.cmb_primary_model.setFixedHeight(34)
-        self.cmb_primary_model.addItems(["gemini-3-flash-preview", "gemini-2.5-pro", "claude-3-7-sonnet", "gpt-4o", "deepseek-reasoner"])
         lo.addWidget(self.cmb_primary_model)
 
         # Apply + Defaults & Reasoning Row
@@ -1640,6 +1657,49 @@ class AetherConfigWindow(QWidget):
             self.providers_layout.addWidget(pop_frame)
             
         self.providers_layout.addStretch()
+
+        # Update Primary Provider / Model Dropdowns
+        self._update_model_routing_dropdowns(providers)
+
+    def _update_model_routing_dropdowns(self, providers: list):
+        self.cmb_primary_provider.blockSignals(True)
+        self.cmb_primary_provider.clear()
+        
+        connected = [p for p in providers if p.get("has_key", False)]
+        if not connected:
+            self.cmb_primary_provider.addItem("No providers connected", "")
+            self.cmb_primary_model.clear()
+            self.cmb_primary_provider.blockSignals(False)
+            return
+
+        for p in connected:
+            self.cmb_primary_provider.addItem(p.get("display_name", p.get("name")), p.get("name"))
+        
+        # Select default provider if any
+        for i, p in enumerate(connected):
+            if p.get("is_default"):
+                self.cmb_primary_provider.setCurrentIndex(i)
+                break
+                
+        self.cmb_primary_provider.blockSignals(False)
+        self._on_primary_provider_changed()
+
+    def _on_primary_provider_changed(self, _=None):
+        p_key = self.cmb_primary_provider.currentData()
+        if not p_key:
+            return
+            
+        self.cmb_primary_model.clear()
+        provider_dict = self.current_providers_data.get(p_key, {})
+        models = provider_dict.get("models", [])
+        if models:
+            self.cmb_primary_model.addItems(models)
+            
+        default_model = provider_dict.get("default_model")
+        if default_model:
+            idx = self.cmb_primary_model.findText(default_model)
+            if idx >= 0:
+                self.cmb_primary_model.setCurrentIndex(idx)
 
     def _open_provider_dialog(self, provider_key: str):
         provider_dict = self.current_providers_data.get(provider_key, {})

@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 import time
 from typing import Any, Dict, List, Optional
 from pathlib import Path
+from pydantic import BaseModel
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
@@ -89,6 +90,8 @@ class EngineState:
         self.routing_policy = GLOBAL_ROUTING_POLICY
         self.scheduler_manager = CapabilitySchedulerManager()
         self.ollama_manager = OllamaManager()
+        from aether_engine.plugins.installer import PluginInstaller
+        self.plugin_installer = PluginInstaller(Path.home() / ".aether" / "plugins")
         self.active_provider: str = "google_gemini"
         self.active_model: str = "gemini-2.5-flash"
         self.configured_providers: List[str] = []
@@ -904,3 +907,75 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
         logger.error(f"WebSocket session error: {e}")
         if task_runner and not task_runner.done():
             task_runner.cancel()
+
+
+# --- PLUGIN ENDPOINTS ---
+
+class InstallRequest(BaseModel):
+    source: str
+
+class ConfirmRequest(BaseModel):
+    prepare_data: Dict[str, Any]
+
+class ToggleRequest(BaseModel):
+    enabled: bool
+
+@app.get("/plugins")
+def list_plugins():
+    return engine_state.plugin_installer.get_all()
+
+@app.post("/plugins/install")
+def prepare_plugin(req: InstallRequest):
+    try:
+        data = engine_state.plugin_installer.prepare_install(req.source)
+        return data
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/plugins/confirm")
+def confirm_plugin(req: ConfirmRequest):
+    try:
+        engine_state.plugin_installer.install(req.prepare_data)
+        return {"status": "success"}
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.delete("/plugins/{name}")
+def delete_plugin(name: str):
+    engine_state.plugin_installer.uninstall(name)
+    return {"status": "success"}
+
+@app.patch("/plugins/{name}/toggle")
+def toggle_plugin(name: str, req: ToggleRequest):
+    try:
+        engine_state.plugin_installer.toggle(name, req.enabled)
+        return {"status": "success"}
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=str(e))
+
+# --- AGENT NODES ENDPOINTS ---
+disabled_nodes = set()
+
+@app.get("/agents/nodes")
+def list_agent_nodes():
+    # Return fake list for UI
+    from aether_engine.routing.capability_router import CapabilityRouter
+    
+    # Just hardcoded ones based on capability router
+    nodes = [
+        {"name": "research", "model": engine_state.config.default_model, "enabled": "research" not in disabled_nodes},
+        {"name": "coding", "model": engine_state.config.default_model, "enabled": "coding" not in disabled_nodes},
+        {"name": "general", "model": engine_state.config.default_model, "enabled": "general" not in disabled_nodes},
+    ]
+    return nodes
+
+@app.patch("/agents/nodes/{name}/toggle")
+def toggle_agent_node(name: str, req: ToggleRequest):
+    if req.enabled:
+        disabled_nodes.discard(name)
+    else:
+        disabled_nodes.add(name)
+    return {"status": "success"}

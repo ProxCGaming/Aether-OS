@@ -73,10 +73,10 @@ class ApprovalDrawer(QWidget):
         scroll.setWidget(self.details)
         layout.addWidget(scroll)
 
-        # Task Class Row
-        dropdown_label = QLabel("Task Class / Sandboxing Level:")
-        dropdown_label.setStyleSheet(f"color:{TEXT_MUTED}; font-size:10px; font-weight:600; border:none; background:transparent;")
-        layout.addWidget(dropdown_label)
+        # Task Class Row (hidden for plugins)
+        self.dropdown_label = QLabel("Task Class / Sandboxing Level:")
+        self.dropdown_label.setStyleSheet(f"color:{TEXT_MUTED}; font-size:10px; font-weight:600; border:none; background:transparent;")
+        layout.addWidget(self.dropdown_label)
 
         self.class_dropdown = QComboBox()
         self.class_dropdown.addItems(["standard", "high", "heavy", "quick", "instant", "custom"])
@@ -134,25 +134,55 @@ class ApprovalDrawer(QWidget):
 
     def show_for_request(self, payload: dict):
         self._approval_key = payload.get("approval_key")
-        tool_name = payload.get("tool_name", "tool")
-        args = payload.get("args", {})
-        node_origin = payload.get("node", "unknown")
-        task_class = payload.get("task_class", "standard")
-        
-        idx = self.class_dropdown.findText(task_class)
-        if idx >= 0:
-            self.class_dropdown.setCurrentIndex(idx)
+        request_type = payload.get("request_type", "tool")
+
+        if request_type == "plugin_install":
+            self.title.setText("Plugin Install Approval")
+            self.dropdown_label.setVisible(False)
+            self.class_dropdown.setVisible(False)
+
+            manifest = payload.get("manifest", {})
+            plugin_name = manifest.get("name", "Unknown Plugin")
+            version = manifest.get("version", "1.0.0")
+            skills = [s["name"] for s in manifest.get("skills", [])]
+            tools = [t["name"] for t in manifest.get("tools", [])]
+            mcp = [m["name"] for m in manifest.get("mcp_servers", [])]
+
+            details_text = f"Plugin: {plugin_name} (v{version})\n"
+            if skills:
+                details_text += f"\nSkills ({len(skills)}):\n - " + "\n - ".join(skills)
+            if tools:
+                details_text += f"\n\nTools ({len(tools)}):\n - " + "\n - ".join(tools)
+            if mcp:
+                details_text += f"\n\nMCP Servers ({len(mcp)}):\n - " + "\n - ".join(mcp)
             
-        roots = payload.get("workspace_roots", [])
-        roots_str = ", ".join(roots) if roots else payload.get("workspace", "None")
-        
-        details_text = (
-            f"Tool: {tool_name}\n"
-            f"Node: {node_origin}\n"
-            f"Class: {task_class}\n"
-            f"Workspace: {roots_str}\n"
-            f"Args: {args}"
-        )
+            if not skills and not tools and not mcp:
+                details_text += "\nNo capabilities."
+        else:
+            self.title.setText("Tool Approval Required")
+            self.dropdown_label.setVisible(True)
+            self.class_dropdown.setVisible(True)
+
+            tool_name = payload.get("tool_name", "tool")
+            args = payload.get("args", {})
+            node_origin = payload.get("node", "unknown")
+            task_class = payload.get("task_class", "standard")
+            
+            idx = self.class_dropdown.findText(task_class)
+            if idx >= 0:
+                self.class_dropdown.setCurrentIndex(idx)
+                
+            roots = payload.get("workspace_roots", [])
+            roots_str = ", ".join(roots) if roots else payload.get("workspace", "None")
+            
+            details_text = (
+                f"Tool: {tool_name}\n"
+                f"Node: {node_origin}\n"
+                f"Class: {task_class}\n"
+                f"Workspace: {roots_str}\n"
+                f"Args: {args}"
+            )
+            
         self.details.setText(details_text)
         self._show()
 
