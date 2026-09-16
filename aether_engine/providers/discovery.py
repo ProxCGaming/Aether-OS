@@ -17,13 +17,10 @@ async def fetch_available_models(
     provider_name: str,
     api_key: str,
     base_url: Optional[str] = None,
-    filter_reachability: bool = True,
+    filter_reachability: bool = False,
     force_reachability: bool = False,
 ) -> List[str]:
-    """Dynamically fetch all available generation/chat models for a given provider and API key.
-
-    Optionally filters the list to only include models verified to be reachable with the key.
-    """
+    """Dynamically fetch all available generation/chat models for a given provider and API key."""
     if not api_key or not api_key.strip():
         return []
 
@@ -47,19 +44,9 @@ async def fetch_available_models(
             return []
 
         if filter_reachability and raw_models:
-            # Skip exhaustive reachability testing if there are too many models (saves time and API limits)
-            if len(raw_models) > 30:
-                logger.info(f"Skipping reachability sweep for {provider_name} due to large model list ({len(raw_models)} models).")
-                return raw_models
-                
-            from aether_engine.models.reachability import GLOBAL_REACHABILITY_CHECKER
-            return await GLOBAL_REACHABILITY_CHECKER.filter_reachable_models(
-                provider_name=provider_name,
-                model_ids=raw_models,
-                api_key=key,
-                base_url=base_url,
-                force=force_reachability,
-            )
+            # Reachability sweep disabled by default based on user request.
+            # Returning raw models instantly to prevent 429 Quota errors and hanging.
+            return raw_models
 
         return raw_models
     except Exception as e:
