@@ -966,9 +966,9 @@ def list_agent_nodes():
     
     # Just hardcoded ones based on capability router
     nodes = [
-        {"name": "research", "model": engine_state.config.default_model, "enabled": "research" not in disabled_nodes},
-        {"name": "coding", "model": engine_state.config.default_model, "enabled": "coding" not in disabled_nodes},
-        {"name": "general", "model": engine_state.config.default_model, "enabled": "general" not in disabled_nodes},
+        {"name": "research", "model": engine_state.user_config.default_model, "enabled": "research" not in disabled_nodes},
+        {"name": "coding", "model": engine_state.user_config.default_model, "enabled": "coding" not in disabled_nodes},
+        {"name": "general", "model": engine_state.user_config.default_model, "enabled": "general" not in disabled_nodes},
     ]
     return nodes
 
