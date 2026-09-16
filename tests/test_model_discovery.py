@@ -43,7 +43,8 @@ async def test_fetch_gemini_models_success():
 
         models = await _discover_gemini_models("fake-key")
         assert "gemini-2.0-flash" in models
-        assert "gemini-flash-latest" in models
+        # Alias blocklist should filter out latest tags
+        assert "gemini-flash-latest" not in models
         # Embedding model should be filtered out
         assert "text-embedding-004" not in models
 

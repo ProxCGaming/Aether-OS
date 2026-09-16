@@ -24,6 +24,7 @@ from PySide6.QtCore import QPoint, QRect, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QDialog,
     QCheckBox,
     QComboBox,
     QFrame,
@@ -83,6 +84,16 @@ _PROVIDER_ICONS = {
     "deepseek": "⟨/⟩",
     "openrouter": "∿",
     "custom_openai": ">_",
+}
+
+
+_PROVIDER_DESCRIPTIONS = {
+    "google_gemini": "Access to Gemini Pro, Flash, and advanced multimodal reasoning models.",
+    "openai": "Direct access to GPT-4o, GPT-4 Turbo, and embeddings.",
+    "anthropic": "Direct access to Claude models, including Opus, Sonnet, and Haiku.",
+    "deepseek": "Access to high-performance DeepSeek Coder and Chat models.",
+    "openrouter": "Curated models including Claude, GPT, Gemini and more via one API.",
+    "custom_openai": "Connect to local LM Studio, Ollama, or vLLM instances."
 }
 
 _PROVIDERS_CONFIG = [
@@ -270,95 +281,88 @@ class CapabilitiesCheckRow(QWidget):
 
 
 
-class ProviderAccordionCard(QFrame):
+
+class ProviderConfigDialog(QDialog):
     validate_requested = Signal(str, str, str)
-    save_requested = Signal(str, str, bool, str, str, str, str)  # key, is_default, model, url, display_name, type
+    save_requested = Signal(str, str, bool, str, str, str, str)
     remove_requested = Signal(str)
     refresh_models_requested = Signal(str)
     reveal_key_requested = Signal(str)
     default_toggled = Signal(str)
 
-    def __init__(self, provider_key: str, display_name: str, provider_type: str = "cloud", parent=None):
+    def __init__(self, provider_dict: dict, parent=None):
         super().__init__(parent)
-        self.provider_key = provider_key
-        self.display_name = display_name
-        self.provider_type = provider_type
-        
-        self.status = "no_key"
-        self.is_default = False
-        self.has_saved_key = False
+        self.provider_dict = provider_dict
+        self.provider_key = provider_dict.get("name", "")
+        self.display_name = provider_dict.get("display_name", "") or self.provider_key
+        self.provider_type = provider_dict.get("provider_type", "cloud")
+        self.has_saved_key = provider_dict.get("has_key", False)
+        self.is_default = provider_dict.get("is_default", False)
         self._is_revealed = False
 
-        self.setObjectName("provider_detail")
-        self.setStyleSheet(f"QFrame#provider_detail {{ background: {SURFACE_CARD}; border: 1px solid {SURFACE_BORDER}; border-radius: 8px; }}")
-
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(14, 12, 14, 12)
-        self.layout.setSpacing(12)
-
+        self.setFixedSize(500, 480)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.frame = QFrame()
+        self.frame.setStyleSheet(f"QFrame {{ background: {SURFACE_CARD}; border: 1px solid {SURFACE_BORDER}; border-radius: 12px; }}")
+        self.layout = QVBoxLayout(self.frame)
+        self.layout.setContentsMargins(20, 20, 20, 20)
+        self.layout.setSpacing(14)
+        
         # Header
         hl = QHBoxLayout()
-        icon_str = _PROVIDER_ICONS.get(self.provider_key, "⊕" if provider_type == "openai_compatible" else "◈")
+        icon_str = _PROVIDER_ICONS.get(self.provider_key, "⊕" if self.provider_type == "openai_compatible" else "◈")
         self.lbl_icon = QLabel(icon_str)
-        self.lbl_icon.setStyleSheet(f"font-size:16px; color:{BRAND_FRONTEND}; font-weight:bold; background:transparent; border:none;")
+        self.lbl_icon.setStyleSheet(f"font-size:20px; color:{BRAND_FRONTEND}; font-weight:bold; background:transparent; border:none;")
         hl.addWidget(self.lbl_icon)
 
-        self.lbl_title = QLabel(self.display_name)
-        self.lbl_title.setStyleSheet(f"font-size:14px; font-weight:600; color:{TEXT_PRIMARY}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
+        self.lbl_title = QLabel(f"Configure {self.display_name}")
+        self.lbl_title.setStyleSheet(f"font-size:16px; font-weight:600; color:{TEXT_PRIMARY}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
         hl.addWidget(self.lbl_title)
         
         hl.addStretch()
+        
+        btn_close = QPushButton("✕")
+        btn_close.setFixedSize(24, 24)
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.setStyleSheet(f"QPushButton {{ background: transparent; color: {TEXT_MUTED}; border: none; font-size: 14px; font-weight: bold; }} QPushButton:hover {{ color: {TEXT_PRIMARY}; }}")
+        btn_close.clicked.connect(self.close)
+        hl.addWidget(btn_close)
+        
+        self.layout.addLayout(hl)
 
         # Default provider checkbox
-        self.chk_default = QCheckBox("Default")
+        self.chk_default = QCheckBox("Set as Default Provider")
         self.chk_default.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chk_default.setChecked(self.is_default)
         self.chk_default.setStyleSheet(f"""
-            QCheckBox {{
-                font-size: 11px;
-                color: {TEXT_SECONDARY};
-                font-weight: 600;
-                font-family: 'Segoe UI', sans-serif;
-                background: transparent;
-                border: none;
-                padding: 4px 8px;
-            }}
-            QCheckBox::indicator {{
-                width: 14px;
-                height: 14px;
-                border-radius: 3px;
-                border: 1px solid {SURFACE_BORDER};
-                background: {SURFACE_BG};
-            }}
-            QCheckBox::indicator:checked {{
-                background: {STATUS_HEALTHY};
-                border: 1px solid {STATUS_HEALTHY};
-                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPg==);
-            }}
-            QCheckBox::indicator:hover {{
-                border: 1px solid {BRAND_FRONTEND};
-            }}
+            QCheckBox {{ font-size: 13px; color: {TEXT_SECONDARY}; font-weight: 600; background: transparent; border: none; padding: 4px 8px; }}
+            QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid {SURFACE_BORDER}; background: {SURFACE_BG}; }}
+            QCheckBox::indicator:checked {{ background: {STATUS_HEALTHY}; border: 1px solid {STATUS_HEALTHY}; image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPg==); }}
+            QCheckBox::indicator:hover {{ border: 1px solid {BRAND_FRONTEND}; }}
         """)
         self.chk_default.toggled.connect(self._on_default_toggled)
-        hl.addWidget(self.chk_default)
-
-        self.lbl_status = QLabel("● No Key Configured")
-        self.lbl_status.setStyleSheet(f"font-size:11px; font-weight:600; color:{TEXT_MUTED}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
-        hl.addWidget(self.lbl_status)
-        self.layout.addLayout(hl)
+        self.layout.addWidget(self.chk_default)
 
         # Base URL Row
         self.custom_row = QWidget()
         self.custom_row.setStyleSheet("background:transparent; border:none;")
         c_layout = QHBoxLayout(self.custom_row)
         c_layout.setContentsMargins(0, 0, 0, 0)
-        c_layout.setSpacing(8)
+        c_layout.setSpacing(10)
         lbl_base_url = QLabel("Base URL:")
-        lbl_base_url.setStyleSheet(f"font-size:11px; color:{TEXT_SECONDARY}; background:transparent; border:none;")
+        lbl_base_url.setFixedWidth(80)
+        lbl_base_url.setStyleSheet(f"font-size:12px; color:{TEXT_SECONDARY}; background:transparent; border:none;")
         c_layout.addWidget(lbl_base_url)
         self.inp_base_url = QLineEdit()
         self.inp_base_url.setPlaceholderText("http://localhost:11434/v1")
+        self.inp_base_url.setText(provider_dict.get("base_url", ""))
         self.inp_base_url.setStyleSheet(INPUT_CSS)
-        self.inp_base_url.setFixedHeight(30)
+        self.inp_base_url.setFixedHeight(34)
         self.inp_base_url.textChanged.connect(self._on_input_modified)
         c_layout.addWidget(self.inp_base_url, 1)
         self.layout.addWidget(self.custom_row)
@@ -366,35 +370,38 @@ class ProviderAccordionCard(QFrame):
 
         # Key Input Row
         kl = QHBoxLayout()
-        kl.setSpacing(8)
-        lbl_key_icon = QLabel("🔑")
-        lbl_key_icon.setStyleSheet(f"font-size:12px; color:{TEXT_SECONDARY}; background:transparent; border:none;")
-        kl.addWidget(lbl_key_icon)
+        kl.setSpacing(10)
+        lbl_key = QLabel("API Key:")
+        lbl_key.setFixedWidth(80)
+        lbl_key.setStyleSheet(f"font-size:12px; color:{TEXT_SECONDARY}; background:transparent; border:none;")
+        kl.addWidget(lbl_key)
 
         self.inp_key = QLineEdit()
         self.inp_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.inp_key.setPlaceholderText("Enter API Key…")
+        if self.has_saved_key:
+            self.inp_key.setText(_MASKED_PLACEHOLDER)
         self.inp_key.setStyleSheet(INPUT_CSS)
-        self.inp_key.setFixedHeight(30)
+        self.inp_key.setFixedHeight(34)
         self.inp_key.textChanged.connect(self._on_input_modified)
         kl.addWidget(self.inp_key, 1)
 
         self.btn_test = QPushButton("Test")
-        self.btn_test.setFixedHeight(30)
+        self.btn_test.setFixedHeight(34)
         self.btn_test.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_test.setStyleSheet(self._btn_css("#1A1F2C", TEXT_PRIMARY, "#252C3D", border_col=SURFACE_BORDER))
         self.btn_test.clicked.connect(self._on_test)
         kl.addWidget(self.btn_test)
 
         self.btn_show_key = QPushButton("⬡ Reveal")
-        self.btn_show_key.setFixedHeight(30)
+        self.btn_show_key.setFixedHeight(34)
         self.btn_show_key.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_show_key.setStyleSheet(self._btn_css("rgba(124, 111, 255, 0.14)", "#B2A8FF", "rgba(124, 111, 255, 0.25)", border_col="rgba(124, 111, 255, 0.35)"))
         self.btn_show_key.clicked.connect(self._on_toggle_show_key)
         kl.addWidget(self.btn_show_key)
 
         self.btn_get_key = QPushButton("Get Key ↗")
-        self.btn_get_key.setFixedHeight(30)
+        self.btn_get_key.setFixedHeight(34)
         self.btn_get_key.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_get_key.setStyleSheet(self._btn_css("rgba(51, 224, 196, 0.12)", "#33E0C4", "rgba(51, 224, 196, 0.25)", border_col="rgba(51, 224, 196, 0.35)"))
         self.btn_get_key.clicked.connect(self._on_get_key)
@@ -403,7 +410,7 @@ class ProviderAccordionCard(QFrame):
 
         # Models Row
         mlbl = QLabel("Select Default Model:")
-        mlbl.setStyleSheet(f"font-size:12px; font-weight:600; color:{TEXT_SECONDARY}; margin-top:8px; background:transparent; border:none;")
+        mlbl.setStyleSheet(f"font-size:12px; font-weight:600; color:{TEXT_SECONDARY}; margin-top:12px; background:transparent; border:none;")
         self.layout.addWidget(mlbl)
 
         self.model_list = QListWidget()
@@ -411,13 +418,14 @@ class ProviderAccordionCard(QFrame):
         self.model_list.setStyleSheet(LIST_CSS)
         self.layout.addWidget(self.model_list)
         self.model_list.itemClicked.connect(self._on_model_clicked)
+        self.update_models(provider_dict.get("models", []), provider_dict.get("default_model", ""))
 
         # Actions
         al = QHBoxLayout()
-        al.setSpacing(8)
+        al.setSpacing(10)
         
         self.btn_refresh = QPushButton("↻ Refresh Models")
-        self.btn_refresh.setFixedHeight(30)
+        self.btn_refresh.setFixedHeight(34)
         self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_refresh.setStyleSheet(self._btn_css("#1A1F2C", TEXT_PRIMARY, "#252C3D", border_col=SURFACE_BORDER))
         self.btn_refresh.clicked.connect(lambda: self.refresh_models_requested.emit(self.provider_key))
@@ -426,41 +434,27 @@ class ProviderAccordionCard(QFrame):
         al.addStretch()
 
         self.btn_remove = QPushButton("Remove")
-        self.btn_remove.setFixedHeight(30)
+        self.btn_remove.setFixedHeight(34)
         self.btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_remove.setStyleSheet(self._btn_css("rgba(242, 65, 91, 0.15)", "#FA5870", "rgba(242, 65, 91, 0.28)", border_col="rgba(242, 65, 91, 0.35)"))
-        self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self.provider_key))
+        self.btn_remove.clicked.connect(self._on_remove)
         al.addWidget(self.btn_remove)
 
         self.btn_save = QPushButton("Save")
-        self.btn_save.setFixedHeight(30)
+        self.btn_save.setFixedHeight(34)
         self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
         self._update_save_button_state(is_dirty=False)
-        self.btn_save.clicked.connect(lambda: self._on_save(is_default=False))
+        self.btn_save.clicked.connect(lambda: self._on_save(is_default=self.chk_default.isChecked()))
         al.addWidget(self.btn_save)
 
         self.layout.addLayout(al)
+        main_layout.addWidget(self.frame)
 
     def _btn_css(self, bg: str, fg: str, hover: str, border_col: str = "transparent", font_weight: str = "600") -> str:
         return f"""
-            QPushButton {{
-                background-color: {bg};
-                color: {fg};
-                font-size: 11px;
-                font-weight: {font_weight};
-                font-family: 'Segoe UI', sans-serif;
-                border: 1px solid {border_col};
-                border-radius: 6px;
-                padding: 4px 10px;
-            }}
-            QPushButton:hover {{
-                background-color: {hover};
-            }}
-            QPushButton:disabled {{
-                background-color: rgba(43, 217, 160, 0.18);
-                color: rgba(255, 255, 255, 0.35);
-                border: 1px solid rgba(43, 217, 160, 0.15);
-            }}
+            QPushButton {{ background-color: {bg}; color: {fg}; font-size: 12px; font-weight: {font_weight}; font-family: 'Segoe UI', sans-serif; border: 1px solid {border_col}; border-radius: 6px; padding: 4px 14px; }}
+            QPushButton:hover {{ background-color: {hover}; }}
+            QPushButton:disabled {{ background-color: rgba(43, 217, 160, 0.18); color: rgba(255, 255, 255, 0.35); border: 1px solid rgba(43, 217, 160, 0.15); }}
         """
 
     def _update_save_button_state(self, is_dirty: bool):
@@ -480,24 +474,9 @@ class ProviderAccordionCard(QFrame):
 
     def _on_model_clicked(self, item: QListWidgetItem):
         model_name = item.text().replace(" ✦ (default)", "").strip()
-        self._on_save(is_default=True, model_name=model_name)
+        self._on_save(is_default=self.chk_default.isChecked(), model_name=model_name)
 
-    def set_badge(self, status: str):
-        self.status = status
-        if status in ("connected", "valid", "healthy"):
-            self.lbl_status.setText("● Connected")
-            self.lbl_status.setStyleSheet(f"font-size:11px; font-weight:600; color:{STATUS_HEALTHY}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
-        elif status in ("invalid_key", "no_key"):
-            self.lbl_status.setText("● No Key Configured")
-            self.lbl_status.setStyleSheet(f"font-size:11px; font-weight:600; color:{TEXT_MUTED}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
-        elif status == "offline":
-            self.lbl_status.setText("● Offline")
-            self.lbl_status.setStyleSheet(f"font-size:11px; font-weight:600; color:{STATUS_OFFLINE}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
-        else:
-            self.lbl_status.setText(f"● {status.capitalize()}")
-            self.lbl_status.setStyleSheet(f"font-size:11px; font-weight:600; color:{STATUS_DEGRADED}; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
-
-    def update_models(self, models: List[str], current: Optional[str] = None):
+    def update_models(self, models: list, current: str = None):
         self.model_list.clear()
         for m in models:
             item = QListWidgetItem(f"{m} ✦ (default)" if m == current else m)
@@ -508,11 +487,6 @@ class ProviderAccordionCard(QFrame):
     def get_raw_key(self) -> str:
         t = self.inp_key.text().strip()
         return "" if t == _MASKED_PLACEHOLDER else t
-
-    def on_saved_success(self):
-        self.has_saved_key = True
-        self.set_badge("connected")
-        self._update_save_button_state(is_dirty=False)
 
     def _on_test(self):
         k = self.get_raw_key()
@@ -529,6 +503,10 @@ class ProviderAccordionCard(QFrame):
         self._update_save_button_state(is_dirty=False)
         self.save_requested.emit(self.provider_key, k, is_default, model_name, url, self.display_name, self.provider_type)
 
+    def _on_remove(self):
+        self.remove_requested.emit(self.provider_key)
+        self.close()
+
     def _on_toggle_show_key(self):
         if not self._is_revealed:
             if not self.inp_key.text() or self.inp_key.text() == _MASKED_PLACEHOLDER:
@@ -543,13 +521,127 @@ class ProviderAccordionCard(QFrame):
 
     def _on_get_key(self):
         url = _PROVIDER_DOCS.get(self.provider_key, "https://google.com")
+        import webbrowser
         webbrowser.open(url)
 
     def _on_default_toggled(self, checked: bool):
         self.is_default = checked
-        if checked:
-            self.default_changed.emit(self.provider_key)
+        self.default_toggled.emit(self.provider_key)
 
+    def reveal_api_key(self, api_key: str):
+        self.inp_key.blockSignals(True)
+        self.inp_key.setText(api_key)
+        self.inp_key.setEchoMode(QLineEdit.EchoMode.Normal)
+        self.btn_show_key.setText("✕ Hide")
+        self._is_revealed = True
+        self.inp_key.blockSignals(False)
+        
+    def set_badge(self, status: str):
+        pass
+
+class ConnectedProviderRow(QFrame):
+    clicked = Signal(str)
+    
+    def __init__(self, provider_dict: dict, parent=None):
+        super().__init__(parent)
+        self.provider_dict = provider_dict
+        self.provider_key = provider_dict.get("name", "")
+        self.display_name = provider_dict.get("display_name", "") or self.provider_key
+        
+        self.setFixedHeight(64)
+        self.setStyleSheet(f"""
+            QFrame {{ background: {SURFACE_CARD}; border: 1px solid {SURFACE_BORDER}; border-radius: 8px; }}
+            QFrame:hover {{ border-color: {SURFACE_BORDER_LIGHT}; background: {SURFACE_PANEL_HOVER}; }}
+        """)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        hl = QHBoxLayout(self)
+        hl.setContentsMargins(16, 0, 16, 0)
+        hl.setSpacing(12)
+        
+        icon_str = _PROVIDER_ICONS.get(self.provider_key, "⊕" if provider_dict.get("provider_type") == "openai_compatible" else "◈")
+        lbl_icon = QLabel(icon_str)
+        lbl_icon.setStyleSheet(f"font-size:18px; color:{TEXT_PRIMARY}; font-weight:bold; background:transparent; border:none;")
+        hl.addWidget(lbl_icon)
+        
+        lbl_name = QLabel(self.display_name)
+        lbl_name.setStyleSheet(f"font-size:14px; font-weight:600; color:{TEXT_PRIMARY}; background:transparent; border:none;")
+        hl.addWidget(lbl_name)
+        
+        lbl_badge = QLabel("API key")
+        lbl_badge.setStyleSheet(f"font-size:10px; color:{TEXT_SECONDARY}; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 4px; padding: 2px 6px;")
+        hl.addWidget(lbl_badge)
+        
+        hl.addStretch()
+        
+        btn_disc = QPushButton("Disconnect")
+        btn_disc.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_disc.setStyleSheet(f"QPushButton {{ background: transparent; color: {TEXT_MUTED}; font-size: 13px; border: none; font-weight: 500; }} QPushButton:hover {{ color: {TEXT_PRIMARY}; }}")
+        btn_disc.clicked.connect(self._on_click)
+        hl.addWidget(btn_disc)
+        
+    def mousePressEvent(self, event):
+        self._on_click()
+        
+    def _on_click(self):
+        self.clicked.emit(self.provider_key)
+
+
+class PopularProviderRow(QFrame):
+    clicked = Signal(str)
+    
+    def __init__(self, provider_dict: dict, parent=None):
+        super().__init__(parent)
+        self.provider_dict = provider_dict
+        self.provider_key = provider_dict.get("name", "")
+        self.display_name = provider_dict.get("display_name", "") or self.provider_key
+        
+        self.setFixedHeight(72)
+        self.setStyleSheet(f"""
+            QFrame {{ background: {SURFACE_BG}; border-bottom: 1px solid {SURFACE_BORDER}; border-radius: 0px; }}
+            QFrame:hover {{ background: {SURFACE_CARD}; }}
+        """)
+        
+        hl = QHBoxLayout(self)
+        hl.setContentsMargins(16, 0, 16, 0)
+        hl.setSpacing(16)
+        
+        icon_str = _PROVIDER_ICONS.get(self.provider_key, "⊕" if provider_dict.get("provider_type") == "openai_compatible" else "◈")
+        lbl_icon = QLabel(icon_str)
+        lbl_icon.setStyleSheet(f"font-size:20px; color:{TEXT_PRIMARY}; font-weight:bold; background:transparent; border:none;")
+        hl.addWidget(lbl_icon)
+        
+        vl = QVBoxLayout()
+        vl.setContentsMargins(0, 14, 0, 14)
+        vl.setSpacing(4)
+        
+        title_lo = QHBoxLayout()
+        title_lo.setSpacing(8)
+        lbl_name = QLabel(self.display_name)
+        lbl_name.setStyleSheet(f"font-size:14px; font-weight:600; color:{TEXT_PRIMARY}; background:transparent; border:none;")
+        title_lo.addWidget(lbl_name)
+        
+        if self.provider_key in ("google_gemini", "anthropic"):
+            lbl_badge = QLabel("Recommended")
+            lbl_badge.setStyleSheet(f"font-size:10px; color:{TEXT_SECONDARY}; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 4px; padding: 2px 6px;")
+            title_lo.addWidget(lbl_badge)
+            
+        title_lo.addStretch()
+        vl.addLayout(title_lo)
+        
+        desc = _PROVIDER_DESCRIPTIONS.get(self.provider_key, "Access to this AI model provider.")
+        lbl_desc = QLabel(desc)
+        lbl_desc.setStyleSheet(f"font-size:12px; color:{TEXT_SECONDARY}; background:transparent; border:none;")
+        vl.addWidget(lbl_desc)
+        
+        hl.addLayout(vl, 1)
+        
+        btn_conn = QPushButton("+ Connect")
+        btn_conn.setFixedSize(80, 28)
+        btn_conn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_conn.setStyleSheet(f"QPushButton {{ background: rgba(255, 255, 255, 0.05); color: {TEXT_PRIMARY}; font-size: 13px; font-weight: 500; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; }} QPushButton:hover {{ background: rgba(255, 255, 255, 0.1); }}")
+        btn_conn.clicked.connect(lambda: self.clicked.emit(self.provider_key))
+        hl.addWidget(btn_conn)
 
 class QuickAddProviderDialog(QFrame):
     save_requested = Signal(str, str, bool, str, str, str, str)  # Match panel signal
@@ -1471,40 +1563,20 @@ class AetherConfigWindow(QWidget):
         l = QVBoxLayout(w)
         l.setContentsMargins(0, 0, 0, 0)
         l.setSpacing(16)
-
-        # Quick Add Bar
-        ql = QHBoxLayout()
-        btn_add_oai = QPushButton("⊕ OpenAI Compatible")
-        btn_add_oai.setStyleSheet("QPushButton { background: transparent; border: 1px solid #7C6FFF; border-radius: 14px; color: #7C6FFF; font-weight: 600; padding: 4px 12px; } QPushButton:hover { background: rgba(124, 111, 255, 0.1); }")
-        btn_add_oai.clicked.connect(lambda: self._open_quick_add("openai_compatible"))
         
-        btn_add_anth = QPushButton("⊕ Anthropic SDK")
-        btn_add_anth.setStyleSheet("QPushButton { background: transparent; border: 1px solid #7C6FFF; border-radius: 14px; color: #7C6FFF; font-weight: 600; padding: 4px 12px; } QPushButton:hover { background: rgba(124, 111, 255, 0.1); }")
-        btn_add_anth.clicked.connect(lambda: self._open_quick_add("anthropic"))
+        self.providers_scroll = QScrollArea()
+        self.providers_scroll.setWidgetResizable(True)
+        css = "QScrollArea { border: none; background: transparent; }\n" + SCROLLBAR_CSS
+        self.providers_scroll.setStyleSheet(css)
         
-        ql.addWidget(btn_add_oai)
-        ql.addWidget(btn_add_anth)
-        ql.addStretch()
-        l.addLayout(ql)
+        self.providers_scroll_widget = QWidget()
+        self.providers_scroll_widget.setStyleSheet("background: transparent;")
+        self.providers_layout = QVBoxLayout(self.providers_scroll_widget)
+        self.providers_layout.setContentsMargins(0, 0, 0, 20)
+        self.providers_layout.setSpacing(16)
         
-        # Selector Row
-        sl = QHBoxLayout()
-        self.cmb_provider = QComboBox()
-        self.cmb_provider.setStyleSheet(COMBO_CSS)
-        self.cmb_provider.setFixedHeight(34)
-        self.cmb_provider.currentIndexChanged.connect(self._on_provider_selected)
-        
-        btn_add_full = QPushButton("+")
-        btn_add_full.setFixedSize(34, 34)
-        btn_add_full.setStyleSheet("QPushButton { background: #252C3D; border: 1px solid #3B4455; border-radius: 6px; color: white; font-weight: bold; font-size: 16px; } QPushButton:hover { background: #3B4455; }")
-        btn_add_full.clicked.connect(self._open_add_provider_dialog)
-        
-        sl.addWidget(self.cmb_provider, 1)
-        sl.addWidget(btn_add_full)
-        l.addLayout(sl)
-        
-        self.provider_panel_container = QVBoxLayout()
-        l.addLayout(self.provider_panel_container, 1)
+        self.providers_scroll.setWidget(self.providers_scroll_widget)
+        l.addWidget(self.providers_scroll, 1)
         
         return w
 
@@ -1521,90 +1593,69 @@ class AetherConfigWindow(QWidget):
         self.add_dialog.move(self.rect().center() - self.add_dialog.rect().center())
         self.add_dialog.show()
         
-    def _add_staged_provider(self, key: str, name: str, ptype: str):
-        if key not in self._provider_cards:
-            self._create_provider_panel(key, name, ptype)
+    def populate_providers(self, providers: list):
+        self.current_providers_data = {p.get("name"): p for p in providers}
         
-        idx = self.cmb_provider.findData(key)
-        if idx >= 0:
-            self.cmb_provider.setCurrentIndex(idx)
-            
-    def _create_provider_panel(self, key: str, name: str, ptype: str):
-        panel = ProviderAccordionCard(key, name, ptype)
-        panel.validate_requested.connect(self.validate_requested)
-        panel.save_requested.connect(self.save_requested)
-        panel.remove_requested.connect(self.remove_requested)
-        panel.refresh_models_requested.connect(self.refresh_models_requested)
-        panel.reveal_key_requested.connect(self.reveal_key_requested)
-        self._provider_cards[key] = panel
-        self.provider_panel_container.addWidget(panel)
-        panel.hide()
-
-    def _on_provider_selected(self, index: int):
-        if index < 0: return
-        key = self.cmb_provider.itemData(index)
-        for k, panel in self._provider_cards.items():
-            panel.setVisible(k == key)
-            
-    def populate_providers(self, providers: List[dict]):
-        current_selection = self.cmb_provider.currentData()
-        
-        self.cmb_provider.blockSignals(True)
-        self.cmb_provider.clear()
-        
-        for prov in providers:
-            name = prov.get("name", "")
-            dname = prov.get("display_name", "") or name
-            ptype = prov.get("provider_type", "cloud")
-            
-            if name not in self._provider_cards:
-                self._create_provider_panel(name, dname, ptype)
+        # Clear layout
+        while self.providers_layout.count():
+            item = self.providers_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
                 
-            card = self._provider_cards[name]
-            card.is_default = prov.get("is_default", False)
-            card.display_name = dname
-            card.lbl_title.setText(dname)
-            
-            base_url = prov.get("base_url", "")
-            if base_url and hasattr(card, "inp_base_url"):
-                card.inp_base_url.blockSignals(True)
-                card.inp_base_url.setText(base_url)
-                card.inp_base_url.blockSignals(False)
-
-            if prov.get("models"):
-                card.update_models(prov.get("models", []), prov.get("default_model", ""))
-
-            has_key = prov.get("has_key", False)
-            if has_key:
-                card.has_saved_key = True
-                card.set_badge("connected")
-                if not card.inp_key.text() or card.inp_key.text() == _MASKED_PLACEHOLDER:
-                    card.inp_key.blockSignals(True)
-                    card.inp_key.setText(_MASKED_PLACEHOLDER)
-                    card.inp_key.blockSignals(False)
-                card._update_save_button_state(is_dirty=False)
-            else:
-                card.has_saved_key = False
-                card.set_badge("no_key")
-                if card.inp_key.text() == _MASKED_PLACEHOLDER:
-                    card.inp_key.blockSignals(True)
-                    card.inp_key.clear()
-                    card.inp_key.blockSignals(False)
-                card._update_save_button_state(is_dirty=False)
-                
-            self.cmb_provider.addItem(dname, name)
-            
-        self.cmb_provider.blockSignals(False)
+        # Split into connected and popular
+        connected = [p for p in providers if p.get("has_key", False)]
+        unconnected = [p for p in providers if not p.get("has_key", False)]
         
-        # Restore selection
-        if current_selection:
-            idx = self.cmb_provider.findData(current_selection)
-            if idx >= 0:
-                self.cmb_provider.setCurrentIndex(idx)
-            else:
-                self.cmb_provider.setCurrentIndex(0)
-        else:
-            self.cmb_provider.setCurrentIndex(0)
+        # Add connected section
+        if connected:
+            lbl_conn = QLabel("Connected providers")
+            lbl_conn.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {TEXT_PRIMARY};")
+            self.providers_layout.addWidget(lbl_conn)
+            
+            for p in connected:
+                row = ConnectedProviderRow(p)
+                row.clicked.connect(self._open_provider_dialog)
+                self.providers_layout.addWidget(row)
+                
+        # Add popular section
+        if unconnected:
+            if connected:
+                self.providers_layout.addSpacing(20)
+                
+            lbl_pop = QLabel("Popular providers")
+            lbl_pop.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {TEXT_PRIMARY};")
+            self.providers_layout.addWidget(lbl_pop)
+            
+            pop_frame = QFrame()
+            pop_frame.setStyleSheet(f"QFrame {{ background: {SURFACE_CARD}; border: 1px solid {SURFACE_BORDER}; border-radius: 8px; }}")
+            pop_layout = QVBoxLayout(pop_frame)
+            pop_layout.setContentsMargins(0, 0, 0, 0)
+            pop_layout.setSpacing(0)
+            
+            for p in unconnected:
+                row = PopularProviderRow(p)
+                row.clicked.connect(self._open_provider_dialog)
+                pop_layout.addWidget(row)
+                
+            self.providers_layout.addWidget(pop_frame)
+            
+        self.providers_layout.addStretch()
+
+    def _open_provider_dialog(self, provider_key: str):
+        provider_dict = self.current_providers_data.get(provider_key, {})
+        if not provider_dict:
+            provider_dict = {"name": provider_key, "display_name": dict(_PROVIDERS_CONFIG).get(provider_key, provider_key)}
+            
+        self.config_dialog = ProviderConfigDialog(provider_dict, self)
+        self.config_dialog.validate_requested.connect(self.validate_requested)
+        self.config_dialog.save_requested.connect(self.save_requested)
+        self.config_dialog.remove_requested.connect(self.remove_requested)
+        self.config_dialog.refresh_models_requested.connect(self.refresh_models_requested)
+        self.config_dialog.reveal_key_requested.connect(self.reveal_key_requested)
+        
+        
+        self.config_dialog.move(self.rect().center() - self.config_dialog.rect().center())
+        self.config_dialog.exec()
 
     def update_latency(self, latency_ms: float):
         if latency_ms > 0:

@@ -36,7 +36,7 @@ from aether_engine.config import (
     save_config,
 )
 from aether_engine.models.local_models import OllamaManager
-from aether_engine.langgraph.executor import run_langgraph_task
+from aether_engine.langgraph.executor import run_langgraph_task, resume_langgraph_task, get_pending_approvals
 from aether_engine.providers.discovery import fetch_available_models
 from aether_engine.providers.base import ProviderError
 from aether_engine.providers.litellm_provider import LiteLLMProvider, validate_api_key
@@ -407,9 +407,80 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
         ).to_json()
     )
 
+    # ── Recover Pending Approvals (Checkpoint Durability) ──
+    try:
+        pending_approvals = await get_pending_approvals()
+        for p in pending_approvals:
+            await ws.send_text(Event(
+                type=EventType.TOOL_APPROVAL_REQUEST,
+                request_id=p["thread_id"],
+                payload={
+                    "tool_name": p["tool_name"],
+                    "args": p["args"],
+                    "task_id": p["task_id"],
+                    "approval_key": p["thread_id"],
+                    "task_class": p["task_class"],
+                    "workspace_roots": [str(Path.home() / "AetherWorkspace")],
+                },
+            ).to_json())
+    except Exception as e:
+        logger.warning(f"Error fetching pending approvals: {e}")
+
     task_runner: Optional[asyncio.Task] = None
     secret_store = SecretStore()
-    approval_queues: Dict[str, asyncio.Queue] = {}
+
+    async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str):
+        try:
+            fallback_attempted = False
+            primary_failed = False
+            failure_event = None
+
+            async for ev in generator:
+                if ev.type == EventType.TASK_CREATED:
+                    ev.payload["routing"] = {
+                        "provider": p_name,
+                        "model": p_model,
+                        "reason": "Default Routing",
+                        "capabilities": [],
+                    }
+                    engine_state.audit_logger.log_task_transition(
+                        ev.payload.get("task_id", "unknown"),
+                        TaskState.PENDING,
+                        TaskState.RUNNING,
+                        ev.payload,
+                    )
+                elif ev.type in (EventType.TASK_COMPLETED, EventType.TASK_CANCELLED, EventType.TASK_FAILED):
+                    to = {
+                        EventType.TASK_COMPLETED: TaskState.SUCCEEDED,
+                        EventType.TASK_CANCELLED: TaskState.CANCELLED,
+                        EventType.TASK_FAILED: TaskState.FAILED,
+                    }[ev.type]
+                    engine_state.audit_logger.log_task_transition(
+                        ev.payload.get("task_id", "unknown"),
+                        TaskState.RUNNING,
+                        to,
+                        ev.payload,
+                    )
+
+                if ev.type == EventType.TASK_FAILED and not fallback_attempted and ev.payload.get("retriable"):
+                    primary_failed = True
+                    failure_event = ev
+                    break
+
+                if ev.type == EventType.TASK_COMPLETED:
+                    latency = ev.payload.get("latency_ms", 100.0)
+                    engine_state.health_manager.record_success(p_name, latency)
+
+                await ws.send_text(ev.to_json())
+
+            if primary_failed and failure_event:
+                err_msg = failure_event.payload.get("error", "Unknown error")
+                engine_state.health_manager.record_failure(p_name, err_msg, is_retriable=True)
+                await ws.send_text(failure_event.to_json())
+                return
+        except asyncio.CancelledError:
+            engine_state.audit_logger.log_event("TASK_CANCELLED", {"task_id": "unknown"})
+            raise
 
     try:
         while True:
@@ -489,105 +560,17 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
                 workspace_roots = [str(Path.home() / "AetherWorkspace")]
 
-                async def approval_handler(tool_name: str, args: Dict[str, Any], request_id: Optional[str] = None) -> Any:
-                    approval_key = request_id or req_id or f"approval-{tool_name}"
-                    queue: asyncio.Queue = asyncio.Queue()
-                    
-                    task_class = infer_task_class(tool_name, args)
-                    
-                    approval_queues[approval_key] = queue
-                    await ws.send_text(Event(
-                        type=EventType.TOOL_APPROVAL_REQUEST,
-                        request_id=request_id,
-                        payload={
-                            "tool_name": tool_name,
-                            "args": args,
-                            "task_id": req_id,
-                            "approval_key": approval_key,
-                            "task_class": task_class,
-                            "workspace_roots": workspace_roots,
-                        },
-                    ).to_json())
-                    try:
-                        decision = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    except asyncio.TimeoutError:
-                        return False
-                    finally:
-                        approval_queues.pop(approval_key, None)
-                    if not decision:
-                        return False
-                    
-                    final_task_class = decision if isinstance(decision, str) else task_class
-                    return await _execute_tool_in_worker(tool_name, args, final_task_class)
-
-                async def execute_task_with_fallback(primary_provider, p_name: str, p_model: str):
-                    try:
-                        task_generator = run_langgraph_task(
-                            prompt=prompt,
-                            provider=primary_provider,
-                            tools=tools,
-                            request_id=req_id,
-                            approval_handler=approval_handler,
-                            workspace_roots=workspace_roots,
-                        )
-
-                        fallback_attempted = False
-                        primary_failed = False
-                        failure_event = None
-
-                        async for ev in task_generator:
-                            if ev.type == EventType.TASK_CREATED:
-                                ev.payload["routing"] = {
-                                    "provider": decision.provider,
-                                    "model": decision.model,
-                                    "reason": decision.reason,
-                                    "capabilities": decision.capabilities,
-                                }
-                                engine_state.audit_logger.log_task_transition(
-                                    ev.payload.get("task_id", "unknown"),
-                                    TaskState.PENDING,
-                                    TaskState.RUNNING,
-                                    ev.payload,
-                                )
-                            elif ev.type in (EventType.TASK_COMPLETED, EventType.TASK_CANCELLED, EventType.TASK_FAILED):
-                                to = {
-                                    EventType.TASK_COMPLETED: TaskState.SUCCEEDED,
-                                    EventType.TASK_CANCELLED: TaskState.CANCELLED,
-                                    EventType.TASK_FAILED: TaskState.FAILED,
-                                }[ev.type]
-                                engine_state.audit_logger.log_task_transition(
-                                    ev.payload.get("task_id", "unknown"),
-                                    TaskState.RUNNING,
-                                    to,
-                                    ev.payload,
-                                )
-
-                            if ev.type == EventType.TASK_FAILED and not fallback_attempted and ev.payload.get("retriable"):
-                                primary_failed = True
-                                failure_event = ev
-                                break
-
-                            if ev.type == EventType.TASK_COMPLETED:
-                                latency = ev.payload.get("latency_ms", 100.0)
-                                engine_state.health_manager.record_success(p_name, latency)
-
-                            await ws.send_text(ev.to_json())
-
-                        if primary_failed and failure_event:
-                            err_msg = failure_event.payload.get("error", "Unknown error")
-                            engine_state.health_manager.record_failure(p_name, err_msg, is_retriable=True)
-
-                            # Auto-fallback temporarily disabled per user request
-                            # Bubble the error directly to the UI
-                            await ws.send_text(failure_event.to_json())
-                            return
-                    except asyncio.CancelledError:
-                        # Log cancellation but do not await ws.send_text here as it will raise CancelledError again
-                        engine_state.audit_logger.log_event("TASK_CANCELLED", {"task_id": "unknown"})
-                        raise
+                task_generator = run_langgraph_task(
+                    prompt=prompt,
+                    provider=provider_instance,
+                    tools=tools,
+                    request_id=req_id,
+                    approval_handler=None,
+                    workspace_roots=workspace_roots,
+                )
 
                 task_runner = asyncio.create_task(
-                    execute_task_with_fallback(provider_instance, decision.provider, decision.model)
+                    execute_task_generator(task_generator, decision.provider, decision.model, req_id)
                 )
 
             elif msg.type == EventType.CANCEL_TASK:
@@ -614,23 +597,42 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 ).to_json())
 
             elif msg.type in (EventType.TOOL_APPROVAL_GRANTED, EventType.TOOL_APPROVAL_REJECTED):
-                # Now handled by LangGraph's native resume
-                # We resume the graph with the user's decision
                 approval_key = msg.payload.get("approval_key")
-                decision = (msg.type == EventType.TOOL_APPROVAL_GRANTED)
+                is_approved = (msg.type == EventType.TOOL_APPROVAL_GRANTED)
                 
-                # In a real LangGraph setup:
-                # engine_state.graph.ainvoke(Command(resume={"approved": decision}), config={"configurable": {"thread_id": approval_key}})
-                
-                # Fallback scaffold for now:
-                queue = approval_queues.get(approval_key)
-                if queue is not None:
-                    if msg.type == EventType.TOOL_APPROVAL_GRANTED:
-                        override = msg.payload.get("override_class")
-                        await queue.put(override if override else True)
-                    else:
-                        await queue.put(False)
-                    approval_queues.pop(approval_key, None)
+                # We need to construct a provider instance for the resume generator.
+                # In a real system, provider state would be part of the task metadata or checkpointer.
+                # Here we recreate the active provider instance.
+                try:
+                    provider_instance = _create_provider_instance(
+                        engine_state.active_provider, engine_state.active_model, secret_store
+                    )
+                except Exception:
+                    continue # Ignore if provider cannot be instantiated
+
+                tools = ToolRegistry()
+                tools.register(create_current_time_tool())
+                for tool in create_file_tools(): tools.register(tool)
+                for tool in create_web_tools(): tools.register(tool)
+
+                workspace_roots = [str(Path.home() / "AetherWorkspace")]
+
+                # Pass the approved decision back into LangGraph
+                resume_gen = resume_langgraph_task(
+                    thread_id=approval_key,
+                    approved=is_approved,
+                    provider=provider_instance,
+                    tools=tools,
+                    workspace_roots=workspace_roots,
+                )
+
+                if task_runner and not task_runner.done():
+                    task_runner.cancel()
+                    
+                req_id = msg.request_id or "resume"
+                task_runner = asyncio.create_task(
+                    execute_task_generator(resume_gen, engine_state.active_provider, engine_state.active_model, req_id)
+                )
 
             # -----------------------------------------------------------
             # Provider management & health events
