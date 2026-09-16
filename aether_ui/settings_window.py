@@ -418,7 +418,11 @@ class ProviderConfigDialog(QDialog):
         self.model_list.setStyleSheet(LIST_CSS)
         self.layout.addWidget(self.model_list)
         self.model_list.itemClicked.connect(self._on_model_clicked)
-        self.update_models(provider_dict.get("models", []), provider_dict.get("default_model", ""))
+        models = provider_dict.get("models", [])
+        if self.has_saved_key:
+            self.update_models(models, provider_dict.get("default_model", ""))
+        else:
+            self.model_list.clear()
 
         # Actions
         al = QHBoxLayout()
@@ -428,17 +432,17 @@ class ProviderConfigDialog(QDialog):
         self.btn_refresh.setFixedHeight(34)
         self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_refresh.setStyleSheet(self._btn_css("#1A1F2C", TEXT_PRIMARY, "#252C3D", border_col=SURFACE_BORDER))
-        self.btn_refresh.clicked.connect(lambda: self.refresh_models_requested.emit(self.provider_key))
+        self.btn_refresh.clicked.connect(self._on_refresh)
         al.addWidget(self.btn_refresh)
         
         al.addStretch()
 
-        self.btn_remove = QPushButton("Remove")
-        self.btn_remove.setFixedHeight(34)
-        self.btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_remove.setStyleSheet(self._btn_css("rgba(242, 65, 91, 0.15)", "#FA5870", "rgba(242, 65, 91, 0.28)", border_col="rgba(242, 65, 91, 0.35)"))
-        self.btn_remove.clicked.connect(self._on_remove)
-        al.addWidget(self.btn_remove)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setFixedHeight(34)
+        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cancel.setStyleSheet(self._btn_css("rgba(255, 255, 255, 0.05)", TEXT_SECONDARY, "rgba(255, 255, 255, 0.1)", border_col=SURFACE_BORDER))
+        self.btn_cancel.clicked.connect(self.close)
+        al.addWidget(self.btn_cancel)
 
         self.btn_save = QPushButton("Save")
         self.btn_save.setFixedHeight(34)
@@ -477,21 +481,47 @@ class ProviderConfigDialog(QDialog):
         self._on_save(is_default=self.chk_default.isChecked(), model_name=model_name)
 
     def update_models(self, models: list, current: str = None):
-        self.model_list.clear()
+        self._stop_loading_animation()
         for m in models:
             item = QListWidgetItem(f"{m} ✦ (default)" if m == current else m)
             self.model_list.addItem(item)
             if m == current:
                 item.setSelected(True)
 
+    def _start_loading_animation(self):
+        self.model_list.clear()
+        self._spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self._spinner_idx = 0
+        self._loading_item = QListWidgetItem(f"{self._spinner_frames[0]} Fetching models...")
+        self._loading_item.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.model_list.addItem(self._loading_item)
+        self._spinner_timer = QTimer(self)
+        self._spinner_timer.timeout.connect(self._update_spinner)
+        self._spinner_timer.start(100)
+        
+    def _update_spinner(self):
+        if hasattr(self, "_loading_item") and self._loading_item:
+            self._spinner_idx = (self._spinner_idx + 1) % len(self._spinner_frames)
+            self._loading_item.setText(f"{self._spinner_frames[self._spinner_idx]} Fetching models...")
+            
+    def _stop_loading_animation(self):
+        if hasattr(self, "_spinner_timer"):
+            self._spinner_timer.stop()
+        self.model_list.clear()
+
     def get_raw_key(self) -> str:
         t = self.inp_key.text().strip()
         return "" if t == _MASKED_PLACEHOLDER else t
 
     def _on_test(self):
+        self._start_loading_animation()
         k = self.get_raw_key()
         url = self.inp_base_url.text().strip() if self.custom_row.isVisible() else ""
         self.validate_requested.emit(self.provider_key, k, url)
+
+    def _on_refresh(self):
+        self._start_loading_animation()
+        self.refresh_models_requested.emit(self.provider_key)
 
     def _on_save(self, is_default: bool = False, model_name: str = ""):
         k = self.get_raw_key()
@@ -503,8 +533,15 @@ class ProviderConfigDialog(QDialog):
         self._update_save_button_state(is_dirty=False)
         self.save_requested.emit(self.provider_key, k, is_default, model_name, url, self.display_name, self.provider_type)
 
-    def _on_remove(self):
-        self.remove_requested.emit(self.provider_key)
+    def on_saved_success(self):
+        self.has_saved_key = True
+        self.inp_key.blockSignals(True)
+        self.inp_key.setText("********")  # _MASKED_PLACEHOLDER is typically 8 asterisks
+        self.inp_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._is_revealed = False
+        self.btn_show_key.setText("⬡ Reveal")
+        self.inp_key.blockSignals(False)
+        self._update_save_button_state(is_dirty=False)
         self.close()
 
     def _on_toggle_show_key(self):

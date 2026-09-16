@@ -341,13 +341,16 @@ class AetherWindow(QWidget):
             status = p.get("status", "no_key")
             latency = p.get("latency_ms", 0.0)
 
-            if self.config_modal is not None and provider_name in self.config_modal._provider_cards:
-                card = self.config_modal._provider_cards[provider_name]
-                card.set_badge(status)
-                if models:
-                    card.update_models(models)
-                    if card.chk_default.isChecked() or getattr(card, "is_default", False):
-                        self.hud.set_available_models(models)
+            if self.config_modal is not None and getattr(self.config_modal, "config_dialog", None) is not None:
+                dialog = self.config_modal.config_dialog
+                if getattr(dialog, "provider_key", "") == provider_name:
+                    dialog.set_badge(status)
+                    if models:
+                        dialog.update_models(models)
+                        if dialog.chk_default.isChecked() or getattr(dialog, "is_default", False):
+                            self.hud.set_available_models(models)
+                    else:
+                        dialog._stop_loading_animation()
             elif models:
                 self.hud.set_available_models(models)
 
@@ -357,16 +360,18 @@ class AetherWindow(QWidget):
         elif t == EventType.PROVIDER_SAVE_RESPONSE:
             provider_name = p.get("provider", "")
             if p.get("success"):
-                if self.config_modal is not None and provider_name in self.config_modal._provider_cards:
-                    card = self.config_modal._provider_cards[provider_name]
-                    card.on_saved_success()
+                if self.config_modal is not None and getattr(self.config_modal, "config_dialog", None) is not None:
+                    dialog = self.config_modal.config_dialog
+                    if getattr(dialog, "provider_key", "") == provider_name and hasattr(dialog, "on_saved_success"):
+                        dialog.on_saved_success()
                 asyncio.create_task(self.ws_client.request_provider_list())
 
         elif t == EventType.PROVIDER_REVEAL_KEY_RESPONSE:
             provider_name = p.get("provider", "")
-            if self.config_modal is not None and p.get("success") and provider_name in self.config_modal._provider_cards:
-                card = self.config_modal._provider_cards[provider_name]
-                card.inp_key.setText(p.get("api_key", ""))
+            if self.config_modal is not None and p.get("success") and getattr(self.config_modal, "config_dialog", None) is not None:
+                dialog = self.config_modal.config_dialog
+                if getattr(dialog, "provider_key", "") == provider_name:
+                    dialog.reveal_api_key(p.get("api_key", ""))
 
         elif t == EventType.TOOL_APPROVAL_REQUEST:
             self.approval_drawer.show_for_request(p)
