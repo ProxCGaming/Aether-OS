@@ -6,6 +6,7 @@ with one consistent interface, automatic retries, and structured tool calling.
 """
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import litellm
@@ -37,7 +38,7 @@ _LITELLM_MODEL_MAP: Dict[str, str] = {
     "gemini-2.5-flash": "gemini/gemini-2.5-flash",
     "gemini-2.5-pro": "gemini/gemini-2.5-pro",
     "gemini-2.0-flash": "gemini/gemini-2.0-flash",
-    "gemini-flash-latest": "gemini/gemini-flash-latest",
+    "gemini-2.0-flash-lite": "gemini/gemini-2.0-flash-lite",
     # OpenAI (native — no prefix needed)
     "gpt-4o-mini": "gpt-4o-mini",
     "gpt-4o": "gpt-4o",
@@ -151,6 +152,15 @@ def resolve_litellm_model(model_id: str, provider_name: str = "") -> str:
     return model_id
 
 
+@dataclass
+class FallbackModel:
+    """Configuration for a fallback model including its provider-specific credentials."""
+    model: str
+    api_key: str
+    provider_name: str
+    base_url: Optional[str] = None
+
+
 class LiteLLMProvider(BaseProvider):
     """Concrete provider that routes any model call through LiteLLM's unified interface.
 
@@ -163,7 +173,7 @@ class LiteLLMProvider(BaseProvider):
         model: str,
         provider_name: str = "google_gemini",
         base_url: Optional[str] = None,
-        fallback_models: Optional[List[str]] = None,
+        fallback_models: Optional[List[FallbackModel]] = None,
     ):
         if not api_key or not api_key.strip():
             raise AuthenticationError("API key cannot be empty.")
@@ -172,8 +182,8 @@ class LiteLLMProvider(BaseProvider):
         self.provider_name = provider_name
         self.base_url = base_url.rstrip("/") if base_url else None
         self.litellm_model = resolve_litellm_model(model, provider_name)
-        # Per-node fallback: list of LiteLLM-format model strings to try on retriable errors
-        self.fallback_models: List[str] = fallback_models or []
+        # Per-node fallback: list of FallbackModel with full provider config for cross-provider fallback
+        self.fallback_models: List[FallbackModel] = fallback_models or []
 
     def _build_call_kwargs(
         self,
@@ -290,17 +300,35 @@ class LiteLLMProvider(BaseProvider):
         return converted
 
     def _convert_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Convert internal tool definitions to OpenAI-format function tools."""
+        """Convert internal tool definitions to OpenAI-format function tools.
+
+        Handles both formats:
+        1. Flat format: {"name": "...", "description": "...", "parameters": {...}}
+        2. OpenAI function calling format: {"type": "function", "function": {"name": "...", ...}}
+        """
         result = []
         for t in tools:
-            result.append({
-                "type": "function",
-                "function": {
-                    "name": t["name"],
-                    "description": t.get("description", ""),
-                    "parameters": t.get("parameters", {"type": "object", "properties": {}}),
-                },
-            })
+            if t.get("type") == "function" and "function" in t:
+                # Already in OpenAI function calling format
+                fn = t["function"]
+                result.append({
+                    "type": "function",
+                    "function": {
+                        "name": fn["name"],
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+                    },
+                })
+            else:
+                # Flat format - wrap in function calling format
+                result.append({
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": t.get("description", ""),
+                        "parameters": t.get("parameters", {"type": "object", "properties": {}}),
+                    },
+                })
         return result
 
     async def call_stream(
@@ -316,15 +344,29 @@ class LiteLLMProvider(BaseProvider):
         when a fallback model succeeds.
         """
         # Build the list of models to try: primary first, then fallbacks
-        models_to_try = [self.litellm_model] + list(self.fallback_models)
+        # Each entry is a tuple of (model_string, api_key, base_url, provider_name)
+        models_to_try: List[tuple] = [
+            (self.litellm_model, self.api_key, self.base_url, self.provider_name)
+        ] + [
+            (fm.model, fm.api_key, fm.base_url, fm.provider_name)
+            for fm in self.fallback_models
+        ]
 
         last_error: Optional[Exception] = None
-        for model_idx, current_model in enumerate(models_to_try):
+        for model_idx, (current_model, current_api_key, current_base_url, current_provider) in enumerate(models_to_try):
             is_fallback = model_idx > 0
             try:
                 kwargs = self._build_call_kwargs(messages, tools)
-                # Override model for fallback attempts
+                # Override model and credentials for fallback attempts
                 kwargs["model"] = current_model
+                kwargs["api_key"] = current_api_key
+                
+                # Correctly resolve api_base for the current provider
+                resolved_base_url = current_base_url or _PROVIDER_BASE_URL.get(current_provider)
+                if resolved_base_url:
+                    kwargs["api_base"] = resolved_base_url
+                else:
+                    kwargs.pop("api_base", None)
 
                 response = await litellm.acompletion(**kwargs)
 
@@ -394,9 +436,36 @@ class LiteLLMProvider(BaseProvider):
             except litellm.AuthenticationError as e:
                 raise AuthenticationError(f"Authentication failed: {e}") from e
             except litellm.BadRequestError as e:
-                raise ProviderError(f"Bad request: {e}", retriable=False) from e
+                # Check if it's a "model not found" / "invalid model" error - retriable for fallback
+                err_str = str(e)
+                model_not_found_indicators = [
+                    "not a valid model",
+                    "model not found",
+                    "invalid model",
+                    "does not exist",
+                    "unknown model",
+                    "model.*not.*support",
+                    "no such model",
+                ]
+                import re
+                is_model_not_found = any(re.search(pattern, err_str, re.IGNORECASE) for pattern in model_not_found_indicators)
+                last_error = e
+                if is_model_not_found and (model_idx < len(models_to_try) - 1):
+                    logger.warning(
+                        f"Model '{current_model}' failed with retriable error: {e}. "
+                        f"Trying next fallback..."
+                    )
+                    continue
+                raise ProviderError(f"Bad request: {e}", retriable=is_model_not_found) from e
             except litellm.NotFoundError as e:
-                raise ProviderError(f"Model not found: {e}", retriable=False) from e
+                last_error = e
+                if model_idx < len(models_to_try) - 1:
+                    logger.warning(
+                        f"Model '{current_model}' failed with retriable error: {e}. "
+                        f"Trying next fallback..."
+                    )
+                    continue
+                raise ProviderError(f"Model not found: {e}", retriable=True) from e
             except (litellm.RateLimitError, litellm.Timeout,
                     litellm.APIConnectionError, litellm.ServiceUnavailableError) as e:
                 # Retriable errors — try next fallback model if available

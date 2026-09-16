@@ -80,8 +80,8 @@ async def _discover_gemini_models(api_key: str) -> List[str]:
         raw_models = data.get("models", [])
 
     discovered = []
-    # Keywords to exclude (non-chat / embedding / special purpose models / deprecated 2.5 preview endpoints)
-    exclude_keywords = ("embedding", "imagen", "aqa", "tts", "whisper", "gecko", "bison", "learnlm", "2.5-flash", "2.5-pro", "2.5-computer")
+    # Keywords to exclude (non-chat / embedding / special purpose models / deprecated 2.5 preview endpoints / broken previews)
+    exclude_keywords = ("embedding", "imagen", "aqa", "tts", "whisper", "gecko", "bison", "learnlm", "2.5-flash", "2.5-pro", "2.5-computer", "preview")
 
     for m in raw_models:
         name = m.get("name", "")  # format: "models/gemini-2.0-flash"
@@ -97,20 +97,21 @@ async def _discover_gemini_models(api_key: str) -> List[str]:
 
         discovered.append(model_id)
 
+    # Filter out alias/latest models that LiteLLM can't reliably resolve
+    # (e.g. gemini-flash-latest, gemini-pro-latest are Vertex AI aliases, not AI Studio IDs)
+    alias_blocklist = {"gemini-flash-latest", "gemini-pro-latest", "gemini-flash-lite-latest"}
+    discovered = [m for m in discovered if m not in alias_blocklist]
+
     # Sort so newer and popular models appear near top
     def _gemini_sort_key(m_id: str) -> tuple:
         lower = m_id.lower()
         priority = 99
         if lower == "gemini-2.0-flash":
             priority = 1
-        elif lower == "gemini-flash-latest":
-            priority = 2
         elif lower == "gemini-2.0-flash-lite":
-            priority = 3
-        elif lower == "gemini-pro-latest":
-            priority = 4
+            priority = 2
         elif "2.0" in lower:
-            priority = 5
+            priority = 3
         elif "1.5" in lower:
             priority = 6
         elif "flash" in lower:
@@ -229,8 +230,15 @@ async def _discover_openrouter_models(api_key: str) -> List[str]:
     discovered = []
     for m in raw_models[:50]:  # Limit top 50
         model_id = m.get("id", "")
-        if model_id:
-            discovered.append(model_id)
+        if not model_id:
+            continue
+        # Skip tilde-prefixed aliases (temporary/unstable IDs that don't resolve)
+        if model_id.startswith("~"):
+            continue
+        # Skip batch-only variants (don't support streaming)
+        if model_id.endswith(":batch"):
+            continue
+        discovered.append(model_id)
 
     return discovered
 

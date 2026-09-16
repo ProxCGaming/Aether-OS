@@ -25,14 +25,39 @@ from aether_common.contracts import (
     TaskState,
     validate_transition,
 )
-from aether_engine.providers.base import BaseProvider
+from aether_engine.providers.base import (
+    BaseProvider,
+    ProviderError,
+    RateLimitError,
+    TimeoutError,
+    NetworkError,
+)
 from aether_engine.tools.registry import ToolRegistry
+from aether_engine.providers.litellm_provider import LiteLLMProvider
 
 logger = logging.getLogger("aether_engine.langgraph.executor")
 
+def _is_retriable_error(exc: Exception) -> bool:
+    """Check if an exception is retriable (should trigger fallback)."""
+    if isinstance(exc, ProviderError):
+        return exc.retriable
+    if isinstance(exc, (RateLimitError, TimeoutError, NetworkError)):
+        return True
+    # Check for common retriable error strings
+    err_str = str(exc).lower()
+    retriable_indicators = [
+        "503", "502", "504", "500",
+        "serviceunavailable", "service unavailable",
+        "rate limit", "rate_limit", "429",
+        "timeout", "timed out",
+        "connection", "connecterror", "remotedisconnected",
+        "network", "unreachable",
+    ]
+    return any(indicator in err_str for indicator in retriable_indicators)
+
 async def run_langgraph_task(
     prompt: str,
-    provider: BaseProvider,  # Kept for signature compatibility, though LangGraph uses litellm natively
+    provider: BaseProvider,
     tools: Optional[ToolRegistry] = None,
     task_id: Optional[str] = None,
     request_id: Optional[str] = None,
@@ -72,6 +97,7 @@ async def run_langgraph_task(
                 "request_id": request_id,
                 "workspace_roots": workspace_roots or [],
                 "task_class": "standard",
+                "provider": provider,
             }
         }
         
@@ -87,6 +113,9 @@ async def run_langgraph_task(
             "delegation_log": [],
             "task_id": task_id
         }
+
+        start_time = time.time()
+        full_response_parts: list[str] = []
 
         try:
             async for event in graph.astream(initial_state, config=config, stream_mode="updates"):
@@ -114,6 +143,7 @@ async def run_langgraph_task(
                     elif "messages" in state_update and isinstance(state_update["messages"], list):
                         for msg in state_update["messages"]:
                             if msg.get("role") == "assistant" and msg.get("content"):
+                                full_response_parts.append(msg["content"])
                                 yield Event(
                                     type=EventType.TASK_PROGRESS,
                                     request_id=request_id,
@@ -146,15 +176,30 @@ async def run_langgraph_task(
                         if messages and messages[-1].get("role") == "tool":
                             pass # Handled above
 
+            elapsed_ms = round((time.time() - start_time) * 1000, 2)
+            full_response = "\n".join(full_response_parts).strip()
             yield Event(
                 type=EventType.TASK_COMPLETED,
                 request_id=request_id,
-                payload={"task_id": task_id, "state": TaskState.SUCCEEDED.value, "latency_ms": 1000},
+                payload={
+                    "task_id": task_id,
+                    "state": TaskState.SUCCEEDED.value,
+                    "latency_ms": elapsed_ms,
+                    "response": full_response or "(task completed)",
+                },
             )
         except Exception as e:
             logger.exception("LangGraph task failed")
+            elapsed_ms = round((time.time() - start_time) * 1000, 2)
+            retriable = _is_retriable_error(e)
             yield Event(
                 type=EventType.TASK_FAILED,
                 request_id=request_id,
-                payload={"task_id": task_id, "state": TaskState.FAILED.value, "error": str(e), "retriable": False},
+                payload={
+                    "task_id": task_id,
+                    "state": TaskState.FAILED.value,
+                    "error": str(e),
+                    "retriable": retriable,
+                    "latency_ms": elapsed_ms,
+                },
             )

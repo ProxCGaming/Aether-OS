@@ -318,12 +318,13 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
     so that retriable errors within a single node's call can automatically retry with
     a different provider (Fix 4, Phase 5.1).
     """
+    from aether_engine.providers.litellm_provider import resolve_litellm_model, FallbackModel
+
     api_key = secret_store.load_provider(provider_name)
     base_url = engine_state.user_config.custom_base_urls.get(provider_name)
 
     # Build fallback model list for per-node retry (uses existing get_fallback_candidates)
-    from aether_engine.providers.litellm_provider import resolve_litellm_model
-    fallback_models: List[str] = []
+    fallback_models: List[FallbackModel] = []
     try:
         candidates = get_fallback_candidates(
             failed_provider=provider_name,
@@ -332,7 +333,14 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
             registry=engine_state.model_registry,
         )
         for entry in candidates:
-            fallback_models.append(resolve_litellm_model(entry.id, entry.provider))
+            fb_api_key = secret_store.load_provider(entry.provider)
+            fb_base_url = engine_state.user_config.custom_base_urls.get(entry.provider)
+            fallback_models.append(FallbackModel(
+                model=resolve_litellm_model(entry.id, entry.provider),
+                api_key=fb_api_key,
+                provider_name=entry.provider,
+                base_url=fb_base_url,
+            ))
     except Exception:
         pass  # Fallback computation is best-effort
 
@@ -523,7 +531,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                             workspace_roots=workspace_roots,
                         )
 
-                        first_event = True
+                        fallback_attempted = False
                         primary_failed = False
                         failure_event = None
 
@@ -554,11 +562,10 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                                     ev.payload,
                                 )
 
-                            if ev.type == EventType.TASK_FAILED and first_event and ev.payload.get("retriable"):
+                            if ev.type == EventType.TASK_FAILED and not fallback_attempted and ev.payload.get("retriable"):
                                 primary_failed = True
                                 failure_event = ev
                                 break
-                            first_event = False
 
                             if ev.type == EventType.TASK_COMPLETED:
                                 latency = ev.payload.get("latency_ms", 100.0)
@@ -570,70 +577,10 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                             err_msg = failure_event.payload.get("error", "Unknown error")
                             engine_state.health_manager.record_failure(p_name, err_msg, is_retriable=True)
 
-                            fallbacks = get_fallback_candidates(
-                                failed_provider=p_name,
-                                configured_providers=engine_state.configured_providers,
-                                health_manager=engine_state.health_manager,
-                                registry=engine_state.model_registry,
-                            )
-
-                            if not fallbacks:
-                                await ws.send_text(failure_event.to_json())
-                                return
-
-                            fallback_candidate = fallbacks[0]
-                            fb_provider = fallback_candidate.provider
-                            fb_model = fallback_candidate.id
-
-                            engine_state.audit_logger.log_event("FALLBACK_TRIGGERED", {
-                                "from_provider": p_name,
-                                "to_provider": fb_provider,
-                                "to_model": fb_model,
-                                "reason": err_msg,
-                            })
-
-                            await ws.send_text(Event(
-                                type=EventType.FALLBACK_STARTED,
-                                request_id=req_id,
-                                payload={
-                                    "from_provider": p_name,
-                                    "to_provider": fb_provider,
-                                    "to_model": fb_model,
-                                    "reason": f"{p_name} failed ({err_msg}) — retrying with {fb_provider} ({fb_model})",
-                                },
-                            ).to_json())
-
-                            try:
-                                alt_provider_inst = _create_provider_instance(fb_provider, fb_model, secret_store)
-                                async for alt_ev in run_langgraph_task(prompt=prompt, provider=alt_provider_inst, tools=tools, request_id=req_id, approval_handler=approval_handler, workspace_roots=workspace_roots):
-                                    if alt_ev.type == EventType.TASK_FAILED and alt_ev.payload.get("retriable"):
-                                        raise ProviderError("Fallback provider also failed")
-                                    if alt_ev.type == EventType.TASK_COMPLETED:
-                                        latency = alt_ev.payload.get("latency_ms", 100.0)
-                                        engine_state.health_manager.record_success(fb_provider, latency)
-                                        engine_state.audit_logger.log_event("FALLBACK_COMPLETED", {
-                                            "provider": fb_provider,
-                                            "model": fb_model,
-                                            "latency_ms": latency,
-                                        })
-                                        await ws.send_text(Event(
-                                            type=EventType.FALLBACK_COMPLETED,
-                                            request_id=req_id,
-                                            payload={"provider": fb_provider, "model": fb_model},
-                                        ).to_json())
-                                    await ws.send_text(alt_ev.to_json())
-                            except Exception as fb_err:
-                                engine_state.audit_logger.log_event("FALLBACK_FAILED", {
-                                    "from_provider": p_name,
-                                    "to_provider": fb_provider,
-                                    "error": str(fb_err),
-                                })
-                                await ws.send_text(Event(
-                                    type=EventType.FALLBACK_FAILED,
-                                    request_id=req_id,
-                                    payload={"error": str(fb_err)},
-                                ).to_json())
-                                await ws.send_text(failure_event.to_json())
+                            # Auto-fallback temporarily disabled per user request
+                            # Bubble the error directly to the UI
+                            await ws.send_text(failure_event.to_json())
+                            return
                     except asyncio.CancelledError:
                         # Log cancellation but do not await ws.send_text here as it will raise CancelledError again
                         engine_state.audit_logger.log_event("TASK_CANCELLED", {"task_id": "unknown"})
