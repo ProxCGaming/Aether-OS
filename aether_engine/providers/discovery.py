@@ -61,7 +61,12 @@ async def _discover_gemini_models(api_key: str) -> List[str]:
         resp = await client.get(url)
         if resp.status_code != 200:
             logger.warning(f"Gemini model list returned status {resp.status_code}: {resp.text[:200]}")
-            return []
+            return [
+                "gemini-2.0-flash",
+                "gemini-2.5-flash",
+                "gemini-1.5-pro",
+                "gemini-1.5-flash",
+            ]
 
         data = resp.json()
         raw_models = data.get("models", [])
@@ -108,6 +113,15 @@ async def _discover_gemini_models(api_key: str) -> List[str]:
         return (priority, lower)
 
     discovered.sort(key=_gemini_sort_key)
+    
+    if not discovered:
+        return [
+            "gemini-2.0-flash",
+            "gemini-2.5-flash",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+        ]
+        
     return discovered
 
 
@@ -119,7 +133,12 @@ async def _discover_openai_models(api_key: str) -> List[str]:
         resp = await client.get(url, headers=headers)
         if resp.status_code != 200:
             logger.warning(f"OpenAI model list returned status {resp.status_code}: {resp.text[:200]}")
-            return []
+            return [
+                "gpt-4o",
+                "gpt-4o-mini",
+                "o1",
+                "o3-mini",
+            ]
 
         data = resp.json()
         raw_models = data.get("data", [])
@@ -148,6 +167,15 @@ async def _discover_openai_models(api_key: str) -> List[str]:
         return (4, lower)
 
     discovered.sort(key=_openai_sort_key)
+    
+    if not discovered:
+        return [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "o1",
+            "o3-mini",
+        ]
+        
     return discovered
 
 
