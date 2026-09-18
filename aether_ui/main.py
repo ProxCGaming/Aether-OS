@@ -93,6 +93,7 @@ class AetherWindow(QWidget):
 
         # State machine + WS client
         self._current_default_provider = self.user_config.default_provider or "google_gemini"
+        self._last_providers_data = []
         self.sm = UIStateMachine()
         self.ws_client = AetherWSClient(
             state_machine=self.sm,
@@ -203,8 +204,11 @@ class AetherWindow(QWidget):
             lambda: asyncio.create_task(self.ws_client.cancel_task())
         )
         self.hud.model_changed_by_user.connect(
-            lambda model: asyncio.create_task(self.ws_client.set_default_model(self._current_default_provider, model))
+            lambda provider, model: asyncio.create_task(
+                self.ws_client.set_default_model(provider or self._current_default_provider, model)
+            )
         )
+        self.hud.manage_models_requested.connect(self._toggle_settings)
         main_col.addWidget(self.hud)
 
         ml.addLayout(main_col, 1)
@@ -218,13 +222,13 @@ class AetherWindow(QWidget):
             lambda p, k, u="": asyncio.create_task(self.ws_client.validate_provider(p, k, base_url=u))
         )
         self.config_modal.save_requested.connect(
-            lambda p, k, d, m, u="", dn="", pt="": asyncio.create_task(self.ws_client.save_provider(p, k, d, m, base_url=u, display_name=dn, provider_type=pt))
+            lambda p, k, d, m, u="", dn="", pt="", mods=None: asyncio.create_task(self.ws_client.save_provider(p, k, d, m, base_url=u, display_name=dn, provider_type=pt, models=mods))
         )
         self.config_modal.remove_requested.connect(
             lambda p: asyncio.create_task(self.ws_client.remove_provider(p))
         )
         self.config_modal.refresh_models_requested.connect(
-            lambda p: asyncio.create_task(self.ws_client.refresh_models(p))
+            lambda p, k, u="": asyncio.create_task(self.ws_client.refresh_models(p, k, base_url=u))
         )
         self.config_modal.reveal_key_requested.connect(
             lambda p: asyncio.create_task(self.ws_client.reveal_provider_key(p))
@@ -269,9 +273,12 @@ class AetherWindow(QWidget):
             screen = QApplication.primaryScreen().availableGeometry() if QApplication.primaryScreen() else None
             if screen is None or (self.width() < screen.width() and self.height() < screen.height()):
                 if self.width() >= _MIN_CHAT_W and self.height() >= _MIN_WINDOW_H:
-                    self.user_config.window_width = self.width()
-                    self.user_config.window_height = self.height()
-                    save_config(self.user_config)
+                    # Reload config from disk to avoid overwriting engine modifications
+                    latest_config = load_config()
+                    latest_config.window_width = self.width()
+                    latest_config.window_height = self.height()
+                    save_config(latest_config)
+                    self.user_config = latest_config
 
     def _toggle_settings(self):
         if self.config_modal.isVisible():
@@ -304,12 +311,23 @@ class AetherWindow(QWidget):
 
         if t in (EventType.PROVIDER_LIST_RESPONSE, EventType.REFRESH_MODELS_RESPONSE):
             providers = p.get("providers", [])
+            self._last_providers_data = providers
             default_provider = p.get("default_provider", "google_gemini")
             default_model = p.get("default_model", "")
             self._current_default_provider = default_provider
 
             if self.config_modal is not None:
                 self.config_modal.populate_providers(providers)
+                if getattr(self.config_modal, "config_dialog", None) is not None:
+                    dialog = self.config_modal.config_dialog
+                    for prov in providers:
+                        if prov.get("name") == getattr(dialog, "provider_key", ""):
+                            dialog.update_models(prov.get("models", []))
+                            if t == EventType.REFRESH_MODELS_RESPONSE:
+                                dialog.set_badge("refreshed", f"Refreshed ({len(prov.get('models', []))} models)")
+                            break
+
+            self.hud.set_available_models(providers)
 
             models = []
             for prov in providers:
@@ -326,12 +344,7 @@ class AetherWindow(QWidget):
                 if not models:
                     models = providers[0].get("models", [])
 
-            if models:
-                self.hud.set_available_models(models)
-                target_model = default_model if (default_model and default_model in models) else models[0]
-            else:
-                self.hud.set_available_models([])
-                target_model = default_model or "No Model"
+            target_model = default_model if (default_model and default_model in models) else (models[0] if models else "No Model")
                 
             self.hud.set_active_model(self._current_default_provider, target_model)
 
@@ -344,26 +357,43 @@ class AetherWindow(QWidget):
             if self.config_modal is not None and getattr(self.config_modal, "config_dialog", None) is not None:
                 dialog = self.config_modal.config_dialog
                 if getattr(dialog, "provider_key", "") == provider_name:
-                    dialog.set_badge(status)
-                    if models:
+                    dialog.set_badge(status, p.get("message", ""))
+                    if status == "connected" or status == "no_key":
                         dialog.update_models(models)
                         if dialog.chk_default.isChecked() or getattr(dialog, "is_default", False):
-                            self.hud.set_available_models(models)
+                            # Update cached provider data and pass to HUD
+                            for prov in self._last_providers_data:
+                                if prov.get("name") == provider_name:
+                                    prov["models"] = models
+                            self.hud.set_available_models(self._last_providers_data)
                     else:
                         dialog._stop_loading_animation()
+                        from PySide6.QtWidgets import QListWidgetItem
+                        from PySide6.QtCore import Qt
+                        item = QListWidgetItem(f"Error: {p.get('message', 'Failed to connect')}")
+                        item.setFlags(Qt.ItemFlag.NoItemFlags)
+                        dialog.model_list.addItem(item)
             elif models:
-                self.hud.set_available_models(models)
+                for prov in self._last_providers_data:
+                    if prov.get("name") == provider_name:
+                        prov["models"] = models
+                self.hud.set_available_models(self._last_providers_data)
 
             if self.config_modal is not None and latency > 0:
                 self.config_modal.update_latency(latency)
 
         elif t == EventType.PROVIDER_SAVE_RESPONSE:
             provider_name = p.get("provider", "")
+            if self.config_modal is not None and getattr(self.config_modal, "config_dialog", None) is not None:
+                dialog = self.config_modal.config_dialog
+                if getattr(dialog, "provider_key", "") == provider_name:
+                    if p.get("success"):
+                        if hasattr(dialog, "on_saved_success"):
+                            dialog.on_saved_success()
+                    else:
+                        if hasattr(dialog, "on_saved_error"):
+                            dialog.on_saved_error(p.get("error") or "Unknown error")
             if p.get("success"):
-                if self.config_modal is not None and getattr(self.config_modal, "config_dialog", None) is not None:
-                    dialog = self.config_modal.config_dialog
-                    if getattr(dialog, "provider_key", "") == provider_name and hasattr(dialog, "on_saved_success"):
-                        dialog.on_saved_success()
                 asyncio.create_task(self.ws_client.request_provider_list())
 
         elif t == EventType.PROVIDER_REVEAL_KEY_RESPONSE:
@@ -373,7 +403,14 @@ class AetherWindow(QWidget):
                 if getattr(dialog, "provider_key", "") == provider_name:
                     dialog.reveal_api_key(p.get("api_key", ""))
 
-        elif t == EventType.TOOL_APPROVAL_REQUEST:
+        elif t == EventType.HELLO:
+            asyncio.create_task(self.ws_client.request_provider_list())
+
+        elif t == EventType.PROVIDER_REMOVE_RESPONSE:
+            if p.get("success") or p.get("deleted"):
+                asyncio.create_task(self.ws_client.request_provider_list())
+
+        elif t in (EventType.TOOL_APPROVAL_REQUEST, EventType.PLUGIN_APPROVAL_REQUEST):
             self.approval_drawer.show_for_request(p)
             self.approval_drawer.setFocus()
 

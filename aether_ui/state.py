@@ -78,7 +78,7 @@ class UIStateMachine:
             self.state = UIState.ERROR
             self.error_message = p.get("error", "Task failed")
             self.active_task_id = None
-        elif t in (EventType.TOOL_APPROVAL_REQUEST, EventType.WORKER_EXECUTION_STARTED):
+        elif t in (EventType.TOOL_APPROVAL_REQUEST, EventType.PLUGIN_APPROVAL_REQUEST, EventType.WORKER_EXECUTION_STARTED):
             self.state = UIState.TASK_RUNNING
             self.error_message = None
         elif t in (EventType.TOOL_APPROVAL_GRANTED, EventType.TOOL_APPROVAL_REJECTED, EventType.WORKER_EXECUTION_COMPLETED):

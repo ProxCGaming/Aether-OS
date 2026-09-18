@@ -6,7 +6,6 @@ import datetime
 from typing import Optional
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -24,7 +23,6 @@ from aether_ui.theme import (
     BRAND_ENGINE,
     BRAND_FRONTEND,
     CHECKBOX_CSS,
-    COMBO_CSS,
     INPUT_CSS,
     SCROLLBAR_CSS,
     STATUS_DEGRADED,
@@ -40,6 +38,7 @@ from aether_ui.theme import (
 )
 from aether_ui.widgets.provider_health_badge import ProviderHealthBadge
 from aether_ui.widgets.routing_banner import RoutingBanner
+from aether_ui.components.model_selector import ModelSelectorButton
 
 _BADGE_COLORS = {
     UIState.DISCONNECTED: ("#1A1D26", STATUS_STANDBY),
@@ -102,9 +101,17 @@ QLabel {{
 """
 
 
-def _format_provider_name(provider: Optional[str]) -> str:
+def _format_provider_name(provider: Optional[str], sm=None) -> str:
     if not provider:
         return "Active Provider"
+    
+    if sm and hasattr(sm, "providers"):
+        for p in sm.providers:
+            if p.get("name") == provider:
+                disp = p.get("display_name")
+                if disp:
+                    return disp
+
     mapping = {
         "google_gemini": "Google Gemini",
         "openai": "OpenAI",
@@ -121,7 +128,8 @@ def _format_provider_name(provider: Optional[str]) -> str:
 class HudWidget(QWidget):
     start_task_requested = Signal(str, str)  # (prompt, model)
     cancel_task_requested = Signal()
-    model_changed_by_user = Signal(str)  # model name
+    model_changed_by_user = Signal(str, str)  # provider, model name
+    manage_models_requested = Signal()
 
     def __init__(self, state_machine: UIStateMachine, parent=None):
         super().__init__(parent)
@@ -175,10 +183,10 @@ class HudWidget(QWidget):
         ilo = QHBoxLayout()
         ilo.setSpacing(8)
 
-        self.cmb_model = QComboBox()
-        self.cmb_model.setStyleSheet(COMBO_CSS)
+        self.cmb_model = ModelSelectorButton()
         self.cmb_model.setToolTip("Active model")
-        self.cmb_model.currentTextChanged.connect(self._on_model_changed)
+        self.cmb_model.model_selected.connect(self._on_model_changed)
+        self.cmb_model.manage_requested.connect(self.manage_models_requested.emit)
         ilo.addWidget(self.cmb_model)
 
         self.inp_prompt = QLineEdit()
@@ -236,14 +244,16 @@ class HudWidget(QWidget):
         if not text:
             return
         self.inp_prompt.clear()
-        model = self.cmb_model.currentText()
+        model = self.cmb_model._active_model
         self.sm.clear_error()
         self.start_task_requested.emit(text, model)
 
-    def _on_model_changed(self, model: str):
+    def _on_model_changed(self, provider: str, model: str):
         if not self._suppress_model_signal and model:
+            if provider:
+                self._active_provider = provider
             self._active_model_name = model
-            self.model_changed_by_user.emit(model)
+            self.model_changed_by_user.emit(provider, model)
 
     @staticmethod
     def _badge_css(state: UIState) -> str:
@@ -263,20 +273,13 @@ class HudWidget(QWidget):
             self.lbl_model.setVisible(True)
         # Sync dropdown without re-emitting signal
         self._suppress_model_signal = True
-        idx = self.cmb_model.findText(model)
-        if idx >= 0:
-            self.cmb_model.setCurrentIndex(idx)
+        self.cmb_model.set_active_model(self._active_provider, self._active_model_name)
         self._suppress_model_signal = False
 
-    def set_available_models(self, models: list):
+    def set_available_models(self, providers: list):
         """Populate the model dropdown from provider config."""
         self._suppress_model_signal = True
-        current = self.cmb_model.currentText()
-        self.cmb_model.clear()
-        self.cmb_model.addItems(models)
-        idx = self.cmb_model.findText(current)
-        if idx >= 0:
-            self.cmb_model.setCurrentIndex(idx)
+        self.cmb_model.set_providers(providers)
         self._suppress_model_signal = False
 
     def log_event(self, event: Event):
@@ -316,7 +319,7 @@ class HudWidget(QWidget):
             self.health_badge.update_health(
                 status="degraded",
                 latency_ms=0.0,
-                provider_name=_format_provider_name(from_prov or self._active_provider),
+                provider_name=_format_provider_name(from_prov or self._active_provider, self.sm),
                 last_error=reason,
             )
             self.routing_banner.set_decision(model_label=to_model, reason=reason, is_fallback=True)
@@ -335,7 +338,7 @@ class HudWidget(QWidget):
             self.health_badge.update_health(
                 status="healthy",
                 latency_ms=latency,
-                provider_name=_format_provider_name(self._active_provider),
+                provider_name=_format_provider_name(self._active_provider, self.sm),
             )
             self.log.append(
                 f'<div style="margin:2px 0;"><span style="color:{STATUS_HEALTHY};">●</span> '
@@ -347,7 +350,7 @@ class HudWidget(QWidget):
             self.health_badge.update_health(
                 status="offline",
                 latency_ms=0.0,
-                provider_name=_format_provider_name(self._active_provider),
+                provider_name=_format_provider_name(self._active_provider, self.sm),
                 last_error=p.get("error"),
             )
             self.log.append(
@@ -366,7 +369,7 @@ class HudWidget(QWidget):
                 self.health_badge.update_health(
                     status=hinfo.get("status", "healthy"),
                     latency_ms=hinfo.get("latency_ms", 0.0),
-                    provider_name=_format_provider_name(active_p),
+                    provider_name=_format_provider_name(active_p, self.sm),
                     last_error=hinfo.get("last_error"),
                 )
         elif t in (EventType.PROVIDER_VALIDATE_RESPONSE, EventType.SETTINGS_PROVIDER_VALIDATE_RESULT):
@@ -379,20 +382,20 @@ class HudWidget(QWidget):
                     self.health_badge.update_health(
                         status="healthy",
                         latency_ms=latency,
-                        provider_name=_format_provider_name(pname),
+                        provider_name=_format_provider_name(pname, self.sm),
                     )
                 elif v_status == "invalid_key":
                     self.health_badge.update_health(
                         status="offline",
                         latency_ms=0.0,
-                        provider_name=_format_provider_name(pname),
+                        provider_name=_format_provider_name(pname, self.sm),
                         last_error=msg or "Invalid API key",
                     )
                 elif v_status in ("error", "offline", "degraded"):
                     self.health_badge.update_health(
                         status="degraded",
                         latency_ms=0.0,
-                        provider_name=_format_provider_name(pname),
+                        provider_name=_format_provider_name(pname, self.sm),
                         last_error=msg,
                     )
         elif t == EventType.TASK_CREATED:
@@ -450,7 +453,7 @@ class HudWidget(QWidget):
             self.health_badge.update_health(
                 status="healthy",
                 latency_ms=latency,
-                provider_name=_format_provider_name(self._active_provider),
+                provider_name=_format_provider_name(self._active_provider, self.sm),
             )
             lat_str = f" ({int(latency)}ms)" if latency > 0 else ""
             self.log.append(
@@ -472,7 +475,7 @@ class HudWidget(QWidget):
             self.health_badge.update_health(
                 status="degraded" if retriable else "offline",
                 latency_ms=0.0,
-                provider_name=_format_provider_name(prov),
+                provider_name=_format_provider_name(prov, self.sm),
                 last_error=err,
             )
             self.log.append(
@@ -500,17 +503,17 @@ class HudWidget(QWidget):
                 self.health_badge.update_health(
                     status=hinfo.get("status", "healthy"),
                     latency_ms=hinfo.get("latency_ms", 0.0),
-                    provider_name=_format_provider_name(self._active_provider),
+                    provider_name=_format_provider_name(self._active_provider, self.sm),
                     last_error=hinfo.get("last_error"),
                 )
             else:
                 self.health_badge.update_health(
                     status=hinfo.get("status", "unknown") if hinfo else "unknown",
                     latency_ms=hinfo.get("latency_ms", 0.0) if hinfo else 0.0,
-                    provider_name=_format_provider_name(self._active_provider),
+                    provider_name=_format_provider_name(self._active_provider, self.sm),
                     last_error=hinfo.get("last_error") if hinfo else None,
                 )
-        elif t == EventType.TOOL_APPROVAL_REQUEST:
+        elif t in (EventType.TOOL_APPROVAL_REQUEST, EventType.PLUGIN_APPROVAL_REQUEST):
             self.log.append(
                 f'<div style="margin:2px 0;"><span style="color:{STATUS_DEGRADED};">●</span> '
                 f'<span style="color:{TEXT_MUTED};">{ts}</span> '

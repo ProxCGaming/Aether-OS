@@ -141,15 +141,9 @@ class AetherWSClient:
         ))
 
     async def save_provider(
-        self,
-        provider: str,
-        api_key: str,
-        is_default: bool,
-        default_model: str,
-        base_url: Optional[str] = None,
-        display_name: Optional[str] = None,
-        provider_type: Optional[str] = None,
-        request_id: Optional[str] = None,
+        self, provider: str, api_key: str, is_default: bool, default_model: str,
+        base_url: Optional[str] = None, display_name: Optional[str] = None, provider_type: Optional[str] = None,
+        models: Optional[list] = None, request_id: Optional[str] = None,
     ):
         payload = {
             "provider": provider,
@@ -163,6 +157,8 @@ class AetherWSClient:
             payload["display_name"] = display_name
         if provider_type:
             payload["provider_type"] = provider_type
+        if models is not None:
+            payload["models"] = models
         await self._send(Event(
             type=EventType.PROVIDER_SAVE_REQUEST,
             request_id=request_id or str(uuid.uuid4()),
@@ -226,11 +222,23 @@ class AetherWSClient:
             payload={"method": method},
         ))
 
-    async def refresh_models(self, provider: Optional[str] = None, request_id: Optional[str] = None):
+    async def refresh_models(
+        self, 
+        provider: Optional[str] = None, 
+        api_key: Optional[str] = None, 
+        base_url: Optional[str] = None, 
+        request_id: Optional[str] = None
+    ):
+        payload = {"provider": provider} if provider else {}
+        if api_key:
+            payload["api_key"] = api_key
+        if base_url:
+            payload["base_url"] = base_url
+            
         await self._send(Event(
             type=EventType.REFRESH_MODELS_REQUEST,
             request_id=request_id or str(uuid.uuid4()),
-            payload={"provider": provider} if provider else {},
+            payload=payload,
         ))
 
     async def request_capability_history(self, request_id: Optional[str] = None):
