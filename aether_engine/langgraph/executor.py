@@ -65,6 +65,7 @@ async def run_langgraph_task(
     max_turns: int = 25,
     approval_handler: Optional[Any] = None,
     workspace_roots: Optional[List[str]] = None,
+    disabled_nodes: Optional[set] = None,
 ) -> AsyncGenerator[Event, None]:
     """Execute a task prompt using the LangGraph multi-agent workflow."""
     task_id = task_id or str(uuid.uuid4())
@@ -99,6 +100,7 @@ async def run_langgraph_task(
                 "workspace_roots": workspace_roots or [],
                 "task_class": "standard",
                 "provider": provider,
+                "disabled_nodes": disabled_nodes or set(),
             }
         }
         
@@ -232,6 +234,7 @@ async def resume_langgraph_task(
     provider: BaseProvider,
     tools: Optional[ToolRegistry] = None,
     workspace_roots: Optional[List[str]] = None,
+    disabled_nodes: Optional[set] = None,
 ) -> AsyncGenerator[Event, None]:
     """Resume an interrupted LangGraph task and yield remaining events."""
     db_path = Path.home() / ".aether" / "checkpoints.db"
@@ -247,6 +250,7 @@ async def resume_langgraph_task(
                 "workspace_roots": workspace_roots or [],
                 "task_class": "standard",
                 "provider": provider,
+                "disabled_nodes": disabled_nodes or set(),
             }
         }
         

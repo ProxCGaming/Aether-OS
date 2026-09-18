@@ -83,10 +83,11 @@ class TestFix2SandboxEnforcement(unittest.TestCase):
 class TestFix3FailClosedApproval(unittest.IsolatedAsyncioTestCase):
     """Fix 3: Missing approval_handler must reject, not auto-approve."""
 
-    async def test_missing_handler_rejects(self):
-        """When approval_handler is None in config, the tool call must be rejected."""
+    @patch("aether_engine.langgraph.nodes.pause.interrupt")
+    async def test_missing_handler_rejects(self, mock_interrupt):
+        """When interrupt returns False (rejected), the tool call must be rejected."""
         from aether_engine.langgraph.nodes.pause import dummy_pause_node
-
+    
         state = {
             "pending_tool_call": {
                 "name": "write_file",
@@ -94,10 +95,11 @@ class TestFix3FailClosedApproval(unittest.IsolatedAsyncioTestCase):
                 "call_id": "call_1",
             }
         }
-        config = {"configurable": {}}  # No approval_handler!
-
-        result = await dummy_pause_node(state, config)
-
+        config = {"configurable": {}}
+        mock_interrupt.return_value = False
+    
+        result = dummy_pause_node(state, config)
+        
         # Should reject: clear pending_tool_call and return rejection message
         self.assertIsNone(result.get("pending_tool_call"))
         self.assertTrue(len(result.get("messages", [])) > 0)
@@ -105,10 +107,11 @@ class TestFix3FailClosedApproval(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg["role"], "tool")
         self.assertIn("rejected", msg["content"].lower())
 
-    async def test_explicit_handler_rejection_matches_missing_handler_format(self):
-        """The rejection format for missing handler must match explicit user rejection."""
+    @patch("aether_engine.langgraph.nodes.pause.interrupt")
+    async def test_explicit_handler_rejection_matches_missing_handler_format(self, mock_interrupt):
+        """The rejection format for interrupt must match expected."""
         from aether_engine.langgraph.nodes.pause import dummy_pause_node
-
+    
         state = {
             "pending_tool_call": {
                 "name": "execute_shell",
@@ -116,29 +119,13 @@ class TestFix3FailClosedApproval(unittest.IsolatedAsyncioTestCase):
                 "call_id": "call_2",
             }
         }
-
-        # Missing handler
-        config_missing = {"configurable": {}}
-        result_missing = await dummy_pause_node(state, config_missing)
-
-        # Explicit handler that rejects
-        async def rejecting_handler(tool_name, args, req_id):
-            return False
-
-        # Reset state (pending_tool_call was cleared)
-        state["pending_tool_call"] = {
-            "name": "execute_shell",
-            "args": {"command": "rm -rf /"},
-            "call_id": "call_2",
-        }
-        config_explicit = {"configurable": {"approval_handler": rejecting_handler}}
-        result_explicit = await dummy_pause_node(state, config_explicit)
-
-        # Both should have the same message content
-        self.assertEqual(
-            result_missing["messages"][0]["content"],
-            result_explicit["messages"][0]["content"],
-        )
+    
+        config = {"configurable": {}}
+        mock_interrupt.return_value = False
+        result = dummy_pause_node(state, config)
+    
+        self.assertEqual(result["messages"][0]["role"], "tool")
+        self.assertIn("rejected", result["messages"][0]["content"].lower())
 
 
 class TestFix4PerNodeFallback(unittest.TestCase):

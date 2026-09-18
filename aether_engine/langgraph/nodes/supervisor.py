@@ -73,13 +73,31 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
     # We ask the model to output a simple JSON indicating next step.
     # In a real setup, we'd use function calling or structured output,
     # but LiteLLM can handle standard JSON requests.
+    disabled_nodes = config.get("configurable", {}).get("disabled_nodes", set())
+    
+    available_nodes = [n for n in ["researcher", "planner", "coder"] if n not in disabled_nodes]
+    
+    if not available_nodes:
+        return {
+            "delegation_log": [{
+                "timestamp": int(time.time()),
+                "prompt_summary": state.get("original_prompt", "")[:50] + "...",
+                "decision": {"next": "END", "reason": "All specialists are disabled."},
+                "task_id": state.get("task_id", "unknown")
+            }],
+            "active_specialist": None,
+            "next": "END"
+        }
+        
+    options_str = "'" + "', '".join(available_nodes) + "'"
+    
     system_prompt = (
-        "You are a Supervisor agent. Your task is to delegate the user's request to one of the following specialists: "
-        "'researcher', 'planner', 'coder', or 'END' if the task is complete.\n"
+        f"You are a Supervisor agent. Your task is to delegate the user's request to one of the following specialists: "
+        f"{options_str}, or 'END' if the task is complete.\n"
         f"User Request: {state.get('original_prompt', 'None')}\n"
         f"Current plan: {state.get('plan', 'No plan yet.')}\n"
         "IMPORTANT: For simple greetings (hi, hello, hii, hey), questions, or conversational input, "
-        "delegate to 'planner' to generate a friendly response. Only use 'END' if the task is truly complete "
+        "delegate to 'planner' (if available) to generate a friendly response. Only use 'END' if the task is truly complete "
         "and a response has already been provided.\n"
         "Output ONLY a JSON object with two keys: 'next' (the name of the specialist or 'END') and 'reason' (why you chose them)."
     )

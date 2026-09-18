@@ -2,7 +2,7 @@ import asyncio
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -238,6 +238,17 @@ class TestEngineWebSocket(unittest.TestCase):
                     self.assertEqual(resp.type, EventType.PROVIDER_SAVE_RESPONSE)
                     self.assertTrue(resp.payload["success"])
 
+                    # Seed every store the disconnect must purge
+                    engine_state.user_config.provider_models["google_gemini"] = ["gemini-x"]
+                    engine_state.user_config.custom_base_urls["google_gemini"] = "https://x/v1"
+                    engine_state.user_config.custom_provider_names["google_gemini"] = "Gem"
+                    engine_state.user_config.custom_provider_types["google_gemini"] = "cloud"
+                    engine_state.model_registry.update_provider_models("google_gemini", ["gemini-x"])
+                    engine_state.health_manager.record_failure(
+                        "google_gemini", "boom", is_retriable=False
+                    )
+                    engine_state.configured_providers = ["google_gemini"]
+
                     # Remove
                     rm_req = Event(
                         type=EventType.PROVIDER_REMOVE_REQUEST,
@@ -247,6 +258,117 @@ class TestEngineWebSocket(unittest.TestCase):
                     resp = Event.from_json(ws.receive_text())
                     self.assertEqual(resp.type, EventType.PROVIDER_REMOVE_RESPONSE)
                     self.assertTrue(resp.payload["deleted"])
+                    self.assertTrue(resp.payload["success"])
+
+                    # Disconnect must leave no trace behind in any store
+                    self.assertNotIn("google_gemini", engine_state.user_config.provider_models)
+                    self.assertNotIn("google_gemini", engine_state.user_config.custom_base_urls)
+                    self.assertNotIn("google_gemini", engine_state.user_config.custom_provider_names)
+                    self.assertNotIn("google_gemini", engine_state.user_config.custom_provider_types)
+                    self.assertEqual(
+                        engine_state.model_registry.get_models_for_provider("google_gemini"), []
+                    )
+                    self.assertNotIn(
+                        "google_gemini", engine_state.health_manager.get_all_statuses()
+                    )
+                    self.assertNotIn("google_gemini", engine_state.configured_providers)
+
+                    # ...and the removal must be persisted, so it stays gone after restart
+                    from aether_engine.config import load_config
+                    persisted = load_config()
+                    self.assertNotIn("google_gemini", persisted.provider_models)
+                    self.assertNotIn("google_gemini", persisted.custom_base_urls)
+                    self.assertNotIn("google_gemini", persisted.custom_provider_names)
+                    self.assertNotIn("google_gemini", persisted.custom_provider_types)
+
+    def test_custom_provider_remove_persists_across_restart(self):
+        pname = "custom_remove_me_1234"
+        with TestClient(app) as client:
+            valid_token = engine_state.auth_token
+            with patch("aether_engine.app.SecretStore") as mock_cls:
+                mock_store = mock_cls.return_value
+                mock_store.list_providers.return_value = [pname]
+                mock_store.delete_provider.return_value = True
+
+                with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+                    ws.receive_text()  # HELLO
+
+                    # Seed config with a fully-configured custom provider
+                    from aether_engine.config import save_config, load_config
+                    cfg = engine_state.user_config
+                    cfg.provider_models[pname] = ["m1"]
+                    cfg.custom_base_urls[pname] = "https://example.com/v1"
+                    cfg.custom_provider_names[pname] = "Remove Me"
+                    cfg.custom_provider_types[pname] = "openai_compatible"
+                    save_config(cfg)
+
+                    ws.send_text(Event(
+                        type=EventType.PROVIDER_REMOVE_REQUEST,
+                        payload={"provider": pname},
+                    ).to_json())
+                    resp = Event.from_json(ws.receive_text())
+                    self.assertEqual(resp.type, EventType.PROVIDER_REMOVE_RESPONSE)
+                    self.assertTrue(resp.payload["success"])
+
+                    # Reloading from disk (i.e. after a restart) must not resurrect it
+                    persisted = load_config()
+                    self.assertNotIn(pname, persisted.provider_models)
+                    self.assertNotIn(pname, persisted.custom_base_urls)
+                    self.assertNotIn(pname, persisted.custom_provider_names)
+                    self.assertNotIn(pname, persisted.custom_provider_types)
+
+    def test_custom_provider_save_uses_provided_display_name(self):
+        pname = "custom_abcd1234"
+        try:
+            with TestClient(app) as client:
+                valid_token = engine_state.auth_token
+                with patch("aether_engine.app.SecretStore") as mock_cls, \
+                     patch("aether_engine.app.fetch_available_models",
+                           new=AsyncMock(return_value=["m1", "m2"])):
+                    mock_store = mock_cls.return_value
+                    mock_store.list_providers.return_value = []
+                    mock_store.save_provider.return_value = None
+                    mock_store.load_provider.return_value = "sk-x"
+
+                    with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+                        ws.receive_text()  # HELLO
+
+                        save_req = Event(
+                            type=EventType.PROVIDER_SAVE_REQUEST,
+                            payload={
+                                "provider": pname,
+                                "api_key": "sk-x",
+                                "is_default": False,
+                                "default_model": "",
+                                "base_url": "https://example.com/v1",
+                                "display_name": "My Test Router",
+                                "provider_type": "openai_compatible",
+                            },
+                        )
+                        ws.send_text(save_req.to_json())
+                        resp = Event.from_json(ws.receive_text())
+                        self.assertEqual(resp.type, EventType.PROVIDER_SAVE_RESPONSE)
+                        self.assertTrue(resp.payload["success"])
+
+                        ws.send_text(Event(
+                            type=EventType.PROVIDER_LIST_REQUEST,
+                        ).to_json())
+                        resp = Event.from_json(ws.receive_text())
+                        self.assertEqual(resp.type, EventType.PROVIDER_LIST_RESPONSE)
+                        custom = [
+                            p for p in resp.payload["providers"] if p["name"] == pname
+                        ]
+                        self.assertEqual(len(custom), 1)
+                        self.assertEqual(custom[0]["display_name"], "My Test Router")
+                        self.assertTrue(custom[0]["has_key"])
+                        self.assertEqual(custom[0]["base_url"], "https://example.com/v1")
+        finally:
+            cfg = engine_state.user_config
+            cfg.provider_models.pop(pname, None)
+            cfg.custom_base_urls.pop(pname, None)
+            cfg.custom_provider_names.pop(pname, None)
+            cfg.custom_provider_types.pop(pname, None)
+            engine_state.model_registry.remove_provider_models(pname)
 
     def test_model_set_default(self):
         with TestClient(app) as client:

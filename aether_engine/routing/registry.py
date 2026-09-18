@@ -153,5 +153,10 @@ class ModelRegistry:
             self._models.append(entry)
             self._by_id[mid] = entry
 
+    def remove_provider_models(self, provider: str) -> None:
+        """Drop all model entries for a provider (used when a provider is disconnected)."""
+        self._models = [m for m in self._models if m.provider != provider]
+        self._by_id = {m.id: m for m in self._models}
+
 
 GLOBAL_MODEL_REGISTRY = ModelRegistry()

@@ -175,9 +175,11 @@ class LiteLLMProvider(BaseProvider):
         base_url: Optional[str] = None,
         fallback_models: Optional[List[FallbackModel]] = None,
     ):
-        if not api_key or not api_key.strip():
+        api_key = api_key.strip() if api_key else ""
+        if not api_key and provider_name != "custom_openai" and provider_name != "openai_compatible":
             raise AuthenticationError("API key cannot be empty.")
-        self.api_key = api_key.strip()
+        
+        self.api_key = api_key if api_key else "sk-no-key-required"
         self.model = model
         self.provider_name = provider_name
         self.base_url = base_url.rstrip("/") if base_url else None
@@ -203,6 +205,9 @@ class LiteLLMProvider(BaseProvider):
         base_url = self.base_url or _PROVIDER_BASE_URL.get(self.provider_name)
         if base_url:
             kwargs["api_base"] = base_url
+            
+        # Spoof User-Agent to bypass strict WAF filters (e.g. AgentRouter)
+        kwargs["extra_headers"] = {"User-Agent": "Cline/1.0.0"}
 
         # Tools (OpenAI-compatible format)
         if tools:
@@ -524,11 +529,15 @@ async def validate_api_key(
 
     litellm_model = resolve_litellm_model(model, provider_name=provider_name)
 
+    # LiteLLM's OpenAI client requires a non-empty key to bypass client-side validation.
+    effective_api_key = api_key if api_key else "sk-no-key-required"
+
     kwargs: Dict[str, Any] = {
         "model": litellm_model,
         "messages": [{"role": "user", "content": "ping"}],
         "max_tokens": 5,
-        "api_key": api_key,
+        "api_key": effective_api_key,
+        "extra_headers": {"User-Agent": "Cline/1.0.0"}
     }
 
     effective_base = base_url.rstrip("/") if base_url else _PROVIDER_BASE_URL.get(provider_name)

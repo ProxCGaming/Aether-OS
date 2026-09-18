@@ -95,6 +95,7 @@ class EngineState:
         self.active_provider: str = "google_gemini"
         self.active_model: str = "gemini-2.5-flash"
         self.configured_providers: List[str] = []
+        self.disabled_nodes: Set[str] = set()
 
     def initialize(self) -> str:
         self.auth_token = generate_token()
@@ -158,10 +159,17 @@ async def lifespan(_app: FastAPI):
     secret_store = SecretStore()
     stored = set(secret_store.list_providers())
     cfg = engine_state.user_config
-    for pname in stored:
+    all_providers = set(stored)
+    for p in cfg.custom_provider_types:
+        if cfg.custom_provider_types[p] == "openai_compatible":
+            all_providers.add(p)
+    all_providers.add("custom_openai")
+
+    for pname in all_providers:
         try:
-            key = secret_store.load_provider(pname)
-            if key:
+            key = secret_store.load_provider(pname) if pname in stored else ""
+            is_custom = pname == "custom_openai" or cfg.custom_provider_types.get(pname) == "openai_compatible"
+            if key or is_custom:
                 base_url = cfg.custom_base_urls.get(pname)
                 disc_models = await fetch_available_models(pname, key, base_url=base_url)
                 if disc_models:
@@ -213,10 +221,7 @@ async def _build_provider_list_async(store: SecretStore) -> list:
             except Exception as e:
                 logger.warning(f"Error discovering models for {p.name}: {e}")
 
-        if not models:
-            models = [m.id for m in engine_state.model_registry.get_models_for_provider(p.name)]
-        if not models:
-            models = list(p.models)
+        models = models or []
 
         result.append({
             "name": p.name,
@@ -241,6 +246,20 @@ async def _build_provider_list_async(store: SecretStore) -> list:
         base_url = cfg.custom_base_urls.get(pname, "")
         display_name = cfg.custom_provider_names.get(pname, pname.replace("_", " ").title())
         provider_type = cfg.custom_provider_types.get(pname, "openai_compatible")
+
+        if not models and (pname in stored or provider_type == "openai_compatible"):
+            try:
+                key = store.load_provider(pname) if pname in stored else ""
+                if key or provider_type == "openai_compatible":
+                    disc_models = await fetch_available_models(pname, key, base_url=base_url)
+                    if disc_models:
+                        models = disc_models
+                        cfg.provider_models[pname] = disc_models
+                        engine_state.model_registry.update_provider_models(pname, disc_models)
+                        save_config(cfg)
+            except Exception as e:
+                logger.warning(f"Error discovering models for {pname}: {e}")
+
         result.append({
             "name": pname,
             "display_name": display_name,
@@ -249,7 +268,7 @@ async def _build_provider_list_async(store: SecretStore) -> list:
             "supports_custom_url": True,
             "base_url": base_url,
             "models": models,
-            "has_key": pname in stored,
+            "has_key": pname in stored or provider_type == "openai_compatible",
             "is_default": cfg.default_provider == pname,
             "default_model": cfg.default_model if cfg.default_provider == pname else (models[0] if models else ""),
             "health": engine_state.health_manager.get_state(pname).status,
@@ -284,18 +303,85 @@ def _build_provider_list(store: SecretStore) -> list:
             "default_model": cfg.default_model if cfg.default_provider == p.name else (models[0] if models else ""),
             "health": engine_state.health_manager.get_state(p.name).status,
         })
+
+    # --- Dynamic custom providers (user-added, not in CLOUD_PROVIDERS) ---
+    known_names = {p.name for p in CLOUD_PROVIDERS}
+    all_custom = set(cfg.custom_base_urls.keys()) | set(cfg.provider_models.keys()) | stored
+    for pname in sorted(all_custom - known_names):
+        models = cfg.provider_models.get(pname, [])
+        base_url = cfg.custom_base_urls.get(pname, "")
+        display_name = cfg.custom_provider_names.get(pname, pname.replace("_", " ").title())
+        provider_type = cfg.custom_provider_types.get(pname, "openai_compatible")
+        if not models:
+            models = [m.id for m in engine_state.model_registry.get_models_for_provider(pname)]
+        result.append({
+            "name": pname,
+            "display_name": display_name,
+            "icon": "⊕" if provider_type == "openai_compatible" else "◈",
+            "key_url": "",
+            "supports_custom_url": True,
+            "base_url": base_url,
+            "models": models,
+            "has_key": pname in stored or provider_type == "openai_compatible",
+            "is_default": cfg.default_provider == pname,
+            "default_model": cfg.default_model if cfg.default_provider == pname else (models[0] if models else ""),
+            "health": engine_state.health_manager.get_state(pname).status,
+            "provider_type": provider_type,
+        })
     return result
 
 
-async def _validate_provider_key(provider_name: str, api_key: str, base_url: Optional[str] = None) -> dict:
-    """Validate a provider key and discover its available models in real-time."""
+MAX_VALIDATION_PINGS = 20
+
+
+async def _validate_provider_key(
+    provider_name: str,
+    api_key: str,
+    base_url: Optional[str] = None,
+    persist_models: bool = True,
+) -> dict:
+    """Validate a provider key and discover its available models in real-time.
+
+    Discovery can return many models while only a subset are usable with the
+    current key/quota, so the validation ping walks through several candidate
+    models and stops at the first one that responds. This avoids reporting a
+    false failure caused by pinging a single quota-exhausted model.
+
+    ``persist_models`` is False for unsaved/template providers so that merely
+    testing a key in the panel does not leave discovery data behind in config.
+    """
     if not base_url:
         base_url = engine_state.user_config.custom_base_urls.get(provider_name)
     discovered_models = await fetch_available_models(provider_name, api_key, base_url=base_url)
 
-    # Pick the first discovered model (or default) for the test ping
-    test_model = discovered_models[0] if discovered_models else ""
-    result = await validate_api_key(provider_name, api_key, model=test_model, base_url=base_url)
+    candidates: List[str] = [m for m in discovered_models if m][:MAX_VALIDATION_PINGS]
+    if not candidates:
+        # No discovered models: fall back to the provider's default test model.
+        candidates = [""]
+
+    is_custom = provider_name in ("custom_openai", "custom") or provider_name.startswith("custom_")
+
+    result: Dict[str, Any] = {"status": "network_error", "message": "Validation failed."}
+    for model_id in candidates:
+        attempt = await validate_api_key(provider_name, api_key, model=model_id, base_url=base_url)
+        result = attempt
+        if attempt["status"] == "connected":
+            if model_id:
+                result = dict(attempt)
+                result["message"] = f"API key is valid (model: {model_id})."
+            break
+        # A single model can reject the request (entitlement/quota/model-specific 401)
+        # while the key itself is valid, so keep scanning the remaining candidates.
+
+    # For OpenAI-compatible endpoints the /models call is authenticated, so a
+    # successful model listing means the key is accepted even if no sampled model
+    # responded to the chat ping (e.g. only one model on the plan works).
+    if result.get("status") != "connected" and discovered_models and is_custom:
+        result = {
+            "status": "connected",
+            "message": f"API key is valid ({len(discovered_models)} models available).",
+            "latency_ms": result.get("latency_ms", 0.0),
+        }
 
     # Attach discovered models to the result dictionary
     result["models"] = discovered_models
@@ -303,7 +389,7 @@ async def _validate_provider_key(provider_name: str, api_key: str, base_url: Opt
     if result["status"] == "connected":
         latency = result.get("latency_ms", 100.0)
         engine_state.health_manager.record_success(provider_name, latency)
-        if discovered_models:
+        if discovered_models and persist_models:
             engine_state.user_config.provider_models[provider_name] = discovered_models
             engine_state.model_registry.update_provider_models(provider_name, discovered_models)
             save_config(engine_state.user_config)
@@ -474,6 +560,13 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     latency = ev.payload.get("latency_ms", 100.0)
                     engine_state.health_manager.record_success(p_name, latency)
 
+                if ev.type == EventType.TOOL_APPROVAL_REQUEST:
+                    engine_state.audit_logger.log_event("APPROVAL_REQUESTED", {
+                        "tool_name": ev.payload.get("tool_name"),
+                        "args": ev.payload.get("args"),
+                        "task_id": ev.payload.get("task_id", "unknown"),
+                    })
+
                 await ws.send_text(ev.to_json())
 
             if primary_failed and failure_event:
@@ -570,6 +663,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     request_id=req_id,
                     approval_handler=None,
                     workspace_roots=workspace_roots,
+                    disabled_nodes=engine_state.disabled_nodes,
                 )
 
                 task_runner = asyncio.create_task(
@@ -603,6 +697,11 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 approval_key = msg.payload.get("approval_key")
                 is_approved = (msg.type == EventType.TOOL_APPROVAL_GRANTED)
                 
+                if is_approved:
+                    engine_state.audit_logger.log_event("APPROVAL_GRANTED", {"approval_key": approval_key})
+                else:
+                    engine_state.audit_logger.log_event("APPROVAL_REJECTED", {"approval_key": approval_key})
+                
                 # We need to construct a provider instance for the resume generator.
                 # In a real system, provider state would be part of the task metadata or checkpointer.
                 # Here we recreate the active provider instance.
@@ -627,6 +726,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     provider=provider_instance,
                     tools=tools,
                     workspace_roots=workspace_roots,
+                    disabled_nodes=engine_state.disabled_nodes,
                 )
 
                 if task_runner and not task_runner.done():
@@ -658,14 +758,39 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     if msg.type == EventType.SETTINGS_PROVIDER_VALIDATE_REQUEST
                     else EventType.PROVIDER_VALIDATE_RESPONSE
                 )
+                is_custom = pname == "custom_openai" or engine_state.user_config.custom_provider_types.get(pname) == "openai_compatible"
+                
+                # If key is empty (e.g. masked in UI), attempt to load the saved key
                 if not key:
+                    saved_key = secret_store.load_provider(pname)
+                    if saved_key:
+                        key = saved_key
+                
+                # If base_url is empty, attempt to load the saved base_url
+                if not base_url:
+                    saved_url = engine_state.user_config.custom_base_urls.get(pname)
+                    if saved_url:
+                        base_url = saved_url
+                
+                # Only persist discovered models for providers that are already
+                # saved; testing a throwaway/template provider must not leak
+                # discovery data into the persisted config.
+                is_registered = (
+                    pname in set(secret_store.list_providers())
+                    or pname in engine_state.user_config.custom_base_urls
+                    or pname in engine_state.user_config.custom_provider_types
+                )
+
+                if not key and not is_custom:
                     await ws.send_text(Event(
                         type=resp_type,
                         request_id=req_id,
                         payload={"provider": pname, "status": "invalid_key", "message": "API key cannot be empty."},
                     ).to_json())
                 else:
-                    result = await _validate_provider_key(pname, key, base_url=base_url)
+                    result = await _validate_provider_key(
+                        pname, key, base_url=base_url, persist_models=False
+                    )
                     result["provider"] = pname
                     await ws.send_text(Event(
                         type=resp_type,
@@ -683,12 +808,40 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 display_name = msg.payload.get("display_name", "")
                 provider_type = msg.payload.get("provider_type", "")
                 try:
-                    if display_name:
-                        engine_state.user_config.custom_provider_names[pname] = display_name
-                    if provider_type:
-                        engine_state.user_config.custom_provider_types[pname] = provider_type
-                    if base_url or pname in engine_state.user_config.custom_base_urls or pname == "custom_openai" or (provider_type == "openai_compatible"):
+                    if not isinstance(pname, str) or not pname.strip():
+                        raise ValueError("Provider name is required.")
+                    is_custom_provider = (
+                        pname == "custom_openai"
+                        or pname.startswith("custom_")
+                        or provider_type == "openai_compatible"
+                    )
+                    if is_custom_provider:
+                        if display_name:
+                            engine_state.user_config.custom_provider_names[pname] = display_name
+                        if provider_type:
+                            engine_state.user_config.custom_provider_types[pname] = provider_type
                         engine_state.user_config.custom_base_urls[pname] = base_url
+                    elif base_url:
+                        engine_state.user_config.custom_base_urls[pname] = base_url
+
+                    # Save config before fetching models so custom names/URLs are persisted
+                    # even if the model fetch raises an exception.
+                    save_config(engine_state.user_config)
+
+                    # A new provider derived from the "custom_openai" template leaves
+                    # throwaway discovery data on that template (written during Test /
+                    # Refresh). Clear it unless the template is itself a real provider.
+                    if is_custom_provider and pname != "custom_openai":
+                        template_in_use = (
+                            "custom_openai" in set(secret_store.list_providers())
+                            or "custom_openai" in engine_state.user_config.custom_base_urls
+                            or "custom_openai" in engine_state.user_config.custom_provider_types
+                        )
+                        if not template_in_use:
+                            engine_state.user_config.provider_models.pop("custom_openai", None)
+                            engine_state.model_registry.remove_provider_models("custom_openai")
+                            engine_state.health_manager.remove_provider("custom_openai")
+
                     if key:
                         secret_store.save_provider(pname, key)
                         engine_state.health_manager.reset_provider(pname)
@@ -730,29 +883,38 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     await ws.send_text(Event(
                         type=EventType.PROVIDER_SAVE_RESPONSE,
                         request_id=req_id,
-                        payload={"provider": pname, "success": False, "error": str(e)},
+                        payload={
+                            "provider": pname,
+                            "success": False,
+                            "error": f"{type(e).__name__}: {e}",
+                        },
                     ).to_json())
 
             elif msg.type == EventType.PROVIDER_REMOVE_REQUEST:
                 pname = msg.payload.get("provider", "")
                 deleted = secret_store.delete_provider(pname)
-                if pname in engine_state.user_config.provider_models:
-                    del engine_state.user_config.provider_models[pname]
-                if pname in engine_state.user_config.custom_base_urls:
-                    del engine_state.user_config.custom_base_urls[pname]
-                if pname in engine_state.user_config.custom_provider_names:
-                    del engine_state.user_config.custom_provider_names[pname]
-                if pname in engine_state.user_config.custom_provider_types:
-                    del engine_state.user_config.custom_provider_types[pname]
+                engine_state.user_config.provider_models.pop(pname, None)
+                engine_state.user_config.custom_base_urls.pop(pname, None)
+                engine_state.user_config.custom_provider_names.pop(pname, None)
+                engine_state.user_config.custom_provider_types.pop(pname, None)
+                engine_state.model_registry.remove_provider_models(pname)
+                engine_state.health_manager.remove_provider(pname)
+                if pname in engine_state.configured_providers:
+                    engine_state.configured_providers.remove(pname)
                 if engine_state.user_config.default_provider == pname:
-                    engine_state.user_config.default_provider = "google_gemini"
-                    engine_state.user_config.default_model = "gemini-2.5-flash"
+                    remaining = [p for p in secret_store.list_providers() if p != pname]
+                    new_default = remaining[0] if remaining else "google_gemini"
+                    engine_state.user_config.default_provider = new_default
+                    new_models = engine_state.user_config.provider_models.get(new_default, [])
+                    engine_state.user_config.default_model = new_models[0] if new_models else ""
+                    engine_state.active_provider = new_default
+                    engine_state.active_model = engine_state.user_config.default_model
                 save_config(engine_state.user_config)
                 engine_state.audit_logger.log_event("PROVIDER_REMOVED", {"provider": pname})
                 await ws.send_text(Event(
                     type=EventType.PROVIDER_REMOVE_RESPONSE,
                     request_id=req_id,
-                    payload={"provider": pname, "deleted": deleted},
+                    payload={"provider": pname, "deleted": deleted, "success": True},
                 ).to_json())
 
             elif msg.type == EventType.PROVIDER_REVEAL_KEY_REQUEST:
@@ -865,14 +1027,38 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
             elif msg.type == EventType.REFRESH_MODELS_REQUEST:
                 target_provider = msg.payload.get("provider")
                 stored = set(secret_store.list_providers())
-                providers_to_refresh = [target_provider] if (target_provider and target_provider in stored) else list(stored)
                 cfg = engine_state.user_config
+                
+                providers_to_refresh = set(stored)
+                for p in cfg.custom_provider_types:
+                    if cfg.custom_provider_types[p] == "openai_compatible":
+                        providers_to_refresh.add(p)
+                providers_to_refresh.add("custom_openai")
+                
+                if target_provider:
+                    providers_to_refresh = [target_provider]
+                else:
+                    providers_to_refresh = list(providers_to_refresh)
+
+                refreshed_models: Dict[str, List[str]] = {}
 
                 for pname in providers_to_refresh:
                     try:
-                        key = secret_store.load_provider(pname)
-                        if key:
+                        payload_key = msg.payload.get("api_key")
+                        payload_url = msg.payload.get("base_url")
+                        
+                        if payload_key is not None:
+                            key = payload_key
+                        else:
+                            key = secret_store.load_provider(pname) if pname in stored else ""
+                            
+                        if payload_url is not None:
+                            base_url = payload_url
+                        else:
                             base_url = cfg.custom_base_urls.get(pname)
+
+                        is_custom = pname == "custom_openai" or cfg.custom_provider_types.get(pname) == "openai_compatible"
+                        if key or is_custom:
                             disc_models = await fetch_available_models(
                                 provider_name=pname,
                                 api_key=key,
@@ -880,7 +1066,18 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                                 filter_reachability=True,
                                 force_reachability=True,
                             )
+                            # Do not persist discovery data for unsaved/template
+                            # providers; models still flow back to the UI response.
                             if disc_models:
+                                refreshed_models[pname] = disc_models
+                            is_registered = (
+                                pname in stored
+                                or pname in cfg.custom_base_urls
+                                or pname in cfg.custom_provider_types
+                            )
+                            # Only persist if it's a background auto-refresh (no target_provider).
+                            # If target_provider is set, it's a manual UI click and should not save.
+                            if disc_models and is_registered and not target_provider:
                                 cfg.provider_models[pname] = disc_models
                                 engine_state.model_registry.update_provider_models(pname, disc_models)
                                 save_config(cfg)
@@ -888,6 +1085,11 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         logger.error(f"Error during refresh models for {pname}: {ref_err}")
 
                 updated_providers = await _build_provider_list_async(secret_store)
+                # Surface freshly discovered models for the target provider even if
+                # it is an unsaved template (whose data we intentionally don't persist).
+                for prov in updated_providers:
+                    if prov.get("name") in refreshed_models:
+                        prov["models"] = refreshed_models[prov["name"]]
                 await ws.send_text(Event(
                     type=EventType.REFRESH_MODELS_RESPONSE,
                     request_id=req_id,
@@ -937,6 +1139,7 @@ def prepare_plugin(req: InstallRequest):
 def confirm_plugin(req: ConfirmRequest):
     try:
         engine_state.plugin_installer.install(req.prepare_data)
+        engine_state.audit_logger.log_event("PLUGIN_INSTALLED", {"manifest": req.prepare_data["manifest"]})
         return {"status": "success"}
     except Exception as e:
         from fastapi import HTTPException

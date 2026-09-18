@@ -106,18 +106,24 @@ class UserConfig:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "UserConfig":
-        def_model = d.get("default_model", "gemini-2.0-flash")
+        def_model = d.get("default_model", "gemini-2.0-flash") or "gemini-2.0-flash"
         if "2.5" in def_model:
             def_model = "gemini-2.0-flash"
+
+        def _as_dict(value: Any) -> Dict[str, Any]:
+            # Older/corrupted config files may contain null for these maps,
+            # which would otherwise crash every save/remove/list operation.
+            return value if isinstance(value, dict) else {}
+
         return cls(
-            default_provider=d.get("default_provider", "google_gemini"),
+            default_provider=d.get("default_provider") or "google_gemini",
             default_model=def_model,
             window_width=int(d.get("window_width", 420)),
             window_height=int(d.get("window_height", 680)),
-            provider_models=d.get("provider_models", {}),
-            custom_base_urls=d.get("custom_base_urls", {}),
-            custom_provider_names=d.get("custom_provider_names", {}),
-            custom_provider_types=d.get("custom_provider_types", {}),
+            provider_models=_as_dict(d.get("provider_models")),
+            custom_base_urls=_as_dict(d.get("custom_base_urls")),
+            custom_provider_names=_as_dict(d.get("custom_provider_names")),
+            custom_provider_types=_as_dict(d.get("custom_provider_types")),
             task_classes=d.get("task_classes", {
                 "instant": {"time_cap_seconds": 30, "memory_cap_mb": 256},
                 "quick": {"time_cap_seconds": 300, "memory_cap_mb": 1024},

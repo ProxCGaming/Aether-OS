@@ -95,6 +95,10 @@ class ProviderHealthManager:
             self.on_status_change(provider, state)
         return state
 
+    def remove_provider(self, provider: str) -> None:
+        """Forget all health state for a provider (used when a provider is disconnected)."""
+        self._states.pop(provider, None)
+
     def get_all_statuses(self) -> Dict[str, Dict[str, Any]]:
         return {p: asdict(s) for p, s in self._states.items()}
 

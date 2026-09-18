@@ -148,6 +148,10 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
 
+    def remove_tool(self, name: str) -> None:
+        if name in self._tools:
+            del self._tools[name]
+
     def get_tool(self, name: str) -> Tool:
         if name not in self._tools:
             raise ToolNotFoundError(f"Tool '{name}' is not registered.")

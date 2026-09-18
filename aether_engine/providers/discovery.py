@@ -12,6 +12,9 @@ logger = logging.getLogger("aether_engine.providers.discovery")
 # Default request timeout for model listing calls
 DISCOVERY_TIMEOUT = 10.0
 
+# Providers with a dedicated (hardcoded-endpoint) discovery implementation.
+_STANDARD_PROVIDERS = {"google_gemini", "openai", "anthropic", "deepseek", "openrouter"}
+
 
 async def fetch_available_models(
     provider_name: str,
@@ -21,10 +24,19 @@ async def fetch_available_models(
     force_reachability: bool = False,
 ) -> List[str]:
     """Dynamically fetch all available generation/chat models for a given provider and API key."""
-    if not api_key or not api_key.strip():
+    key = api_key.strip() if api_key else ""
+    has_custom_url = bool(base_url and base_url.strip())
+    # Any provider that is not one of the hardcoded standard providers and exposes
+    # a custom base URL is treated as OpenAI-compatible, regardless of its key name.
+    is_custom = (
+        provider_name in ("custom_openai", "custom")
+        or provider_name.startswith("custom_")
+        or (has_custom_url and provider_name not in _STANDARD_PROVIDERS)
+    )
+
+    if not key and not is_custom:
         return []
 
-    key = api_key.strip()
     raw_models: List[str] = []
     try:
         if provider_name == "google_gemini":
@@ -37,7 +49,7 @@ async def fetch_available_models(
             raw_models = await _discover_deepseek_models(key)
         elif provider_name == "openrouter":
             raw_models = await _discover_openrouter_models(key)
-        elif provider_name in ("custom_openai", "custom") or provider_name.startswith("custom_"):
+        elif is_custom:
             raw_models = await _discover_openai_compatible_models(base_url=base_url or "", api_key=key)
         else:
             logger.warning(f"Model discovery not implemented for provider '{provider_name}'")
@@ -264,9 +276,12 @@ async def _discover_openai_compatible_models(base_url: str, api_key: str) -> Lis
         return []
 
     base_url = base_url.strip().rstrip("/")
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-
-    candidates = []
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    # Spoof User-Agent to bypass strict WAF filters (e.g. AgentRouter)
+    headers["User-Agent"] = "Cline/1.0.0"
+    candidates: List[str] = []
     if base_url.endswith("/models"):
         candidates.append(base_url)
     else:
