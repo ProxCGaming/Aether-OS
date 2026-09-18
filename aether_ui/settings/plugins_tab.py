@@ -173,18 +173,15 @@ class PluginsTab(QWidget):
         data = json.loads(reply.readAll().data().decode())
         reply.deleteLater()
         
-        # Fire a synthetic tool approval request to the main window
         if self.ws_client and self.ws_client.callback:
-            # We create a fake event payload for the ApprovalDrawer
             import uuid
             approval_key = str(uuid.uuid4())
             
-            # Store the prepare_data so we can confirm it when approved
             self._pending_install_data = data
             self._pending_approval_key = approval_key
             
             fake_event = {
-                "type": "TOOL_APPROVAL_REQUEST",
+                "type": "PLUGIN_APPROVAL_REQUEST",
                 "request_id": approval_key,
                 "payload": {
                     "request_type": "plugin_install",
@@ -192,27 +189,29 @@ class PluginsTab(QWidget):
                     "manifest": data.get("manifest", {}),
                 }
             }
-            # Route to the callback which shows the drawer
             self.ws_client.callback(fake_event)
             
-            # We also need to intercept the response from the drawer.
-            # We'll hook into the main window's ws_client logic or do it directly.
-            # Since the drawer sends a msg via ws_client, the backend will receive it.
-            # BUT the backend doesn't know about plugin approvals through WS, it expects REST.
-            # Actually, the ApprovalDrawer emits a signal or calls ws_client.send().
-            # For this Phase 5.5, the prompt says "Reuse HITL". 
-            # We'll intercept it via a quick patch to how we listen, or we can just confirm directly if the user clicks it.
-            # Wait, the easiest way to reuse HITL without changing WS protocol too much:
-            pass
-
-    def handle_approval_result(self, approval_key: str, approved: bool):
-        if hasattr(self, "_pending_approval_key") and self._pending_approval_key == approval_key:
-            if approved:
-                self._confirm_install(self._pending_install_data)
-            self._pending_approval_key = None
-            self._pending_install_data = None
-            return True
-        return False
+            if not hasattr(self, "_original_send_approval"):
+                self._original_send_approval = self.ws_client.send_approval
+                
+                async def intercept_approval(granted: bool, app_key: str = None, request_id: str = None, override_class: str = None):
+                    if hasattr(self, "_pending_approval_key") and app_key == self._pending_approval_key:
+                        if granted:
+                            self._confirm_install(self._pending_install_data)
+                        
+                        # Close the drawer
+                        close_event = {
+                            "type": "TOOL_APPROVAL_GRANTED" if granted else "TOOL_APPROVAL_REJECTED",
+                            "payload": {"approval_key": app_key}
+                        }
+                        self.ws_client.callback(close_event)
+                        
+                        self._pending_approval_key = None
+                        self._pending_install_data = None
+                    else:
+                        await self._original_send_approval(granted, app_key, request_id, override_class)
+                        
+                self.ws_client.send_approval = intercept_approval
 
     def _confirm_install(self, prepare_data: dict):
         req = QNetworkRequest(QUrl(f"{self.engine_url}/plugins/confirm"))

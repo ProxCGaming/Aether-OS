@@ -77,6 +77,44 @@ class TestSecretStore(unittest.TestCase):
         with self.assertRaises(SecretDecryptionError):
             store.load_provider("google_gemini")
 
+    def test_legacy_schema_is_migrated_on_init(self):
+        # Simulate a DB created by an older build with extra NOT NULL columns.
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                """
+                CREATE TABLE providers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    api_key BLOB NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO providers (name, api_key, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                ("openrouter", b"ENC:old-key", 1.0, 1.0),
+            )
+            conn.commit()
+
+        store = SecretStore(db_path=self.db_path, protector=DummyProtector())
+        # Saving on the legacy table used to raise
+        # "IntegrityError: NOT NULL constraint failed: providers.created_at".
+        store.save_provider("custom_new_x", "sk-new")
+        self.assertEqual(store.load_provider("custom_new_x"), "sk-new")
+        self.assertIn("openrouter", store.list_providers())
+
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(providers)")}
+        self.assertEqual(cols, {"name", "api_key"})
+
+    def test_save_rejects_empty_provider_name(self):
+        store = SecretStore(db_path=self.db_path, protector=DummyProtector())
+        with self.assertRaises(ValueError):
+            store.save_provider("", "sk-123")
+        with self.assertRaises(ValueError):
+            store.save_provider(None, "sk-123")
+
     @unittest.skipUnless(sys.platform == "win32", "DPAPI requires Windows")
     def test_windows_dpapi_roundtrip(self):
         store = SecretStore(db_path=self.db_path, protector=WindowsDPAPIProtector())

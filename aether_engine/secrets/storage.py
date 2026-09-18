@@ -41,6 +41,37 @@ class SecretStore:
                     )
                     """
                 )
+                self._migrate_providers_schema(conn)
+
+    def _migrate_providers_schema(self, conn: sqlite3.Connection) -> None:
+        """Normalize legacy 'providers' tables to the current (name, api_key) schema.
+
+        Older builds created this table with extra NOT NULL columns such as
+        created_at/updated_at. Because ``CREATE TABLE IF NOT EXISTS`` never alters
+        an existing table, saves on those databases failed with
+        ``IntegrityError: NOT NULL constraint failed: providers.created_at``.
+        This preserves the stored keys while rebuilding the table.
+        """
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(providers)")}
+        if not cols or cols == {"name", "api_key"}:
+            return
+        if not {"name", "api_key"}.issubset(cols):
+            return
+
+        conn.execute("ALTER TABLE providers RENAME TO providers__legacy")
+        conn.execute(
+            """
+            CREATE TABLE providers (
+                name TEXT PRIMARY KEY,
+                api_key BLOB NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO providers (name, api_key) "
+            "SELECT name, api_key FROM providers__legacy"
+        )
+        conn.execute("DROP TABLE providers__legacy")
 
     def list_providers(self) -> List[str]:
         if not self.db_path.exists():
@@ -51,6 +82,10 @@ class SecretStore:
             return [row[0] for row in cursor.fetchall()]
 
     def save_provider(self, provider: str, api_key: str) -> None:
+        if not isinstance(provider, str) or not provider.strip():
+            raise ValueError("Provider name must be a non-empty string.")
+        if not isinstance(api_key, str):
+            raise ValueError("API key must be a string.")
         self._init_db()
         encrypted_bytes = self.protector.protect(api_key.encode("utf-8"))
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:

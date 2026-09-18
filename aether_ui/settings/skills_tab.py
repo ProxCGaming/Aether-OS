@@ -87,7 +87,7 @@ class SkillsTab(QWidget):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(title)
         
-        msg = QLabel("Aether hasn't learned any custom skills yet. In the future (Phase 8), Aether will distill completed tasks into reusable skills here.\n\nTo manually add a skill, place a SKILL.md file in:\n~/.aether/skills/")
+        msg = QLabel("Aether hasn't learned any custom skills yet. In the future (Phase 8), Aether will distill completed tasks into reusable skills here.\n\nTo manually add a skill, place an OKF-compliant SKILL.md file in:\n~/.aether/skills/")
         msg.setStyleSheet(f"font-size: 13px; color: {TEXT_SECONDARY};")
         msg.setWordWrap(True)
         msg.setAlignment(Qt.AlignmentFlag.AlignCenter)

@@ -105,6 +105,16 @@ _PROVIDERS_CONFIG = [
     ("custom_openai", "Custom OpenAI Compatible"),
 ]
 
+
+def _stable_custom_key(display_name: str) -> str:
+    """Build a stable custom-provider key from a display name (no random UUIDs)."""
+    import hashlib
+    import re
+    cleaned = (display_name or "").strip()
+    slug = re.sub(r"[^a-z0-9]+", "_", cleaned.lower()).strip("_")
+    digest = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:8]
+    return f"custom_{slug[:32]}_{digest}" if slug else f"custom_{digest}"
+
 class LocalModelItem(QWidget):
     """Row widget for a local (Ollama) model in Installed or Available sections."""
 
@@ -286,7 +296,7 @@ class ProviderConfigDialog(QDialog):
     validate_requested = Signal(str, str, str)
     save_requested = Signal(str, str, bool, str, str, str, str)
     remove_requested = Signal(str)
-    refresh_models_requested = Signal(str)
+    refresh_models_requested = Signal(str, str, str)
     reveal_key_requested = Signal(str)
     default_toggled = Signal(str)
 
@@ -325,6 +335,11 @@ class ProviderConfigDialog(QDialog):
         hl.addWidget(self.lbl_title)
         
         hl.addStretch()
+
+        self.lbl_status = QLabel("")
+        self.lbl_status.setVisible(False)
+        self.lbl_status.setStyleSheet("background:transparent; border:none;")
+        hl.addWidget(self.lbl_status)
         
         btn_close = QPushButton("✕")
         btn_close.setFixedSize(24, 24)
@@ -347,6 +362,26 @@ class ProviderConfigDialog(QDialog):
         """)
         self.chk_default.toggled.connect(self._on_default_toggled)
         self.layout.addWidget(self.chk_default)
+
+        # Provider Name Row
+        self.name_row = QWidget()
+        self.name_row.setStyleSheet("background:transparent; border:none;")
+        n_layout = QHBoxLayout(self.name_row)
+        n_layout.setContentsMargins(0, 0, 0, 0)
+        n_layout.setSpacing(10)
+        lbl_name = QLabel("Provider Name:")
+        lbl_name.setFixedWidth(80)
+        lbl_name.setStyleSheet(f"font-size:12px; color:{TEXT_SECONDARY}; background:transparent; border:none;")
+        n_layout.addWidget(lbl_name)
+        self.inp_name = QLineEdit()
+        self.inp_name.setPlaceholderText("e.g. Local Ollama")
+        self.inp_name.setText(self.display_name if self.provider_key != "custom_openai" else "")
+        self.inp_name.setStyleSheet(INPUT_CSS)
+        self.inp_name.setFixedHeight(34)
+        self.inp_name.textChanged.connect(self._on_input_modified)
+        n_layout.addWidget(self.inp_name, 1)
+        self.layout.addWidget(self.name_row)
+        self.name_row.setVisible(self.provider_key == "custom_openai" or self.provider_type == "openai_compatible")
 
         # Base URL Row
         self.custom_row = QWidget()
@@ -419,10 +454,7 @@ class ProviderConfigDialog(QDialog):
         self.layout.addWidget(self.model_list)
         self.model_list.itemClicked.connect(self._on_model_clicked)
         models = provider_dict.get("models", [])
-        if self.has_saved_key:
-            self.update_models(models, provider_dict.get("default_model", ""))
-        else:
-            self.model_list.clear()
+        self.update_models(models, provider_dict.get("default_model", ""))
 
         # Actions
         al = QHBoxLayout()
@@ -434,7 +466,15 @@ class ProviderConfigDialog(QDialog):
         self.btn_refresh.setStyleSheet(self._btn_css("#1A1F2C", TEXT_PRIMARY, "#252C3D", border_col=SURFACE_BORDER))
         self.btn_refresh.clicked.connect(self._on_refresh)
         al.addWidget(self.btn_refresh)
-        
+
+        self.btn_disconnect = QPushButton("Disconnect")
+        self.btn_disconnect.setFixedHeight(34)
+        self.btn_disconnect.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_disconnect.setStyleSheet(self._btn_css("rgba(242, 65, 91, 0.15)", "#FA5870", "rgba(242, 65, 91, 0.28)", border_col="rgba(242, 65, 91, 0.35)"))
+        self.btn_disconnect.clicked.connect(self._on_disconnect)
+        self.btn_disconnect.setVisible(self.has_saved_key)
+        al.addWidget(self.btn_disconnect)
+
         al.addStretch()
 
         self.btn_cancel = QPushButton("Cancel")
@@ -482,6 +522,13 @@ class ProviderConfigDialog(QDialog):
 
     def update_models(self, models: list, current: str = None):
         self._stop_loading_animation()
+        if not models:
+            item = QListWidgetItem("No models fetched")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            item.setForeground(QColor(TEXT_MUTED))
+            self.model_list.addItem(item)
+            return
+
         for m in models:
             item = QListWidgetItem(f"{m} ✦ (default)" if m == current else m)
             self.model_list.addItem(item)
@@ -515,23 +562,52 @@ class ProviderConfigDialog(QDialog):
 
     def _on_test(self):
         self._start_loading_animation()
+        self.set_badge("testing", "Testing…")
         k = self.get_raw_key()
-        url = self.inp_base_url.text().strip() if self.custom_row.isVisible() else ""
+        url = self.inp_base_url.text().strip() if self.custom_row.isVisibleTo(self) else ""
         self.validate_requested.emit(self.provider_key, k, url)
 
     def _on_refresh(self):
         self._start_loading_animation()
-        self.refresh_models_requested.emit(self.provider_key)
+        self.set_badge("testing", "Refreshing…")
+        k = self.get_raw_key()
+        url = self.inp_base_url.text().strip() if self.custom_row.isVisibleTo(self) else ""
+        self.refresh_models_requested.emit(self.provider_key, k, url)
+
+    def _on_disconnect(self):
+        self.remove_requested.emit(self.provider_key)
+        self.close()
 
     def _on_save(self, is_default: bool = False, model_name: str = ""):
         k = self.get_raw_key()
-        url = self.inp_base_url.text().strip() if self.custom_row.isVisible() else ""
+        url = self.inp_base_url.text().strip() if self.custom_row.isVisibleTo(self) else ""
         if not model_name:
             items = self.model_list.selectedItems()
             model_name = items[0].text().replace(" ✦ (default)", "").strip() if items else ""
             
+        if hasattr(self, "name_row") and self.name_row.isVisibleTo(self):
+            new_name = self.inp_name.text().strip()
+            if self.provider_key == "custom_openai":
+                if not new_name:
+                    self.set_badge("error", "Display name is required.")
+                    self._update_save_button_state(is_dirty=True)
+                    return
+                self.display_name = new_name
+                # Deterministic key derived from the display name so re-saving the
+                # same provider updates it instead of creating duplicates.
+                self.provider_key = self._stable_custom_key(self.display_name)
+                self.provider_type = "openai_compatible"
+            elif new_name:
+                self.display_name = new_name
+
         self._update_save_button_state(is_dirty=False)
+        self.btn_save.setText("Saving...")
+        self.btn_save.setEnabled(False)
         self.save_requested.emit(self.provider_key, k, is_default, model_name, url, self.display_name, self.provider_type)
+
+    @staticmethod
+    def _stable_custom_key(display_name: str) -> str:
+        return _stable_custom_key(display_name)
 
     def on_saved_success(self):
         self.has_saved_key = True
@@ -543,6 +619,11 @@ class ProviderConfigDialog(QDialog):
         self.inp_key.blockSignals(False)
         self._update_save_button_state(is_dirty=False)
         self.close()
+
+    def on_saved_error(self, message: str = ""):
+        """Re-enable the dialog after a failed save so the user can retry."""
+        self.set_badge("error", message or "Save failed.")
+        self._update_save_button_state(is_dirty=True)
 
     def _on_toggle_show_key(self):
         if not self._is_revealed:
@@ -573,11 +654,36 @@ class ProviderConfigDialog(QDialog):
         self._is_revealed = True
         self.inp_key.blockSignals(False)
         
-    def set_badge(self, status: str):
-        pass
+    def set_badge(self, status: str, message: str = ""):
+        color_map = {
+            "connected": STATUS_HEALTHY,
+            "testing": "#F0B429",
+            "refreshed": BRAND_FRONTEND,
+            "invalid_key": STATUS_OFFLINE,
+            "error": STATUS_OFFLINE,
+            "unreachable": STATUS_DEGRADED,
+            "no_key": TEXT_MUTED,
+        }
+        color = color_map.get(status, TEXT_MUTED)
+        label_map = {
+            "connected": "Connected",
+            "testing": message or "Testing…",
+            "refreshed": message or "Refreshed",
+            "invalid_key": "Invalid key",
+            "error": "Error",
+            "unreachable": "Unreachable",
+            "no_key": "No key",
+        }
+        text = label_map.get(status, status.replace("_", " ").title())
+        if message and status not in ("testing", "refreshed"):
+            text = f"{text}: {message}"
+        self.lbl_status.setText(f"● {text}")
+        self.lbl_status.setStyleSheet(f"font-size:11px; font-weight:700; color:{color}; background:transparent; border:none;")
+        self.lbl_status.setVisible(True)
 
 class ConnectedProviderRow(QFrame):
     clicked = Signal(str)
+    disconnect_clicked = Signal(str)
     
     def __init__(self, provider_dict: dict, parent=None):
         super().__init__(parent)
@@ -611,11 +717,11 @@ class ConnectedProviderRow(QFrame):
         
         hl.addStretch()
         
-        btn_disc = QPushButton("Disconnect")
-        btn_disc.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_disc.setStyleSheet(f"QPushButton {{ background: transparent; color: {TEXT_MUTED}; font-size: 13px; border: none; font-weight: 500; }} QPushButton:hover {{ color: {TEXT_PRIMARY}; }}")
-        btn_disc.clicked.connect(self._on_click)
-        hl.addWidget(btn_disc)
+        self.btn_disc = QPushButton("Disconnect")
+        self.btn_disc.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_disc.setStyleSheet(f"QPushButton {{ background: transparent; color: {TEXT_MUTED}; font-size: 13px; border: none; font-weight: 500; }} QPushButton:hover {{ color: {STATUS_OFFLINE}; }}")
+        self.btn_disc.clicked.connect(lambda: self.disconnect_clicked.emit(self.provider_key))
+        hl.addWidget(self.btn_disc)
         
     def mousePressEvent(self, event):
         self._on_click()
@@ -740,8 +846,10 @@ class QuickAddProviderDialog(QFrame):
         if not name:
             QMessageBox.warning(self, "Validation Error", "Display Name is required.")
             return
-            
-        key = name.lower().replace(" ", "_")
+
+        # Custom providers use the same stable "custom_<slug>_<hash>" key scheme
+        # as the main config dialog so discovery/routing logic is identical.
+        key = _stable_custom_key(name) if self.provider_type == "openai_compatible" else name.lower().replace(" ", "_")
         api_key = self.inp_key.text().strip()
         url = self.inp_url.text().strip() if self.provider_type == "openai_compatible" else ""
         
@@ -808,17 +916,19 @@ class AddProviderDialog(QFrame):
         self.layout.addWidget(scroll)
         
     def _select_provider(self, key, name):
-        self.provider_selected.emit(key, name, "cloud" if key != "custom_openai" else "openai_compatible")
+        # Close the picker first so it does not linger behind the config dialog
+        # (the signal handler opens a modal dialog synchronously).
         self.close()
+        self.provider_selected.emit(key, name, "cloud" if key != "custom_openai" else "openai_compatible")
 
 class AetherConfigWindow(QWidget):
     """Full Reference-Styled Modal Settings Window."""
 
     closed = Signal()
     validate_requested = Signal(str, str, str)
-    save_requested = Signal(str, str, bool, str, str)
+    save_requested = Signal(str, str, bool, str, str, str, str)
     remove_requested = Signal(str)
-    refresh_models_requested = Signal(str)
+    refresh_models_requested = Signal(str, str, str)
     reveal_key_requested = Signal(str)
     download_local_model_requested = Signal(str, str)
     delete_local_model_requested = Signal(str)
@@ -829,7 +939,7 @@ class AetherConfigWindow(QWidget):
         self.setWindowFlags(Qt.WindowType.SubWindow)
         self.setStyleSheet(SCROLLBAR_CSS)
 
-        self._provider_cards: Dict[str, ProviderAccordionCard] = {}
+        self._provider_cards: Dict[str, object] = {}
         self.mcp_servers = {}
         self._sidebar_buttons: List[QPushButton] = []
         self._build_ui()
@@ -1025,6 +1135,10 @@ class AetherConfigWindow(QWidget):
         root_layout.addWidget(self.card)
 
         self._switch_tab(0)
+
+        # Seed the Providers tab immediately so it is never blank on cold launch,
+        # even before the WebSocket handshake delivers PROVIDER_LIST_RESPONSE.
+        self.populate_providers(self._default_provider_dicts())
 
     def paintEvent(self, event):
         """Paint semi-transparent backdrop overlay."""
@@ -1256,53 +1370,6 @@ class AetherConfigWindow(QWidget):
 
         cl.addLayout(bottom)
         return card
-
-    def _build_providers_tab(self) -> QWidget:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("background:transparent; border:none;")
-
-        container = QWidget()
-        lo = QVBoxLayout(container)
-        lo.setContentsMargins(0, 0, 8, 0)
-        lo.setSpacing(10)
-
-        # Provider Accordion Cards
-        for p_key, p_name in _PROVIDERS_CONFIG:
-            card = ProviderAccordionCard(p_key, p_name, self)
-            card.validate_requested.connect(self.validate_requested.emit)
-            card.save_requested.connect(self.save_requested.emit)
-            card.remove_requested.connect(self.remove_requested.emit)
-            card.refresh_models_requested.connect(self.refresh_models_requested.emit)
-            card.reveal_key_requested.connect(self.reveal_key_requested.emit)
-            card.default_toggled.connect(self._on_provider_default_toggled)
-
-            self._provider_cards[p_key] = card
-            lo.addWidget(card)
-
-        # Expand Google Gemini by default
-        if "google_gemini" in self._provider_cards:
-            self._provider_cards["google_gemini"].set_expanded(True)
-
-        # Local Models Section
-        lbl_local = QLabel("Local Models (Ollama)")
-        lbl_local.setStyleSheet(f"font-size:13px; font-weight:700; color:{TEXT_PRIMARY}; margin-top: 10px;")
-        lo.addWidget(lbl_local)
-        
-        local_models = [
-            ("llama3", "4.7 GB"),
-            ("mistral", "4.1 GB"),
-            ("phi3", "2.3 GB")
-        ]
-        for m_name, m_size in local_models:
-            l_item = LocalModelItem(m_name, m_size)
-            l_item.download_clicked.connect(self.download_local_model_requested.emit)
-            l_item.delete_clicked.connect(self.delete_local_model_requested.emit)
-            lo.addWidget(l_item)
-
-        lo.addStretch()
-        scroll.setWidget(container)
-        return scroll
 
     def _on_provider_default_toggled(self, selected_provider: str):
         """Ensure mutual exclusion for default provider checkbox across all provider cards."""
@@ -1574,50 +1641,26 @@ class AetherConfigWindow(QWidget):
         cl.addWidget(desc)
         return card
 
-    def populate_providers(self, providers: List[dict]):
-        for prov in providers:
-            name = prov.get("name", "")
-            if name in self._provider_cards:
-                card = self._provider_cards[name]
-                card.is_default = prov.get("is_default", False)
-                card.chk_default.blockSignals(True)
-                card.chk_default.setChecked(card.is_default)
-                card.chk_default.blockSignals(False)
-
-                if prov.get("models"):
-                    card.update_models(prov.get("models", []))
-
-                has_key = prov.get("has_key", False)
-                if has_key:
-                    card.has_saved_key = True
-                    card.set_badge("connected")
-                    # Display masked key if input is empty or already masked
-                    if not card.inp_key.text() or card.inp_key.text() == _MASKED_PLACEHOLDER:
-                        card.inp_key.blockSignals(True)
-                        card.inp_key.setText(_MASKED_PLACEHOLDER)
-                        card.inp_key.blockSignals(False)
-                    card._update_save_button_state(is_dirty=False)
-                else:
-                    card.has_saved_key = False
-                    card.set_badge("no_key")
-                    if card.inp_key.text() == _MASKED_PLACEHOLDER:
-                        card.inp_key.blockSignals(True)
-                        card.inp_key.clear()
-                        card.inp_key.blockSignals(False)
-                    card._update_save_button_state(is_dirty=False)
-
-    def update_latency(self, latency_ms: float):
-        if latency_ms > 0:
-            self.lbl_sys_ok.setText(f"SYS_OK: {int(latency_ms)}ms")
-        else:
-            self.lbl_sys_ok.setText("SYS_OK: 145ms")
-
     def _build_providers_tab(self):
         w = QWidget()
         l = QVBoxLayout(w)
         l.setContentsMargins(0, 0, 0, 0)
         l.setSpacing(16)
-        
+
+        hdr = QHBoxLayout()
+        lbl_hdr = QLabel("Manage provider connections and API keys")
+        lbl_hdr.setStyleSheet(f"font-size:12px; color:{TEXT_SECONDARY}; background:transparent; border:none;")
+        hdr.addWidget(lbl_hdr)
+        hdr.addStretch()
+
+        btn_add = QPushButton("+ Add Provider")
+        btn_add.setFixedHeight(30)
+        btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_add.setStyleSheet(f"QPushButton {{ background: {BRAND_ENGINE}; color: #07150E; font-size: 12px; font-weight: 700; border: none; border-radius: 6px; padding: 4px 14px; }} QPushButton:hover {{ background: #38E5AC; }}")
+        btn_add.clicked.connect(self._open_add_provider_dialog)
+        hdr.addWidget(btn_add)
+        l.addLayout(hdr)
+
         self.providers_scroll = QScrollArea()
         self.providers_scroll.setWidgetResizable(True)
         css = "QScrollArea { border: none; background: transparent; }\n" + SCROLLBAR_CSS
@@ -1646,8 +1689,35 @@ class AetherConfigWindow(QWidget):
         self.add_dialog.provider_selected.connect(self._add_staged_provider)
         self.add_dialog.move(self.rect().center() - self.add_dialog.rect().center())
         self.add_dialog.show()
-        
+
+    def _add_staged_provider(self, provider_key: str, provider_name: str, provider_type: str):
+        if provider_key not in self.current_providers_data:
+            self.current_providers_data[provider_key] = {
+                "name": provider_key,
+                "display_name": provider_name,
+                "provider_type": provider_type,
+                "has_key": False,
+                "models": [],
+            }
+        self._open_provider_dialog(provider_key)
+
+    def _default_provider_dicts(self) -> list:
+        return [
+            {
+                "name": k,
+                "display_name": n,
+                "has_key": False,
+                "is_default": False,
+                "models": [],
+                "base_url": "",
+                "provider_type": "openai_compatible" if k == "custom_openai" else "cloud",
+            }
+            for k, n in _PROVIDERS_CONFIG
+        ]
+
     def populate_providers(self, providers: list):
+        if not providers:
+            providers = self._default_provider_dicts()
         self.current_providers_data = {p.get("name"): p for p in providers}
         
         # Clear layout
@@ -1669,6 +1739,7 @@ class AetherConfigWindow(QWidget):
             for p in connected:
                 row = ConnectedProviderRow(p)
                 row.clicked.connect(self._open_provider_dialog)
+                row.disconnect_clicked.connect(self.remove_requested)
                 self.providers_layout.addWidget(row)
                 
         # Add popular section
