@@ -74,7 +74,9 @@ from aether_engine.routing.task_class_router import infer_task_class
 from aether_engine.workers.job_object import WorkerJobObject
 from aether_engine.memory import session_store
 
-logger = logging.getLogger("aether_engine")
+logger = logging.getLogger("aether_engine.app")
+
+pending_plugin_installs = {}
 
 
 # ---------------------------------------------------------------------------
@@ -1156,6 +1158,174 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         "default_provider": cfg.default_provider,
                         "default_model": cfg.default_model,
                     },
+                ).to_json())
+
+            # -----------------------------------------------------------
+            # Tools, MCP, Plugins, Memory Events
+            # -----------------------------------------------------------
+            elif msg.type == EventType.TOOL_LIST_REQUEST:
+                from aether_engine.tools.registry import create_file_tools, create_web_tools
+                all_tools = create_file_tools() + create_web_tools()
+                defs = []
+                for t in all_tools:
+                    policy = engine_state.user_config.tool_policies.get(t.name, "Require Approval")
+                    d = t.to_definition()
+                    d["policy"] = policy
+                    defs.append(d)
+                await ws.send_text(Event(
+                    type=EventType.TOOL_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"tools": defs},
+                ).to_json())
+
+            elif msg.type == EventType.TOOL_POLICY_SET_REQUEST:
+                tool_name = msg.payload.get("tool_name")
+                policy = msg.payload.get("policy")
+                if tool_name and policy:
+                    engine_state.user_config.tool_policies[tool_name] = policy
+                    save_config(engine_state.user_config)
+                await ws.send_text(Event(
+                    type=EventType.TOOL_POLICY_SET_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": True, "tool_name": tool_name, "policy": policy},
+                ).to_json())
+
+            elif msg.type == EventType.MCP_SERVER_LIST_REQUEST:
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                servers = GLOBAL_MCP_REGISTRY.list_servers()
+                await ws.send_text(Event(
+                    type=EventType.MCP_SERVER_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"servers": servers},
+                ).to_json())
+
+            elif msg.type == EventType.MCP_SERVER_ADD_REQUEST:
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                config = msg.payload.get("config", {})
+                if name and config:
+                    GLOBAL_MCP_REGISTRY.add_server(name, config)
+                await ws.send_text(Event(
+                    type=EventType.MCP_SERVER_ADD_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": True, "name": name, "config": config},
+                ).to_json())
+
+            elif msg.type == EventType.MCP_SERVER_REMOVE_REQUEST:
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                if name:
+                    GLOBAL_MCP_REGISTRY.remove_server(name)
+                await ws.send_text(Event(
+                    type=EventType.MCP_SERVER_REMOVE_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": True, "name": name},
+                ).to_json())
+
+            elif msg.type == EventType.PLUGIN_LIST_REQUEST:
+                plugins_dict = engine_state.plugin_installer.get_all()
+                plugins_list = list(plugins_dict.values()) if plugins_dict else []
+                await ws.send_text(Event(
+                    type=EventType.PLUGIN_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"plugins": plugins_list},
+                ).to_json())
+
+            elif msg.type == EventType.PLUGIN_INSTALL_REQUEST:
+                source = msg.payload.get("source")
+                try:
+                    data = engine_state.plugin_installer.prepare_install(source)
+                    pending_plugin_installs[req_id] = data
+                    await ws.send_text(Event(
+                        type=EventType.PLUGIN_APPROVAL_REQUEST,
+                        request_id=req_id,
+                        payload={
+                            "plugin_name": data["manifest"].get("name", "Unknown"),
+                            "plugin_details": data,
+                        },
+                    ).to_json())
+                except Exception as e:
+                    await ws.send_text(Event(
+                        type=EventType.PLUGIN_INSTALL_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": False, "error": str(e)},
+                    ).to_json())
+
+            elif msg.type == EventType.PLUGIN_APPROVAL_GRANTED:
+                data = pending_plugin_installs.pop(req_id, None)
+                if data:
+                    try:
+                        engine_state.plugin_installer.install(data)
+                        engine_state.audit_logger.log_event("PLUGIN_INSTALLED", {"manifest": data["manifest"]})
+                        await ws.send_text(Event(
+                            type=EventType.PLUGIN_INSTALL_RESPONSE,
+                            request_id=req_id,
+                            payload={"success": True},
+                        ).to_json())
+                    except Exception as e:
+                        await ws.send_text(Event(
+                            type=EventType.PLUGIN_INSTALL_RESPONSE,
+                            request_id=req_id,
+                            payload={"success": False, "error": str(e)},
+                        ).to_json())
+
+            elif msg.type == EventType.PLUGIN_APPROVAL_REJECTED:
+                pending_plugin_installs.pop(req_id, None)
+                await ws.send_text(Event(
+                    type=EventType.PLUGIN_INSTALL_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": False, "error": "Install rejected by user."},
+                ).to_json())
+
+            elif msg.type == EventType.PLUGIN_UNINSTALL_REQUEST:
+                name = msg.payload.get("name")
+                try:
+                    engine_state.plugin_installer.uninstall(name)
+                    await ws.send_text(Event(
+                        type=EventType.PLUGIN_UNINSTALL_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": True, "name": name},
+                    ).to_json())
+                except Exception as e:
+                    await ws.send_text(Event(
+                        type=EventType.PLUGIN_UNINSTALL_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": False, "error": str(e)},
+                    ).to_json())
+                    
+            elif msg.type == EventType.PLUGIN_TOGGLE_REQUEST:
+                name = msg.payload.get("name")
+                enabled = msg.payload.get("enabled", True)
+                try:
+                    engine_state.plugin_installer.toggle(name, enabled)
+                    await ws.send_text(Event(
+                        type=EventType.PLUGIN_TOGGLE_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": True, "name": name, "enabled": enabled},
+                    ).to_json())
+                except Exception as e:
+                    await ws.send_text(Event(
+                        type=EventType.PLUGIN_TOGGLE_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": False, "error": str(e)},
+                    ).to_json())
+
+            elif msg.type == EventType.MEMORY_EPISODES_REQUEST:
+                from aether_engine.memory.episodic import get_all_episodes
+                episodes = get_all_episodes(limit=msg.payload.get("limit", 50))
+                await ws.send_text(Event(
+                    type=EventType.MEMORY_EPISODES_RESPONSE,
+                    request_id=req_id,
+                    payload={"episodes": episodes},
+                ).to_json())
+            
+            elif msg.type == EventType.MEMORY_GRAPH_REQUEST:
+                from aether_engine.memory.knowledge_graph import get_all_facts
+                facts = get_all_facts(limit=msg.payload.get("limit", 100))
+                await ws.send_text(Event(
+                    type=EventType.MEMORY_GRAPH_RESPONSE,
+                    request_id=req_id,
+                    payload={"facts": facts},
                 ).to_json())
 
     except WebSocketDisconnect:

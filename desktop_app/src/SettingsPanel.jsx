@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Key, Cpu, Settings as SettingsIcon, Monitor, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2 } from 'lucide-react';
+import { User, Key, Cpu, Settings as SettingsIcon, Monitor, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server } from 'lucide-react';
 import Dropdown from './Dropdown';
 import './chat.css';
 
@@ -12,6 +12,18 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   const [validationState, setValidationState] = useState({}); // { provider: 'testing' | 'saving' | 'success' | 'error' }
   const [validationMsg, setValidationMsg] = useState({});
   const [customDisplayNames, setCustomDisplayNames] = useState({}); // for custom_openai
+  
+  const [tools, setTools] = useState([]);
+  const [mcpServers, setMcpServers] = useState({});
+  const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '' });
+
+  const [plugins, setPlugins] = useState([]);
+  const [newPluginSource, setNewPluginSource] = useState('');
+  
+  const [memoryTab, setMemoryTab] = useState('episodic');
+  const [episodes, setEpisodes] = useState([]);
+  const [facts, setFacts] = useState([]);
+  const [selectedEpisode, setSelectedEpisode] = useState(null);
   
   const [downloadInput, setDownloadInput] = useState('');
 
@@ -43,6 +55,33 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
             setValidationState(prev => ({ ...prev, [provider]: 'error', ...(isCustomSave ? { custom_openai: 'error' } : {}) }));
             setValidationMsg(prev => ({ ...prev, [provider]: data.payload.error || 'Failed to save', ...(isCustomSave ? { custom_openai: data.payload.error || 'Failed to save' } : {}) }));
           }
+        } else if (data.type === 'TOOL_LIST_RESPONSE') {
+          setTools(data.payload.tools || []);
+        } else if (data.type === 'TOOL_POLICY_SET_RESPONSE') {
+          if (data.payload.success) {
+            setTools(prev => prev.map(t => t.function.name === data.payload.tool_name ? { ...t, policy: data.payload.policy } : t));
+          }
+        } else if (data.type === 'MCP_SERVER_LIST_RESPONSE') {
+          setMcpServers(data.payload.servers || {});
+        } else if (data.type === 'MCP_SERVER_ADD_RESPONSE' || data.type === 'MCP_SERVER_REMOVE_RESPONSE') {
+          if (data.payload.success) {
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'MCP_SERVER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+            }
+          }
+        } else if (data.type === 'PLUGIN_LIST_RESPONSE') {
+          const p = data.payload.plugins;
+          setPlugins(Array.isArray(p) ? p : Object.values(p || {}));
+        } else if (data.type === 'PLUGIN_INSTALL_RESPONSE' || data.type === 'PLUGIN_UNINSTALL_RESPONSE' || data.type === 'PLUGIN_TOGGLE_RESPONSE') {
+          if (data.payload.success) {
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'PLUGIN_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+            }
+          }
+        } else if (data.type === 'MEMORY_EPISODES_RESPONSE') {
+          setEpisodes(data.payload.episodes || []);
+        } else if (data.type === 'MEMORY_GRAPH_RESPONSE') {
+          setFacts(data.payload.facts || []);
         }
       } catch (e) {
         // ignore JSON parse errors
@@ -54,6 +93,44 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
       if (wsRef.current) wsRef.current.removeEventListener('message', handleMessage);
     };
   }, [wsRef]);
+
+  useEffect(() => {
+    if (activeMenu === 'Tools' && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'TOOL_LIST_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+    } else if (activeMenu === 'MCP' && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'MCP_SERVER_LIST_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+    } else if (activeMenu === 'Plugins' && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'PLUGIN_LIST_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+    } else if (activeMenu === 'Memory' && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'MEMORY_EPISODES_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+      wsRef.current.send(JSON.stringify({
+        type: 'MEMORY_GRAPH_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+    }
+  }, [activeMenu, wsRef]);
 
   useEffect(() => {
     // Initialize local state with backend keys
@@ -152,6 +229,8 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
     { id: 'Providers', icon: <Key size={18} />, label: 'API Providers' },
     { id: 'Models', icon: <Cpu size={18} />, label: 'Models & Tasks' },
     { id: 'Agents', icon: <Network size={18} />, label: 'Agents' },
+    { id: 'Tools', icon: <Wrench size={18} />, label: 'Tools' },
+    { id: 'MCP', icon: <Server size={18} />, label: 'MCP Servers' },
     { id: 'Plugins', icon: <Plug size={18} />, label: 'Plugins' },
     { id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
     { id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
@@ -566,12 +645,237 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
           </div>
         )}
 
+        { activeMenu === 'Tools' && (
+          <div style={{ color: '#f0f0f5' }}>
+            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Tools Sandbox</h2>
+            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Configure auto-approval policies for built-in tools.</p>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {tools.length === 0 ? (
+                <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                  No tools registered.
+                </div>
+              ) : (
+                tools.map(tool => (
+                  <div key={tool.function.name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <h4 style={{ fontSize: '15px', fontWeight: 500 }}>{tool.function.name}</h4>
+                      <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>{tool.function.description}</p>
+                    </div>
+                    <div>
+                      <Dropdown 
+                        value={tool.policy || 'Require Approval'}
+                        onChange={(val) => {
+                          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                            wsRef.current.send(JSON.stringify({
+                              type: 'TOOL_POLICY_SET_REQUEST',
+                              schema_version: 1,
+                              request_id: Date.now().toString(),
+                              payload: { tool_name: tool.function.name, policy: val }
+                            }));
+                          }
+                        }}
+                        options={[
+                          { value: 'Always Allow', label: 'Always Allow' },
+                          { value: 'Require Approval', label: 'Require Approval' },
+                          { value: 'Deny', label: 'Deny' }
+                        ]}
+                        style={{ width: '160px' }}
+                        align="right"
+                      />
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        { activeMenu === 'MCP' && (
+          <div style={{ color: '#f0f0f5' }}>
+            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>MCP Connections</h2>
+            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Manage remote Model Context Protocol servers.</p>
+            
+            <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', marginBottom: '24px' }}>
+              <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Add New Server</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <input 
+                  type="text"
+                  value={newMcpServer.name}
+                  onChange={(e) => setNewMcpServer({...newMcpServer, name: e.target.value})}
+                  className="ios-glass-input" 
+                  placeholder="Server Name (e.g. SQLite DB)" 
+                  style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
+                />
+                <input 
+                  type="text"
+                  value={newMcpServer.command}
+                  onChange={(e) => setNewMcpServer({...newMcpServer, command: e.target.value})}
+                  className="ios-glass-input" 
+                  placeholder="Command (e.g. python, npx)" 
+                  style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
+                />
+                <input 
+                  type="text"
+                  value={newMcpServer.args}
+                  onChange={(e) => setNewMcpServer({...newMcpServer, args: e.target.value})}
+                  className="ios-glass-input" 
+                  placeholder="Arguments (comma separated)" 
+                  style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
+                />
+                <button 
+                  onClick={() => {
+                    if (newMcpServer.name && newMcpServer.command && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({
+                        type: 'MCP_SERVER_ADD_REQUEST',
+                        schema_version: 1,
+                        request_id: Date.now().toString(),
+                        payload: { 
+                          name: newMcpServer.name, 
+                          config: { 
+                            command: newMcpServer.command, 
+                            args: newMcpServer.args.split(',').map(s => s.trim()).filter(Boolean) 
+                          }
+                        }
+                      }));
+                      setNewMcpServer({ name: '', command: '', args: '' });
+                    }
+                  }}
+                  style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '12px 24px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, alignSelf: 'flex-start' }}
+                >
+                  Add Server
+                </button>
+              </div>
+            </div>
+
+            <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Configured Servers</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {Object.keys(mcpServers).length === 0 ? (
+                <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                  No MCP servers configured.
+                </div>
+              ) : (
+                Object.entries(mcpServers).map(([name, config]) => (
+                  <div key={name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <h4 style={{ fontSize: '15px', fontWeight: 500 }}>{name}</h4>
+                      <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px', fontFamily: 'monospace' }}>
+                        {config.command} {config.args?.join(' ')}
+                      </p>
+                    </div>
+                    <div>
+                      <button 
+                        onClick={() => {
+                          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                            wsRef.current.send(JSON.stringify({
+                              type: 'MCP_SERVER_REMOVE_REQUEST',
+                              schema_version: 1,
+                              request_id: Date.now().toString(),
+                              payload: { name }
+                            }));
+                          }
+                        }}
+                        style={{ background: 'rgba(242, 65, 91, 0.15)', color: '#FA5870', border: '1px solid rgba(242, 65, 91, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
         {activeMenu === 'Plugins' && (
           <div style={{ color: '#f0f0f5' }}>
             <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Plugins</h2>
             <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Manage active plugins and extensions for Aether-OS.</p>
-            <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: '#9090a0', marginTop: '64px' }}>
-              <h3>Plugin manager coming soon...</h3>
+            
+            <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', marginBottom: '24px' }}>
+              <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Install New Plugin</h3>
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <input 
+                  type="text"
+                  value={newPluginSource}
+                  onChange={(e) => setNewPluginSource(e.target.value)}
+                  className="ios-glass-input" 
+                  placeholder="GitHub URL or local path" 
+                  style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+                />
+                <button 
+                  onClick={() => {
+                    if (newPluginSource && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({
+                        type: 'PLUGIN_INSTALL_REQUEST',
+                        schema_version: 1,
+                        request_id: Date.now().toString(),
+                        payload: { source: newPluginSource }
+                      }));
+                      setNewPluginSource('');
+                    }
+                  }}
+                  style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '0 24px', borderRadius: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 500 }}
+                >
+                  <Download size={16} />
+                  Install
+                </button>
+              </div>
+            </div>
+
+            <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Installed Plugins</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {plugins.length === 0 ? (
+                <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                  No plugins installed.
+                </div>
+              ) : (
+                plugins.map(plugin => (
+                  <div key={plugin.name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <h4 style={{ fontSize: '15px', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        {plugin.manifest?.name || plugin.name}
+                        <span style={{ fontSize: '11px', background: 'rgba(255,255,255,0.1)', padding: '2px 6px', borderRadius: '4px' }}>v{plugin.manifest?.version || '1.0'}</span>
+                      </h4>
+                      <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>
+                        {plugin.manifest?.description || 'No description available.'}
+                      </p>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <button 
+                        onClick={() => {
+                          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                            wsRef.current.send(JSON.stringify({
+                              type: 'PLUGIN_TOGGLE_REQUEST',
+                              schema_version: 1,
+                              request_id: Date.now().toString(),
+                              payload: { name: plugin.name, enabled: !plugin.enabled }
+                            }));
+                          }
+                        }}
+                        style={{ background: plugin.enabled ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255, 255, 255, 0.1)', color: plugin.enabled ? '#10b981' : '#fff', border: `1px solid ${plugin.enabled ? 'rgba(16, 185, 129, 0.3)' : 'rgba(255, 255, 255, 0.2)'}`, padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', width: '80px' }}
+                      >
+                        {plugin.enabled ? 'Enabled' : 'Disabled'}
+                      </button>
+                      <button 
+                        onClick={() => {
+                          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                            wsRef.current.send(JSON.stringify({
+                              type: 'PLUGIN_UNINSTALL_REQUEST',
+                              schema_version: 1,
+                              request_id: Date.now().toString(),
+                              payload: { name: plugin.name }
+                            }));
+                          }
+                        }}
+                        style={{ background: 'rgba(242, 65, 91, 0.15)', color: '#FA5870', border: '1px solid rgba(242, 65, 91, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                      >
+                        Uninstall
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         )}
@@ -579,10 +883,122 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
         {activeMenu === 'Memory' && (
           <div style={{ color: '#f0f0f5' }}>
             <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Memory & Storage</h2>
-            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Manage the internal vector database and SQLite session storage.</p>
-            <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: '#9090a0', marginTop: '64px' }}>
-              <h3>Storage manager coming soon...</h3>
+            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Manage the internal knowledge graph and episodic memory.</p>
+            
+            <div style={{ display: 'flex', background: 'rgba(255,255,255,0.05)', padding: '4px', borderRadius: '12px', marginBottom: '24px', width: 'fit-content' }}>
+               <button 
+                  onClick={() => setMemoryTab('episodic')}
+                  style={{ background: memoryTab === 'episodic' ? 'rgba(124,58,237,0.4)' : 'transparent', color: '#fff', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
+                  Episodic Memory
+               </button>
+               <button 
+                  onClick={() => setMemoryTab('kg')}
+                  style={{ background: memoryTab === 'kg' ? 'rgba(124,58,237,0.4)' : 'transparent', color: '#fff', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
+                  Knowledge Graph
+               </button>
             </div>
+
+            {memoryTab === 'episodic' && (
+              <div style={{ display: 'flex', gap: '24px', height: '600px' }}>
+                <div style={{ width: '300px', display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto', paddingRight: '8px' }} className="chat-scroll">
+                  {episodes.length === 0 ? (
+                    <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center' }}>No episodes found.</div>
+                  ) : (
+                    episodes.map(ep => (
+                      <div 
+                        key={ep.id} 
+                        onClick={() => setSelectedEpisode(ep)}
+                        style={{ 
+                          background: selectedEpisode?.id === ep.id ? 'rgba(124,58,237,0.2)' : 'rgba(255,255,255,0.02)', 
+                          border: `1px solid ${selectedEpisode?.id === ep.id ? 'rgba(124,58,237,0.5)' : 'rgba(255,255,255,0.05)'}`, 
+                          borderRadius: '12px', padding: '16px', cursor: 'pointer',
+                          transition: 'all 0.2s'
+                        }}
+                      >
+                        <h4 style={{ fontSize: '14px', fontWeight: 500, margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {ep.user_prompt || 'System event'}
+                        </h4>
+                        <p style={{ fontSize: '12px', color: '#9090a0', marginTop: '4px', margin: 0 }}>
+                          {new Date(ep.timestamp * 1000).toLocaleString()}
+                        </p>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <div style={{ flex: 1, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '16px', padding: '24px', overflowY: 'auto' }} className="chat-scroll">
+                  {selectedEpisode ? (
+                    <div>
+                      <h3 style={{ fontSize: '18px', marginBottom: '16px', fontWeight: 500 }}>Episode Details</h3>
+                      <div style={{ marginBottom: '16px' }}>
+                        <div style={{ fontSize: '12px', color: '#a78bfa', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>User Prompt</div>
+                        <div style={{ background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px', fontSize: '14px', whiteSpace: 'pre-wrap' }}>
+                          {selectedEpisode.user_prompt}
+                        </div>
+                      </div>
+                      <div style={{ marginBottom: '16px' }}>
+                        <div style={{ fontSize: '12px', color: '#10b981', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Response</div>
+                        <div style={{ background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px', fontSize: '14px', whiteSpace: 'pre-wrap' }}>
+                          {selectedEpisode.outcome}
+                        </div>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                        <div>
+                          <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '4px' }}>Task ID</div>
+                          <div style={{ fontSize: '13px', fontFamily: 'monospace' }}>{selectedEpisode.task_id}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '4px' }}>Timestamp</div>
+                          <div style={{ fontSize: '13px' }}>{new Date(selectedEpisode.timestamp * 1000).toLocaleString()}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '4px' }}>Vector ID</div>
+                          <div style={{ fontSize: '13px', fontFamily: 'monospace' }}>{selectedEpisode.vector_id || 'N/A'}</div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center', color: '#9090a0', fontSize: '14px' }}>
+                      Select an episode to view details.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {memoryTab === 'kg' && (
+              <div>
+                {facts.length === 0 ? (
+                  <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                    No facts in Knowledge Graph.
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '16px' }}>
+                    {/* Group facts by entity_name */}
+                    {Object.entries(facts.reduce((acc, f) => {
+                      acc[f.entity_name] = acc[f.entity_name] || [];
+                      acc[f.entity_name].push(f);
+                      return acc;
+                    }, {})).map(([entityName, entityFacts]) => (
+                      <div key={entityName} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                          <h3 style={{ fontSize: '16px', fontWeight: 500, margin: 0, color: '#a78bfa' }}>{entityName}</h3>
+                          <span style={{ fontSize: '11px', background: 'rgba(255,255,255,0.1)', padding: '2px 8px', borderRadius: '12px', color: '#9090a0' }}>
+                            {entityFacts[0].entity_type}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                          {entityFacts.map((fact, i) => (
+                            <div key={i} style={{ background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px', fontSize: '13px', lineHeight: '1.5' }}>
+                              {fact.fact_text}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

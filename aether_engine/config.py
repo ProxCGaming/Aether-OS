@@ -90,6 +90,7 @@ class UserConfig:
         "heavy": {"time_cap_seconds": 14400, "memory_cap_mb": 8192},
         "custom": {"time_cap_seconds": 3600, "memory_cap_mb": 2048},
     })
+    tool_policies: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -102,6 +103,7 @@ class UserConfig:
             "custom_provider_names": self.custom_provider_names,
             "custom_provider_types": self.custom_provider_types,
             "task_classes": self.task_classes,
+            "tool_policies": self.tool_policies,
         }
 
     @classmethod
@@ -131,6 +133,7 @@ class UserConfig:
                 "heavy": {"time_cap_seconds": 14400, "memory_cap_mb": 8192},
                 "custom": {"time_cap_seconds": 3600, "memory_cap_mb": 2048},
             }),
+            tool_policies=_as_dict(d.get("tool_policies")),
         )
 
 

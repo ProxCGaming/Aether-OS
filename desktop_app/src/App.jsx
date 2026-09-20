@@ -152,6 +152,15 @@ function App() {
             tool_args: data.payload.tool_args,
             isFinal: true
           }]);
+        } else if (data.type === 'PLUGIN_APPROVAL_REQUEST') {
+          setIsThinking(false);
+          setChatMessages(prev => [...prev, { 
+            id: data.request_id || Date.now().toString(),
+            role: 'plugin_approval', 
+            plugin_name: data.payload.plugin_name,
+            plugin_details: data.payload.plugin_details,
+            isFinal: true
+          }]);
         } else if (data.type === 'SESSION_CREATE_RESPONSE') {
           const newId = data.payload.session_id;
           setActiveSession(newId);
@@ -286,6 +295,19 @@ function App() {
     }
   };
 
+  const handlePluginApproval = (requestId, approved) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: approved ? 'PLUGIN_APPROVAL_GRANTED' : 'PLUGIN_APPROVAL_REJECTED',
+        schema_version: 1,
+        request_id: requestId,
+        payload: {}
+      }));
+      setChatMessages(prev => prev.filter(m => m.id !== requestId));
+      if (approved) setIsThinking(true);
+    }
+  };
+
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', overflow: 'hidden', backgroundColor: '#05050f', flexDirection: 'column' }}>
       
@@ -382,6 +404,7 @@ function App() {
           messages={chatMessages} 
           onSendMessage={handleSendMessage} 
           onApproveTool={handleToolApproval}
+          onApprovePlugin={handlePluginApproval}
           status={status}
           isThinking={isThinking}
           providers={providers}
