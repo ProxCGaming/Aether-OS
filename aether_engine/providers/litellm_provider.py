@@ -199,6 +199,7 @@ class LiteLLMProvider(BaseProvider):
             "stream": True,
             "api_key": self.api_key,
             "max_tokens": 4096,
+            "num_retries": 0,
         }
 
         # Set base URL if needed

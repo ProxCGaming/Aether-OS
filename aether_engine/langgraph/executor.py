@@ -35,6 +35,8 @@ from aether_engine.providers.base import (
 )
 from aether_engine.tools.registry import ToolRegistry
 from aether_engine.providers.litellm_provider import LiteLLMProvider
+from aether_engine.memory import episodic
+from aether_engine.memory import knowledge_graph
 
 logger = logging.getLogger("aether_engine.langgraph.executor")
 
@@ -202,6 +204,19 @@ async def run_langgraph_task(
             if not interrupted:
                 elapsed_ms = round((time.time() - start_time) * 1000, 2)
             full_response = "\n".join(full_response_parts).strip()
+            
+            if not interrupted:
+                try:
+                    episodic.store_episode(task_id, prompt, full_response, ["task", "completed"], TaskState.SUCCEEDED.value)
+                    await knowledge_graph.extract_and_store_facts(
+                        provider=provider,
+                        user_prompt=prompt,
+                        assistant_response=full_response,
+                        task_id=task_id
+                    )
+                except Exception as mem_e:
+                    logger.warning(f"Memory storage failed: {mem_e}")
+                    
             yield Event(
                 type=EventType.TASK_COMPLETED,
                 request_id=request_id,
@@ -333,6 +348,19 @@ async def resume_langgraph_task(
             if not interrupted:
                 elapsed_ms = round((time.time() - start_time) * 1000, 2)
                 full_response = "\\n".join(full_response_parts).strip()
+                
+                orig_prompt = state_obj.values.get("original_prompt", "")
+                try:
+                    episodic.store_episode(task_id, orig_prompt, full_response, ["task", "completed", "resumed"], TaskState.SUCCEEDED.value)
+                    await knowledge_graph.extract_and_store_facts(
+                        provider=provider,
+                        user_prompt=orig_prompt,
+                        assistant_response=full_response,
+                        task_id=task_id
+                    )
+                except Exception as mem_e:
+                    logger.warning(f"Memory storage failed: {mem_e}")
+                    
                 yield Event(
                     type=EventType.TASK_COMPLETED,
                     request_id=thread_id,

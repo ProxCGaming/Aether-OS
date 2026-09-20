@@ -4,6 +4,7 @@ from langchain_core.runnables import RunnableConfig
 from aether_engine.langgraph.state import AetherState
 from aether_engine.providers.litellm_provider import LiteLLMProvider
 from aether_engine.providers.base import StreamChunk
+from aether_engine.memory import episodic
 
 
 def _should_end_task(state: AetherState) -> bool:
@@ -91,11 +92,27 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
         
     options_str = "'" + "', '".join(available_nodes) + "'"
     
+    original_prompt = state.get('original_prompt', 'None')
+    
+    # Retrieve relevant past episodic context
+    context_str = ""
+    try:
+        if original_prompt and original_prompt != "None":
+            episodes = episodic.search_episodic_memory(original_prompt, limit=3)
+            if episodes:
+                context_str = "Relevant Past Context (for your awareness):\n"
+                for ep in episodes:
+                    resp_trunc = ep.get('response', '')[:200].replace('\n', ' ')
+                    context_str += f"- Past User Request: '{ep.get('prompt', '')}' -> Response: '{resp_trunc}...'\n"
+    except Exception:
+        pass
+    
     system_prompt = (
         f"You are a Supervisor agent. Your task is to delegate the user's request to one of the following specialists: "
         f"{options_str}, or 'END' if the task is complete.\n"
-        f"User Request: {state.get('original_prompt', 'None')}\n"
+        f"User Request: {original_prompt}\n"
         f"Current plan: {state.get('plan', 'No plan yet.')}\n"
+        f"{context_str}\n"
         "IMPORTANT: For simple greetings (hi, hello, hii, hey), questions, or conversational input, "
         "delegate to 'planner' (if available) to generate a friendly response. Only use 'END' if the task is truly complete "
         "and a response has already been provided.\n"
@@ -132,13 +149,25 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
         content_clean = content_clean[:-3]
     content_clean = content_clean.strip()
 
-    try:
-        decision = json.loads(content_clean)
-    except json.JSONDecodeError:
-        # Fallback if the model fails to output valid JSON
-        decision = {"next": "END", "reason": f"Failed to parse supervisor decision from: {content[:50]}"}
+    if not content_clean:
+        fallback_node = "planner" if "planner" in available_nodes else (available_nodes[0] if available_nodes else "END")
+        reason_text = "Empty text response from supervisor"
+        if tool_calls:
+            reason_text += " (model generated tool calls instead of JSON)"
+        decision = {"next": fallback_node, "reason": reason_text}
+    else:
+        try:
+            decision = json.loads(content_clean)
+        except json.JSONDecodeError:
+            # Fallback if the model fails to output valid JSON
+            fallback_node = "planner" if "planner" in available_nodes else (available_nodes[0] if available_nodes else "END")
+            decision = {"next": fallback_node, "reason": f"Failed to parse supervisor decision: {content_clean[:100]}"}
 
     next_node = decision.get("next", "END")
+    
+    # Ensure next_node is valid
+    if next_node not in available_nodes and next_node != "END":
+        next_node = "END"
 
     log_entry = {
         "timestamp": int(time.time()),

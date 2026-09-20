@@ -7,7 +7,7 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from pathlib import Path
 from pydantic import BaseModel
 
@@ -72,6 +72,7 @@ from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
 from aether_engine.tools.registry import ToolRegistry, create_current_time_tool, create_file_tools, create_web_tools
 from aether_engine.routing.task_class_router import infer_task_class
 from aether_engine.workers.job_object import WorkerJobObject
+from aether_engine.memory import session_store
 
 logger = logging.getLogger("aether_engine")
 
@@ -244,7 +245,8 @@ async def _build_provider_list_async(store: SecretStore) -> list:
     for pname in sorted(dynamic):
         models = cfg.provider_models.get(pname, [])
         base_url = cfg.custom_base_urls.get(pname, "")
-        display_name = cfg.custom_provider_names.get(pname, pname.replace("_", " ").title())
+        fallback_name = pname[7:] if pname.startswith("custom_") else pname
+        display_name = cfg.custom_provider_names.get(pname, fallback_name.replace("_", " ").title())
         provider_type = cfg.custom_provider_types.get(pname, "openai_compatible")
 
         if not models and (pname in stored or provider_type == "openai_compatible"):
@@ -310,7 +312,8 @@ def _build_provider_list(store: SecretStore) -> list:
     for pname in sorted(all_custom - known_names):
         models = cfg.provider_models.get(pname, [])
         base_url = cfg.custom_base_urls.get(pname, "")
-        display_name = cfg.custom_provider_names.get(pname, pname.replace("_", " ").title())
+        fallback_name = pname[7:] if pname.startswith("custom_") else pname
+        display_name = cfg.custom_provider_names.get(pname, fallback_name.replace("_", " ").title())
         provider_type = cfg.custom_provider_types.get(pname, "openai_compatible")
         if not models:
             models = [m.id for m in engine_state.model_registry.get_models_for_provider(pname)]
@@ -518,7 +521,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
     task_runner: Optional[asyncio.Task] = None
     secret_store = SecretStore()
 
-    async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str):
+    async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str, session_id: Optional[str] = None):
         try:
             fallback_attempted = False
             primary_failed = False
@@ -559,6 +562,12 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 if ev.type == EventType.TASK_COMPLETED:
                     latency = ev.payload.get("latency_ms", 100.0)
                     engine_state.health_manager.record_success(p_name, latency)
+                    if session_id and ev.payload.get("response"):
+                        # Save the final response from assistant
+                        try:
+                            session_store.add_message(session_id, "assistant", ev.payload["response"])
+                        except Exception as e:
+                            logger.error(f"Failed to save session message: {e}")
 
                 if ev.type == EventType.TOOL_APPROVAL_REQUEST:
                     engine_state.audit_logger.log_event("APPROVAL_REQUESTED", {
@@ -603,6 +612,17 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 prompt = msg.payload.get("prompt", "").strip() or "Say hello"
                 cfg = engine_state.user_config
                 requested_model = msg.payload.get("model")
+                session_id = msg.payload.get("session_id")
+                
+                if not session_id:
+                    # Create new session if none provided
+                    title = prompt[:30] + "..." if len(prompt) > 30 else prompt
+                    session_id = session_store.create_session(title)
+                
+                try:
+                    session_store.add_message(session_id, "user", prompt)
+                except Exception as e:
+                    logger.error(f"Failed to save user message: {e}")
 
                 stored_providers = set(secret_store.list_providers())
                 engine_state.configured_providers = list(stored_providers)
@@ -667,7 +687,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 )
 
                 task_runner = asyncio.create_task(
-                    execute_task_generator(task_generator, decision.provider, decision.model, req_id)
+                    execute_task_generator(task_generator, decision.provider, decision.model, req_id, session_id=session_id)
                 )
 
             elif msg.type == EventType.CANCEL_TASK:
@@ -734,7 +754,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     
                 req_id = msg.request_id or "resume"
                 task_runner = asyncio.create_task(
-                    execute_task_generator(resume_gen, engine_state.active_provider, engine_state.active_model, req_id)
+                    execute_task_generator(resume_gen, engine_state.active_provider, engine_state.active_model, req_id, session_id=None)
                 )
 
             # -----------------------------------------------------------
@@ -946,6 +966,44 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     type=EventType.MODEL_DEFAULT_CHANGED,
                     request_id=req_id,
                     payload={"provider": pname, "model": engine_state.user_config.default_model},
+                ).to_json())
+
+            # -----------------------------------------------------------
+            # Session Events
+            # -----------------------------------------------------------
+            elif msg.type == EventType.SESSION_LIST_REQUEST:
+                sessions = session_store.list_sessions()
+                await ws.send_text(Event(
+                    type=EventType.SESSION_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"sessions": sessions},
+                ).to_json())
+
+            elif msg.type == EventType.SESSION_GET_REQUEST:
+                sess_id = msg.payload.get("session_id")
+                session_data = session_store.get_session(sess_id) if sess_id else None
+                await ws.send_text(Event(
+                    type=EventType.SESSION_GET_RESPONSE,
+                    request_id=req_id,
+                    payload={"session": session_data},
+                ).to_json())
+
+            elif msg.type == EventType.SESSION_CREATE_REQUEST:
+                title = msg.payload.get("title", "New Chat")
+                sess_id = session_store.create_session(title)
+                await ws.send_text(Event(
+                    type=EventType.SESSION_CREATE_RESPONSE,
+                    request_id=req_id,
+                    payload={"session_id": sess_id},
+                ).to_json())
+
+            elif msg.type == EventType.SESSION_DELETE_REQUEST:
+                sess_id = msg.payload.get("session_id")
+                deleted = session_store.delete_session(sess_id) if sess_id else False
+                await ws.send_text(Event(
+                    type=EventType.SESSION_DELETE_RESPONSE,
+                    request_id=req_id,
+                    payload={"session_id": sess_id, "deleted": deleted},
                 ).to_json())
 
             # -----------------------------------------------------------
