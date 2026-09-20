@@ -3,6 +3,8 @@ import ForceGraph3D from 'react-force-graph-3d';
 import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
 import SettingsPanel from './SettingsPanel';
+import Dashboard from './Dashboard';
+import Projects from './Projects';
 import './chat.css';
 
 // Dummy graph data for "first-run" state
@@ -30,39 +32,87 @@ function App() {
   const [status, setStatus] = useState('Initializing');
   const [isThinking, setIsThinking] = useState(false);
   const [chatMessages, setChatMessages] = useState([]);
+  const [isChatDetached, setIsChatDetached] = useState(false);
   
   // Settings State
   const [providers, setProviders] = useState({});
   const [localModels, setLocalModels] = useState([]);
   const [defaultModel, setDefaultModel] = useState('');
 
+  const params = new URLSearchParams(window.location.search);
+  const isFloating = params.get('floating') === 'true';
+  const initialSession = params.get('session');
+
   const [sessions, setSessions] = useState([]);
-  const [activeSession, setActiveSession] = useState(null);
+  const [activeSession, setActiveSession] = useState(initialSession || null);
   const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Projects', 'Insights', 'Settings'
   const wsRef = useRef(null);
   const graphRef = useRef();
 
   useEffect(() => {
     async function initConnection() {
-      // Fetch token from Electron main process
-      let token = '';
-      if (window.electronAPI && window.electronAPI.getAuthToken) {
-        token = await window.electronAPI.getAuthToken();
-      }
-
-      // Connect to Aether Engine with Token
-      const wsUrl = token ? `ws://127.0.0.1:8000/ws/tasks?token=${token}` : 'ws://127.0.0.1:8000/ws/tasks';
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-      
-      ws.onopen = () => {
-        setStatus('Online');
-        ws.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
-        ws.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
-        ws.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+      // In the new architecture, the main process handles the WebSocket.
+      // We just mock wsRef so existing code can call wsRef.current.send()
+      wsRef.current = {
+        readyState: 1, // Simulate WebSocket.OPEN
+        send: (data) => {
+          if (window.electronAPI && window.electronAPI.sendEngineMessage) {
+            window.electronAPI.sendEngineMessage(data);
+          }
+        },
+        addEventListener: (event, handler) => {
+          if (event === 'message' && window.electronAPI) {
+            window.electronAPI.onEngineMessage((data) => {
+              handler({ data });
+            });
+          }
+        },
+        removeEventListener: () => {}
       };
 
-      ws.onmessage = (event) => {
+      // Check initial status
+      if (window.electronAPI && window.electronAPI.getWsStatus) {
+        const isConnected = await window.electronAPI.getWsStatus();
+        if (isConnected) {
+          setStatus('Online');
+          wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+          wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+          wsRef.current.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+        }
+      }
+
+      if (window.electronAPI && window.electronAPI.onEngineMessage) {
+        window.electronAPI.onEngineMessage((data) => {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.type === '_ws_status') {
+              if (parsed.status === 'connected') {
+                setStatus('Online');
+                wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+                wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+                wsRef.current.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+              } else {
+                setStatus('Offline / Engine Disconnected');
+              }
+              return;
+            }
+            // Route standard messages to handleMessage
+            handleMessage({ data });
+          } catch (e) {
+            console.error(e);
+          }
+        });
+      }
+
+      if (window.electronAPI && window.electronAPI.onChatDetached) {
+        window.electronAPI.onChatDetached(() => setIsChatDetached(true));
+      }
+      
+      if (window.electronAPI && window.electronAPI.onChatAttached) {
+        window.electronAPI.onChatAttached(() => setIsChatDetached(false));
+      }
+
+      const handleMessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'hello') {
           setStatus(`Online / ${data.payload.active_model || 'Agent'}`);
@@ -121,6 +171,8 @@ function App() {
           setSessions(data.payload.sessions || []);
           if (data.payload.sessions?.length > 0 && !activeSession) {
             handleSessionSwitch(data.payload.sessions[0].id);
+          } else if (isFloating && initialSession) {
+            handleSessionSwitch(initialSession);
           }
         } else if (data.type === 'SESSION_GET_RESPONSE') {
           const sess = data.payload.session;
@@ -194,10 +246,7 @@ function App() {
         }
       };
 
-      ws.onerror = () => {
-        setStatus('Offline / Engine Disconnected');
       };
-    }
     
     initConnection();
 
@@ -286,116 +335,158 @@ function App() {
     }
   };
 
+  const handleChangeModel = (provider, model) => {
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({
+        type: 'MODEL_SET_DEFAULT',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { provider, model }
+      }));
+    }
+  };
+
   return (
-    <div style={{ width: '100vw', height: '100vh', display: 'flex', overflow: 'hidden', backgroundColor: '#05050f', flexDirection: 'column' }}>
+    <div style={{ width: '100vw', height: '100vh', display: 'flex', overflow: 'hidden', backgroundColor: isFloating ? 'transparent' : '#05050f', flexDirection: 'column' }}>
       
-      <TitleBar />
+      {!isFloating && <TitleBar />}
       
       {/* Glowing Orbs for Glassmorphism pop */}
-      <div style={{ position: 'absolute', top: '10%', left: '20%', width: '500px', height: '500px', background: 'radial-gradient(circle, rgba(124, 58, 237, 0.25) 0%, rgba(0,0,0,0) 70%)', filter: 'blur(80px)', zIndex: 2, pointerEvents: 'none', borderRadius: '50%', animation: 'float1 20s infinite ease-in-out' }}></div>
-      <div style={{ position: 'absolute', bottom: '10%', right: '15%', width: '600px', height: '600px', background: 'radial-gradient(circle, rgba(236, 72, 153, 0.2) 0%, rgba(0,0,0,0) 70%)', filter: 'blur(100px)', zIndex: 2, pointerEvents: 'none', borderRadius: '50%', animation: 'float2 25s infinite ease-in-out reverse' }}></div>
-      <div style={{ position: 'absolute', top: '40%', left: '50%', width: '400px', height: '400px', background: 'radial-gradient(circle, rgba(59, 130, 246, 0.2) 0%, rgba(0,0,0,0) 70%)', filter: 'blur(90px)', zIndex: 2, pointerEvents: 'none', borderRadius: '50%', transform: 'translate(-50%, -50%)', animation: 'float3 15s infinite ease-in-out' }}></div>
+      {!isFloating && (
+        <>
+          <div style={{ position: 'absolute', top: '10%', left: '20%', width: '500px', height: '500px', background: 'radial-gradient(circle, rgba(124, 58, 237, 0.25) 0%, rgba(0,0,0,0) 70%)', filter: 'blur(80px)', zIndex: 2, pointerEvents: 'none', borderRadius: '50%', animation: 'float1 20s infinite ease-in-out' }}></div>
+          <div style={{ position: 'absolute', bottom: '10%', right: '15%', width: '600px', height: '600px', background: 'radial-gradient(circle, rgba(236, 72, 153, 0.2) 0%, rgba(0,0,0,0) 70%)', filter: 'blur(100px)', zIndex: 2, pointerEvents: 'none', borderRadius: '50%', animation: 'float2 25s infinite ease-in-out reverse' }}></div>
+          <div style={{ position: 'absolute', top: '40%', left: '50%', width: '400px', height: '400px', background: 'radial-gradient(circle, rgba(59, 130, 246, 0.2) 0%, rgba(0,0,0,0) 70%)', filter: 'blur(90px)', zIndex: 2, pointerEvents: 'none', borderRadius: '50%', transform: 'translate(-50%, -50%)', animation: 'float3 15s infinite ease-in-out' }}></div>
+        </>
+      )}
 
       <div style={{ flex: 1, position: 'relative', display: 'flex', zIndex: 10 }}>
         {/* Sidebar Command Palette (Glassmorphism) */}
-      <div className="glass-panel" style={{
-        width: '320px',
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        position: 'absolute',
-        left: 0,
-        top: 0,
-        padding: '24px 0',
-        zIndex: 20
-      }}>
-        <div style={{ padding: '0 24px', marginBottom: '32px', display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div style={{ width: '32px', height: '32px', background: 'linear-gradient(135deg, #7c3aed, #ec4899)', borderRadius: '8px' }}></div>
-          <div>
-            <h2 style={{ fontSize: '18px', margin: 0, color: '#fff' }}>AETHER-OS</h2>
-            <div style={{ fontSize: '12px', color: '#a78bfa', textTransform: 'uppercase', letterSpacing: '1px' }}>{status}</div>
-          </div>
-        </div>
+        {!isFloating && (
+          <div className="glass-panel" style={{
+            width: '320px',
+            height: '100%',
+            display: 'flex',
+            flexDirection: 'column',
+            position: 'absolute',
+            left: 0,
+            top: 0,
+            padding: '24px 0',
+            zIndex: 20
+          }}>
+            <div style={{ padding: '0 24px', marginBottom: '32px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{ width: '32px', height: '32px', background: 'linear-gradient(135deg, #7c3aed, #ec4899)', borderRadius: '8px' }}></div>
+              <div>
+                <h2 style={{ fontSize: '18px', margin: 0, color: '#fff' }}>AETHER-OS</h2>
+                <div style={{ fontSize: '12px', color: '#a78bfa', textTransform: 'uppercase', letterSpacing: '1px' }}>{status}</div>
+              </div>
+            </div>
 
-        <nav style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '0 12px' }}>
-          <NavItem icon={<MessageSquare size={18} />} label="Chat" activeTab={activeTab} setActiveTab={setActiveTab} />
-          <NavItem icon={<LayoutDashboard size={18} />} label="Dashboard" activeTab={activeTab} setActiveTab={setActiveTab} />
-          <NavItem icon={<Folder size={18} />} label="Projects" activeTab={activeTab} setActiveTab={setActiveTab} />
-          <NavItem icon={<BarChart2 size={18} />} label="Insights" activeTab={activeTab} setActiveTab={setActiveTab} />
-          <NavItem icon={<Settings size={18} />} label="Settings" activeTab={activeTab} setActiveTab={setActiveTab} />
-        </nav>
+            <nav style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '0 12px' }}>
+              <NavItem icon={<MessageSquare size={18} />} label="Chat" activeTab={activeTab} setActiveTab={setActiveTab} />
+              <NavItem icon={<LayoutDashboard size={18} />} label="Dashboard" activeTab={activeTab} setActiveTab={setActiveTab} />
+              <NavItem icon={<Folder size={18} />} label="Projects" activeTab={activeTab} setActiveTab={setActiveTab} />
+              <NavItem icon={<Settings size={18} />} label="Settings" activeTab={activeTab} setActiveTab={setActiveTab} />
+            </nav>
 
-        {/* Sessions Section */}
-        <div style={{ flex: 1, marginTop: '32px', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          <div style={{ padding: '0 24px', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#9090a0', letterSpacing: '1px', margin: 0 }}>Chats</h3>
-            <button 
-              onClick={handleNewChat}
-              style={{ 
-              background: 'rgba(255,255,255,0.05)', 
-              border: 'none', 
-              color: '#fff',
-              borderRadius: '6px',
-              padding: '4px 8px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              cursor: 'pointer',
-              fontSize: '11px'
-            }}>
-              <Plus size={12} /> New
-            </button>
-          </div>
-          
-          <div className="chat-scroll" style={{ padding: '0 12px', flex: 1, overflowY: 'auto' }}>
-            {sessions.map(s => (
-              <div 
-                key={s.id} 
-                className={`session-item ${activeSession === s.id ? 'active' : ''}`}
-                onClick={() => handleSessionSwitch(s.id)}
-                style={{
+            {/* Sessions Section */}
+            <div style={{ flex: 1, marginTop: '32px', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              <div style={{ padding: '0 24px', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#9090a0', letterSpacing: '1px', margin: 0 }}>Chats</h3>
+                <button 
+                  onClick={handleNewChat}
+                  style={{ 
+                  background: 'rgba(255,255,255,0.05)', 
+                  border: 'none', 
+                  color: '#fff',
+                  borderRadius: '6px',
+                  padding: '4px 8px',
                   display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'space-between'
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden' }}>
-                  <MessageSquare size={16} style={{ opacity: activeSession === s.id ? 1 : 0.5, flexShrink: 0 }} />
-                  <span style={{ fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.title || s.name || `Session ${s.id}`}</span>
-                </div>
-                <button 
-                  className="session-delete-btn"
-                  onClick={(e) => handleDeleteSession(s.id, e)}
-                  title="Delete Session"
-                >
-                  <Trash2 size={14} />
+                  gap: '4px',
+                  cursor: 'pointer',
+                  fontSize: '11px'
+                }}>
+                  <Plus size={12} /> New
                 </button>
               </div>
-            ))}
-          </div>
-        </div>
+              
+              <div className="chat-scroll" style={{ padding: '0 12px', flex: 1, overflowY: 'auto' }}>
+                {sessions.map(s => (
+                  <div 
+                    key={s.id} 
+                    className={`session-item ${activeSession === s.id ? 'active' : ''}`}
+                    onClick={() => handleSessionSwitch(s.id)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden' }}>
+                      <MessageSquare size={16} style={{ opacity: activeSession === s.id ? 1 : 0.5, flexShrink: 0 }} />
+                      <span style={{ fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.title || s.name || `Session ${s.id}`}</span>
+                    </div>
+                    <button 
+                      className="session-delete-btn"
+                      onClick={(e) => handleDeleteSession(s.id, e)}
+                      title="Delete Session"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
 
-      </div>
+          </div>
+        )}
 
       {activeTab === 'Chat' && (
-        <DraggableChatWindow 
-          messages={chatMessages} 
-          onSendMessage={handleSendMessage} 
-          onApproveTool={handleToolApproval}
-          status={status}
-          isThinking={isThinking}
-          providers={providers}
-          onChangeModel={(provider, model) => {
-             if (wsRef.current) {
-                wsRef.current.send(JSON.stringify({
-                   type: 'MODEL_SET_DEFAULT',
-                   schema_version: 1,
-                   request_id: Date.now().toString(),
-                   payload: { provider, model }
-                }));
-             }
-          }}
-        />
+        isChatDetached ? (
+          <div style={{
+            position: 'absolute',
+            top: '40px',
+            left: '360px',
+            right: '40px',
+            bottom: '40px',
+            zIndex: 40,
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center'
+          }}>
+            <div className="ios-glass" style={{ width: '100%', height: '100%', padding: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '40px', textAlign: 'center', maxWidth: '400px' }}>
+                <h2 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '20px' }}>Chat is Detached</h2>
+                <p style={{ margin: '0 0 24px 0', fontSize: '14px', lineHeight: '1.5', color: '#9090a0' }}>
+                  The chat window is currently running as a floating overlay.
+                </p>
+                <button 
+                  onClick={() => {
+                    if (window.electronAPI && window.electronAPI.closeFloatingChat) {
+                      window.electronAPI.closeFloatingChat();
+                    }
+                  }}
+                  style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '12px 24px', borderRadius: '12px', cursor: 'pointer', fontSize: '14px', fontWeight: 500 }}
+                >
+                  Re-attach to Main Window
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <DraggableChatWindow 
+            messages={chatMessages} 
+            onSendMessage={handleSendMessage} 
+            onApproveTool={handleToolApproval}
+            status={status}
+            isThinking={isThinking}
+            providers={providers}
+            onChangeModel={handleChangeModel}
+            onDetach={() => window.electronAPI?.openFloatingChat(activeSession)}
+            isFloating={isFloating}
+          />
+        )
       )}
 
       {activeTab !== 'Chat' && (
@@ -431,7 +522,9 @@ function App() {
                  />
                </div>
             )}
-            {activeTab !== 'Settings' && (
+            {activeTab === 'Dashboard' && <Dashboard />}
+            {activeTab === 'Projects' && <Projects />}
+            {activeTab !== 'Settings' && activeTab !== 'Dashboard' && activeTab !== 'Projects' && (
                <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: '#9090a0' }}>
                  <h2>{activeTab} view coming soon.</h2>
                </div>
@@ -441,25 +534,27 @@ function App() {
       )}
 
       {/* 3D Knowledge Graph Background */}
-      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1 }}>
-        <ForceGraph3D
-          ref={graphRef}
-          graphData={graphData}
-          backgroundColor="#05050f"
-          nodeColor={node => {
-            if (node.group === 1) return '#ec4899'; // AETHER-OS root
-            if (node.group === 2) return '#60a5fa'; // Core brain nodes
-            if (node.group === 3) return '#a78bfa'; // Logs
-            return '#312e81'; // Ambient
-          }}
-          nodeRelSize={6}
-          linkOpacity={0.3}
-          linkWidth={1.5}
-          linkColor={() => '#4338ca'}
-          enableNodeDrag={false}
-          showNavInfo={false}
-        />
-      </div>
+      {!isFloating && (
+        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1 }}>
+          <ForceGraph3D
+            ref={graphRef}
+            graphData={graphData}
+            backgroundColor="#05050f"
+            nodeColor={node => {
+              if (node.group === 1) return '#ec4899'; // AETHER-OS root
+              if (node.group === 2) return '#60a5fa'; // Core brain nodes
+              if (node.group === 3) return '#a78bfa'; // Logs
+              return '#312e81'; // Ambient
+            }}
+            nodeRelSize={6}
+            linkOpacity={0.3}
+            linkWidth={1.5}
+            linkColor={() => '#4338ca'}
+            enableNodeDrag={false}
+            showNavInfo={false}
+          />
+        </div>
+      )}
 
     </div>
     </div>

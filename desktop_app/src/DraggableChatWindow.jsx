@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Draggable from 'react-draggable';
-import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown } from 'lucide-react';
+import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
 import './chat.css';
@@ -80,7 +80,9 @@ export default function DraggableChatWindow({
   isThinking,
   onApproveTool,
   providers = [],
-  onChangeModel = () => {}
+  onChangeModel = () => {},
+  onDetach,
+  isFloating
 }) {
   const [input, setInput] = useState('');
   const [isMinimized, setIsMinimized] = useState(false);
@@ -111,11 +113,11 @@ export default function DraggableChatWindow({
         ref={nodeRef}
         className="ios-glass"
         style={{
-          position: 'absolute',
-          top: '20px',
-          right: '20px',
-          width: '400px',
-          height: isMinimized ? 'auto' : '600px',
+          position: isFloating ? 'relative' : 'absolute',
+          top: isFloating ? '0' : '20px',
+          right: isFloating ? '0' : '20px',
+          width: isFloating ? '100%' : '400px',
+          height: isFloating ? '100%' : (isMinimized ? 'auto' : '600px'),
           display: 'flex',
           flexDirection: 'column',
           zIndex: 50,
@@ -124,17 +126,18 @@ export default function DraggableChatWindow({
       >
         {/* Header - Draggable Handle */}
         <div 
-          className="draggable-handle"
+          className={isFloating ? "title-bar" : "draggable-handle"}
           style={{
             padding: '12px 16px',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
             borderBottom: '1px solid rgba(255,255,255,0.08)',
-            background: 'rgba(255,255,255,0.03)'
+            background: 'rgba(255,255,255,0.03)',
+            WebkitAppRegion: isFloating ? 'drag' : undefined
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, WebkitAppRegion: 'no-drag' }}>
             <GripHorizontal size={16} color="rgba(255,255,255,0.4)" />
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
               <div style={{ 
@@ -173,13 +176,42 @@ export default function DraggableChatWindow({
 
             </div>
           </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button 
-              onClick={() => setIsMinimized(!isMinimized)}
-              style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}
-            >
-              {isMinimized ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
-            </button>
+          <div style={{ display: 'flex', gap: '12px' }}>
+            {isFloating ? (
+              <>
+                <button 
+                  onClick={() => window.electronAPI && window.electronAPI.closeFloatingChat()}
+                  title="Re-attach to Main Window"
+                  style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <LogIn size={14} />
+                </button>
+                <button 
+                  onClick={() => window.electronAPI && window.electronAPI.closeFloatingChat()}
+                  title="Close Window"
+                  style={{ background: 'rgba(239, 68, 68, 0.2)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#fca5a5', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <X size={14} />
+                </button>
+              </>
+            ) : (
+              <>
+                <button 
+                  onClick={onDetach}
+                  title="Pop out to floating window"
+                  style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
+                >
+                  <ExternalLink size={14} />
+                </button>
+                <button 
+                  onClick={() => setIsMinimized(!isMinimized)}
+                  title={isMinimized ? "Maximize" : "Minimize"}
+                  style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
+                >
+                  {isMinimized ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
+                </button>
+              </>
+            )}
           </div>
         </div>
 

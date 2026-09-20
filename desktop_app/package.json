@@ -19,7 +19,8 @@
     "react-draggable": "^4.7.2",
     "react-force-graph-3d": "^1.29.1",
     "react-markdown": "^10.1.0",
-    "three": "^0.186.0"
+    "three": "^0.186.0",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/react": "^19.2.18",

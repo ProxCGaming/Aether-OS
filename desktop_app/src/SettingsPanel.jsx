@@ -134,17 +134,44 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
 
 
 
+  const [showLlamaPrompt, setShowLlamaPrompt] = useState(false);
+  const [downloadingLlama, setDownloadingLlama] = useState(false);
+
   const handleDownloadLocalModel = () => {
     if (!downloadInput) return;
+    
+    // Check if we have llama.cpp installed (mock check for demo)
+    const hasLlamaCpp = localStorage.getItem('has_llama_cpp') === 'true';
+    
+    if (!hasLlamaCpp) {
+      setShowLlamaPrompt(true);
+      return;
+    }
+    
+    startModelDownload();
+  };
+
+  const startModelDownload = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'LOCAL_MODEL_DOWNLOAD_START',
         schema_version: 1,
         request_id: Date.now().toString(),
-        payload: { model_name: downloadInput }
+        payload: { repo_id: downloadInput }
       }));
       setDownloadInput('');
     }
+  };
+
+  const handleInstallLlama = () => {
+    setDownloadingLlama(true);
+    // Simulate downloading native dependencies
+    setTimeout(() => {
+      localStorage.setItem('has_llama_cpp', 'true');
+      setDownloadingLlama(false);
+      setShowLlamaPrompt(false);
+      startModelDownload();
+    }, 3000);
   };
 
   const menuItems = [
@@ -216,9 +243,9 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '16px' }}>Customize the look and feel of Aether-OS.</p>
                {/* Controls will go here */}
                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <button className="ios-glass" style={{ padding: '8px 16px', color: '#fff', border: '1px solid rgba(124, 58, 237, 0.5)', background: 'rgba(124, 58, 237, 0.2)' }}>System Default</button>
-                  <button className="ios-glass" style={{ padding: '8px 16px', color: '#9090a0' }}>Dark Mode</button>
-                  <button className="ios-glass" style={{ padding: '8px 16px', color: '#9090a0' }}>Light Mode</button>
+                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'system')} className="ios-glass" style={{ padding: '8px 16px', color: '#fff', border: '1px solid rgba(124, 58, 237, 0.5)', background: 'rgba(124, 58, 237, 0.2)', cursor: 'pointer' }}>System Default</button>
+                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'dark')} className="ios-glass" style={{ padding: '8px 16px', color: '#9090a0', cursor: 'pointer' }}>Dark Mode</button>
+                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'light')} className="ios-glass" style={{ padding: '8px 16px', color: '#9090a0', cursor: 'pointer' }}>Light Mode</button>
                </div>
             </div>
           </div>
@@ -433,7 +460,17 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                           <Dropdown 
                             value="auto"
-                            onChange={() => {}}
+                            onChange={(val) => {
+                              const [provider, model] = val.split(':::');
+                              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                                wsRef.current.send(JSON.stringify({
+                                  type: 'AUXILIARY_MODEL_SET_REQUEST',
+                                  schema_version: 1,
+                                  request_id: Date.now().toString(),
+                                  payload: { task: task.id, provider, model: model || 'auto' }
+                                }));
+                              }
+                            }}
                             options={[
                               { value: 'auto', label: 'Use main model' },
                               ...(Array.isArray(providers) ? providers : [])
@@ -456,14 +493,14 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
             {modelTab === 'local' && (
                <>
                  <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', marginBottom: '24px' }}>
-                   <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Download New Local Model</h3>
-                   <div style={{ display: 'flex', gap: '12px' }}>
+                   <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Download GGUF Model (HuggingFace)</h3>
+                   <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
                      <input 
                        type="text"
                        value={downloadInput}
                        onChange={(e) => setDownloadInput(e.target.value)}
                        className="ios-glass-input" 
-                       placeholder="e.g. llama3, mistral, phi3" 
+                       placeholder="e.g. TheBloke/Llama-2-7B-Chat-GGUF" 
                        style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
                      />
                      <button 
@@ -474,6 +511,31 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                        Download
                      </button>
                    </div>
+                   
+                   {showLlamaPrompt && (
+                     <div style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.2)', borderRadius: '12px', padding: '16px', marginTop: '16px' }}>
+                       <h4 style={{ color: '#fca5a5', margin: '0 0 8px 0', fontSize: '14px' }}>Native Inference Engine Required</h4>
+                       <p style={{ color: '#e2e8f0', fontSize: '13px', margin: '0 0 16px 0' }}>
+                         To run local models, you need to download the native `llama.cpp` inference engine (~25MB). Would you like to download it now?
+                       </p>
+                       <div style={{ display: 'flex', gap: '12px' }}>
+                         <button 
+                           onClick={handleInstallLlama}
+                           disabled={downloadingLlama}
+                           style={{ background: '#ef4444', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: 500 }}
+                         >
+                           {downloadingLlama ? 'Downloading...' : 'Install Native Engine'}
+                         </button>
+                         <button 
+                           onClick={() => setShowLlamaPrompt(false)}
+                           disabled={downloadingLlama}
+                           style={{ background: 'rgba(255,255,255,0.1)', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                         >
+                           Cancel
+                         </button>
+                       </div>
+                     </div>
+                   )}
                  </div>
 
                  <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Available Local Models</h3>
