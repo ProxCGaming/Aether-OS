@@ -198,10 +198,16 @@ class AetherWindow(QWidget):
         # HUD Stream Widget
         self.hud = HudWidget(self.sm, self)
         self.hud.start_task_requested.connect(
-            lambda prompt, model: asyncio.create_task(self.ws_client.start_task(prompt, model))
+            lambda prompt, model, session_id: asyncio.create_task(self.ws_client.start_task(prompt, model, session_id))
         )
         self.hud.cancel_task_requested.connect(
             lambda: asyncio.create_task(self.ws_client.cancel_task())
+        )
+        self.hud.session_selected.connect(
+            lambda session_id: asyncio.create_task(self.ws_client.get_session(session_id))
+        )
+        self.hud.new_chat_requested.connect(
+            lambda: asyncio.create_task(self.ws_client.create_session("New Chat"))
         )
         self.hud.model_changed_by_user.connect(
             lambda provider, model: asyncio.create_task(
@@ -405,6 +411,10 @@ class AetherWindow(QWidget):
 
         elif t == EventType.HELLO:
             asyncio.create_task(self.ws_client.request_provider_list())
+            asyncio.create_task(self.ws_client.fetch_sessions())
+
+        elif t in (EventType.SESSION_CREATE_RESPONSE, EventType.SESSION_DELETE_RESPONSE):
+            asyncio.create_task(self.ws_client.fetch_sessions())
 
         elif t == EventType.PROVIDER_REMOVE_RESPONSE:
             if p.get("success") or p.get("deleted"):

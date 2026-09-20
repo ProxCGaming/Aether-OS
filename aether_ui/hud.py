@@ -15,7 +15,11 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QScrollArea
 )
+
+from aether_ui.components.sessions_drawer import SessionsDrawer
+from aether_ui.components.chat_bubble import ChatBubble
 
 from aether_common.contracts import Event, EventType
 from aether_ui.state import UIState, UIStateMachine
@@ -124,12 +128,50 @@ def _format_provider_name(provider: Optional[str], sm=None) -> str:
     }
     return mapping.get(provider.lower(), provider.replace("_", " ").title())
 
+class ChatLogScrollArea(QScrollArea):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setFrameStyle(0)
+        self.setStyleSheet(SCROLLBAR_CSS + "QScrollArea { background: transparent; }")
+        
+        self.content_widget = QWidget()
+        self.lo = QVBoxLayout(self.content_widget)
+        self.lo.setContentsMargins(10, 10, 10, 10)
+        self.lo.setSpacing(10)
+        self.lo.addStretch()
+        self.setWidget(self.content_widget)
+
+    def append(self, html: str):
+        lbl = QLabel(html)
+        lbl.setWordWrap(True)
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl.setStyleSheet(f"font-family: Consolas, 'Cascadia Code', monospace; font-size: 11px;")
+        self.lo.insertWidget(self.lo.count() - 1, lbl)
+        self.ensureCursorVisible()
+
+    def add_bubble(self, role: str, content: str):
+        bubble = ChatBubble(role, content)
+        self.lo.insertWidget(self.lo.count() - 1, bubble)
+        self.ensureCursorVisible()
+
+    def ensureCursorVisible(self):
+        QTimer.singleShot(10, lambda: self.verticalScrollBar().setValue(self.verticalScrollBar().maximum()))
+
+    def clear(self):
+        while self.lo.count() > 1:
+            item = self.lo.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
 
 class HudWidget(QWidget):
-    start_task_requested = Signal(str, str)  # (prompt, model)
+    start_task_requested = Signal(str, str, str)  # (prompt, model, session_id)
     cancel_task_requested = Signal()
     model_changed_by_user = Signal(str, str)  # provider, model name
     manage_models_requested = Signal()
+    session_selected = Signal(str)
+    new_chat_requested = Signal()
 
     def __init__(self, state_machine: UIStateMachine, parent=None):
         super().__init__(parent)
@@ -153,9 +195,24 @@ class HudWidget(QWidget):
         self.lbl_hb.setText(f"Heartbeat: #{self.heartbeat}")
 
     def _build_ui(self):
-        lo = QVBoxLayout(self)
+        main_lo = QHBoxLayout(self)
+        main_lo.setContentsMargins(0, 0, 0, 0)
+        main_lo.setSpacing(0)
+        
+        # Left Panel: Sessions Drawer
+        self.drawer = SessionsDrawer()
+        self.drawer.setFixedWidth(260)
+        self.drawer.session_selected.connect(self.session_selected.emit)
+        self.drawer.new_chat_requested.connect(self.new_chat_requested.emit)
+        main_lo.addWidget(self.drawer)
+        
+        # Right Panel: Chat/HUD
+        right_pane = QWidget()
+        right_pane.setStyleSheet(f"background-color: {SURFACE_PANEL};")
+        lo = QVBoxLayout(right_pane)
         lo.setContentsMargins(16, 10, 16, 16)
         lo.setSpacing(10)
+        main_lo.addWidget(right_pane, 1)
 
         # Header row: Status pill + Health badge + Model pill + Heartbeat
         hdr = QHBoxLayout()
@@ -214,29 +271,14 @@ class HudWidget(QWidget):
         self.routing_banner = RoutingBanner()
         lo.addWidget(self.routing_banner)
 
-        # Event stream section
-        lbl_log = QLabel("EVENT STREAM")
+        lbl_log = QLabel("CHAT & EVENT STREAM")
         lbl_log.setStyleSheet(
             f"font-size:10px; color:{TEXT_SECONDARY}; font-weight:700; "
             "letter-spacing:0.5px; font-family:'Segoe UI', sans-serif;"
         )
         lo.addWidget(lbl_log)
 
-        self.log = QTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setStyleSheet(f"""
-            QTextEdit {{
-                background: {SURFACE_PANEL};
-                color: {TEXT_PRIMARY};
-                border: 1px solid {SURFACE_BORDER};
-                border-radius: 8px;
-                padding: 10px;
-                font-family: Consolas, 'Cascadia Code', monospace;
-                font-size: 11px;
-                line-height: 1.5;
-            }}
-            {SCROLLBAR_CSS}
-        """)
+        self.log = ChatLogScrollArea()
         lo.addWidget(self.log, 1)
 
     def _on_send(self):
@@ -246,7 +288,7 @@ class HudWidget(QWidget):
         self.inp_prompt.clear()
         model = self.cmb_model._active_model
         self.sm.clear_error()
-        self.start_task_requested.emit(text, model)
+        self.start_task_requested.emit(text, model, self.sm.active_session_id)
 
     def _on_model_changed(self, provider: str, model: str):
         if not self._suppress_model_signal and model:
@@ -290,11 +332,12 @@ class HudWidget(QWidget):
         if t == EventType.START_TASK:
             m = p.get("model", "")
             m_str = f" [{m}]" if m else ""
+            self.log.add_bubble("user", p.get("prompt", ""))
             self.log.append(
                 f'<div style="margin:2px 0;"><span style="color:{STATUS_HEALTHY};">●</span> '
                 f'<span style="color:{TEXT_MUTED};">{ts}</span> '
                 f'<span style="color:{STATUS_HEALTHY}; font-weight:bold;">task.start</span> '
-                f'<span style="color:{TEXT_PRIMARY};">{p.get("prompt")}{m_str}</span></div>'
+                f'<span style="color:{TEXT_PRIMARY};">{m_str}</span></div>'
             )
         elif t == EventType.ROUTING_DECISION:
             reason = p.get("reason", "")
@@ -424,28 +467,17 @@ class HudWidget(QWidget):
                     f'<span style="color:{TEXT_SECONDARY};">{p.get("result")}</span></div>'
                 )
             elif "text_delta" in p:
-                import markdown
-                import re
-                text = p["text_delta"]
-                # Format <think> tags to a nice block
-                text = re.sub(
-                    r'<think>(.*?)</think>', 
-                    r'<div style="color: #8B949E; border-left: 2px solid #30363D; padding-left: 10px; margin-bottom: 10px; margin-top: 10px;"><i>🤔 Thinking...<br/>\1</i></div>', 
-                    text, 
-                    flags=re.DOTALL
-                )
-                # Fallback for unclosed <think> tag
-                text = re.sub(
-                    r'<think>(.*)$', 
-                    r'<div style="color: #8B949E; border-left: 2px solid #30363D; padding-left: 10px; margin-bottom: 10px; margin-top: 10px;"><i>🤔 Thinking...<br/>\1</i></div>', 
-                    text, 
-                    flags=re.DOTALL
-                )
-                html = markdown.markdown(text, extensions=['fenced_code', 'tables'])
-                self.log.append(f'<div style="color:#C9D1D9; margin-top: 5px;">{html}</div>')
-                self.log.ensureCursorVisible()
+                pass # Skip raw text rendering in event log, we will render the full bubble on completion
+        elif t == EventType.SESSION_GET_RESPONSE:
+            self.log.clear()
+            sess = p.get("session")
+            if sess:
+                for msg in sess.get("messages", []):
+                    self.log.add_bubble(msg.get("role"), msg.get("content"))
         elif t == EventType.TASK_COMPLETED:
             resp = p.get("response", "")
+            self.log.add_bubble("assistant", resp)
+            
             latency = p.get("latency_ms", 0.0)
             prov = p.get("provider") or self._active_provider
             if prov:
@@ -459,8 +491,8 @@ class HudWidget(QWidget):
             self.log.append(
                 f'<div style="margin:4px 0;"><span style="color:{STATUS_HEALTHY};">●</span> '
                 f'<span style="color:{TEXT_MUTED};">{ts}</span> '
-                f'<span style="color:{STATUS_HEALTHY}; font-weight:bold;">task.complete{lat_str}</span>: '
-                f'<span style="color:{TEXT_PRIMARY};">{resp}</span></div>'
+                f'<span style="color:{STATUS_HEALTHY}; font-weight:bold;">task.complete{lat_str}</span> '
+                f'<span style="color:{TEXT_PRIMARY};">Response added.</span></div>'
             )
         elif t == EventType.TASK_CANCELLED:
             self.log.append(
@@ -550,6 +582,7 @@ class HudWidget(QWidget):
     def _on_state(self, sm: UIStateMachine):
         self.lbl_status.setText(sm.state.value)
         self.lbl_status.setStyleSheet(self._badge_css(sm.state))
+        self.drawer.set_sessions(sm.sessions_list, sm.active_session_id)
 
         can_start = sm.state in (UIState.CONNECTED, UIState.ERROR)
         can_cancel = sm.state == UIState.TASK_RUNNING

@@ -99,15 +99,20 @@ class AetherWSClient:
         self,
         prompt: str = "Say hello",
         model: str = "gemini-2.0-flash",
+        session_id: Optional[str] = None,
         request_id: Optional[str] = None,
     ):
         self.sm.clear_error()
         req_id = request_id or str(uuid.uuid4())
+        payload = {"prompt": prompt, "model": model}
+        if session_id:
+            payload["session_id"] = session_id
+            
         await self._send(
             Event(
                 type=EventType.START_TASK,
                 request_id=req_id,
-                payload={"prompt": prompt, "model": model},
+                payload=payload,
             )
         )
 
@@ -245,6 +250,34 @@ class AetherWSClient:
         await self._send(Event(
             type=EventType.CAPABILITY_CHECK_GET_HISTORY,
             request_id=request_id or str(uuid.uuid4()),
+        ))
+
+    # Session System helpers
+    async def fetch_sessions(self, request_id: Optional[str] = None):
+        await self._send(Event(
+            type=EventType.SESSION_LIST_REQUEST,
+            request_id=request_id or str(uuid.uuid4()),
+        ))
+
+    async def get_session(self, session_id: str, request_id: Optional[str] = None):
+        await self._send(Event(
+            type=EventType.SESSION_GET_REQUEST,
+            request_id=request_id or str(uuid.uuid4()),
+            payload={"session_id": session_id}
+        ))
+
+    async def create_session(self, title: str = "New Chat", request_id: Optional[str] = None):
+        await self._send(Event(
+            type=EventType.SESSION_CREATE_REQUEST,
+            request_id=request_id or str(uuid.uuid4()),
+            payload={"title": title}
+        ))
+
+    async def delete_session(self, session_id: str, request_id: Optional[str] = None):
+        await self._send(Event(
+            type=EventType.SESSION_DELETE_REQUEST,
+            request_id=request_id or str(uuid.uuid4()),
+            payload={"session_id": session_id}
         ))
 
     async def send_approval(self, granted: bool, approval_key: Optional[str] = None, request_id: Optional[str] = None, override_class: Optional[str] = None):

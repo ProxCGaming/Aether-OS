@@ -22,6 +22,9 @@ class UIStateMachine:
         self.total_ticks = 0
         self.error_message: Optional[str] = None
         self.event_history: List[Event] = []
+        self.active_session_id: Optional[str] = None
+        self.sessions_list: List[dict] = []
+        self.current_session_messages: List[dict] = []
         self._subs: List[Callable[["UIStateMachine"], None]] = []
 
     def subscribe(self, cb: Callable[["UIStateMachine"], None]) -> None:
@@ -87,6 +90,16 @@ class UIStateMachine:
         elif t == EventType.ERROR:
             self.state = UIState.ERROR
             self.error_message = p.get("error", "Unknown error")
+        elif t == EventType.SESSION_LIST_RESPONSE:
+            self.sessions_list = p.get("sessions", [])
+        elif t == EventType.SESSION_GET_RESPONSE:
+            session_data = p.get("session")
+            if session_data:
+                self.active_session_id = session_data.get("id")
+                self.current_session_messages = session_data.get("messages", [])
+        elif t == EventType.SESSION_CREATE_RESPONSE:
+            self.active_session_id = p.get("session_id")
+            self.current_session_messages = []
 
         self._notify()
         return self.state

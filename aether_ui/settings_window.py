@@ -720,7 +720,7 @@ class ConnectedProviderRow(QFrame):
         self.btn_disc = QPushButton("Disconnect")
         self.btn_disc.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_disc.setStyleSheet(f"QPushButton {{ background: transparent; color: {TEXT_MUTED}; font-size: 13px; border: none; font-weight: 500; }} QPushButton:hover {{ color: {STATUS_OFFLINE}; }}")
-        self.btn_disc.clicked.connect(lambda: self.disconnect_clicked.emit(self.provider_key))
+        self.btn_disc.clicked.connect(lambda _=False: self.disconnect_clicked.emit(self.provider_key))
         hl.addWidget(self.btn_disc)
         
     def mousePressEvent(self, event):
@@ -1739,7 +1739,7 @@ class AetherConfigWindow(QWidget):
             for p in connected:
                 row = ConnectedProviderRow(p)
                 row.clicked.connect(self._open_provider_dialog)
-                row.disconnect_clicked.connect(self.remove_requested)
+                row.disconnect_clicked.connect(self.remove_requested.emit)
                 self.providers_layout.addWidget(row)
                 
         # Add popular section
