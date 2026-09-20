@@ -79,6 +79,7 @@ export default function DraggableChatWindow({
   status, 
   isThinking,
   onApproveTool,
+  onApprovePlugin,
   providers = [],
   onChangeModel = () => {},
   onDetach,
@@ -289,6 +290,50 @@ export default function DraggableChatWindow({
                           >
                             <TerminalSquare size={16} style={{ marginRight: '6px' }} />
                             Approve Execution
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+
+                if (msg.role === 'plugin_approval') {
+                  return (
+                    <div key={i} style={{ 
+                      margin: '8px 0', 
+                      background: 'rgba(0, 0, 0, 0.4)', 
+                      border: '1px solid rgba(59, 130, 246, 0.3)',
+                      borderRadius: '16px',
+                      overflow: 'hidden',
+                      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.2)'
+                    }}>
+                      <div style={{ padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '12px', borderBottom: '1px solid rgba(255, 255, 255, 0.05)', background: 'rgba(59, 130, 246, 0.1)' }}>
+                        <ShieldAlert size={20} color="#3b82f6" />
+                        <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600, color: '#93c5fd' }}>Plugin Install Approval Required</h3>
+                      </div>
+                      <div style={{ padding: '20px' }}>
+                        <p style={{ margin: '0 0 16px 0', fontSize: '14px', color: '#e2e8f0', lineHeight: 1.5 }}>
+                          The agent has requested permission to install plugin <strong>{msg.plugin_name}</strong>.
+                        </p>
+                        <div style={{ background: 'rgba(0,0,0,0.5)', padding: '12px', borderRadius: '8px', fontFamily: 'monospace', fontSize: '12px', color: '#60a5fa', marginBottom: '20px', overflowX: 'auto' }}>
+                          {JSON.stringify(msg.plugin_details, null, 2)}
+                        </div>
+                        <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+                          <button 
+                            onClick={() => onApprovePlugin && onApprovePlugin(msg.id, false)}
+                            className="ios-close-btn"
+                            style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center' }}
+                          >
+                            <X size={16} style={{ marginRight: '6px' }} />
+                            Reject Request
+                          </button>
+                          <button 
+                            onClick={() => onApprovePlugin && onApprovePlugin(msg.id, true)}
+                            className="ios-close-btn"
+                            style={{ background: 'rgba(59, 130, 246, 0.2)', border: '1px solid rgba(59, 130, 246, 0.4)', color: '#93c5fd', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+                          >
+                            <TerminalSquare size={16} style={{ marginRight: '6px' }} />
+                            Approve Install
                           </button>
                         </div>
                       </div>

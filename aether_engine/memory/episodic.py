@@ -80,3 +80,10 @@ def query_episodes(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         except sqlite3.OperationalError:
             # Fallback if syntax error in MATCH
             return []
+
+def get_all_episodes(limit: int = 50) -> List[Dict[str, Any]]:
+    init_episodic_db()
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM episodic_memory ORDER BY timestamp DESC LIMIT ?", (limit,))
+        return [dict(row) for row in cur.fetchall()]
