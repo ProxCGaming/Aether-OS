@@ -514,13 +514,14 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     "task_id": p["task_id"],
                     "approval_key": p["thread_id"],
                     "task_class": p["task_class"],
-                    "workspace_roots": [str(Path.home() / "AetherWorkspace")],
+                    "workspace_roots": engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")],
                 },
             ).to_json())
     except Exception as e:
         logger.warning(f"Error fetching pending approvals: {e}")
 
     task_runner: Optional[asyncio.Task] = None
+    active_downloads: Dict[str, asyncio.Task] = {}
     secret_store = SecretStore()
 
     async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str, session_id: Optional[str] = None):
@@ -676,7 +677,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 for tool in create_web_tools():
                     tools.register(tool)
 
-                workspace_roots = [str(Path.home() / "AetherWorkspace")]
+                workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
 
                 task_generator = run_langgraph_task(
                     prompt=prompt,
@@ -739,7 +740,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 for tool in create_file_tools(): tools.register(tool)
                 for tool in create_web_tools(): tools.register(tool)
 
-                workspace_roots = [str(Path.home() / "AetherWorkspace")]
+                workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
 
                 # Pass the approved decision back into LangGraph
                 resume_gen = resume_langgraph_task(
@@ -1020,7 +1021,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.LOCAL_MODEL_DOWNLOAD_START:
-                model_name = msg.payload.get("model", "")
+                model_name = msg.payload.get("model", "") or msg.payload.get("repo_id", "")
                 dest_dir = msg.payload.get("destination_dir")
                 if task_runner and not task_runner.done():
                     task_runner.cancel()
@@ -1033,7 +1034,16 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     ):
                         await ws.send_text(dl_ev.to_json())
 
-                task_runner = asyncio.create_task(execute_local_download())
+                dl_task = asyncio.create_task(execute_local_download())
+                active_downloads[model_name] = dl_task
+                task_runner = dl_task
+
+            elif msg.type == EventType.LOCAL_MODEL_DOWNLOAD_CANCEL:
+                cancel_model = msg.payload.get("model", "")
+                dl = active_downloads.pop(cancel_model, None)
+                if dl and not dl.done():
+                    dl.cancel()
+                    logger.info(f"Download cancelled for model: {cancel_model}")
 
             elif msg.type == EventType.LOCAL_MODEL_DELETE_REQUEST:
                 model_name = msg.payload.get("model", "")
@@ -1327,6 +1337,57 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     request_id=req_id,
                     payload={"facts": facts},
                 ).to_json())
+
+            elif msg.type == EventType.WORKSPACE_LIST_REQUEST:
+                roots = engine_state.user_config.workspace_roots or []
+                workspaces = []
+                for r in roots:
+                    p = Path(r)
+                    workspaces.append({
+                        "path": r,
+                        "name": p.name,
+                        "is_indexed": False,  # No real indexing backend yet
+                    })
+                await ws.send_text(Event(
+                    type=EventType.WORKSPACE_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"workspaces": workspaces},
+                ).to_json())
+
+            elif msg.type == EventType.WORKSPACE_ADD_REQUEST:
+                ws_path = msg.payload.get("path", "").strip()
+                if ws_path and ws_path not in engine_state.user_config.workspace_roots:
+                    engine_state.user_config.workspace_roots.append(ws_path)
+                    save_config(engine_state.user_config)
+                    p = Path(ws_path)
+                    await ws.send_text(Event(
+                        type=EventType.WORKSPACE_ADD_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": True, "workspace": {"path": ws_path, "name": p.name, "is_indexed": False}},
+                    ).to_json())
+                else:
+                    await ws.send_text(Event(
+                        type=EventType.WORKSPACE_ADD_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": False, "error": "Path empty or already exists"},
+                    ).to_json())
+
+            elif msg.type == EventType.WORKSPACE_REMOVE_REQUEST:
+                ws_path = msg.payload.get("path", "").strip()
+                if ws_path in engine_state.user_config.workspace_roots:
+                    engine_state.user_config.workspace_roots.remove(ws_path)
+                    save_config(engine_state.user_config)
+                    await ws.send_text(Event(
+                        type=EventType.WORKSPACE_REMOVE_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": True, "path": ws_path},
+                    ).to_json())
+                else:
+                    await ws.send_text(Event(
+                        type=EventType.WORKSPACE_REMOVE_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": False, "error": "Path not found"},
+                    ).to_json())
 
     except WebSocketDisconnect:
         logger.info(f"Client disconnected from {ip}:{port}")

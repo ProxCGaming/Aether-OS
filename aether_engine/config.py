@@ -91,6 +91,7 @@ class UserConfig:
         "custom": {"time_cap_seconds": 3600, "memory_cap_mb": 2048},
     })
     tool_policies: Dict[str, str] = field(default_factory=dict)
+    workspace_roots: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -104,6 +105,7 @@ class UserConfig:
             "custom_provider_types": self.custom_provider_types,
             "task_classes": self.task_classes,
             "tool_policies": self.tool_policies,
+            "workspace_roots": self.workspace_roots,
         }
 
     @classmethod
@@ -134,6 +136,7 @@ class UserConfig:
                 "custom": {"time_cap_seconds": 3600, "memory_cap_mb": 2048},
             }),
             tool_policies=_as_dict(d.get("tool_policies")),
+            workspace_roots=d.get("workspace_roots") if isinstance(d.get("workspace_roots"), list) else [],
         )
 
 
