@@ -54,8 +54,11 @@ async def extract_and_store_facts(
 ) -> None:
     init_kg_db()
     
-    # We only extract facts for substantial interactions (don't waste LLM calls on greetings)
-    if len(user_prompt) < 15 and len(assistant_response) < 30:
+    # Skip pure short greetings with no personal information or substance
+    pure_greetings = {"hi", "hello", "hey", "hii", "heyy", "sup", "yo"}
+    if user_prompt.strip().lower() in pure_greetings and len(assistant_response) < 40:
+        return
+    if len(user_prompt.strip()) < 3:
         return
         
     system_prompt = """
@@ -159,4 +162,18 @@ def get_all_facts(limit: int = 20) -> List[Dict[str, Any]]:
             JOIN entities e ON f.entity_id = e.id 
             ORDER BY f.timestamp DESC LIMIT ?
         """, (limit,))
+        return [dict(row) for row in cur.fetchall()]
+
+def search_facts(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    init_kg_db()
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        search_term = f"%{query.strip()}%"
+        cur.execute("""
+            SELECT e.name as entity_name, e.entity_type, f.fact_text, f.timestamp, f.confidence
+            FROM facts f
+            JOIN entities e ON f.entity_id = e.id
+            WHERE e.name LIKE ? OR f.fact_text LIKE ?
+            ORDER BY f.timestamp DESC LIMIT ?
+        """, (search_term, search_term, limit))
         return [dict(row) for row in cur.fetchall()]

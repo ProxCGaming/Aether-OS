@@ -68,6 +68,7 @@ async def run_langgraph_task(
     approval_handler: Optional[Any] = None,
     workspace_roots: Optional[List[str]] = None,
     disabled_nodes: Optional[set] = None,
+    session_id: Optional[str] = None,
 ) -> AsyncGenerator[Event, None]:
     """Execute a task prompt using the LangGraph multi-agent workflow."""
     task_id = task_id or str(uuid.uuid4())
@@ -103,6 +104,7 @@ async def run_langgraph_task(
                 "task_class": "standard",
                 "provider": provider,
                 "disabled_nodes": disabled_nodes or set(),
+                "session_id": session_id,
             }
         }
         
@@ -116,7 +118,9 @@ async def run_langgraph_task(
             "pending_tool_call": None,
             "active_specialist": None,
             "delegation_log": [],
-            "task_id": task_id
+            "task_id": task_id,
+            "session_id": session_id,
+            "context_briefing": None,
         }
 
         start_time = time.time()

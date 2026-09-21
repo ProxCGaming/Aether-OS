@@ -17,3 +17,8 @@ class AetherState(TypedDict):
     
     # Structured log entries for delegation decisions
     delegation_log: Annotated[List[Dict[str, Any]], operator.add]
+    
+    # Session and task identifiers
+    task_id: Optional[str]
+    session_id: Optional[str]
+    context_briefing: Optional[str]

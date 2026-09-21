@@ -589,6 +589,16 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
         except asyncio.CancelledError:
             engine_state.audit_logger.log_event("TASK_CANCELLED", {"task_id": "unknown"})
             raise
+        except Exception as e:
+            logger.error(f"Task generator failed with exception: {e}", exc_info=True)
+            try:
+                await ws.send_text(Event(
+                    type=EventType.ERROR,
+                    request_id=req_id,
+                    payload={"error": f"Internal engine error: {str(e)}"}
+                ).to_json())
+            except Exception:
+                pass
 
     try:
         while True:
@@ -687,6 +697,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     approval_handler=None,
                     workspace_roots=workspace_roots,
                     disabled_nodes=engine_state.disabled_nodes,
+                    session_id=session_id,
                 )
 
                 task_runner = asyncio.create_task(
@@ -1174,7 +1185,6 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
             # Tools, MCP, Plugins, Memory Events
             # -----------------------------------------------------------
             elif msg.type == EventType.TOOL_LIST_REQUEST:
-                from aether_engine.tools.registry import create_file_tools, create_web_tools
                 all_tools = create_file_tools() + create_web_tools()
                 defs = []
                 for t in all_tools:
@@ -1327,6 +1337,27 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     type=EventType.MEMORY_EPISODES_RESPONSE,
                     request_id=req_id,
                     payload={"episodes": episodes},
+                ).to_json())
+
+            elif msg.type == EventType.MEMORY_EPISODE_DELETE_REQUEST:
+                from aether_engine.memory.episodic import delete_episode, get_all_episodes
+                task_id = msg.payload.get("task_id")
+                if task_id:
+                    delete_episode(task_id)
+                episodes = get_all_episodes(limit=msg.payload.get("limit", 50))
+                await ws.send_text(Event(
+                    type=EventType.MEMORY_EPISODE_DELETE_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": True, "task_id": task_id, "episodes": episodes},
+                ).to_json())
+
+            elif msg.type == EventType.MEMORY_EPISODES_CLEAR_REQUEST:
+                from aether_engine.memory.episodic import clear_all_episodes
+                clear_all_episodes()
+                await ws.send_text(Event(
+                    type=EventType.MEMORY_EPISODES_CLEAR_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": True, "episodes": []},
                 ).to_json())
             
             elif msg.type == EventType.MEMORY_GRAPH_REQUEST:

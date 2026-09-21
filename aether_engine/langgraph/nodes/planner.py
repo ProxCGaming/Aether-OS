@@ -17,7 +17,12 @@ async def planner_node(state: AetherState, config: RunnableConfig) -> dict:
     registry = config.get("configurable", {}).get("tool_registry")
     tools = registry.get_definitions() if registry else []
     
-    system_prompt = "You are a Planner agent. Break goals into structured steps, monitor progress, and adapt the plan. Output your new plan."
+    plan_text = state.get("plan", "")
+    plan_info = f"\nCurrent Plan & Context:\n{plan_text}\n" if plan_text and plan_text != "No plan currently." else ""
+    system_prompt = (
+        "You are a Planner agent. Break goals into structured steps, monitor progress, adapt the plan, or respond directly to conversational input.\n"
+        f"{plan_info}"
+    )
     messages = [{"role": "system", "content": system_prompt}] + state.get("messages", [])
     
     if messages and messages[-1].get("role") != "user":

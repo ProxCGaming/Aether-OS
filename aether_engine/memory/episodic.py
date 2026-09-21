@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import time
 import uuid
@@ -48,14 +49,16 @@ def init_embeddings_db() -> None:
 
 async def _embed_text(text: str) -> Optional[List[float]]:
     try:
-        response = await litellm.aembedding(
-            model="ollama/nomic-embed-text",
-            input=[text],
-            api_base="http://127.0.0.1:11434"
+        response = await asyncio.wait_for(
+            litellm.aembedding(
+                model="ollama/nomic-embed-text",
+                input=[text],
+                api_base="http://127.0.0.1:11434"
+            ),
+            timeout=1.0
         )
         return response.data[0]["embedding"]
     except Exception as e:
-        logging.warning(f"Embedding failed (fallback to BM25): {e}")
         return None
 
 def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
@@ -176,3 +179,27 @@ def get_all_episodes(limit: int = 50) -> List[Dict[str, Any]]:
         cur = conn.cursor()
         cur.execute("SELECT * FROM episodic_memory ORDER BY timestamp DESC LIMIT ?", (limit,))
         return [dict(row) for row in cur.fetchall()]
+
+def delete_episode(task_id: str) -> bool:
+    init_episodic_db()
+    init_embeddings_db()
+    with _get_conn() as conn:
+        conn.execute("DELETE FROM episodic_memory WHERE task_id = ?", (task_id,))
+        conn.commit()
+    with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
+        e_conn.execute("DELETE FROM episodic_embeddings WHERE task_id = ?", (task_id,))
+        e_conn.commit()
+    _audit_logger.log_event("EPISODIC_MEMORY_DELETED", {"task_id": task_id})
+    return True
+
+def clear_all_episodes() -> bool:
+    init_episodic_db()
+    init_embeddings_db()
+    with _get_conn() as conn:
+        conn.execute("DELETE FROM episodic_memory")
+        conn.commit()
+    with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
+        e_conn.execute("DELETE FROM episodic_embeddings")
+        e_conn.commit()
+    _audit_logger.log_event("EPISODIC_MEMORY_CLEARED_ALL", {})
+    return True

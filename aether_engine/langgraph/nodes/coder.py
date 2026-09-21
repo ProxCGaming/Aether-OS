@@ -17,7 +17,9 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
     registry = config.get("configurable", {}).get("tool_registry")
     tools = registry.get_definitions() if registry else []
     
-    system_prompt = "You are a Coder agent. Write, test, and debug code based on the current plan."
+    plan_text = state.get("plan", "")
+    plan_info = f"\nCurrent Plan & Context:\n{plan_text}\n" if plan_text and plan_text != "No plan currently." else ""
+    system_prompt = f"You are a Coder agent. Write, test, and debug code based on the current plan and context.\n{plan_info}"
     messages = [{"role": "system", "content": system_prompt}] + state.get("messages", [])
     
     if messages and messages[-1].get("role") != "user":
