@@ -1,20 +1,78 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { FolderPlus, Folder, Trash2, Search } from 'lucide-react';
 import './chat.css';
 
-export default function Projects() {
-  const [workspaces, setWorkspaces] = useState([
-    { id: 1, name: 'Aether-OS Backend', path: 'e:/JA' }
-  ]);
+export default function Projects({ wsRef }) {
+  const [workspaces, setWorkspaces] = useState([]);
 
-  const handleAddWorkspace = () => {
-    // In a real app, this would use window.electronAPI.showOpenDialog()
-    // and save to backend.
-    setWorkspaces([...workspaces, { id: Date.now(), name: 'New Project', path: '/path/to/project' }]);
+  // Fetch workspace list from engine on mount
+  useEffect(() => {
+    if (!wsRef?.current) return;
+
+    const handleMessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'WORKSPACE_LIST_RESPONSE') {
+          setWorkspaces(data.payload.workspaces || []);
+        } else if (data.type === 'WORKSPACE_ADD_RESPONSE') {
+          if (data.payload.success && data.payload.workspace) {
+            setWorkspaces(prev => [...prev, data.payload.workspace]);
+          }
+        } else if (data.type === 'WORKSPACE_REMOVE_RESPONSE') {
+          if (data.payload.success) {
+            setWorkspaces(prev => prev.filter(w => w.path !== data.payload.path));
+          }
+        }
+      } catch (e) {
+        // ignore parse errors
+      }
+    };
+
+    wsRef.current.addEventListener('message', handleMessage);
+
+    // Request initial list
+    wsRef.current.send(JSON.stringify({
+      type: 'WORKSPACE_LIST_REQUEST',
+      schema_version: 1,
+      request_id: Date.now().toString(),
+      payload: {}
+    }));
+
+    return () => {
+      if (wsRef.current) wsRef.current.removeEventListener('message', handleMessage);
+    };
+  }, [wsRef]);
+
+  const handleAddWorkspace = async () => {
+    // Real folder picker via Electron IPC
+    if (!window.electronAPI?.showOpenDialog) return;
+    try {
+      const selectedPath = await window.electronAPI.showOpenDialog({
+        properties: ['openDirectory'],
+        title: 'Select Workspace Folder'
+      });
+      if (selectedPath && wsRef?.current) {
+        wsRef.current.send(JSON.stringify({
+          type: 'WORKSPACE_ADD_REQUEST',
+          schema_version: 1,
+          request_id: Date.now().toString(),
+          payload: { path: selectedPath }
+        }));
+      }
+    } catch (e) {
+      console.error('Failed to open folder picker:', e);
+    }
   };
 
-  const handleRemoveWorkspace = (id) => {
-    setWorkspaces(workspaces.filter(w => w.id !== id));
+  const handleRemoveWorkspace = (path) => {
+    if (wsRef?.current) {
+      wsRef.current.send(JSON.stringify({
+        type: 'WORKSPACE_REMOVE_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { path }
+      }));
+    }
   };
 
   return (
@@ -34,7 +92,7 @@ export default function Projects() {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
         {workspaces.map(ws => (
-          <div key={ws.id} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div key={ws.path} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
               <div style={{ background: 'rgba(59, 130, 246, 0.2)', padding: '12px', borderRadius: '12px', color: '#60a5fa' }}>
                 <Folder size={24} />
@@ -45,11 +103,14 @@ export default function Projects() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-              <div style={{ color: '#10b981', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <Search size={14} /> Indexed
-              </div>
+              {/* Only show Indexed badge if the engine reports is_indexed === true */}
+              {ws.is_indexed && (
+                <div style={{ color: '#10b981', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <Search size={14} /> Indexed
+                </div>
+              )}
               <button 
-                onClick={() => handleRemoveWorkspace(ws.id)}
+                onClick={() => handleRemoveWorkspace(ws.path)}
                 style={{ background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: 'none', padding: '8px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               >
                 <Trash2 size={16} />
