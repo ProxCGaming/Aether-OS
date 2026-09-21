@@ -99,8 +99,6 @@ function createFloatingChat(sessionId) {
     transparent: true,
     alwaysOnTop: true,
     hasShadow: false,
-    vibrancy: 'ultra-dark',
-    backgroundMaterial: 'acrylic',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -148,6 +146,19 @@ ipcMain.handle('close-window', (event) => {
 ipcMain.handle('minimize-window', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   if (win) win.minimize()
+});
+
+ipcMain.handle('select-directory', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showOpenDialog(win, {
+    properties: ['openDirectory', 'createDirectory'],
+    title: 'Select Download Directory'
+  });
+  if (result.canceled) {
+    return null;
+  } else {
+    return result.filePaths[0];
+  }
 });
 
 ipcMain.handle('maximize-window', (event) => {
