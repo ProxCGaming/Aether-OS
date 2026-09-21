@@ -152,17 +152,46 @@ def get_entity_facts(entity_name: str) -> List[Dict[str, Any]]:
         """, (entity_name,))
         return [dict(row) for row in cur.fetchall()]
         
-def get_all_facts(limit: int = 20) -> List[Dict[str, Any]]:
+def get_all_facts(limit: int = 100) -> List[Dict[str, Any]]:
     init_kg_db()
     with _get_conn() as conn:
         cur = conn.cursor()
         cur.execute("""
-            SELECT e.name as entity_name, e.entity_type, f.fact_text, f.timestamp 
+            SELECT f.id as fact_id, e.id as entity_id, e.name as entity_name, e.entity_type, f.fact_text, f.timestamp 
             FROM facts f 
             JOIN entities e ON f.entity_id = e.id 
             ORDER BY f.timestamp DESC LIMIT ?
         """, (limit,))
         return [dict(row) for row in cur.fetchall()]
+
+def delete_fact(fact_id: str) -> bool:
+    init_kg_db()
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+        cur.execute("DELETE FROM entities WHERE id NOT IN (SELECT DISTINCT entity_id FROM facts)")
+        conn.commit()
+    _audit_logger.log_event("KNOWLEDGE_FACT_DELETED", {"fact_id": fact_id})
+    return True
+
+def delete_entity(entity_name: str) -> bool:
+    init_kg_db()
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM entities WHERE name = ?", (entity_name,))
+        conn.commit()
+    _audit_logger.log_event("KNOWLEDGE_ENTITY_DELETED", {"entity_name": entity_name})
+    return True
+
+def clear_all_facts() -> bool:
+    init_kg_db()
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM facts")
+        cur.execute("DELETE FROM entities")
+        conn.commit()
+    _audit_logger.log_event("KNOWLEDGE_GRAPH_CLEARED_ALL", {})
+    return True
 
 def search_facts(query: str, limit: int = 10) -> List[Dict[str, Any]]:
     init_kg_db()
@@ -170,7 +199,7 @@ def search_facts(query: str, limit: int = 10) -> List[Dict[str, Any]]:
         cur = conn.cursor()
         search_term = f"%{query.strip()}%"
         cur.execute("""
-            SELECT e.name as entity_name, e.entity_type, f.fact_text, f.timestamp, f.confidence
+            SELECT f.id as fact_id, e.name as entity_name, e.entity_type, f.fact_text, f.timestamp, f.confidence
             FROM facts f
             JOIN entities e ON f.entity_id = e.id
             WHERE e.name LIKE ? OR f.fact_text LIKE ?

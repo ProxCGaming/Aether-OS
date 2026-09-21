@@ -63,6 +63,48 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
     }
   };
 
+  const handleDeleteFact = (factId) => {
+    if (!factId) return;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'MEMORY_FACT_DELETE_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { fact_id: factId }
+      }));
+    }
+    setFacts(prev => prev.filter(f => f.fact_id !== factId));
+  };
+
+  const handleDeleteEntity = (entityName) => {
+    if (!entityName) return;
+    if (window.confirm(`Delete all facts associated with "${entityName}"?`)) {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'MEMORY_ENTITY_DELETE_REQUEST',
+          schema_version: 1,
+          request_id: Date.now().toString(),
+          payload: { entity_name: entityName }
+        }));
+      }
+      setFacts(prev => prev.filter(f => f.entity_name !== entityName));
+    }
+  };
+
+  const handleClearAllFacts = () => {
+    if (window.confirm("Are you sure you want to clear all facts from the Knowledge Graph?")) {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'MEMORY_GRAPH_CLEAR_REQUEST',
+          schema_version: 1,
+          request_id: Date.now().toString(),
+          payload: {}
+        }));
+      }
+      setFacts([]);
+    }
+  };
+
   useEffect(() => {
     if (!wsRef.current) return;
     
@@ -119,8 +161,10 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
         } else if (data.type === 'MEMORY_EPISODES_CLEAR_RESPONSE') {
           setEpisodes([]);
           setSelectedEpisode(null);
-        } else if (data.type === 'MEMORY_GRAPH_RESPONSE') {
+        } else if (data.type === 'MEMORY_GRAPH_RESPONSE' || data.type === 'MEMORY_FACT_DELETE_RESPONSE' || data.type === 'MEMORY_ENTITY_DELETE_RESPONSE') {
           setFacts(data.payload.facts || []);
+        } else if (data.type === 'MEMORY_GRAPH_CLEAR_RESPONSE') {
+          setFacts([]);
         }
       } catch (e) {
         // ignore JSON parse errors
@@ -966,6 +1010,30 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                   Clear All Memory
                 </button>
               )}
+              {memoryTab === 'kg' && facts.length > 0 && (
+                <button
+                  onClick={handleClearAllFacts}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    background: 'rgba(239, 68, 68, 0.12)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    color: '#f87171',
+                    padding: '8px 16px',
+                    borderRadius: '10px',
+                    fontSize: '13px',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.22)'}
+                  onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.12)'}
+                >
+                  <Trash2 size={15} />
+                  Clear All Knowledge
+                </button>
+              )}
             </div>
 
             {memoryTab === 'episodic' && (
@@ -1111,15 +1179,86 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                     }, {})).map(([entityName, entityFacts]) => (
                       <div key={entityName} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                          <h3 style={{ fontSize: '16px', fontWeight: 500, margin: 0, color: '#a78bfa' }}>{entityName}</h3>
-                          <span style={{ fontSize: '11px', background: 'rgba(255,255,255,0.1)', padding: '2px 8px', borderRadius: '12px', color: '#9090a0' }}>
-                            {entityFacts[0].entity_type}
-                          </span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <h3 style={{ fontSize: '16px', fontWeight: 500, margin: 0, color: '#a78bfa' }}>{entityName}</h3>
+                            <span style={{ fontSize: '11px', background: 'rgba(255,255,255,0.1)', padding: '2px 8px', borderRadius: '12px', color: '#9090a0' }}>
+                              {entityFacts[0]?.entity_type || 'Entity'}
+                            </span>
+                          </div>
+                          <button
+                            title={`Delete all facts for ${entityName}`}
+                            onClick={() => handleDeleteEntity(entityName)}
+                            style={{
+                              background: 'transparent',
+                              border: 'none',
+                              color: '#9090a0',
+                              padding: '4px 6px',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              transition: 'all 0.2s'
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.color = '#ef4444';
+                              e.currentTarget.style.background = 'rgba(239, 68, 68, 0.15)';
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.color = '#9090a0';
+                              e.currentTarget.style.background = 'transparent';
+                            }}
+                          >
+                            <Trash2 size={14} />
+                          </button>
                         </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                           {entityFacts.map((fact, i) => (
-                            <div key={i} style={{ background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px', fontSize: '13px', lineHeight: '1.5' }}>
-                              {fact.fact_text}
+                            <div 
+                              key={fact.fact_id || i} 
+                              style={{ 
+                                display: 'flex', 
+                                alignItems: 'flex-start', 
+                                justifyContent: 'space-between', 
+                                gap: '10px', 
+                                background: 'rgba(0,0,0,0.2)', 
+                                padding: '10px 12px', 
+                                borderRadius: '8px', 
+                                fontSize: '13px', 
+                                lineHeight: '1.5' 
+                              }}
+                            >
+                              <div style={{ flex: 1, wordBreak: 'break-word' }}>
+                                {fact.fact_text}
+                              </div>
+                              {fact.fact_id && (
+                                <button
+                                  title="Delete this fact"
+                                  onClick={() => handleDeleteFact(fact.fact_id)}
+                                  style={{
+                                    background: 'transparent',
+                                    border: 'none',
+                                    color: '#9090a0',
+                                    padding: '4px',
+                                    borderRadius: '6px',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    transition: 'all 0.2s',
+                                    flexShrink: 0
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    e.currentTarget.style.color = '#ef4444';
+                                    e.currentTarget.style.background = 'rgba(239, 68, 68, 0.15)';
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    e.currentTarget.style.color = '#9090a0';
+                                    e.currentTarget.style.background = 'transparent';
+                                  }}
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              )}
                             </div>
                           ))}
                         </div>

@@ -1369,6 +1369,39 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     payload={"facts": facts},
                 ).to_json())
 
+            elif msg.type == EventType.MEMORY_FACT_DELETE_REQUEST:
+                from aether_engine.memory.knowledge_graph import delete_fact, get_all_facts
+                fact_id = msg.payload.get("fact_id")
+                if fact_id:
+                    delete_fact(fact_id)
+                facts = get_all_facts(limit=msg.payload.get("limit", 100))
+                await ws.send_text(Event(
+                    type=EventType.MEMORY_FACT_DELETE_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": True, "fact_id": fact_id, "facts": facts},
+                ).to_json())
+
+            elif msg.type == EventType.MEMORY_ENTITY_DELETE_REQUEST:
+                from aether_engine.memory.knowledge_graph import delete_entity, get_all_facts
+                entity_name = msg.payload.get("entity_name")
+                if entity_name:
+                    delete_entity(entity_name)
+                facts = get_all_facts(limit=msg.payload.get("limit", 100))
+                await ws.send_text(Event(
+                    type=EventType.MEMORY_ENTITY_DELETE_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": True, "entity_name": entity_name, "facts": facts},
+                ).to_json())
+
+            elif msg.type == EventType.MEMORY_GRAPH_CLEAR_REQUEST:
+                from aether_engine.memory.knowledge_graph import clear_all_facts
+                clear_all_facts()
+                await ws.send_text(Event(
+                    type=EventType.MEMORY_GRAPH_CLEAR_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": True, "facts": []},
+                ).to_json())
+
             elif msg.type == EventType.WORKSPACE_LIST_REQUEST:
                 roots = engine_state.user_config.workspace_roots or []
                 workspaces = []
