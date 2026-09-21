@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import Draggable from 'react-draggable';
+
 import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
@@ -83,9 +83,10 @@ export default function DraggableChatWindow({
   providers = [],
   onChangeModel = () => {},
   onDetach,
-  isFloating
+  isFloating,
+  initialInput = ''
 }) {
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
   const messagesEndRef = useRef(null);
   const nodeRef = useRef(null);
@@ -108,38 +109,61 @@ export default function DraggableChatWindow({
     }
   };
 
+  const handleMouseMove = (e) => {
+    if (nodeRef.current) {
+      const rect = nodeRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      nodeRef.current.style.setProperty('--mouse-x', `${x}px`);
+      nodeRef.current.style.setProperty('--mouse-y', `${y}px`);
+    }
+  };
+
   return (
-    <Draggable nodeRef={nodeRef} handle=".draggable-handle" bounds="parent">
+    <div 
+      ref={nodeRef}
+      className="ios-glass"
+      onMouseMove={handleMouseMove}
+      style={isFloating ? {
+        position: 'relative',
+        margin: '0',
+        width: '100vw',
+        height: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        zIndex: 1000,
+        boxShadow: 'inset 0 1px 1px rgba(255, 255, 255, 0.15), inset 0 0 40px rgba(124, 58, 237, 0.05), inset 0 -1px 1px rgba(0, 0, 0, 0.4)',
+        transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+        opacity: isMinimized ? 0.8 : 1
+      } : {
+        position: 'absolute',
+        top: '40px',
+        left: '360px',
+        right: '40px',
+        bottom: '40px',
+        width: 'auto',
+        height: 'auto',
+        display: 'flex',
+        flexDirection: 'column',
+        zIndex: 1000,
+        transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
+      }}
+    >
+      {/* Header */}
       <div 
-        ref={nodeRef}
-        className="ios-glass"
+        className="title-bar"
         style={{
-          position: isFloating ? 'relative' : 'absolute',
-          top: isFloating ? '0' : '20px',
-          right: isFloating ? '0' : '20px',
-          width: isFloating ? '100%' : '400px',
-          height: isFloating ? '100%' : (isMinimized ? 'auto' : '600px'),
+          padding: '12px 16px',
           display: 'flex',
-          flexDirection: 'column',
-          zIndex: 50,
-          overflow: 'hidden'
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
+          background: 'rgba(255,255,255,0.03)',
+          WebkitAppRegion: isFloating ? 'drag' : undefined
         }}
       >
-        {/* Header - Draggable Handle */}
-        <div 
-          className={isFloating ? "title-bar" : "draggable-handle"}
-          style={{
-            padding: '12px 16px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            borderBottom: '1px solid rgba(255,255,255,0.08)',
-            background: 'rgba(255,255,255,0.03)',
-            WebkitAppRegion: isFloating ? 'drag' : undefined
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, WebkitAppRegion: 'no-drag' }}>
-            <GripHorizontal size={16} color="rgba(255,255,255,0.4)" />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
+          {isFloating && <GripHorizontal size={16} color="rgba(255,255,255,0.4)" />}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
               <div style={{ 
                 width: '8px', 
@@ -183,35 +207,26 @@ export default function DraggableChatWindow({
                 <button 
                   onClick={() => window.electronAPI && window.electronAPI.closeFloatingChat()}
                   title="Re-attach to Main Window"
-                  style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  style={{ WebkitAppRegion: 'no-drag', background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                 >
                   <LogIn size={14} />
                 </button>
                 <button 
                   onClick={() => window.electronAPI && window.electronAPI.closeFloatingChat()}
                   title="Close Window"
-                  style={{ background: 'rgba(239, 68, 68, 0.2)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#fca5a5', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  style={{ WebkitAppRegion: 'no-drag', background: 'rgba(239, 68, 68, 0.2)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#fca5a5', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                 >
                   <X size={14} />
                 </button>
               </>
             ) : (
-              <>
-                <button 
-                  onClick={onDetach}
-                  title="Pop out to floating window"
-                  style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
-                >
-                  <ExternalLink size={14} />
-                </button>
-                <button 
-                  onClick={() => setIsMinimized(!isMinimized)}
-                  title={isMinimized ? "Maximize" : "Minimize"}
-                  style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
-                >
-                  {isMinimized ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
-                </button>
-              </>
+              <button 
+                onClick={() => onDetach({ input })}
+                title="Pop out to floating window"
+                style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
+              >
+                <ExternalLink size={14} />
+              </button>
             )}
           </div>
         </div>
@@ -352,7 +367,7 @@ export default function DraggableChatWindow({
                       width: '32px',
                       height: '32px',
                       borderRadius: '10px',
-                      background: msg.role === 'user' ? 'rgba(255,255,255,0.1)' : 'rgba(124, 58, 237, 0.2)',
+                      background: msg.role === 'user' ? 'rgba(255,255,255,0.1)' : 'rgba(var(--accent-rgb), 0.2)',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
@@ -434,7 +449,7 @@ export default function DraggableChatWindow({
                   type="submit"
                   disabled={!input.trim() || isThinking}
                   style={{
-                    background: input.trim() && !isThinking ? '#7c3aed' : 'rgba(255,255,255,0.1)',
+                    background: input.trim() && !isThinking ? 'var(--accent)' : 'rgba(255,255,255,0.1)',
                     border: 'none',
                     borderRadius: '50%',
                     width: '32px',
@@ -459,6 +474,5 @@ export default function DraggableChatWindow({
           </>
         )}
       </div>
-    </Draggable>
   );
 }
