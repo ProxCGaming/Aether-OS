@@ -142,3 +142,38 @@
   background: rgba(124, 58, 237, 0.2);
   color: #fff;
 }
+
+/* iPhone-style glassmorphism re-attach button */
+.ios-reattach-btn {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.04));
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-top: 1px solid rgba(255, 255, 255, 0.35);
+  color: #f0f0f5;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(20px) saturate(190%);
+  -webkit-backdrop-filter: blur(20px) saturate(190%);
+  margin-right: 8px;
+  position: relative;
+  outline: none;
+}
+
+.ios-reattach-btn:hover {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.3), rgba(236, 72, 153, 0.2));
+  border-color: rgba(167, 139, 250, 0.5);
+  color: #ffffff;
+  transform: scale(1.08);
+  box-shadow: 0 6px 20px rgba(124, 58, 237, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.ios-reattach-btn:active {
+  transform: scale(0.92);
+  background: rgba(124, 58, 237, 0.4);
+}

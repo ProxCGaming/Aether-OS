@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ForceGraph3D from 'react-force-graph-3d';
-import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square } from 'lucide-react';
+import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
 import SettingsPanel from './SettingsPanel';
 import Dashboard from './Dashboard';
@@ -68,6 +68,18 @@ function App() {
       }
     }
   }, [isFloating]);
+
+  // Sync back to floating_transfer_state if messages change in floating window
+  useEffect(() => {
+    if (isFloating && chatMessages.length > 0) {
+      try {
+        const current = JSON.parse(localStorage.getItem('floating_transfer_state') || '{}');
+        current.messages = chatMessages;
+        localStorage.setItem('floating_transfer_state', JSON.stringify(current));
+      } catch (e) {}
+    }
+  }, [isFloating, chatMessages]);
+
   const wsRef = useRef(null);
   const graphRef = useRef();
 
@@ -132,7 +144,16 @@ function App() {
       }
       
       if (window.electronAPI && window.electronAPI.onChatAttached) {
-        window.electronAPI.onChatAttached(() => setIsChatDetached(false));
+        window.electronAPI.onChatAttached(() => {
+          setIsChatDetached(false);
+          try {
+            const transferData = localStorage.getItem('floating_transfer_state');
+            if (transferData) {
+              const parsed = JSON.parse(transferData);
+              if (parsed.messages) setChatMessages(parsed.messages);
+            }
+          } catch (e) {}
+        });
       }
 
       const handleMessage = (event) => {
@@ -425,10 +446,30 @@ function App() {
     }
   };
 
+  const handleReattachChat = () => {
+    if (window.electronAPI && window.electronAPI.closeFloatingChat) {
+      window.electronAPI.closeFloatingChat();
+    }
+    setIsChatDetached(false);
+    setActiveTab('Chat');
+    try {
+      const transferData = localStorage.getItem('floating_transfer_state');
+      if (transferData) {
+        const parsed = JSON.parse(transferData);
+        if (parsed.messages) setChatMessages(parsed.messages);
+      }
+    } catch (e) {}
+  };
+
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', overflow: 'hidden', backgroundColor: isFloating ? 'transparent' : '#05050f', flexDirection: 'column' }}>
       
-      {!isFloating && <TitleBar />}
+      {!isFloating && (
+        <TitleBar 
+          isChatDetached={isChatDetached}
+          onReattachChat={handleReattachChat}
+        />
+      )}
       
       {/* Glowing Orbs for Glassmorphism pop */}
       {!isFloating && (
@@ -521,59 +562,27 @@ function App() {
           </div>
         )}
 
-      {activeTab === 'Chat' && (
-        isChatDetached ? (
-          <div style={{
-            position: 'absolute',
-            top: '40px',
-            left: '360px',
-            right: '40px',
-            bottom: '40px',
-            zIndex: 40,
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center'
-          }}>
-            <div className="ios-glass" style={{ width: '100%', height: '100%', padding: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-              <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '40px', textAlign: 'center', maxWidth: '400px' }}>
-                <h2 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '20px' }}>Chat is Detached</h2>
-                <p style={{ margin: '0 0 24px 0', fontSize: '14px', lineHeight: '1.5', color: '#9090a0' }}>
-                  The chat window is currently running as a floating overlay.
-                </p>
-                <button 
-                  onClick={() => {
-                    if (window.electronAPI && window.electronAPI.closeFloatingChat) {
-                      window.electronAPI.closeFloatingChat();
-                    }
-                  }}
-                  style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '12px 24px', borderRadius: '12px', cursor: 'pointer', fontSize: '14px', fontWeight: 500 }}
-                >
-                  Re-attach to Main Window
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <DraggableChatWindow 
-            messages={chatMessages} 
-            onSendMessage={handleSendMessage} 
-            onApproveTool={handleToolApproval}
-            onApprovePlugin={handlePluginApproval}
-            status={status}
-            isThinking={isThinking}
-            providers={providers}
-            onChangeModel={handleChangeModel}
-            onDetach={(state) => {
-              localStorage.setItem('floating_transfer_state', JSON.stringify({
-                messages: chatMessages,
-                input: state?.input || ''
-              }));
-              window.electronAPI?.openFloatingChat(activeSession);
-            }}
-            isFloating={isFloating}
-            initialInput={initialInput}
-          />
-        )
+      {activeTab === 'Chat' && !isChatDetached && (
+        <DraggableChatWindow 
+          messages={chatMessages} 
+          onSendMessage={handleSendMessage} 
+          onApproveTool={handleToolApproval}
+          onApprovePlugin={handlePluginApproval}
+          status={status}
+          isThinking={isThinking}
+          providers={providers}
+          onChangeModel={handleChangeModel}
+          onDetach={(state) => {
+            localStorage.setItem('floating_transfer_state', JSON.stringify({
+              messages: chatMessages,
+              input: state?.input || ''
+            }));
+            setIsChatDetached(true);
+            window.electronAPI?.openFloatingChat(activeSession);
+          }}
+          isFloating={isFloating}
+          initialInput={initialInput}
+        />
       )}
 
       {activeTab !== 'Chat' && (
@@ -684,14 +693,14 @@ function NavItem({ icon, label, activeTab, setActiveTab }) {
   );
 }
 
-function TitleBar() {
+function TitleBar({ isChatDetached, onReattachChat }) {
   const handleMinimize = () => window.electronAPI?.minimizeWindow();
   const handleMaximize = () => window.electronAPI?.maximizeWindow();
   const handleClose = () => window.electronAPI?.closeWindow();
 
   return (
     <div style={{
-      height: '32px',
+      height: '36px',
       background: 'transparent',
       WebkitAppRegion: 'drag', // Electron specific for dragging
       display: 'flex',
@@ -701,18 +710,31 @@ function TitleBar() {
       position: 'absolute',
       top: 0,
       left: 0,
-      right: 0
+      right: 0,
+      padding: '0 8px 0 16px'
     }}>
-      <div style={{ WebkitAppRegion: 'no-drag', display: 'flex', height: '100%' }}>
-        <button onClick={handleMinimize} className="window-btn">
-          <Minus size={14} />
-        </button>
-        <button onClick={handleMaximize} className="window-btn">
-          <Square size={12} />
-        </button>
-        <button onClick={handleClose} className="window-btn close-btn">
-          <X size={14} />
-        </button>
+      <div style={{ WebkitAppRegion: 'no-drag', display: 'flex', alignItems: 'center', height: '100%' }}>
+        {isChatDetached && (
+          <button 
+            onClick={onReattachChat}
+            className="ios-reattach-btn"
+            title="Re-attach to Main Window"
+            aria-label="Re-attach to Main Window"
+          >
+            <LogIn size={13} />
+          </button>
+        )}
+        <div style={{ display: 'flex', height: '100%' }}>
+          <button onClick={handleMinimize} className="window-btn" title="Minimize">
+            <Minus size={14} />
+          </button>
+          <button onClick={handleMaximize} className="window-btn" title="Maximize">
+            <Square size={12} />
+          </button>
+          <button onClick={handleClose} className="window-btn close-btn" title="Close">
+            <X size={14} />
+          </button>
+        </div>
       </div>
     </div>
   );
