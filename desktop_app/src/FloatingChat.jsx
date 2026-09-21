@@ -38,7 +38,7 @@ export default function FloatingChat() {
   };
 
   return (
-    <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', backgroundColor: 'rgba(5, 5, 15, 0.85)', borderRadius: '12px', overflow: 'hidden', border: '1px solid rgba(124, 58, 237, 0.3)' }}>
+    <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', backgroundColor: 'rgba(5, 5, 15, 0.85)', borderRadius: '12px', overflow: 'hidden', border: '1px solid rgba(var(--accent-rgb), 0.3)' }}>
       {/* Title Bar */}
       <div style={{ height: '36px', background: 'rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 12px', WebkitAppRegion: 'drag' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#fff', fontSize: '12px' }}>
@@ -54,7 +54,7 @@ export default function FloatingChat() {
       {/* Messages Area */}
       <div style={{ flex: 1, padding: '16px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px' }} className="chat-scroll">
         {messages.map((m, i) => (
-          <div key={i} style={{ alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start', background: m.role === 'user' ? '#7c3aed' : 'rgba(255,255,255,0.1)', color: '#fff', padding: '8px 12px', borderRadius: '12px', maxWidth: '85%', fontSize: '13px' }}>
+          <div key={i} style={{ alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start', background: m.role === 'user' ? 'var(--accent)' : 'rgba(255,255,255,0.1)', color: '#fff', padding: '8px 12px', borderRadius: '12px', maxWidth: '85%', fontSize: '13px' }}>
             {m.content}
           </div>
         ))}
@@ -72,7 +72,7 @@ export default function FloatingChat() {
             placeholder="Message Aether..."
             style={{ flex: 1, background: 'transparent', border: 'none', color: '#fff', outline: 'none', fontSize: '13px' }}
           />
-          <button onClick={handleSend} style={{ background: '#7c3aed', border: 'none', width: '28px', height: '28px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', cursor: 'pointer' }}>
+          <button onClick={handleSend} style={{ background: 'var(--accent)', border: 'none', width: '28px', height: '28px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', cursor: 'pointer' }}>
             <Send size={12} />
           </button>
         </div>

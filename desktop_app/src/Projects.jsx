@@ -26,7 +26,7 @@ export default function Projects() {
         </div>
         <button 
           onClick={handleAddWorkspace}
-          style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '10px 20px', borderRadius: '12px', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 500 }}
+          style={{ background: 'var(--accent)', color: '#fff', border: 'none', padding: '10px 20px', borderRadius: '12px', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 500 }}
         >
           <FolderPlus size={18} /> Add Folder
         </button>

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { User, Key, Cpu, Settings as SettingsIcon, Monitor, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server } from 'lucide-react';
 import Dropdown from './Dropdown';
+import LocalModelsTab from './LocalModelsTab';
 import './chat.css';
 
 export default function SettingsPanel({ wsRef, providers = {}, localModels = [], defaultModel = '' }) {
@@ -320,11 +321,11 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
             <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '16px', padding: '24px' }}>
                <h3 style={{ marginBottom: '16px', fontSize: '16px' }}>Appearance</h3>
                <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '16px' }}>Customize the look and feel of Aether-OS.</p>
-               {/* Controls will go here */}
-               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'system')} className="ios-glass" style={{ padding: '8px 16px', color: '#fff', border: '1px solid rgba(124, 58, 237, 0.5)', background: 'rgba(124, 58, 237, 0.2)', cursor: 'pointer' }}>System Default</button>
-                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'dark')} className="ios-glass" style={{ padding: '8px 16px', color: '#9090a0', cursor: 'pointer' }}>Dark Mode</button>
-                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'light')} className="ios-glass" style={{ padding: '8px 16px', color: '#9090a0', cursor: 'pointer' }}>Light Mode</button>
+               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(0,0,0,0.2)', padding: '6px', borderRadius: '16px', width: 'fit-content' }}>
+                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'default')} className="ios-glass" style={{ padding: '8px 20px', color: '#fff', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>Default</button>
+                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'system')} className="ios-glass" style={{ padding: '8px 20px', color: '#9090a0', background: 'transparent', border: '1px solid transparent', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>System Default</button>
+                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'light')} className="ios-glass" style={{ padding: '8px 20px', color: '#9090a0', background: 'transparent', border: '1px solid transparent', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>Light</button>
+                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'dark')} className="ios-glass" style={{ padding: '8px 20px', color: '#9090a0', background: 'transparent', border: '1px solid transparent', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>Dark</button>
                </div>
             </div>
           </div>
@@ -570,71 +571,7 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
             )}
 
             {modelTab === 'local' && (
-               <>
-                 <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', marginBottom: '24px' }}>
-                   <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Download GGUF Model (HuggingFace)</h3>
-                   <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
-                     <input 
-                       type="text"
-                       value={downloadInput}
-                       onChange={(e) => setDownloadInput(e.target.value)}
-                       className="ios-glass-input" 
-                       placeholder="e.g. TheBloke/Llama-2-7B-Chat-GGUF" 
-                       style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
-                     />
-                     <button 
-                       onClick={handleDownloadLocalModel}
-                       style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '0 24px', borderRadius: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 500 }}
-                     >
-                       <Download size={16} />
-                       Download
-                     </button>
-                   </div>
-                   
-                   {showLlamaPrompt && (
-                     <div style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.2)', borderRadius: '12px', padding: '16px', marginTop: '16px' }}>
-                       <h4 style={{ color: '#fca5a5', margin: '0 0 8px 0', fontSize: '14px' }}>Native Inference Engine Required</h4>
-                       <p style={{ color: '#e2e8f0', fontSize: '13px', margin: '0 0 16px 0' }}>
-                         To run local models, you need to download the native `llama.cpp` inference engine (~25MB). Would you like to download it now?
-                       </p>
-                       <div style={{ display: 'flex', gap: '12px' }}>
-                         <button 
-                           onClick={handleInstallLlama}
-                           disabled={downloadingLlama}
-                           style={{ background: '#ef4444', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: 500 }}
-                         >
-                           {downloadingLlama ? 'Downloading...' : 'Install Native Engine'}
-                         </button>
-                         <button 
-                           onClick={() => setShowLlamaPrompt(false)}
-                           disabled={downloadingLlama}
-                           style={{ background: 'rgba(255,255,255,0.1)', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
-                         >
-                           Cancel
-                         </button>
-                       </div>
-                     </div>
-                   )}
-                 </div>
-
-                 <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Available Local Models</h3>
-                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                   {localModels.length === 0 ? (
-                     <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
-                       No local models detected. Ensure Ollama is running.
-                     </div>
-                   ) : (
-                     localModels.map(lm => (
-                       <div key={lm.name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                         <div>
-                           <h4 style={{ fontSize: '15px', fontWeight: 500 }}>{lm.name}</h4>
-                           <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>Size: {(lm.size / (1024*1024*1024)).toFixed(1)} GB</p>
-                         </div>
-                       </div>
-                     ))
-                   )}
-                 </div>
-               </>
+               <LocalModelsTab wsRef={wsRef} localModels={localModels} />
             )}
           </div>
         )}
