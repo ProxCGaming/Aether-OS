@@ -21,6 +21,10 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   const [plugins, setPlugins] = useState([]);
   const [newPluginSource, setNewPluginSource] = useState('');
   
+  // A5: State for Reasoning Effort and Node model override
+  const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem('reasoning_effort') || 'standard');
+  const [nodeModels, setNodeModels] = useState(() => JSON.parse(localStorage.getItem('node_models') || '{}'));
+
   const [memoryTab, setMemoryTab] = useState('episodic');
   const [episodes, setEpisodes] = useState([]);
   const [facts, setFacts] = useState([]);
@@ -500,8 +504,11 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                      <div style={{ width: '200px' }}>
                        <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Reasoning Effort</h3>
                        <Dropdown 
-                         value="standard"
-                         onChange={() => {}}
+                         value={reasoningEffort}
+                         onChange={(val) => {
+                           setReasoningEffort(val);
+                           localStorage.setItem('reasoning_effort', val);
+                         }}
                          options={[
                            { value: 'standard', label: 'Standard' },
                            { value: 'medium', label: 'Medium' },
@@ -595,8 +602,12 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                      </div>
                    </div>
                    <Dropdown 
-                     value="inherit"
-                     onChange={() => {}}
+                     value={nodeModels[node] || 'inherit'}
+                     onChange={(val) => {
+                       const next = { ...nodeModels, [node]: val };
+                       setNodeModels(next);
+                       localStorage.setItem('node_models', JSON.stringify(next));
+                     }}
                      options={[
                        { value: 'inherit', label: '[Use Global Default Model]' },
                        { value: 'gpt-4o', label: 'GPT-4o (OpenAI)' },

@@ -39,13 +39,18 @@ function App() {
   const [localModels, setLocalModels] = useState([]);
   const [defaultModel, setDefaultModel] = useState('');
 
+  // Dashboard State (real data, not hardcoded)
+  const [activeTaskIds, setActiveTaskIds] = useState(new Set());
+  const [pluginCount, setPluginCount] = useState(0);
+  const [memoryMb, setMemoryMb] = useState(null);
+
   const params = new URLSearchParams(window.location.search);
   const isFloating = params.get('floating') === 'true';
   const initialSession = params.get('session');
 
   const [sessions, setSessions] = useState([]);
   const [activeSession, setActiveSession] = useState(initialSession || null);
-  const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Projects', 'Insights', 'Settings'
+  const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Projects', 'Settings'
   const [initialInput, setInitialInput] = useState('');
   
   useEffect(() => {
@@ -108,6 +113,7 @@ function App() {
                 wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
                 wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
                 wsRef.current.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+                wsRef.current.send(JSON.stringify({ type: 'PLUGIN_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
               } else {
                 setStatus('Offline / Engine Disconnected');
               }
@@ -133,6 +139,11 @@ function App() {
         const data = JSON.parse(event.data);
         if (data.type === 'hello') {
           setStatus(`Online / ${data.payload.active_model || 'Agent'}`);
+        } else if (data.type === 'START_TASK' || data.type === 'TASK_STARTED') {
+          // Track active task for Dashboard
+          if (data.payload?.task_id || data.request_id) {
+            setActiveTaskIds(prev => new Set(prev).add(data.payload?.task_id || data.request_id));
+          }
         } else if (data.type === 'TASK_PROGRESS') {
           const delta = data.payload.text_delta;
           const node = data.payload.node;
@@ -167,6 +178,10 @@ function App() {
           }
         } else if (data.type === 'TASK_COMPLETED') {
           setIsThinking(false);
+          // Remove from active tasks for Dashboard
+          if (data.payload?.task_id || data.request_id) {
+            setActiveTaskIds(prev => { const next = new Set(prev); next.delete(data.payload?.task_id || data.request_id); return next; });
+          }
           const result = data.payload.response || data.payload.result || data.payload.output || JSON.stringify(data.payload);
           setChatMessages(prev => {
             const last = prev[prev.length - 1];
@@ -180,6 +195,10 @@ function App() {
           });
         } else if (data.type === 'TASK_FAILED' || data.type === 'TASK_CANCELLED') {
           setIsThinking(false);
+          // Remove from active tasks for Dashboard
+          if (data.payload?.task_id || data.request_id) {
+            setActiveTaskIds(prev => { const next = new Set(prev); next.delete(data.payload?.task_id || data.request_id); return next; });
+          }
           setChatMessages(prev => [
             ...prev,
             { role: 'agent', content: `**${data.type === 'TASK_CANCELLED' ? 'Task Cancelled' : 'Task Failed'}**: ${data.payload.error || data.payload.message || 'Unknown error'}` }
@@ -266,6 +285,10 @@ function App() {
           });
         } else if (data.type === 'LOCAL_MODEL_LIST_RESPONSE') {
           setLocalModels(data.payload.models || []);
+        } else if (data.type === 'PLUGIN_LIST_RESPONSE') {
+          const plugins = data.payload.plugins;
+          const pluginArr = Array.isArray(plugins) ? plugins : Object.values(plugins || {});
+          setPluginCount(pluginArr.filter(p => p.enabled !== false).length);
         } else if (data.type === 'ERROR') {
           setIsThinking(false);
           setChatMessages(prev => [...prev, { role: 'agent', content: `**Error:** ${data.payload.message || 'Unknown error'}` }]);
@@ -275,6 +298,22 @@ function App() {
       };
     
     initConnection();
+
+    // Poll Electron process memory usage every 5s for Dashboard
+    const memoryPoll = setInterval(async () => {
+      if (window.electronAPI?.getMemoryUsage) {
+        try {
+          const mb = await window.electronAPI.getMemoryUsage();
+          setMemoryMb(mb);
+        } catch (e) {
+          // ignore
+        }
+      }
+    }, 5000);
+    // Initial fetch
+    if (window.electronAPI?.getMemoryUsage) {
+      window.electronAPI.getMemoryUsage().then(mb => setMemoryMb(mb)).catch(() => {});
+    }
 
     // Add some random ambient nodes to simulate a vast but empty network
     const ambientNodes = [];
@@ -289,6 +328,7 @@ function App() {
       nodes: [...prev.nodes, ...ambientNodes],
       links: [...prev.links, ...ambientLinks]
     }));
+    return () => clearInterval(memoryPoll);
   }, []);
 
   const handleSendMessage = (text) => {
@@ -569,8 +609,8 @@ function App() {
                  />
                </div>
             )}
-            {activeTab === 'Dashboard' && <Dashboard />}
-            {activeTab === 'Projects' && <Projects />}
+            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} />}
+            {activeTab === 'Projects' && <Projects wsRef={wsRef} />}
             {activeTab !== 'Settings' && activeTab !== 'Dashboard' && activeTab !== 'Projects' && (
                <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: '#9090a0' }}>
                  <h2>{activeTab} view coming soon.</h2>
