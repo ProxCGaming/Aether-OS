@@ -2,31 +2,44 @@
 
 .ios-glass {
   position: relative;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.03) 100%);
+  background: linear-gradient(135deg, rgba(15, 15, 30, 0.65) 0%, rgba(5, 5, 15, 0.85) 100%);
   backdrop-filter: blur(40px) saturate(250%) brightness(115%) contrast(105%);
   -webkit-backdrop-filter: blur(40px) saturate(250%) brightness(115%) contrast(105%);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-top: 1px solid rgba(255, 255, 255, 0.3);
-  border-left: 1px solid rgba(255, 255, 255, 0.25);
+  border: 1px solid rgba(124, 58, 237, 0.15);
+  border-top: 1px solid rgba(124, 58, 237, 0.3);
+  border-left: 1px solid rgba(124, 58, 237, 0.25);
   box-shadow: 
-    0 30px 60px rgba(0, 0, 0, 0.4), 
-    inset 0 1px 1px rgba(255, 255, 255, 0.5), 
-    inset 0 0 40px rgba(255, 255, 255, 0.05),
-    inset 0 -1px 1px rgba(0, 0, 0, 0.2);
+    0 30px 60px rgba(0, 0, 0, 0.6), 
+    inset 0 1px 1px rgba(255, 255, 255, 0.15), 
+    inset 0 0 40px rgba(124, 58, 237, 0.05),
+    inset 0 -1px 1px rgba(0, 0, 0, 0.4);
   border-radius: 24px;
+  transition: border-color 0.3s ease;
 }
 
-.ios-glass::before {
+.ios-glass:hover {
+  border-color: rgba(124, 58, 237, 0.4);
+}
+
+/* Windows 11 style reveal hover effect */
+.ios-glass::after {
   content: "";
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
-  border-radius: 24px;
-  padding: 4px;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0) 40%, rgba(0, 0, 0, 0) 60%, rgba(0, 0, 0, 0.2));
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity 0.3s;
+  background: radial-gradient(
+    600px circle at var(--mouse-x, -500px) var(--mouse-y, -500px),
+    rgba(124, 58, 237, 0.15),
+    transparent 40%
+  );
   pointer-events: none;
+  z-index: 1;
+}
+
+.ios-glass:hover::after {
+  opacity: 1;
 }
 
 .ios-glass-input {
