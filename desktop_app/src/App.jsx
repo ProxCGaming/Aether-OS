@@ -46,6 +46,23 @@ function App() {
   const [sessions, setSessions] = useState([]);
   const [activeSession, setActiveSession] = useState(initialSession || null);
   const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Projects', 'Insights', 'Settings'
+  const [initialInput, setInitialInput] = useState('');
+  
+  useEffect(() => {
+    if (isFloating) {
+      try {
+        const transferData = localStorage.getItem('floating_transfer_state');
+        if (transferData) {
+          const parsed = JSON.parse(transferData);
+          if (parsed.messages) setChatMessages(parsed.messages);
+          if (parsed.input) setInitialInput(parsed.input);
+          // We intentionally don't clear it immediately so refreshing the floating window keeps the context
+        }
+      } catch (err) {
+        console.error('Failed to load floating transfer state', err);
+      }
+    }
+  }, [isFloating]);
   const wsRef = useRef(null);
   const graphRef = useRef();
 
@@ -506,8 +523,15 @@ function App() {
             isThinking={isThinking}
             providers={providers}
             onChangeModel={handleChangeModel}
-            onDetach={() => window.electronAPI?.openFloatingChat(activeSession)}
+            onDetach={(state) => {
+              localStorage.setItem('floating_transfer_state', JSON.stringify({
+                messages: chatMessages,
+                input: state?.input || ''
+              }));
+              window.electronAPI?.openFloatingChat(activeSession);
+            }}
             isFloating={isFloating}
+            initialInput={initialInput}
           />
         )
       )}
