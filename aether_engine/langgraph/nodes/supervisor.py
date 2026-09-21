@@ -98,7 +98,7 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
     context_str = ""
     try:
         if original_prompt and original_prompt != "None":
-            episodes = episodic.query_episodes(original_prompt, limit=3)
+            episodes = await episodic.query_episodes(original_prompt, limit=3)
             if episodes:
                 context_str = "Relevant Past Context (for your awareness):\n"
                 for ep in episodes:

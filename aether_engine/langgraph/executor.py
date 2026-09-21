@@ -207,7 +207,7 @@ async def run_langgraph_task(
             
             if not interrupted:
                 try:
-                    episodic.store_episode(task_id, prompt, full_response, ["task", "completed"], TaskState.SUCCEEDED.value)
+                    await episodic.store_episode(task_id, prompt, full_response, ["task", "completed"], TaskState.SUCCEEDED.value)
                     await knowledge_graph.extract_and_store_facts(
                         provider=provider,
                         user_prompt=prompt,
@@ -351,7 +351,7 @@ async def resume_langgraph_task(
                 
                 orig_prompt = state_obj.values.get("original_prompt", "")
                 try:
-                    episodic.store_episode(task_id, orig_prompt, full_response, ["task", "completed", "resumed"], TaskState.SUCCEEDED.value)
+                    await episodic.store_episode(task_id, orig_prompt, full_response, ["task", "completed", "resumed"], TaskState.SUCCEEDED.value)
                     await knowledge_graph.extract_and_store_facts(
                         provider=provider,
                         user_prompt=orig_prompt,
