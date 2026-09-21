@@ -11,6 +11,7 @@ export default function Dropdown({
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef(null);
+  const scrollRef = useRef(null);
 
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -22,6 +23,56 @@ export default function Dropdown({
       document.addEventListener('mousedown', handleClickOutside);
     }
     return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isOpen]);
+
+  // Custom butter-smooth scrolling using lerp (linear interpolation)
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    let targetScroll = el.scrollTop;
+    let isScrolling = false;
+    let frameId;
+
+    const updateScroll = () => {
+      if (!el) return;
+      
+      // Interpolate towards the target
+      el.scrollTop += (targetScroll - el.scrollTop) * 0.15;
+      
+      if (Math.abs(targetScroll - el.scrollTop) > 0.5) {
+        frameId = requestAnimationFrame(updateScroll);
+      } else {
+        el.scrollTop = targetScroll;
+        isScrolling = false;
+      }
+    };
+
+    const onWheel = (e) => {
+      e.preventDefault();
+      // Accumulate scroll target
+      targetScroll = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, targetScroll + e.deltaY));
+      
+      if (!isScrolling) {
+        isScrolling = true;
+        frameId = requestAnimationFrame(updateScroll);
+      }
+    };
+
+    const onScroll = () => {
+      if (!isScrolling) {
+        targetScroll = el.scrollTop;
+      }
+    };
+
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('scroll', onScroll, { passive: true });
+    
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('scroll', onScroll);
+      if (frameId) cancelAnimationFrame(frameId);
+    };
   }, [isOpen]);
 
   // Find the selected label
@@ -42,7 +93,7 @@ export default function Dropdown({
   }
 
   return (
-    <div style={{ position: 'relative', width: style.width || 'auto' }} ref={dropdownRef}>
+    <div className="nodrag" style={{ position: 'relative', width: style.width || 'auto', WebkitAppRegion: 'no-drag', cursor: 'auto' }} ref={dropdownRef}>
       <button 
         type="button"
         onClick={() => setIsOpen(!isOpen)}
@@ -80,26 +131,45 @@ export default function Dropdown({
             top: 'calc(100% + 8px)',
             [align === 'right' ? 'right' : 'left']: 0,
             minWidth: '240px',
-            maxHeight: '300px',
-            overflowY: 'auto',
-            background: 'rgba(15, 15, 25, 0.95)',
-            backdropFilter: 'blur(20px)',
-            border: '1px solid rgba(255,255,255,0.08)',
-            borderRadius: '12px',
-            boxShadow: '0 16px 40px rgba(0,0,0,0.4)',
+            borderRadius: '16px',
             padding: '8px',
+            boxShadow: '0 20px 40px rgba(0,0,0,0.5), inset 0 1px 1px rgba(255,255,255,0.15), inset 0 0 20px rgba(124,58,237,0.15), inset 0 -1px 1px rgba(0,0,0,0.3)',
             zIndex: 1000,
-            display: 'flex',
-            flexDirection: 'column',
             animation: 'fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
-            transformOrigin: 'top ' + align
+            transformOrigin: 'top ' + align,
+            overflow: 'hidden'
           }}
         >
+          <div 
+            ref={scrollRef}
+            className="chat-scroll"
+            style={{
+              maxHeight: '300px',
+              overflowY: 'auto',
+              paddingRight: '4px',
+              display: 'flex',
+              flexDirection: 'column'
+            }}
+          >
           {options.map((opt, idx) => {
             if (opt.group) {
               return (
                 <div key={opt.group || idx} style={{ marginBottom: '8px' }}>
-                  <div style={{ fontSize: '10px', textTransform: 'uppercase', color: '#9090a0', padding: '6px 8px 4px 8px', letterSpacing: '0.05em', fontWeight: 600 }}>
+                  <div style={{ 
+                    position: 'sticky',
+                    top: 0,
+                    zIndex: 10,
+                    background: 'rgba(20, 20, 35, 0.85)',
+                    backdropFilter: 'blur(8px)',
+                    fontSize: '10px', 
+                    textTransform: 'uppercase', 
+                    color: '#9090a0', 
+                    padding: '6px 8px 4px 8px', 
+                    letterSpacing: '0.05em', 
+                    fontWeight: 600,
+                    borderBottom: '1px solid rgba(255, 255, 255, 0.05)',
+                    borderRadius: '4px 4px 0 0'
+                  }}>
                     {opt.group}
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
@@ -117,7 +187,7 @@ export default function Dropdown({
                             width: '100%',
                             textAlign: 'left',
                             padding: '8px 10px',
-                            background: isSelected ? 'rgba(124, 58, 237, 0.2)' : 'transparent',
+                            background: isSelected ? 'rgba(var(--accent-rgb), 0.2)' : 'transparent',
                             border: 'none',
                             borderRadius: '6px',
                             color: isSelected ? '#a78bfa' : '#e2e8f0',
@@ -157,7 +227,7 @@ export default function Dropdown({
                     width: '100%',
                     textAlign: 'left',
                     padding: '8px 10px',
-                    background: isSelected ? 'rgba(124, 58, 237, 0.2)' : 'transparent',
+                    background: isSelected ? 'rgba(var(--accent-rgb), 0.2)' : 'transparent',
                     border: 'none',
                     borderRadius: '6px',
                     color: isSelected ? '#a78bfa' : '#e2e8f0',
@@ -181,6 +251,7 @@ export default function Dropdown({
               );
             }
           })}
+          </div>
         </div>
       )}
     </div>
