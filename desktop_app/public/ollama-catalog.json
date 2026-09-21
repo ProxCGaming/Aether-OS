@@ -1,0 +1,8 @@
+[
+  { "name": "llama3:8b", "size": 4.7, "params": "8B", "quant": "Q4_K_M", "description": "Meta's powerful 8B model. Excellent for general chat and reasoning." },
+  { "name": "mistral:7b", "size": 4.1, "params": "7B", "quant": "Q4_K_M", "description": "Fast, extremely capable open model by Mistral AI." },
+  { "name": "qwen2.5:7b", "size": 4.2, "params": "7B", "quant": "Q4_K_M", "description": "Alibaba's latest high-performance reasoning model." },
+  { "name": "phi3:mini", "size": 2.3, "params": "3.8B", "quant": "Q4_K_M", "description": "Microsoft's highly efficient small model. Perfect for low RAM." },
+  { "name": "gemma2:2b", "size": 1.6, "params": "2B", "quant": "Q4_K_M", "description": "Google's lightweight model based on Gemini." },
+  { "name": "deepseek-coder-v2:16b", "size": 8.9, "params": "16B", "quant": "Q4_K_M", "description": "Exceptional coding and logic capabilities." }
+]

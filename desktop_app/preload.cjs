@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
   getAuthToken: () => ipcRenderer.invoke('get-auth-token'),
   getWsStatus: () => ipcRenderer.invoke('get-ws-status'),
+  getMemoryUsage: () => ipcRenderer.invoke('get-memory-usage'),
+  showOpenDialog: (options) => ipcRenderer.invoke('show-open-dialog', options),
   sendEngineMessage: (msg) => ipcRenderer.send('engine-send', msg),
   onEngineMessage: (callback) => ipcRenderer.on('engine-message', (_event, value) => callback(value)),
   onChatDetached: (callback) => ipcRenderer.on('chat-detached', () => callback()),

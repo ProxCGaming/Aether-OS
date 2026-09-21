@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const WebSocket = require('ws');
@@ -194,4 +194,18 @@ ipcMain.handle('close-floating-chat', () => {
   if (floatingChatWindow && !floatingChatWindow.isDestroyed()) {
     floatingChatWindow.close();
   }
+});
+
+ipcMain.handle('get-memory-usage', () => {
+  return Math.round(process.memoryUsage().rss / 1024 / 1024);
+});
+
+ipcMain.handle('show-open-dialog', async (event, options) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showOpenDialog(win, options || {
+    properties: ['openDirectory'],
+    title: 'Select Folder'
+  });
+  if (result.canceled) return null;
+  return result.filePaths[0];
 });
