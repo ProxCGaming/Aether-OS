@@ -10,14 +10,14 @@ export default function LocalModelsTab({ wsRef, localModels = [] }) {
   const [downloadProgress, setDownloadProgress] = useState({}); // { modelName: { percent, status } }
   
   // A curated catalogue representing models available to download.
-  const [catalog, setCatalog] = useState([
-    { name: 'llama3:8b', size: 4.7, params: '8B', quant: 'Q4_K_M', description: 'Meta\'s powerful 8B model. Excellent for general chat and reasoning.' },
-    { name: 'mistral:7b', size: 4.1, params: '7B', quant: 'Q4_K_M', description: 'Fast, extremely capable open model by Mistral AI.' },
-    { name: 'qwen2.5:7b', size: 4.2, params: '7B', quant: 'Q4_K_M', description: 'Alibaba\'s latest high-performance reasoning model.' },
-    { name: 'phi3:mini', size: 2.3, params: '3.8B', quant: 'Q4_K_M', description: 'Microsoft\'s highly efficient small model. Perfect for low RAM.' },
-    { name: 'gemma2:2b', size: 1.6, params: '2B', quant: 'Q4_K_M', description: 'Google\'s lightweight model based on Gemini.' },
-    { name: 'deepseek-coder-v2:16b', size: 8.9, params: '16B', quant: 'Q4_K_M', description: 'Exceptional coding and logic capabilities.' }
-  ]);
+  const [catalog, setCatalog] = useState([]);
+
+  useEffect(() => {
+    fetch('/ollama-catalog.json')
+      .then(res => res.json())
+      .then(data => setCatalog(data))
+      .catch(e => console.error('Failed to load catalog:', e));
+  }, []);
 
   // Combine downloaded models with catalog
   const mergedModels = catalog.map(cat => {
@@ -82,9 +82,25 @@ export default function LocalModelsTab({ wsRef, localModels = [] }) {
         type: 'LOCAL_MODEL_DOWNLOAD_START',
         schema_version: 1,
         request_id: Date.now().toString(),
-        payload: { repo_id: modelName } // mapped to 'name' in python backend
+        payload: { model: modelName, destination_dir: localStorage.getItem('local_model_download_dir') || null }
       }));
       setDownloadProgress(prev => ({ ...prev, [modelName]: { percent: 0, status: 'starting' } }));
+    }
+  };
+
+  const handleCancel = (modelName) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'LOCAL_MODEL_DOWNLOAD_CANCEL',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { model: modelName }
+      }));
+      setDownloadProgress(prev => {
+        const next = { ...prev };
+        delete next[modelName];
+        return next;
+      });
     }
   };
 
@@ -237,11 +253,7 @@ export default function LocalModelsTab({ wsRef, localModels = [] }) {
                         <RefreshCw size={14} className="spin-animation" /> {progress.percent}%
                      </div>
                      <div style={{ display: 'flex', gap: '8px' }}>
-                        {/* Fake pause/cancel buttons for visual demo of the impeccable UI */}
-                        <button className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: 'var(--text-primary, #e2e8f0)', cursor: 'pointer', border: '1px solid rgba(100,100,100,0.3)' }}>
-                           <Pause size={14} />
-                        </button>
-                        <button className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: '#ef4444', cursor: 'pointer', border: '1px solid rgba(239,68,68,0.3)' }}>
+                        <button onClick={() => handleCancel(model.name)} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: '#ef4444', cursor: 'pointer', border: '1px solid rgba(239,68,68,0.3)' }} title="Cancel Download">
                            <X size={14} />
                         </button>
                      </div>
