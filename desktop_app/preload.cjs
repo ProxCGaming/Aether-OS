@@ -10,9 +10,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getMemoryUsage: () => ipcRenderer.invoke('get-memory-usage'),
   showOpenDialog: (options) => ipcRenderer.invoke('show-open-dialog', options),
   sendEngineMessage: (msg) => ipcRenderer.send('engine-send', msg),
-  onEngineMessage: (callback) => ipcRenderer.on('engine-message', (_event, value) => callback(value)),
-  onChatDetached: (callback) => ipcRenderer.on('chat-detached', () => callback()),
-  onChatAttached: (callback) => ipcRenderer.on('chat-attached', () => callback()),
+  onEngineMessage: (callback) => {
+    const handler = (_event, value) => callback(value);
+    ipcRenderer.on('engine-message', handler);
+    return () => ipcRenderer.removeListener('engine-message', handler);
+  },
+  onChatDetached: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('chat-detached', handler);
+    return () => ipcRenderer.removeListener('chat-detached', handler);
+  },
+  onChatAttached: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('chat-attached', handler);
+    return () => ipcRenderer.removeListener('chat-attached', handler);
+  },
   openFloatingChat: (sessionId) => ipcRenderer.invoke('open-floating-chat', sessionId),
   closeFloatingChat: () => ipcRenderer.invoke('close-floating-chat')
 });

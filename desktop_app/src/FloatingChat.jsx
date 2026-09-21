@@ -7,8 +7,9 @@ export default function FloatingChat() {
   const [input, setInput] = useState('');
 
   useEffect(() => {
+    let unsubscribe = null;
     if (window.electronAPI && window.electronAPI.onEngineMessage) {
-      window.electronAPI.onEngineMessage((data) => {
+      unsubscribe = window.electronAPI.onEngineMessage((data) => {
         try {
           const parsed = JSON.parse(data);
           // Simplified message handler for demo
@@ -21,6 +22,9 @@ export default function FloatingChat() {
         } catch (e) {}
       });
     }
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
   }, []);
 
   const handleSend = () => {

@@ -25,6 +25,10 @@ const initGraphData = {
   ]
 };
 
+// Module-level IPC event deduplicator to drop identical packets fired by multiple listeners
+let lastRawIpcData = null;
+let lastRawIpcTime = 0;
+
 function App() {
   const [graphData, setGraphData] = useState(initGraphData);
   const [input, setInput] = useState('');
@@ -50,6 +54,8 @@ function App() {
 
   const [sessions, setSessions] = useState([]);
   const [activeSession, setActiveSession] = useState(initialSession || null);
+  const activeSessionRef = useRef(initialSession || null);
+  useEffect(() => { activeSessionRef.current = activeSession; }, [activeSession]);
   const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Projects', 'Settings'
   const [initialInput, setInitialInput] = useState('');
   
@@ -82,11 +88,15 @@ function App() {
 
   const wsRef = useRef(null);
   const graphRef = useRef();
+  const pendingSessionSwitchRef = useRef(null);
 
   useEffect(() => {
+    const unsubscribers = [];
     async function initConnection() {
       // In the new architecture, the main process handles the WebSocket.
       // We just mock wsRef so existing code can call wsRef.current.send()
+      const wsListeners = new Map();
+
       wsRef.current = {
         readyState: 1, // Simulate WebSocket.OPEN
         send: (data) => {
@@ -95,13 +105,20 @@ function App() {
           }
         },
         addEventListener: (event, handler) => {
-          if (event === 'message' && window.electronAPI) {
-            window.electronAPI.onEngineMessage((data) => {
+          if (event === 'message' && window.electronAPI && window.electronAPI.onEngineMessage) {
+            const cleanup = window.electronAPI.onEngineMessage((data) => {
               handler({ data });
             });
+            wsListeners.set(handler, cleanup);
           }
         },
-        removeEventListener: () => {}
+        removeEventListener: (event, handler) => {
+          if (event === 'message' && wsListeners.has(handler)) {
+            const cleanup = wsListeners.get(handler);
+            if (typeof cleanup === 'function') cleanup();
+            wsListeners.delete(handler);
+          }
+        }
       };
 
       // Check initial status
@@ -116,7 +133,7 @@ function App() {
       }
 
       if (window.electronAPI && window.electronAPI.onEngineMessage) {
-        window.electronAPI.onEngineMessage((data) => {
+        unsubscribers.push(window.electronAPI.onEngineMessage((data) => {
           try {
             const parsed = JSON.parse(data);
             if (parsed.type === '_ws_status') {
@@ -128,6 +145,23 @@ function App() {
                 wsRef.current.send(JSON.stringify({ type: 'PLUGIN_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
               } else {
                 setStatus('Offline / Engine Disconnected');
+                // If the engine crashes or drops connection, forcefully terminate any pending tasks so the UI doesn't hang spinning forever.
+                setIsThinking(false);
+                setChatMessages(prev => {
+                  let newMessages = [...prev];
+                  const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
+                  if (lastAgentIdx !== -1) {
+                    const last = newMessages[lastAgentIdx];
+                    newMessages[lastAgentIdx] = { 
+                      ...last, 
+                      content: last.content ? `${last.content}\n\n**Error**: Connection lost (Engine crashed).` : "**Error**: Connection lost (Engine crashed).", 
+                      isFinal: true,
+                      hasError: true
+                    };
+                    return newMessages;
+                  }
+                  return prev;
+                });
               }
               return;
             }
@@ -136,15 +170,15 @@ function App() {
           } catch (e) {
             console.error(e);
           }
-        });
+        }));
       }
 
       if (window.electronAPI && window.electronAPI.onChatDetached) {
-        window.electronAPI.onChatDetached(() => setIsChatDetached(true));
+        unsubscribers.push(window.electronAPI.onChatDetached(() => setIsChatDetached(true)));
       }
       
       if (window.electronAPI && window.electronAPI.onChatAttached) {
-        window.electronAPI.onChatAttached(() => {
+        unsubscribers.push(window.electronAPI.onChatAttached(() => {
           setIsChatDetached(false);
           try {
             const transferData = localStorage.getItem('floating_transfer_state');
@@ -153,10 +187,18 @@ function App() {
               if (parsed.messages) setChatMessages(parsed.messages);
             }
           } catch (e) {}
-        });
+        }));
       }
 
       const handleMessage = (event) => {
+        const now = Date.now();
+        if (event.data && event.data === lastRawIpcData && (now - lastRawIpcTime) < 150) {
+          // Drop identical duplicate packet dispatched by multiple listeners in the same tick
+          return;
+        }
+        lastRawIpcData = event.data;
+        lastRawIpcTime = now;
+
         const data = JSON.parse(event.data);
         if (data.type === 'hello') {
           setStatus(`Online / ${data.payload.active_model || 'Agent'}`);
@@ -165,30 +207,50 @@ function App() {
           if (data.payload?.task_id || data.request_id) {
             setActiveTaskIds(prev => new Set(prev).add(data.payload?.task_id || data.request_id));
           }
+          setIsThinking(true);
+          setChatMessages(prev => {
+            if (prev.findLastIndex(m => m.role === 'agent' && !m.isFinal) === -1) {
+              return [...prev, { role: 'agent', content: '', thoughts: [], isFinal: false }];
+            }
+            return prev;
+          });
         } else if (data.type === 'TASK_PROGRESS') {
-          const delta = data.payload.text_delta;
+          let delta = data.payload.text_delta;
+          if (delta !== undefined && delta !== null && typeof delta !== 'string') {
+            delta = JSON.stringify(delta, null, 2);
+          }
           const node = data.payload.node;
           const isThought = node && node !== 'assistant' && node !== 'agent';
           
           if (delta) {
             setChatMessages(prev => {
-              const last = prev[prev.length - 1];
-              if (last && last.role === 'agent' && !last.isFinal) {
+              const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
+              if (lastAgentIdx !== -1) {
                 const newMessages = [...prev];
+                const last = newMessages[lastAgentIdx];
                 if (isThought) {
                   const currentThoughts = last.thoughts || [];
                   const updatedThoughts = [...currentThoughts];
                   if (updatedThoughts.length > 0 && updatedThoughts[updatedThoughts.length - 1].node === node) {
+                    const currentText = updatedThoughts[updatedThoughts.length - 1].text || '';
+                    if (delta.length > 10 && currentText.endsWith(delta)) {
+                      return prev;
+                    }
                     updatedThoughts[updatedThoughts.length - 1].text += delta;
                   } else {
                     updatedThoughts.push({ node, text: delta });
                   }
-                  newMessages[newMessages.length - 1] = { ...last, thoughts: updatedThoughts };
+                  newMessages[lastAgentIdx] = { ...last, thoughts: updatedThoughts };
                 } else {
-                  newMessages[newMessages.length - 1] = { ...last, content: last.content + delta };
+                  newMessages[lastAgentIdx] = { ...last, content: (last.content || '') + delta };
                 }
                 return newMessages;
               } else {
+                const veryLast = prev[prev.length - 1];
+                if (veryLast && veryLast.role === 'agent' && veryLast.isFinal) {
+                  // Drop ghost progress packets that arrive after a task is completed/cancelled
+                  return prev;
+                }
                 if (isThought) {
                   return [...prev, { role: 'agent', content: '', thoughts: [{ node, text: delta }], isFinal: false }];
                 } else {
@@ -203,40 +265,68 @@ function App() {
           if (data.payload?.task_id || data.request_id) {
             setActiveTaskIds(prev => { const next = new Set(prev); next.delete(data.payload?.task_id || data.request_id); return next; });
           }
-          const result = data.payload.response || data.payload.result || data.payload.output || JSON.stringify(data.payload);
+          let result = data.payload.response || data.payload.result || data.payload.output;
+          
           setChatMessages(prev => {
-            const last = prev[prev.length - 1];
-            if (last && last.role === 'agent' && !last.isFinal) {
-              const newMessages = [...prev];
-              newMessages[newMessages.length - 1] = { ...last, content: result, isFinal: true };
-              return newMessages;
+            let newMessages = [...prev];
+            const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
+            
+            if (lastAgentIdx !== -1) {
+              const last = newMessages[lastAgentIdx];
+              const finalContent = (result !== undefined && result !== null) ? (typeof result !== 'string' ? JSON.stringify(result, null, 2) : result) : last.content;
+              
+              newMessages[lastAgentIdx] = { ...last, content: finalContent, isFinal: true };
+              return newMessages.map((m, i) => 
+                (m.role === 'agent' && !m.isFinal && i !== lastAgentIdx) ? { ...m, isFinal: true, hasError: true, content: "**Task Cancelled**: Superseded by new request." } : m
+              );
             } else {
-              return [...prev, { role: 'agent', content: result, isFinal: true }];
+              const veryLast = newMessages[newMessages.length - 1];
+              if (veryLast && veryLast.role === 'agent' && veryLast.isFinal) return newMessages;
+              const finalContent = (result !== undefined && result !== null) ? (typeof result !== 'string' ? JSON.stringify(result, null, 2) : result) : '';
+              return [...newMessages, { role: 'agent', content: finalContent, isFinal: true }];
             }
           });
         } else if (data.type === 'TASK_FAILED' || data.type === 'TASK_CANCELLED') {
           setIsThinking(false);
-          // Remove from active tasks for Dashboard
           if (data.payload?.task_id || data.request_id) {
             setActiveTaskIds(prev => { const next = new Set(prev); next.delete(data.payload?.task_id || data.request_id); return next; });
           }
-          setChatMessages(prev => [
-            ...prev,
-            { role: 'agent', content: `**${data.type === 'TASK_CANCELLED' ? 'Task Cancelled' : 'Task Failed'}**: ${data.payload.error || data.payload.message || 'Unknown error'}` }
-          ]);
+          setChatMessages(prev => {
+            let newMessages = [...prev];
+            const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
+            
+            const errorText = `**${data.type === 'TASK_CANCELLED' ? 'Task Cancelled' : 'Task Failed'}**: ${data.payload.error || data.payload.message || 'Unknown error'}`;
+            
+            if (lastAgentIdx !== -1) {
+              const last = newMessages[lastAgentIdx];
+              newMessages[lastAgentIdx] = { 
+                ...last, 
+                content: last.content ? `${last.content}\n\n${errorText}` : errorText, 
+                isFinal: true,
+                hasError: true
+              };
+              return newMessages.map((m, i) => 
+                (m.role === 'agent' && !m.isFinal && i !== lastAgentIdx) ? { ...m, isFinal: true, hasError: true, content: "**Task Cancelled**: Superseded by new request." } : m
+              );
+            } else {
+              const veryLast = newMessages[newMessages.length - 1];
+              if (veryLast && veryLast.role === 'agent' && veryLast.isFinal) return newMessages;
+              return [...newMessages, { role: 'agent', content: errorText, isFinal: true, hasError: true }];
+            }
+          });
         } else if (data.type === 'SESSION_LIST_RESPONSE') {
           setSessions(data.payload.sessions || []);
-          if (data.payload.sessions?.length > 0 && !activeSession) {
+          if (data.payload.sessions?.length > 0 && !activeSessionRef.current) {
             handleSessionSwitch(data.payload.sessions[0].id);
           } else if (isFloating && initialSession) {
             handleSessionSwitch(initialSession);
           }
         } else if (data.type === 'SESSION_GET_RESPONSE') {
-          const sess = data.payload.session;
-          if (sess && sess.messages) {
-            setChatMessages(sess.messages.map(m => ({...m, isFinal: true})));
-          } else {
-            setChatMessages([]);
+          // Only replace chat messages if we explicitly requested a session switch and it matches exactly.
+          if (data.request_id && data.request_id === pendingSessionSwitchRef.current) {
+            pendingSessionSwitchRef.current = null; // Clear immediately to ignore any subsequent echoed broadcasts
+            const sess = data.payload.session;
+            setChatMessages((sess && sess.messages) ? sess.messages.map(m => ({...m, isFinal: true})) : []);
           }
         } else if (data.type === 'FALLBACK_STARTED') {
           setChatMessages(prev => [...prev, { 
@@ -312,7 +402,27 @@ function App() {
           setPluginCount(pluginArr.filter(p => p.enabled !== false).length);
         } else if (data.type === 'ERROR') {
           setIsThinking(false);
-          setChatMessages(prev => [...prev, { role: 'agent', content: `**Error:** ${data.payload.message || 'Unknown error'}` }]);
+          setChatMessages(prev => {
+            const errorText = `**Error:** ${data.payload.message || 'Unknown error'}`;
+            const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
+            if (lastAgentIdx !== -1) {
+              const newMessages = [...prev];
+              const last = newMessages[lastAgentIdx];
+              newMessages[lastAgentIdx] = { 
+                ...last, 
+                content: last.content ? `${last.content}\n\n${errorText}` : errorText, 
+                isFinal: true,
+                hasError: true
+              };
+              return newMessages.map((m, i) => 
+                (m.role === 'agent' && !m.isFinal && i !== lastAgentIdx) ? { ...m, isFinal: true, hasError: true, content: "**Task Cancelled**: Superseded by new request." } : m
+              );
+            } else {
+              const veryLast = prev[prev.length - 1];
+              if (veryLast && veryLast.role === 'agent' && veryLast.isFinal) return prev;
+              return [...prev, { role: 'agent', content: errorText, isFinal: true, hasError: true }];
+            }
+          });
         }
       };
 
@@ -349,11 +459,20 @@ function App() {
       nodes: [...prev.nodes, ...ambientNodes],
       links: [...prev.links, ...ambientLinks]
     }));
-    return () => clearInterval(memoryPoll);
+    return () => {
+      clearInterval(memoryPoll);
+      unsubscribers.forEach(unsub => {
+        if (typeof unsub === 'function') unsub();
+      });
+    };
   }, []);
 
   const handleSendMessage = (text) => {
-    setChatMessages(prev => [...prev, { role: 'user', content: text, isFinal: true }]);
+    setChatMessages(prev => [
+      ...prev, 
+      { role: 'user', content: text, isFinal: true },
+      { role: 'agent', content: '', thoughts: [], isFinal: false }
+    ]);
     setIsThinking(true);
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
@@ -368,7 +487,15 @@ function App() {
     } else {
       setTimeout(() => {
         setIsThinking(false);
-        setChatMessages(prev => [...prev, { role: 'agent', content: "Offline mode: Backend not connected." }]);
+        setChatMessages(prev => {
+          let newMessages = [...prev];
+          const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
+          if (lastAgentIdx !== -1) {
+            newMessages[lastAgentIdx] = { ...newMessages[lastAgentIdx], content: "**Error**: Offline mode: Backend not connected.", isFinal: true, hasError: true };
+            return newMessages;
+          }
+          return [...newMessages, { role: 'agent', content: "**Error**: Offline mode: Backend not connected.", isFinal: true, hasError: true }];
+        });
       }, 1000);
     }
   };
@@ -376,10 +503,12 @@ function App() {
   const handleSessionSwitch = (id) => {
     setActiveSession(id);
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const reqId = `switch_${Date.now()}`;
+      pendingSessionSwitchRef.current = reqId;
       wsRef.current.send(JSON.stringify({
         type: 'SESSION_GET_REQUEST',
         schema_version: 1,
-        request_id: Date.now().toString(),
+        request_id: reqId,
         payload: { session_id: id }
       }));
     }
@@ -461,6 +590,18 @@ function App() {
     } catch (e) {}
   };
 
+  const handleStopTask = () => {
+    if (wsRef.current && wsRef.current.send) {
+      wsRef.current.send(JSON.stringify({
+        type: 'CANCEL_TASK',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+    }
+    setIsThinking(false);
+  };
+
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', overflow: 'hidden', backgroundColor: isFloating ? 'transparent' : '#05050f', flexDirection: 'column' }}>
       
@@ -468,6 +609,8 @@ function App() {
         <TitleBar 
           isChatDetached={isChatDetached}
           onReattachChat={handleReattachChat}
+          isThinking={isThinking}
+          onStopTask={handleStopTask}
         />
       )}
       
@@ -566,6 +709,7 @@ function App() {
         <DraggableChatWindow 
           messages={chatMessages} 
           onSendMessage={handleSendMessage} 
+          onStopTask={handleStopTask}
           onApproveTool={handleToolApproval}
           onApprovePlugin={handlePluginApproval}
           status={status}
@@ -693,7 +837,7 @@ function NavItem({ icon, label, activeTab, setActiveTab }) {
   );
 }
 
-function TitleBar({ isChatDetached, onReattachChat }) {
+function TitleBar({ isChatDetached, onReattachChat, isThinking, onStopTask }) {
   const handleMinimize = () => window.electronAPI?.minimizeWindow();
   const handleMaximize = () => window.electronAPI?.maximizeWindow();
   const handleClose = () => window.electronAPI?.closeWindow();
@@ -713,15 +857,29 @@ function TitleBar({ isChatDetached, onReattachChat }) {
       right: 0,
       padding: '0 8px 0 16px'
     }}>
-      <div style={{ WebkitAppRegion: 'no-drag', display: 'flex', alignItems: 'center', height: '100%' }}>
+      <div style={{ WebkitAppRegion: 'no-drag', display: 'flex', alignItems: 'center', height: '100%', gap: '6px' }}>
+        {/* Stop Task button shown whenever a task is active */}
+        {isThinking && (
+          <button 
+            onClick={onStopTask}
+            className="ios-stop-btn"
+            title="Stop current task"
+            aria-label="Stop current task"
+          >
+            <Square size={9} fill="currentColor" />
+          </button>
+        )}
+
+        {/* Re-attach button with running task indicator */}
         {isChatDetached && (
           <button 
             onClick={onReattachChat}
-            className="ios-reattach-btn"
-            title="Re-attach to Main Window"
+            className={`ios-reattach-btn ${isThinking ? 'running' : ''}`}
+            title={isThinking ? "Task is running • Click to re-attach to Main Window" : "Re-attach to Main Window"}
             aria-label="Re-attach to Main Window"
           >
             <LogIn size={13} />
+            {isThinking && <span className="ios-running-badge" />}
           </button>
         )}
         <div style={{ display: 'flex', height: '100%' }}>
