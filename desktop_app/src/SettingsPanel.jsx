@@ -222,7 +222,11 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
     if (Array.isArray(providers)) {
       providers.forEach(p => {
         // We don't receive the actual API key for security, so we leave it empty.
-        // But we do receive the base_url.
+        // But we can pre-fill it from localStorage if the user previously entered it!
+        const savedLocalKey = localStorage.getItem(`aether_saved_key_${p.name}`);
+        if (savedLocalKey) {
+          initKeys[p.name] = savedLocalKey;
+        }
         initBaseUrls[p.name] = p.base_url || '';
       });
     }
@@ -247,13 +251,17 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
 
     setValidationState(prev => ({ ...prev, [providerName]: 'saving' }));
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const apiKeyToSave = keys[providerName] || '';
+      if (apiKeyToSave) {
+        localStorage.setItem(`aether_saved_key_${finalProviderName}`, apiKeyToSave);
+      }
       wsRef.current.send(JSON.stringify({
         type: 'PROVIDER_SAVE_REQUEST',
         schema_version: 1,
         request_id: Date.now().toString(),
         payload: {
           provider: finalProviderName,
-          api_key: keys[providerName] || '',
+          api_key: apiKeyToSave,
           base_url: baseUrls[providerName] || '',
           ...(displayName && { display_name: displayName, provider_type: 'openai_compatible' })
         }
