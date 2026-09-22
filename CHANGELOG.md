@@ -5,7 +5,8 @@ All notable changes to the **Aether-OS** project will be documented in this file
 ## [Unreleased] (Current Session)
 
 ### Added
-- **Auto-Title Generation**: Newly created conversations (previously generic "New Conversation") are now automatically renamed to a brief summary of the first user prompt sent in the session.
+- **[2026-09-23 04:22] Environment Diagnostics Engine**: Replaced the static UI mockup in the Settings page with a live, dynamic capability-check runner. Pressing "Run Diagnostics Now" triggers a true backend test for the Python environment, terminal access, SQLite read/write permissions, local Ollama daemon connectivity, and `TAVILY_API_KEY` verification, with live results rendering directly into the UI!
+- **[2026-09-23 03:53] Auto-Title Generation**: Newly created conversations (previously generic "New Conversation") are now automatically renamed to a brief summary of the first user prompt sent in the session.
 
 ### Fixed
 - **Settings API Provider Caching**: API keys are now securely cached in the browser `localStorage` upon connection. If a key is disconnected from the backend, the UI text box remains pre-filled, saving users from needing to re-enter it manually.

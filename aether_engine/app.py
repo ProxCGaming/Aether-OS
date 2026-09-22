@@ -59,13 +59,16 @@ from aether_engine.routing.policy import (
 )
 from aether_engine.routing.registry import (
     GLOBAL_MODEL_REGISTRY,
+    MODEL_REGISTRY,
     ModelEntry,
     ModelRegistry,
+    ModelTier,
 )
 from aether_engine.routing.startup import (
     StartupValidationResult,
     validate_startup_configuration,
 )
+from aether_engine.validation.diagnostics import run_environment_diagnostics
 from aether_engine.scheduler.capability_jobs import CapabilitySchedulerManager
 from aether_engine.secrets.dpapi import SecretDecryptionError
 from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
@@ -1115,6 +1118,19 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     type=EventType.CAPABILITY_CHECK_HISTORY_RESPONSE,
                     request_id=req_id,
                     payload={"summary": status_sum, "history": history},
+                ).to_json())
+
+            elif msg.type == EventType.ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST:
+                diag_logs = run_environment_diagnostics()
+                # Determine overall summary status based on logs
+                failed_count = sum(1 for log in diag_logs if log["status"] == "FAILED")
+                await ws.send_text(Event(
+                    type=EventType.ENVIRONMENT_DIAGNOSTIC_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "summary": {"failed_count": failed_count},
+                        "history": diag_logs,
+                    },
                 ).to_json())
 
             elif msg.type == EventType.REFRESH_MODELS_REQUEST:
