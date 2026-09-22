@@ -384,6 +384,10 @@ function App() {
           });
         } else if (data.type === 'PROVIDER_LIST_RESPONSE') {
           setProviders(data.payload.providers || {});
+        } else if (data.type === 'PROVIDER_REMOVE_RESPONSE' || data.type === 'PROVIDER_SAVE_RESPONSE') {
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+          }
         } else if (data.type === 'MODEL_DEFAULT_CHANGED') {
           setProviders(prev => {
             if (!Array.isArray(prev)) return prev;

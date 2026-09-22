@@ -195,9 +195,9 @@ class CapabilityRouter:
             elif profile.preferred_tier == "premium" and tier == "balanced":
                 score += 2.0
 
-            # User default model small tiebreaker bonus
+            # User default model strong preference bonus
             if p == user_default_provider and mid == user_default_model:
-                score += 1.0
+                score += 100.0
 
             return score
 
