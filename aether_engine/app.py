@@ -59,10 +59,8 @@ from aether_engine.routing.policy import (
 )
 from aether_engine.routing.registry import (
     GLOBAL_MODEL_REGISTRY,
-    MODEL_REGISTRY,
     ModelEntry,
     ModelRegistry,
-    ModelTier,
 )
 from aether_engine.routing.startup import (
     StartupValidationResult,

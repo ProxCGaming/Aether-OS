@@ -34,6 +34,7 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   
   const [capabilityHistory, setCapabilityHistory] = useState([]);
   const [capabilityStatus, setCapabilityStatus] = useState(null);
+  const [isDiagnosticsRunning, setIsDiagnosticsRunning] = useState(false);
 
   const handleDeleteEpisode = (taskId) => {
     if (!taskId) return;
@@ -171,6 +172,7 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
         } else if (data.type === 'ENVIRONMENT_DIAGNOSTIC_RESPONSE') {
           setCapabilityStatus(data.payload.summary);
           setCapabilityHistory(data.payload.history || []);
+          setIsDiagnosticsRunning(false);
         }
       } catch (e) {
         // ignore JSON parse errors
@@ -731,7 +733,8 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                 </div>
                 <button 
                   onClick={() => {
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isDiagnosticsRunning) {
+                      setIsDiagnosticsRunning(true);
                       wsRef.current.send(JSON.stringify({
                         type: 'ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST',
                         schema_version: 1,
@@ -740,8 +743,30 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                       }));
                     }
                   }}
-                  style={{ background: 'transparent', color: '#7c3aed', border: '1px solid rgba(124, 58, 237, 0.5)', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer' }}>
-                  Run Diagnostics Now
+                  disabled={isDiagnosticsRunning}
+                  style={{ 
+                    background: isDiagnosticsRunning ? 'rgba(124, 58, 237, 0.2)' : 'transparent', 
+                    color: isDiagnosticsRunning ? '#a78bfa' : '#7c3aed', 
+                    border: '1px solid rgba(124, 58, 237, 0.5)', 
+                    padding: '8px 16px', 
+                    borderRadius: '8px', 
+                    cursor: isDiagnosticsRunning ? 'wait' : 'pointer',
+                    transition: 'all 0.2s ease',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px'
+                  }}>
+                  {isDiagnosticsRunning ? (
+                    <>
+                      <svg style={{ width: '16px', height: '16px', animation: 'spin 1s linear infinite' }} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle style={{ opacity: 0.25 }} cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path style={{ opacity: 0.75 }} fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Testing...
+                    </>
+                  ) : (
+                    'Run Diagnostics Now'
+                  )}
                 </button>
               </div>
               
