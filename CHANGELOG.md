@@ -4,6 +4,9 @@ All notable changes to the **Aether-OS** project will be documented in this file
 
 ## [Unreleased] (Current Session)
 
+### Added
+- **Auto-Title Generation**: Newly created conversations (previously generic "New Conversation") are now automatically renamed to a brief summary of the first user prompt sent in the session.
+
 ### Fixed
 - **Settings API Provider Caching**: API keys are now securely cached in the browser `localStorage` upon connection. If a key is disconnected from the backend, the UI text box remains pre-filled, saving users from needing to re-enter it manually.
 - **Model Disconnect Bug**: Fixed a UI bug in `App.jsx` where disconnecting a provider or saving a new configuration failed to instantly refresh the available model dropdown.

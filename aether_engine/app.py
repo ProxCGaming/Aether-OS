@@ -631,7 +631,19 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     # Create new session if none provided
                     title = prompt[:30] + "..." if len(prompt) > 30 else prompt
                     session_id = session_store.create_session(title)
-                
+                else:
+                    sess_info = session_store.get_session(session_id)
+                    if sess_info and sess_info.get("title") in ("New Conversation", "New Chat") and not sess_info.get("messages"):
+                        title = prompt[:30] + "..." if len(prompt) > 30 else prompt
+                        session_store.update_session_title(session_id, title)
+                        try:
+                            await ws.send_text(Event(
+                                type=EventType.SESSION_LIST_RESPONSE,
+                                request_id=req_id,
+                                payload={"sessions": session_store.list_sessions()}
+                            ).to_json())
+                        except Exception:
+                            pass
                 try:
                     session_store.add_message(session_id, "user", prompt)
                 except Exception as e:
