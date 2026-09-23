@@ -91,7 +91,7 @@ class TestEngineWebSocket(unittest.TestCase):
 
                     start_event = Event(
                         type=EventType.START_TASK,
-                        payload={"prompt": "Hello"},
+                        payload={"prompt": "Hello", "session_id": "test-session-1"},
                     )
                     ws.send_text(start_event.to_json())
 
@@ -123,7 +123,7 @@ class TestEngineWebSocket(unittest.TestCase):
 
                     start_event = Event(
                         type=EventType.START_TASK,
-                        payload={"prompt": "What is the weather?"},
+                        payload={"prompt": "What is the weather?", "session_id": "test-session-2"},
                     )
                     ws.send_text(start_event.to_json())
 
@@ -131,13 +131,17 @@ class TestEngineWebSocket(unittest.TestCase):
                     ev1 = Event.from_json(ws.receive_text())
                     self.assertEqual(ev1.type, EventType.TASK_CREATED)
 
-                    # 2. TASK_PROGRESS deltas (Graph now emits the full message as one delta per node)
+                    # 2. TASK_PROGRESS deltas (may be preceded by NODE_ACTIVITY)
                     ev2 = Event.from_json(ws.receive_text())
+                    while ev2.type == EventType.NODE_ACTIVITY:
+                        ev2 = Event.from_json(ws.receive_text())
                     self.assertEqual(ev2.type, EventType.TASK_PROGRESS)
                     self.assertIn("Hello from test LLM!", ev2.payload["text_delta"])
 
-                    # 3. TASK_COMPLETED
+                    # 3. TASK_COMPLETED (may be preceded by NODE_ACTIVITY)
                     ev4 = Event.from_json(ws.receive_text())
+                    while ev4.type == EventType.NODE_ACTIVITY:
+                        ev4 = Event.from_json(ws.receive_text())
                     self.assertEqual(ev4.type, EventType.TASK_COMPLETED)
                     # The response payload is currently empty in LangGraph implementation
                     # self.assertEqual(ev4.payload.get("response", ""), "Hello from test LLM!")

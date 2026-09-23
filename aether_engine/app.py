@@ -418,9 +418,23 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
     api_key = secret_store.load_provider(provider_name)
     base_url = engine_state.user_config.custom_base_urls.get(provider_name)
 
-    # Build fallback model list for per-node retry (uses existing get_fallback_candidates)
+    # Build fallback model list for per-node retry (intra-provider first, then cross-provider)
     fallback_models: List[FallbackModel] = []
     try:
+        # 1. Intra-provider fallbacks: alternative healthy chat models from the SAME provider
+        same_provider_models = engine_state.model_registry.get_models_for_provider(provider_name)
+        for entry in same_provider_models:
+            if entry.id != model and entry.capabilities and "chat" in entry.capabilities:
+                fallback_models.append(FallbackModel(
+                    model=resolve_litellm_model(entry.id, provider_name),
+                    api_key=api_key,
+                    provider_name=provider_name,
+                    base_url=base_url,
+                ))
+            if len(fallback_models) >= 2:
+                break
+
+        # 2. Cross-provider candidates from healthy configured providers
         candidates = get_fallback_candidates(
             failed_provider=provider_name,
             configured_providers=engine_state.configured_providers,
@@ -566,10 +580,12 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 if ev.type == EventType.TASK_COMPLETED:
                     latency = ev.payload.get("latency_ms", 100.0)
                     engine_state.health_manager.record_success(p_name, latency)
+                    if session_id:
+                        ev.payload["session_id"] = session_id
                     if session_id and ev.payload.get("response"):
-                        # Save the final response from assistant
+                        # Save the final response from assistant with full thought history
                         try:
-                            session_store.add_message(session_id, "assistant", ev.payload["response"])
+                            session_store.add_message(session_id, "assistant", ev.payload["response"], thoughts=ev.payload.get("thoughts"))
                         except Exception as e:
                             logger.error(f"Failed to save session message: {e}")
 
@@ -632,6 +648,19 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     # Create new session if none provided
                     title = prompt[:30] + "..." if len(prompt) > 30 else prompt
                     session_id = session_store.create_session(title)
+                    try:
+                        await ws.send_text(Event(
+                            type=EventType.SESSION_CREATE_RESPONSE,
+                            request_id=req_id,
+                            payload={"session_id": session_id, "preserve_messages": True}
+                        ).to_json())
+                        await ws.send_text(Event(
+                            type=EventType.SESSION_LIST_RESPONSE,
+                            request_id=req_id,
+                            payload={"sessions": session_store.list_sessions()}
+                        ).to_json())
+                    except Exception:
+                        pass
                 else:
                     sess_info = session_store.get_session(session_id)
                     if sess_info and sess_info.get("title") in ("New Conversation", "New Chat") and not sess_info.get("messages"):

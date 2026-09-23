@@ -125,3 +125,38 @@ class TestPerNodeFallback:
             provider_name="openai",
         )
         assert provider.fallback_models == []
+
+    def test_classify_429_quota_exhausted(self):
+        """Verify that 429 RESOURCE_EXHAUSTED quota errors are classified as retriable."""
+        exc = Exception("vertex_ai_betaException - 429 RESOURCE_EXHAUSTED: Quota exceeded for metric")
+        assert is_retriable_error(exc)
+        is_retriable, msg = classify_provider_error(exc)
+        assert is_retriable
+        assert "rate limit" in msg.lower()
+
+    def test_create_provider_instance_intra_provider_fallback(self):
+        """Verify that _create_provider_instance includes same-provider alternative models."""
+        from aether_engine.app import _create_provider_instance, engine_state
+        from aether_engine.routing.registry import ModelRegistry, ModelEntry
+
+        mock_models = [
+            ModelEntry(provider="google_gemini", id="gemini-3.5-flash-lite", label="Flash Lite", capabilities=["chat", "fast"], priority=1),
+            ModelEntry(provider="google_gemini", id="gemini-2.5-flash", label="Flash", capabilities=["chat", "fast", "code"], priority=2),
+            ModelEntry(provider="google_gemini", id="gemini-2.0-flash", label="Flash 2.0", capabilities=["chat", "fast"], priority=3),
+        ]
+        orig_registry = engine_state.model_registry
+        orig_providers = engine_state.configured_providers
+        try:
+            engine_state.model_registry = ModelRegistry(mock_models)
+            engine_state.configured_providers = ["google_gemini"]
+
+            mock_secret_store = MagicMock()
+            mock_secret_store.load_provider.return_value = "fake-key"
+
+            provider_inst = _create_provider_instance("google_gemini", "gemini-3.5-flash-lite", mock_secret_store)
+            fb_model_names = [fm.model for fm in provider_inst.fallback_models]
+            assert "gemini/gemini-2.5-flash" in fb_model_names
+            assert "gemini/gemini-2.0-flash" in fb_model_names
+        finally:
+            engine_state.model_registry = orig_registry
+            engine_state.configured_providers = orig_providers

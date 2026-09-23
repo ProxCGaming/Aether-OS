@@ -27,6 +27,8 @@ logger = logging.getLogger("aether_engine.providers.litellm_provider")
 
 # Suppress litellm's noisy debug logs in production
 litellm.suppress_debug_info = True
+litellm.set_verbose = False
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
 # LiteLLM model-name mapping
@@ -473,7 +475,8 @@ class LiteLLMProvider(BaseProvider):
                     continue
                 raise ProviderError(f"Model not found: {e}", retriable=True) from e
             except (litellm.RateLimitError, litellm.Timeout,
-                    litellm.APIConnectionError, litellm.ServiceUnavailableError) as e:
+                    litellm.APIConnectionError, litellm.ServiceUnavailableError,
+                    getattr(litellm, "MidStreamFallbackError", ())) as e:
                 # Retriable errors — try next fallback model if available
                 last_error = e
                 if is_fallback or model_idx < len(models_to_try) - 1:
@@ -483,7 +486,8 @@ class LiteLLMProvider(BaseProvider):
                     )
                     continue
                 # No more fallbacks — raise the appropriate typed exception
-                if isinstance(e, litellm.RateLimitError):
+                err_str = str(e)
+                if isinstance(e, litellm.RateLimitError) or "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                     raise RateLimitError(f"Rate limit exceeded: {e}") from e
                 elif isinstance(e, litellm.Timeout):
                     raise TimeoutError(f"Request timed out: {e}") from e
@@ -492,6 +496,13 @@ class LiteLLMProvider(BaseProvider):
             except (AuthenticationError, RateLimitError, TimeoutError, NetworkError, ProviderError):
                 raise
             except Exception as e:
+                err_str = str(e)
+                if ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower()) and (is_fallback or model_idx < len(models_to_try) - 1):
+                    logger.warning(
+                        f"Model '{current_model}' failed with rate limit/quota error: {e}. Trying next fallback..."
+                    )
+                    last_error = e
+                    continue
                 # Non-retriable unknown errors — don't try fallbacks
                 raise ProviderError(f"Unexpected LiteLLM error: {e}", retriable=False) from e
 

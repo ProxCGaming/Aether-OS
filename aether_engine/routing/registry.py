@@ -96,12 +96,18 @@ def _format_model_label(model_id: str) -> str:
 def _infer_capabilities(model_id: str) -> List[str]:
     """Infer baseline capabilities based on model name substrings."""
     lower = model_id.lower()
+
+    # Non-chat / media generation models get NO chat capabilities
+    non_chat_indicators = ("image", "imagen", "transcribe", "lyria", "audio", "tts", "whisper", "embedding", "diffusion")
+    if any(ind in lower for ind in non_chat_indicators):
+        return []
+
     caps = ["chat"]
     if "flash" in lower or "mini" in lower or "haiku" in lower or "small" in lower:
         caps.append("fast")
     if "pro" in lower or "plus" in lower or "sonnet" in lower or "opus" in lower or "gpt-4" in lower or "gemini" in lower:
         caps.extend(["tools", "vision"])
-    if "coder" in lower or "code" in lower or "pro" in lower or "gpt-4" in lower or "sonnet" in lower:
+    if "coder" in lower or "code" in lower or "pro" in lower or "gpt-4" in lower or "sonnet" in lower or "deepseek" in lower or "gemini-2.5" in lower or "gemini-3" in lower:
         caps.append("code")
     if "reason" in lower or "r1" in lower or "o1" in lower or "o3" in lower:
         caps.append("reasoning")
@@ -139,10 +145,19 @@ class ModelRegistry:
         if not model_ids:
             return
 
+        # Filter out non-chat / media generation models
+        non_chat = ("image", "imagen", "transcribe", "lyria", "audio", "tts", "whisper", "embedding", "diffusion")
+        sanitized_ids = [
+            mid for mid in model_ids
+            if not any(kw in mid.lower() for kw in non_chat)
+        ]
+        if not sanitized_ids:
+            return
+
         # Remove existing models for this provider if we have a fresh discovered list
         self._models = [m for m in self._models if m.provider != provider]
 
-        for i, mid in enumerate(model_ids):
+        for i, mid in enumerate(sanitized_ids):
             entry = ModelEntry(
                 provider=provider,
                 id=mid,

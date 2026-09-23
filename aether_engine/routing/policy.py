@@ -115,6 +115,9 @@ class RoutingPolicy:
             if health_manager.is_provider_available(p):
                 available_models.extend(self.registry.get_models_for_provider(p))
 
+        # Only consider models with chat capabilities (filter out media generation endpoints)
+        available_models = [m for m in available_models if m.capabilities and "chat" in m.capabilities]
+
         if not available_models:
             # Fallback to configured default even if in cooldown or unkeyed
             return RoutingDecision(
@@ -124,8 +127,21 @@ class RoutingPolicy:
                 capabilities=["chat"],
             )
 
+        # Identify user's preferred default model entry if available
+        user_def_entry = next(
+            (m for m in available_models if m.provider == user_default_provider and m.id == user_default_model),
+            None
+        )
+
         # Check for specialized requirements
         if reqs.has_images:
+            if user_def_entry and "vision" in user_def_entry.capabilities:
+                return RoutingDecision(
+                    provider=user_def_entry.provider,
+                    model=user_def_entry.id,
+                    reason=f"Routed to {user_def_entry.label} — vision & image processing",
+                    capabilities=list(user_def_entry.capabilities),
+                )
             vision_models = [m for m in available_models if "vision" in m.capabilities]
             if vision_models:
                 best = vision_models[0]
@@ -137,6 +153,13 @@ class RoutingPolicy:
                 )
 
         if reqs.wants_reasoning:
+            if user_def_entry and "reasoning" in user_def_entry.capabilities:
+                return RoutingDecision(
+                    provider=user_def_entry.provider,
+                    model=user_def_entry.id,
+                    reason=f"Routed to {user_def_entry.label} — deep reasoning & complex logic",
+                    capabilities=list(user_def_entry.capabilities),
+                )
             reasoning_models = [m for m in available_models if "reasoning" in m.capabilities]
             if reasoning_models:
                 best = reasoning_models[0]
@@ -148,6 +171,13 @@ class RoutingPolicy:
                 )
 
         if reqs.wants_code:
+            if user_def_entry and "code" in user_def_entry.capabilities:
+                return RoutingDecision(
+                    provider=user_def_entry.provider,
+                    model=user_def_entry.id,
+                    reason=f"Routed to {user_def_entry.label} — code generation & tool capabilities",
+                    capabilities=list(user_def_entry.capabilities),
+                )
             code_models = [m for m in available_models if "code" in m.capabilities]
             if code_models:
                 best = code_models[0]
@@ -159,14 +189,13 @@ class RoutingPolicy:
                 )
 
         # Standard / Fast chat: Check if user's default model is available
-        for m in available_models:
-            if m.provider == user_default_provider and m.id == user_default_model:
-                return RoutingDecision(
-                    provider=m.provider,
-                    model=m.id,
-                    reason=f"Routed to {m.label} — fast chat + tool support",
-                    capabilities=list(m.capabilities),
-                )
+        if user_def_entry:
+            return RoutingDecision(
+                provider=user_def_entry.provider,
+                model=user_def_entry.id,
+                reason=f"Routed to {user_def_entry.label} — fast chat + tool support",
+                capabilities=list(user_def_entry.capabilities),
+            )
 
         # Otherwise pick the highest priority available model for user default provider or next provider
         fallback_model = available_models[0]

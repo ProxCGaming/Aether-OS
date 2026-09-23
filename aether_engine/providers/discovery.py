@@ -84,8 +84,12 @@ async def _discover_gemini_models(api_key: str) -> List[str]:
         raw_models = data.get("models", [])
 
     discovered = []
-    # Keywords to exclude (non-chat / embedding / special purpose models / deprecated 2.5 preview endpoints / broken previews)
-    exclude_keywords = ("embedding", "imagen", "aqa", "tts", "whisper", "gecko", "bison", "learnlm", "2.5-flash", "2.5-pro", "2.5-computer", "preview")
+    # Keywords to exclude (non-chat / image / embedding / audio / special purpose models)
+    exclude_keywords = (
+        "embedding", "imagen", "image", "aqa", "tts", "whisper", "audio",
+        "gecko", "bison", "learnlm", "transcribe", "lyria", "diffusion",
+        "2.5-computer", "preview"
+    )
 
     for m in raw_models:
         name = m.get("name", "")  # format: "models/gemini-2.0-flash"
@@ -106,30 +110,37 @@ async def _discover_gemini_models(api_key: str) -> List[str]:
     alias_blocklist = {"gemini-flash-latest", "gemini-pro-latest", "gemini-flash-lite-latest"}
     discovered = [m for m in discovered if m not in alias_blocklist]
 
-    # Sort so newer and popular models appear near top
+    # Sort so newer and popular stable models appear near top
     def _gemini_sort_key(m_id: str) -> tuple:
         lower = m_id.lower()
         priority = 99
-        if lower == "gemini-2.0-flash":
+        if lower == "gemini-2.5-flash":
             priority = 1
-        elif lower == "gemini-2.0-flash-lite":
+        elif lower == "gemini-2.0-flash":
             priority = 2
-        elif "2.0" in lower:
+        elif lower == "gemini-2.5-pro":
             priority = 3
-        elif "1.5" in lower:
+        elif lower == "gemini-2.0-flash-lite":
+            priority = 4
+        elif "2.5" in lower:
+            priority = 5
+        elif "2.0" in lower:
             priority = 6
         elif "flash" in lower:
             priority = 7
         elif "pro" in lower:
             priority = 8
+        elif "1.5" in lower:
+            priority = 9
         return (priority, lower)
 
     discovered.sort(key=_gemini_sort_key)
     
     if not discovered:
         return [
-            "gemini-2.0-flash",
             "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-2.5-pro",
             "gemini-1.5-pro",
             "gemini-1.5-flash",
         ]
@@ -255,6 +266,7 @@ async def _discover_openrouter_models(api_key: str) -> List[str]:
         raw_models = data.get("data", [])
 
     discovered = []
+    exclude_openrouter = ("image", "embedding", "audio", "whisper", "tts", "moderation", "diffusion")
     for m in raw_models[:50]:  # Limit top 50
         model_id = m.get("id", "")
         if not model_id:
@@ -264,6 +276,9 @@ async def _discover_openrouter_models(api_key: str) -> List[str]:
             continue
         # Skip batch-only variants (don't support streaming)
         if model_id.endswith(":batch"):
+            continue
+        lower = model_id.lower()
+        if any(kw in lower for kw in exclude_openrouter):
             continue
         discovered.append(model_id)
 
@@ -310,7 +325,7 @@ async def _discover_openai_compatible_models(base_url: str, api_key: str) -> Lis
                 logger.debug(f"Failed querying {url}: {e}")
 
     discovered = []
-    exclude_keywords = ("audio", "realtime", "embed", "moderation", "tts", "dall-e", "transcription", "rerank")
+    exclude_keywords = ("audio", "realtime", "embed", "moderation", "tts", "dall-e", "image", "transcription", "rerank", "diffusion")
 
     for m in raw_models:
         if isinstance(m, str):

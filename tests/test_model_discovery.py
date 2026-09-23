@@ -24,6 +24,11 @@ async def test_fetch_gemini_models_success():
                 "supportedGenerationMethods": ["generateContent"],
             },
             {
+                "name": "models/gemini-2.5-flash",
+                "displayName": "Gemini 2.5 Flash",
+                "supportedGenerationMethods": ["generateContent"],
+            },
+            {
                 "name": "models/gemini-flash-latest",
                 "displayName": "Gemini Flash Latest",
                 "supportedGenerationMethods": ["generateContent"],
@@ -32,6 +37,21 @@ async def test_fetch_gemini_models_success():
                 "name": "models/text-embedding-004",
                 "displayName": "Embedding 004",
                 "supportedGenerationMethods": ["embedContent"],
+            },
+            {
+                "name": "models/gemini-3-pro-image",
+                "displayName": "Gemini 3 Pro Image",
+                "supportedGenerationMethods": ["generateContent"],
+            },
+            {
+                "name": "models/gemini-3.5-transcribe",
+                "displayName": "Gemini 3.5 Transcribe",
+                "supportedGenerationMethods": ["generateContent"],
+            },
+            {
+                "name": "models/lyria-3.5",
+                "displayName": "Lyria 3.5",
+                "supportedGenerationMethods": ["generateContent"],
             },
         ]
     }
@@ -43,10 +63,15 @@ async def test_fetch_gemini_models_success():
 
         models = await _discover_gemini_models("fake-key")
         assert "gemini-2.0-flash" in models
+        assert "gemini-2.5-flash" in models
         # Alias blocklist should filter out latest tags
         assert "gemini-flash-latest" not in models
         # Embedding model should be filtered out
         assert "text-embedding-004" not in models
+        # Image, audio, transcribe, and music models must be filtered out
+        assert "gemini-3-pro-image" not in models
+        assert "gemini-3.5-transcribe" not in models
+        assert "lyria-3.5" not in models
 
 
 @pytest.mark.asyncio

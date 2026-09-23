@@ -74,6 +74,19 @@ class TestRoutingPolicy:
         assert decision.model == "gemini-2.5-flash"
         assert "code" in decision.capabilities
 
+    def test_select_route_code_task_preserves_default_if_capable(self, mock_registry, health_mgr):
+        policy = RoutingPolicy(mock_registry)
+        decision = policy.select_route(
+            prompt="Write a python script to parse json logs",
+            configured_providers=["google_gemini"],
+            health_manager=health_mgr,
+            user_default_provider="google_gemini",
+            user_default_model="gemini-2.5-flash",
+        )
+        assert decision.provider == "google_gemini"
+        assert decision.model == "gemini-2.5-flash"
+        assert "code" in decision.capabilities
+
     def test_select_route_reasoning_task(self, mock_registry, health_mgr):
         policy = RoutingPolicy(mock_registry)
         decision = policy.select_route(
