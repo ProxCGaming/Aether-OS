@@ -43,3 +43,9 @@ Thumbs.db
 aether_engine/secrets/*.db
 aether_engine/secrets/*.sqlite*
 exported_keys.json
+
+# Node / Frontend
+node_modules/
+dist/
+dist-electron/
+build/

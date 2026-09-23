@@ -1,0 +1,28 @@
+{
+  "name": "ja",
+  "version": "1.0.0",
+  "description": "",
+  "main": "test_ws.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "npm --prefix desktop_app test -- --watchAll=false",
+    "prepare": "husky"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ProxCGaming/Aether-OS.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/ProxCGaming/Aether-OS/issues"
+  },
+  "homepage": "https://github.com/ProxCGaming/Aether-OS#readme",
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}
