@@ -22,7 +22,7 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
     system_prompt = f"You are a Researcher agent. Gather information and synthesize findings for other specialists.\n{plan_info}"
     messages = [{"role": "system", "content": system_prompt}] + state.get("messages", [])
     
-    if messages and messages[-1].get("role") != "user":
+    if messages and messages[-1].get("role") not in ("user", "tool"):
         messages.append({
             "role": "user",
             "content": "Please proceed with gathering information and synthesizing findings based on the current state."

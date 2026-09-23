@@ -500,3 +500,371 @@
   background: rgba(167, 139, 250, 0.1);
   color: #ddd6fe;
 }
+
+/* ========================================================
+   Hierarchical Execution Tree & Payload Drawers
+   ======================================================== */
+
+.node-activity-card {
+  margin-bottom: 12px;
+  background: rgba(18, 18, 30, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.node-activity-card:hover {
+  border-color: rgba(167, 139, 250, 0.3);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.node-activity-card.pending {
+  border-color: rgba(167, 139, 250, 0.4);
+  box-shadow: 0 0 16px rgba(167, 139, 250, 0.15);
+}
+
+.node-activity-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.node-transition-flow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.node-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  text-transform: uppercase;
+}
+
+.node-arrow-icon {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.node-action-pill {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #a1a1aa;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.node-intent-banner {
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #cbd5e1;
+  border-left: 3px solid #a78bfa;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.node-raw-delta {
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 11px;
+  color: #94a3b8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.node-drawers-container {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+/* Nested Tools inside Node */
+.nested-tools-wrapper {
+  margin: 4px 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px dashed rgba(251, 191, 36, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.nested-tools-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fbbf24;
+  letter-spacing: 0.3px;
+}
+
+.nested-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Upgraded Tool Activity Card */
+.tool-activity-card {
+  background: rgba(15, 15, 26, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: all 0.2s ease;
+}
+
+.tool-activity-card.nested {
+  background: rgba(20, 20, 35, 0.75);
+  border: 1px solid rgba(251, 191, 36, 0.18);
+}
+
+.tool-activity-card.pending {
+  border-color: rgba(234, 179, 8, 0.4);
+  box-shadow: 0 0 12px rgba(234, 179, 8, 0.12);
+}
+
+.tool-activity-card.failed {
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+.tool-card-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tool-identity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.tool-terminal-icon {
+  color: #fbbf24;
+  flex-shrink: 0;
+}
+
+.tool-call-name {
+  font-weight: 600;
+  font-size: 12px;
+  color: #f1f5f9;
+}
+
+.tool-route-badge {
+  font-size: 9.5px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.tool-status-pill {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tool-status-pill.tool-status-pending {
+  background: rgba(234, 179, 8, 0.15);
+  color: #fef08a;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
+
+.tool-status-pill.tool-status-completed {
+  background: rgba(16, 185, 129, 0.15);
+  color: #6ee7b7;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.tool-status-pill.tool-status-failed {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.tool-spinner-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #facc15;
+  animation: pulseDot 1.2s infinite ease-in-out;
+}
+
+@keyframes pulseDot {
+  0%, 100% { transform: scale(0.8); opacity: 0.6; }
+  50% { transform: scale(1.3); opacity: 1; }
+}
+
+.tool-payloads-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tool-awaiting-result {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: #fef08a;
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px dashed rgba(234, 179, 8, 0.25);
+  padding: 6px 9px;
+  border-radius: 7px;
+}
+
+.pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #facc15;
+  animation: pulseDot 1s infinite ease-in-out;
+}
+
+/* Reusable Payload Drawer */
+.payload-drawer-container {
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+  transition: all 0.2s ease;
+}
+
+.payload-drawer-container:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.payload-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 9px;
+  cursor: pointer;
+  user-select: none;
+  background: rgba(255, 255, 255, 0.02);
+  transition: background 0.15s ease;
+}
+
+.payload-drawer-header:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.payload-drawer-header.open {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.payload-title-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.payload-icon {
+  color: #a78bfa;
+}
+
+.payload-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.payload-count-badge {
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.payload-actions-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.payload-copy-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+  border-radius: 5px;
+  padding: 2px 6px;
+  font-size: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.payload-copy-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f1f5f9;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.payload-chevron {
+  color: #94a3b8;
+  transition: transform 0.2s ease;
+}
+
+.payload-chevron.rotated {
+  transform: rotate(180deg);
+}
+
+.payload-drawer-body {
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.4);
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.payload-code-block {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #e2e8f0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.payload-empty-notice {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: #64748b;
+  font-style: italic;
+}
+

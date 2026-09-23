@@ -1,90 +1,405 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck } from 'lucide-react';
+import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
 import './chat.css';
 
-const ToolActivityCard = ({ payload }) => {
-  const [expanded, setExpanded] = useState(false);
-  
-  if (!payload) return null;
-  
-  const { tool_name, tool_args, status, result, node } = payload;
-  
-  let argsStr = '';
-  try {
-    argsStr = typeof tool_args === 'string' ? tool_args : JSON.stringify(tool_args, null, 2);
-  } catch(e) { argsStr = String(tool_args); }
-  
-  const hasResult = result !== undefined && result !== null && result !== '';
-  let resultStr = '';
-  if (hasResult) {
+export function getNodeStyle(nodeName = '') {
+  const n = String(nodeName).toLowerCase();
+  if (n.includes('supervisor')) {
+    return { color: '#c4b5fd', bg: 'rgba(167, 139, 250, 0.16)', border: 'rgba(167, 139, 250, 0.35)', name: 'SUPERVISOR' };
+  }
+  if (n.includes('plan')) {
+    return { color: '#93c5fd', bg: 'rgba(96, 165, 250, 0.16)', border: 'rgba(96, 165, 250, 0.35)', name: 'PLANNER' };
+  }
+  if (n.includes('code')) {
+    return { color: '#6ee7b7', bg: 'rgba(52, 211, 153, 0.16)', border: 'rgba(52, 211, 153, 0.35)', name: 'CODER' };
+  }
+  if (n.includes('research')) {
+    return { color: '#7dd3fc', bg: 'rgba(56, 189, 248, 0.16)', border: 'rgba(56, 189, 248, 0.35)', name: 'RESEARCHER' };
+  }
+  if (n.includes('tool') || n === 'execute_tool') {
+    return { color: '#fde047', bg: 'rgba(251, 191, 36, 0.16)', border: 'rgba(251, 191, 36, 0.35)', name: 'EXECUTE_TOOL' };
+  }
+  if (n.includes('user')) {
+    return { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.16)', border: 'rgba(244, 114, 182, 0.35)', name: 'USER' };
+  }
+  return { color: '#e2e8f0', bg: 'rgba(255, 255, 255, 0.08)', border: 'rgba(255, 255, 255, 0.15)', name: n.toUpperCase() || 'NODE' };
+}
+
+export function useSmoothScroll(ref, active = true) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !active) return;
+
+    let targetScroll = el.scrollTop;
+    let isScrolling = false;
+    let frameId;
+
+    const updateScroll = () => {
+      if (!el) return;
+      
+      // Interpolate towards target using lerp (0.15 factor matching Dropdown)
+      el.scrollTop += (targetScroll - el.scrollTop) * 0.15;
+      
+      if (Math.abs(targetScroll - el.scrollTop) > 0.5) {
+        frameId = requestAnimationFrame(updateScroll);
+      } else {
+        el.scrollTop = targetScroll;
+        isScrolling = false;
+      }
+    };
+
+    const onWheel = (e) => {
+      const maxScroll = el.scrollHeight - el.clientHeight;
+      if (maxScroll <= 0) return;
+
+      const goingDown = e.deltaY > 0;
+      const goingUp = e.deltaY < 0;
+      const atTop = el.scrollTop <= 0;
+      const atBottom = el.scrollTop >= maxScroll - 1;
+
+      if ((goingDown && !atBottom) || (goingUp && !atTop)) {
+        e.preventDefault();
+        targetScroll = Math.max(0, Math.min(maxScroll, targetScroll + e.deltaY));
+        
+        if (!isScrolling) {
+          isScrolling = true;
+          frameId = requestAnimationFrame(updateScroll);
+        }
+      }
+    };
+
+    const onScroll = () => {
+      if (!isScrolling) {
+        targetScroll = el.scrollTop;
+      }
+    };
+
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('scroll', onScroll, { passive: true });
+    
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('scroll', onScroll);
+      if (frameId) cancelAnimationFrame(frameId);
+    };
+  }, [ref, active]);
+}
+
+export function PayloadDrawer({ title, data, icon: Icon, defaultOpen = false, emptyText = 'No payload' }) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+  const [copied, setCopied] = useState(false);
+  const bodyRef = useRef(null);
+
+  useSmoothScroll(bodyRef, isOpen);
+
+  const isNoneOrEmpty = data === undefined || data === null || data === '' || (typeof data === 'object' && Object.keys(data).length === 0);
+
+  let formattedText = '';
+  if (data === undefined || data === null) {
+    formattedText = emptyText;
+  } else if (typeof data === 'string') {
+    formattedText = data;
+  } else {
     try {
-      resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-    } catch(e) { resultStr = String(result); }
+      formattedText = JSON.stringify(data, null, 2);
+    } catch (e) {
+      formattedText = String(data);
+    }
   }
 
+  // Summary badge count
+  let countLabel = '';
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const keys = Object.keys(data);
+    countLabel = `${keys.length} ${keys.length === 1 ? 'param' : 'params'}`;
+  } else if (Array.isArray(data)) {
+    countLabel = `${data.length} ${data.length === 1 ? 'item' : 'items'}`;
+  } else if (typeof data === 'string' && data.length > 0) {
+    countLabel = `${data.length} chars`;
+  }
+
+  const handleCopy = (e) => {
+    e.stopPropagation();
+    try {
+      navigator.clipboard.writeText(formattedText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch (err) {}
+  };
+
   return (
-    <div className="tool-activity-card">
-      <div className="tool-header">
-        <div className="tool-name-container">
-          <TerminalSquare size={16} className="tool-icon" />
-          <span>{tool_name || 'unknown_tool'}</span>
-          <span style={{opacity: 0.6, fontSize: '10px'}}>[{node || 'system'}]</span>
+    <div className="payload-drawer-container">
+      <div 
+        className={`payload-drawer-header ${isOpen ? 'open' : ''}`}
+        onClick={() => setIsOpen(!isOpen)}
+        title="Click to toggle payload drawer"
+      >
+        <div className="payload-title-group">
+          {Icon ? <Icon size={12} className="payload-icon" /> : <TerminalSquare size={12} className="payload-icon" />}
+          <span className="payload-title">{title}</span>
+          {countLabel && <span className="payload-count-badge">{countLabel}</span>}
         </div>
-        <div className={`tool-status tool-status-${status}`}>
-          {status}
+        <div className="payload-actions-group">
+          <button 
+            type="button" 
+            className="payload-copy-btn" 
+            onClick={handleCopy} 
+            title="Copy payload to clipboard"
+          >
+            {copied ? <CheckCheck size={11} color="#10b981" /> : <Copy size={11} />}
+            <span>{copied ? 'Copied' : 'Copy'}</span>
+          </button>
+          <ChevronDown size={13} className={`payload-chevron ${isOpen ? 'rotated' : ''}`} />
         </div>
       </div>
-      
-      {argsStr && argsStr !== '{}' && (
-        <div className="tool-args selectable-text">
-          <div style={{opacity: 0.6, marginBottom: '4px', fontSize: '11px'}}>Arguments:</div>
-          {argsStr}
-        </div>
-      )}
-      
-      {hasResult && !expanded && (
-        <div className="tool-result selectable-text">
-          <div style={{opacity: 0.6, marginBottom: '4px', fontSize: '11px'}}>Result Preview:</div>
-          {resultStr.slice(0, 150)}{resultStr.length > 150 ? '...' : ''}
-          {resultStr.length > 150 && (
-            <button className="tool-show-more-btn" onClick={() => setExpanded(true)} style={{marginTop: '6px', display: 'block'}}>
-              Show more
-            </button>
+      {isOpen && (
+        <div ref={bodyRef} className="payload-drawer-body chat-scroll selectable-text">
+          {isNoneOrEmpty && formattedText === '{}' ? (
+            <div className="payload-empty-notice">&#123;&#125; (No parameters required)</div>
+          ) : (
+            <pre className="payload-code-block">{formattedText}</pre>
           )}
-        </div>
-      )}
-      
-      {hasResult && expanded && (
-        <div className="tool-result selectable-text">
-          <div style={{opacity: 0.6, marginBottom: '4px', fontSize: '11px'}}>Full Result:</div>
-          {resultStr}
-          <button className="tool-show-more-btn" onClick={() => setExpanded(false)} style={{marginTop: '6px', display: 'block'}}>
-            Show less
-          </button>
         </div>
       )}
     </div>
   );
-};
+}
+
+export function ToolActivityCard({ payload, isNested = false }) {
+  if (!payload) return null;
+
+  const { tool_name, tool_args, status, result, node, from_node, to_node } = payload;
+  const isPending = status === 'pending';
+  const isFailed = status === 'failed';
+
+  const callerNode = from_node || node || 'agent';
+  const targetNode = to_node || 'execute_tool';
+
+  return (
+    <div className={`tool-activity-card ${isNested ? 'nested' : ''} ${isPending ? 'pending' : ''} ${isFailed ? 'failed' : ''}`}>
+      <div className="tool-card-topbar">
+        <div className="tool-identity">
+          <TerminalSquare size={14} className="tool-terminal-icon" />
+          <span className="tool-call-name">{tool_name || 'unknown_tool'}</span>
+          <span className="tool-route-badge">
+            {callerNode.toUpperCase()} ➔ {targetNode.toUpperCase()}
+          </span>
+        </div>
+        <div className={`tool-status-pill tool-status-${status || 'pending'}`}>
+          {isPending && <span className="tool-spinner-dot" />}
+          {isFailed && <AlertCircle size={11} />}
+          {!isPending && !isFailed && <CheckCircle2 size={11} />}
+          <span>{status || 'pending'}</span>
+        </div>
+      </div>
+
+      <div className="tool-payloads-stack">
+        <PayloadDrawer 
+          title="📥 Request Payload" 
+          data={tool_args || {}} 
+          icon={ArrowDownRight}
+          defaultOpen={false}
+          emptyText="{}"
+        />
+        
+        {isPending ? (
+          <div className="tool-awaiting-result">
+            <span className="pulse-dot" />
+            <span>Executing tool in sandbox... awaiting output payload</span>
+          </div>
+        ) : (
+          <PayloadDrawer 
+            title="📤 Output Payload" 
+            data={result} 
+            icon={ArrowUpRight}
+            defaultOpen={true}
+            emptyText="(Empty result)"
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function NodeActivityCard({ activity, nestedTools = [], rawDelta }) {
+  if (!activity) return null;
+
+  const { from_node, to_node, action, reason, briefing, input_payload, output_payload, status } = activity;
+
+  const fromStyle = getNodeStyle(from_node);
+  const toStyle = getNodeStyle(to_node);
+
+  return (
+    <div className={`node-activity-card ${status === 'pending' ? 'pending' : ''}`}>
+      <div className="node-activity-header">
+        <div className="node-transition-flow">
+          <span className="node-badge" style={{ color: fromStyle.color, background: fromStyle.bg, border: `1px solid ${fromStyle.border}` }}>
+            {fromStyle.name}
+          </span>
+          <ArrowRight size={13} className="node-arrow-icon" />
+          <span className="node-badge" style={{ color: toStyle.color, background: toStyle.bg, border: `1px solid ${toStyle.border}` }}>
+            {toStyle.name}
+          </span>
+        </div>
+        {action && (
+          <span className="node-action-pill">
+            {action.replace('_', ' ').toUpperCase()}
+          </span>
+        )}
+      </div>
+
+      {(reason || briefing) && (
+        <div className="node-intent-banner">
+          {reason && <div className="node-intent-reason"><strong style={{ color: '#c4b5fd' }}>Goal:</strong> {reason}</div>}
+          {briefing && <div className="node-intent-briefing"><strong style={{ color: '#93c5fd' }}>Briefing:</strong> {briefing}</div>}
+        </div>
+      )}
+
+      {rawDelta && (
+        <div className="node-raw-delta selectable-text">
+          {rawDelta.trim()}
+        </div>
+      )}
+
+      <div className="node-drawers-container">
+        {input_payload && Object.keys(input_payload).length > 0 && (
+          <PayloadDrawer 
+            title="📥 Input State / Payload" 
+            data={input_payload} 
+            icon={ArrowDownRight}
+            defaultOpen={false}
+          />
+        )}
+
+        {nestedTools && nestedTools.length > 0 && (
+          <div className="nested-tools-wrapper">
+            <div className="nested-tools-header">
+              <TerminalSquare size={12} color="#fbbf24" />
+              <span>Nested Tool Calls ({nestedTools.length})</span>
+            </div>
+            <div className="nested-tools-list">
+              {nestedTools.map((t, tIdx) => (
+                <ToolActivityCard key={tIdx} payload={t.payload} isNested={true} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {output_payload && Object.keys(output_payload).length > 0 && (
+          <PayloadDrawer 
+            title="📤 Output State / Payload" 
+            data={output_payload} 
+            icon={ArrowUpRight}
+            defaultOpen={false}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopTask }) {
-  const [isExpanded, setIsExpanded] = useState(false);
+  let parsedThoughts = thoughts;
+  if (typeof thoughts === 'string') {
+    try {
+      parsedThoughts = JSON.parse(thoughts);
+    } catch (e) {
+      parsedThoughts = [];
+    }
+  }
+  if (!Array.isArray(parsedThoughts)) {
+    parsedThoughts = [];
+  }
+
+  // Auto-expand during live execution per grill-me decision
+  const [isExpanded, setIsExpanded] = useState(isThinking);
+  const scrollRef = useRef(null);
+
+  useSmoothScroll(scrollRef, isExpanded);
+
+  useEffect(() => {
+    if (isThinking) {
+      setIsExpanded(true);
+    }
+  }, [isThinking]);
 
   // If there are no thoughts and the task has finished successfully, don't render an empty box
-  if ((!thoughts || thoughts.length === 0) && !isThinking && !hasError) return null;
+  if ((!parsedThoughts || parsedThoughts.length === 0) && !isThinking && !hasError) return null;
+
+  // Build hierarchical thought tree
+  const treeNodes = [];
+  let currentGroup = null;
+
+  parsedThoughts.forEach((item, idx) => {
+    if (item.type === 'NODE_ACTIVITY') {
+      const action = item.payload?.action;
+      // Filter out redundant tool_request/tool_result node activities (handled directly by TOOL_ACTIVITY)
+      if (action === 'tool_request' || action === 'tool_result') {
+        return;
+      }
+      currentGroup = {
+        type: 'node',
+        activity: item.payload,
+        tools: [],
+        rawDelta: null,
+        key: `node-${idx}-${item.payload?.from_node}-${item.payload?.to_node}`
+      };
+      treeNodes.push(currentGroup);
+    } else if (item.type === 'TOOL_ACTIVITY') {
+      const toolName = item.payload?.tool_name;
+      // Check if tool already exists in treeNodes (e.g. was pending and is now updated)
+      const existingIdx = treeNodes.findIndex(
+        n => n.type === 'tool' && n.payload?.tool_name === toolName && n.payload?.status === 'pending'
+      );
+      if (existingIdx !== -1 && item.payload?.status !== 'pending') {
+        const prevArgs = treeNodes[existingIdx].payload?.tool_args;
+        const newArgs = item.payload?.tool_args;
+        const finalArgs = (newArgs && Object.keys(newArgs).length > 0) ? newArgs : (prevArgs || {});
+        treeNodes[existingIdx] = {
+          type: 'tool',
+          payload: { ...treeNodes[existingIdx].payload, ...item.payload, tool_args: finalArgs },
+          key: treeNodes[existingIdx].key
+        };
+      } else {
+        treeNodes.push({
+          type: 'tool',
+          payload: item.payload,
+          key: `tool-${idx}-${toolName || 'unknown'}`
+        });
+      }
+    } else {
+      const text = item.text?.trim() || '';
+      // Filter out redundant supervisor delegation texts or echoed assistant conversational outputs
+      if (!text || text.startsWith('[Supervisor] -> Delegating') || text.startsWith('Hello! The current time')) {
+        return;
+      }
+      if (currentGroup && !currentGroup.rawDelta && currentGroup.activity?.from_node === item.node) {
+        currentGroup.rawDelta = text;
+      } else {
+        treeNodes.push({
+          type: 'text',
+          node: item.node,
+          text: text,
+          key: `text-${idx}`
+        });
+      }
+    }
+  });
+
+  if (treeNodes.length === 0 && !isThinking && !hasError) return null;
 
   return (
     <div style={{
-      marginBottom: '10px',
-      borderRadius: '12px',
-      background: 'rgba(0, 0, 0, 0.28)',
-      border: isExpanded ? '1px solid rgba(167, 139, 250, 0.25)' : '1px solid rgba(255, 255, 255, 0.08)',
+      marginBottom: '12px',
+      borderRadius: '14px',
+      background: 'rgba(10, 10, 20, 0.45)',
+      border: isExpanded ? '1px solid rgba(167, 139, 250, 0.3)' : '1px solid rgba(255, 255, 255, 0.08)',
       overflow: 'hidden',
       transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
-      boxShadow: isExpanded ? '0 4px 16px rgba(0, 0, 0, 0.3)' : 'none'
+      boxShadow: isExpanded ? '0 8px 24px rgba(0, 0, 0, 0.4)' : 'none'
     }}>
       <div 
         onClick={() => setIsExpanded(!isExpanded)}
@@ -93,15 +408,15 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
           display: 'flex',
           alignItems: 'center',
           gap: '8px',
-          padding: '8px 12px',
-          background: isExpanded ? 'rgba(255, 255, 255, 0.05)' : 'transparent',
+          padding: '9px 13px',
+          background: isExpanded ? 'rgba(255, 255, 255, 0.04)' : 'transparent',
           color: isThinking ? '#c4b5fd' : '#9090a0',
           fontSize: '12px',
           cursor: 'pointer',
           userSelect: 'none',
           transition: 'background 0.2s',
         }}
-        title="Click to inspect what the agent is doing under the hood"
+        title="Click to inspect node-to-node handoffs and tool payloads"
       >
         {isThinking ? (
           <div className="spinner" style={{ 
@@ -119,13 +434,11 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
         )}
         
         <span style={{ flex: 1, textAlign: 'left', fontWeight: '500', display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <span>{isThinking ? 'Agent is thinking...' : hasError ? 'Task Stopped' : `Thought for ${thoughts?.length || 0} step${thoughts?.length === 1 ? '' : 's'}`}</span>
+          <span>{isThinking ? 'Agent is thinking...' : hasError ? 'Task Stopped' : `Execution Pipeline (${treeNodes.length} steps)`}</span>
           <span style={{ fontSize: '10.5px', opacity: 0.65, fontWeight: 400, color: '#a78bfa' }}>
-            {isExpanded ? '(click to hide)' : '(click to see under the hood)'}
+            {isExpanded ? '(click to collapse)' : '(click to inspect payloads)'}
           </span>
         </span>
-
-
 
         <ChevronDown 
           size={14} 
@@ -138,61 +451,67 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
       </div>
       
       {isExpanded && (
-        <div style={{
-          padding: '10px 12px 12px',
-          fontSize: '12px',
-          color: '#d4d4d8',
-          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-          lineHeight: '1.5',
-          maxHeight: '260px',
-          overflowY: 'auto',
-          borderTop: '1px solid rgba(255, 255, 255, 0.06)',
-          background: 'rgba(0, 0, 0, 0.2)'
-        }} className="chat-thought-container chat-scroll">
-          {(!thoughts || thoughts.length === 0) ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '4px 0', color: '#a1a1aa' }}>
+        <div 
+          ref={scrollRef}
+          style={{
+            padding: '12px',
+            fontSize: '12px',
+            color: '#d4d4d8',
+            maxHeight: '380px',
+            overflowY: 'auto',
+            borderTop: '1px solid rgba(255, 255, 255, 0.06)',
+            background: 'rgba(0, 0, 0, 0.25)'
+          }} 
+          className="chat-thought-container chat-scroll"
+        >
+          {(!treeNodes || treeNodes.length === 0) ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '6px 0', color: '#a1a1aa' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: hasError ? '#ef4444' : '#c4b5fd' }}>
                 {!hasError && <span className="dot-typing" style={{ width: '5px', height: '5px', display: 'inline-block' }}></span>}
                 <span>{hasError ? 'Task was stopped before supervisor node could initialize.' : 'Initializing supervisor node & analyzing prompt requirements...'}</span>
               </div>
               <div style={{ fontSize: '11px', color: '#71717a' }}>
-                Evaluating available tools, memory context, and provider route...
+                Evaluating available specialists, memory context, and provider route...
               </div>
             </div>
           ) : (
-            thoughts.map((t, idx) => {
-              if (t.type === 'TOOL_ACTIVITY') {
-                return <ToolActivityCard key={idx} payload={t.payload} />;
+            treeNodes.map((item) => {
+              if (item.type === 'node') {
+                return (
+                  <NodeActivityCard 
+                    key={item.key} 
+                    activity={item.activity} 
+                    nestedTools={item.tools} 
+                    rawDelta={item.rawDelta} 
+                  />
+                );
               }
-              const node = (t.node || 'node').toLowerCase();
-              let badgeColor = '#a78bfa';
-              let badgeBg = 'rgba(167, 139, 250, 0.15)';
-              if (node.includes('tool') || node === 'execute_tool') {
-                badgeColor = '#fbbf24';
-                badgeBg = 'rgba(251, 191, 36, 0.15)';
-              } else if (node.includes('code') || node.includes('coder')) {
-                badgeColor = '#34d399';
-                badgeBg = 'rgba(52, 211, 153, 0.15)';
-              } else if (node.includes('research')) {
-                badgeColor = '#38bdf8';
-                badgeBg = 'rgba(56, 189, 248, 0.15)';
+              if (item.type === 'tool') {
+                return (
+                  <ToolActivityCard 
+                    key={item.key} 
+                    payload={item.payload} 
+                  />
+                );
               }
-
+              // Text item
+              const nodeStyle = getNodeStyle(item.node);
               return (
-                <div key={idx} style={{ marginBottom: '8px', paddingBottom: '8px', borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                <div key={item.key} style={{ marginBottom: '10px', padding: '8px 10px', borderRadius: '8px', background: 'rgba(255, 255, 255, 0.02)', border: '1px solid rgba(255, 255, 255, 0.04)' }}>
                   <span style={{ 
-                    color: badgeColor, 
-                    background: badgeBg,
-                    padding: '2px 6px',
+                    color: nodeStyle.color, 
+                    background: nodeStyle.bg,
+                    border: `1px solid ${nodeStyle.border}`,
+                    padding: '2px 7px',
                     borderRadius: '4px',
                     fontSize: '10px',
                     fontWeight: 600,
                     letterSpacing: '0.5px'
                   }}>
-                    {t.node.toUpperCase()}
+                    {nodeStyle.name}
                   </span>
                   <div className="thought-step-content selectable-text" style={{ marginTop: '6px', whiteSpace: 'pre-wrap', opacity: 0.9, fontSize: '11.5px', userSelect: 'text', cursor: 'text' }}>
-                    {t.text.trim()}
+                    {item.text?.trim()}
                   </div>
                 </div>
               );
@@ -777,7 +1096,7 @@ export default function DraggableChatWindow({
                       {msg.role === 'user' ? <User size={18} color="#fff" /> : <Bot size={18} color="#a78bfa" />}
                     </div>
                     <div className={`chat-bubble ${msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-agent'}`}>
-                      {msg.role === 'agent' && (
+                      {(msg.role === 'agent' || msg.role === 'assistant') && (
                         <ThinkingAccordion thoughts={msg.thoughts} isThinking={!msg.isFinal} hasError={msg.hasError} onStopTask={onStopTask} />
                       )}
                       
@@ -790,7 +1109,7 @@ export default function DraggableChatWindow({
                             .replace(/<\/thinking>/g, '\n```')}
                         </ReactMarkdown>
                       ) : (
-                        msg.role === 'agent' && !msg.isFinal && (
+                        (msg.role === 'agent' || msg.role === 'assistant') && !msg.isFinal && (
                           <div style={{ display: 'flex', gap: '4px', alignItems: 'center', height: '24px' }}>
                             <span className="dot-typing"></span>
                             <span className="dot-typing" style={{ animationDelay: '0.2s' }}></span>

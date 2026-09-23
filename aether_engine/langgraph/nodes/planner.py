@@ -25,7 +25,7 @@ async def planner_node(state: AetherState, config: RunnableConfig) -> dict:
     )
     messages = [{"role": "system", "content": system_prompt}] + state.get("messages", [])
     
-    if messages and messages[-1].get("role") != "user":
+    if messages and messages[-1].get("role") not in ("user", "tool"):
         messages.append({
             "role": "user",
             "content": "Please proceed with breaking goals into structured steps and updating the plan based on the current state."

@@ -222,6 +222,11 @@ function App() {
           const node = data.payload.node;
           const isThought = node && node !== 'assistant' && node !== 'agent';
           
+          // Filter out supervisor delegation strings that duplicate NODE_ACTIVITY
+          if (isThought && delta && typeof delta === 'string' && delta.trim().startsWith('[Supervisor] -> Delegating')) {
+            return;
+          }
+          
           if (delta) {
             setChatMessages(prev => {
               const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
@@ -259,6 +264,47 @@ function App() {
               }
             });
           }
+        } else if (data.type === 'NODE_ACTIVITY') {
+          // Tool calls are exclusively rendered and managed via TOOL_ACTIVITY
+          if (data.payload?.action === 'tool_request' || data.payload?.action === 'tool_result') {
+            return;
+          }
+          setChatMessages(prev => {
+            const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
+            if (lastAgentIdx !== -1) {
+              const newMessages = [...prev];
+              const last = newMessages[lastAgentIdx];
+              const currentThoughts = last.thoughts || [];
+              const updatedThoughts = [...currentThoughts];
+              
+              if (data.payload.status !== 'pending') {
+                const pendingIdx = updatedThoughts.findLastIndex(t => 
+                  t.type === 'NODE_ACTIVITY' && 
+                  t.payload?.from_node === data.payload.from_node && 
+                  t.payload?.to_node === data.payload.to_node && 
+                  t.payload?.status === 'pending'
+                );
+                if (pendingIdx !== -1) {
+                  updatedThoughts[pendingIdx] = { 
+                    ...updatedThoughts[pendingIdx], 
+                    payload: { ...updatedThoughts[pendingIdx].payload, ...data.payload }
+                  };
+                  newMessages[lastAgentIdx] = { ...last, thoughts: updatedThoughts };
+                  return newMessages;
+                }
+              }
+              
+              updatedThoughts.push({
+                type: 'NODE_ACTIVITY',
+                payload: data.payload,
+                node: data.payload.from_node || data.payload.node
+              });
+              
+              newMessages[lastAgentIdx] = { ...last, thoughts: updatedThoughts };
+              return newMessages;
+            }
+            return prev;
+          });
         } else if (data.type === 'TOOL_ACTIVITY') {
           setChatMessages(prev => {
             const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
@@ -271,11 +317,22 @@ function App() {
               if (data.payload.status !== 'pending') {
                 const pendingIdx = updatedThoughts.findLastIndex(t => 
                   t.type === 'TOOL_ACTIVITY' && 
-                  t.payload.tool_name === data.payload.tool_name && 
-                  t.payload.status === 'pending'
+                  t.payload?.tool_name === data.payload.tool_name && 
+                  t.payload?.status === 'pending'
                 );
                 if (pendingIdx !== -1) {
-                  updatedThoughts[pendingIdx] = { ...updatedThoughts[pendingIdx], payload: data.payload };
+                  const prevArgs = updatedThoughts[pendingIdx].payload?.tool_args;
+                  const newArgs = data.payload.tool_args;
+                  const finalArgs = (newArgs && Object.keys(newArgs).length > 0) ? newArgs : (prevArgs || {});
+                  
+                  updatedThoughts[pendingIdx] = { 
+                    ...updatedThoughts[pendingIdx], 
+                    payload: {
+                      ...updatedThoughts[pendingIdx].payload,
+                      ...data.payload,
+                      tool_args: finalArgs
+                    }
+                  };
                   newMessages[lastAgentIdx] = { ...last, thoughts: updatedThoughts };
                   return newMessages;
                 }
@@ -298,6 +355,12 @@ function App() {
           if (data.payload?.task_id || data.request_id) {
             setActiveTaskIds(prev => { const next = new Set(prev); next.delete(data.payload?.task_id || data.request_id); return next; });
           }
+          if (data.payload?.session_id && !activeSessionRef.current) {
+            setActiveSession(data.payload.session_id);
+            if (wsRef.current) {
+              wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+            }
+          }
           let result = data.payload.response || data.payload.result || data.payload.output;
           
           setChatMessages(prev => {
@@ -307,8 +370,9 @@ function App() {
             if (lastAgentIdx !== -1) {
               const last = newMessages[lastAgentIdx];
               const finalContent = (result !== undefined && result !== null) ? (typeof result !== 'string' ? JSON.stringify(result, null, 2) : result) : last.content;
+              const finalThoughts = (last.thoughts && last.thoughts.length > 0) ? last.thoughts : (data.payload.thoughts || []);
               
-              newMessages[lastAgentIdx] = { ...last, content: finalContent, isFinal: true };
+              newMessages[lastAgentIdx] = { ...last, content: finalContent, thoughts: finalThoughts, isFinal: true };
               return newMessages.map((m, i) => 
                 (m.role === 'agent' && !m.isFinal && i !== lastAgentIdx) ? { ...m, isFinal: true, hasError: true, content: "**Task Cancelled**: Superseded by new request." } : m
               );
@@ -316,7 +380,7 @@ function App() {
               const veryLast = newMessages[newMessages.length - 1];
               if (veryLast && veryLast.role === 'agent' && veryLast.isFinal) return newMessages;
               const finalContent = (result !== undefined && result !== null) ? (typeof result !== 'string' ? JSON.stringify(result, null, 2) : result) : '';
-              return [...newMessages, { role: 'agent', content: finalContent, isFinal: true }];
+              return [...newMessages, { role: 'agent', content: finalContent, thoughts: data.payload.thoughts || [], isFinal: true }];
             }
           });
         } else if (data.type === 'TASK_FAILED' || data.type === 'TASK_CANCELLED') {
@@ -359,7 +423,22 @@ function App() {
           if (data.request_id && data.request_id === pendingSessionSwitchRef.current) {
             pendingSessionSwitchRef.current = null; // Clear immediately to ignore any subsequent echoed broadcasts
             const sess = data.payload.session;
-            setChatMessages((sess && sess.messages) ? sess.messages.map(m => ({...m, isFinal: true})) : []);
+            setChatMessages((sess && sess.messages) ? sess.messages.map(m => {
+              let parsedThoughts = m.thoughts;
+              if (typeof parsedThoughts === 'string') {
+                try {
+                  parsedThoughts = JSON.parse(parsedThoughts);
+                } catch (e) {
+                  parsedThoughts = [];
+                }
+              }
+              return {
+                ...m,
+                role: m.role === 'assistant' ? 'agent' : m.role,
+                isFinal: true,
+                thoughts: Array.isArray(parsedThoughts) ? parsedThoughts : []
+              };
+            }) : []);
           }
         } else if (data.type === 'FALLBACK_STARTED') {
           setChatMessages(prev => [...prev, { 
@@ -396,7 +475,9 @@ function App() {
         } else if (data.type === 'SESSION_CREATE_RESPONSE') {
           const newId = data.payload.session_id;
           setActiveSession(newId);
-          setChatMessages([]);
+          if (!data.payload?.preserve_messages) {
+            setChatMessages([]);
+          }
           // Refresh list
           if (wsRef.current) {
             wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));

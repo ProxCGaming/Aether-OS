@@ -35,3 +35,23 @@ def test_session_lifecycle():
     deleted = delete_session(session_id)
     assert deleted is True
     assert len(list_sessions()) == 0
+
+def test_session_thoughts():
+    session_id = create_session("Thoughts Chat")
+    sample_thoughts = [
+        {"type": "NODE_ACTIVITY", "payload": {"from_node": "supervisor", "to_node": "planner", "action": "delegation"}},
+        {"type": "TOOL_ACTIVITY", "payload": {"tool_name": "get_current_time", "status": "completed", "result": "2026-09-24"}}
+    ]
+    add_message(session_id, "user", "What time is it?")
+    add_message(session_id, "assistant", "It is 2026-09-24.", thoughts=sample_thoughts)
+    
+    session_data = get_session(session_id)
+    assert session_data is not None
+    assert len(session_data["messages"]) == 2
+    assistant_msg = session_data["messages"][1]
+    assert assistant_msg["role"] == "assistant"
+    assert assistant_msg["content"] == "It is 2026-09-24."
+    assert isinstance(assistant_msg["thoughts"], list)
+    assert len(assistant_msg["thoughts"]) == 2
+    assert assistant_msg["thoughts"][0]["type"] == "NODE_ACTIVITY"
+    assert assistant_msg["thoughts"][1]["payload"]["tool_name"] == "get_current_time"

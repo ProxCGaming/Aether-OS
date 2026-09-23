@@ -80,6 +80,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     tool_message = {
         "role": "tool",
         "name": tool_name,
+        "args": args,
         "content": result_text,
         "tool_call_id": call_id
     }

@@ -1,6 +1,7 @@
 import sqlite3
 import uuid
 import time
+import json
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
@@ -30,10 +31,15 @@ def init_db() -> None:
                 session_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
+                thoughts TEXT,
                 timestamp INTEGER NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             )
         """)
+        try:
+            conn.execute("ALTER TABLE session_messages ADD COLUMN thoughts TEXT")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
 def list_sessions() -> List[Dict[str, Any]]:
@@ -53,7 +59,23 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
             return None
         
         cur.execute("SELECT * FROM session_messages WHERE session_id = ? ORDER BY timestamp ASC", (session_id,))
-        messages = [dict(row) for row in cur.fetchall()]
+        raw_messages = [dict(row) for row in cur.fetchall()]
+        messages = []
+        for m in raw_messages:
+            th = m.get("thoughts")
+            if th:
+                if isinstance(th, str):
+                    try:
+                        m["thoughts"] = json.loads(th)
+                    except Exception:
+                        m["thoughts"] = []
+                elif isinstance(th, list):
+                    m["thoughts"] = th
+                else:
+                    m["thoughts"] = [th]
+            else:
+                m["thoughts"] = []
+            messages.append(m)
         
         session = dict(session_row)
         session["messages"] = messages
@@ -71,14 +93,25 @@ def create_session(title: str = "New Chat") -> str:
         conn.commit()
     return session_id
 
-def add_message(session_id: str, role: str, content: str) -> None:
+def add_message(session_id: str, role: str, content: str, thoughts: Optional[Any] = None) -> None:
     init_db()
     msg_id = str(uuid.uuid4())
     now = int(time.time())
+    if thoughts is not None:
+        if isinstance(thoughts, str):
+            try:
+                json.loads(thoughts)
+                thoughts_json = thoughts
+            except Exception:
+                thoughts_json = json.dumps(thoughts)
+        else:
+            thoughts_json = json.dumps(thoughts)
+    else:
+        thoughts_json = None
     with _get_conn() as conn:
         conn.execute(
-            "INSERT INTO session_messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
-            (msg_id, session_id, role, content, now)
+            "INSERT INTO session_messages (id, session_id, role, content, thoughts, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+            (msg_id, session_id, role, content, thoughts_json, now)
         )
         conn.execute(
             "UPDATE sessions SET updated_at = ? WHERE id = ?",

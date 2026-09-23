@@ -129,6 +129,33 @@ async def run_langgraph_task(
         full_response_parts: list[str] = []
         interrupted = False
         thinking_log = []
+        accumulated_thoughts = []
+
+        def record_thought(ev: Event):
+            p = ev.payload
+            if ev.type == EventType.TOOL_ACTIVITY:
+                st = p.get("status")
+                t_name = p.get("tool_name")
+                if st != "pending":
+                    for t in reversed(accumulated_thoughts):
+                        if t.get("type") == "TOOL_ACTIVITY" and t.get("payload", {}).get("tool_name") == t_name and t.get("payload", {}).get("status") == "pending":
+                            prev_args = t.get("payload", {}).get("tool_args", {})
+                            new_args = p.get("tool_args", {})
+                            merged_args = new_args if (new_args and len(new_args) > 0) else prev_args
+                            t["payload"] = {**p, "tool_args": merged_args}
+                            return
+                accumulated_thoughts.append({"type": "TOOL_ACTIVITY", "payload": p, "node": p.get("node")})
+            elif ev.type == EventType.NODE_ACTIVITY:
+                accumulated_thoughts.append({"type": "NODE_ACTIVITY", "payload": p, "node": p.get("from_node")})
+            elif ev.type == EventType.TASK_PROGRESS:
+                n = p.get("node")
+                d = p.get("text_delta")
+                if n and n not in ("assistant", "agent") and d:
+                    accumulated_thoughts.append({"node": n, "text": d})
+
+        def emit_event(ev: Event) -> Event:
+            record_thought(ev)
+            return ev
 
         event_queue = asyncio.Queue()
         event_bus.subscribe(task_id, event_queue)
@@ -154,7 +181,7 @@ async def run_langgraph_task(
                             thinking_log.append(f"[TOOL] {payload.get('tool_name')}({json.dumps(payload.get('tool_args', {}))}) -> completed")
                         elif status == "failed":
                             thinking_log.append(f"[TOOL] {payload.get('tool_name')}({json.dumps(payload.get('tool_args', {}))}) -> failed")
-                    yield item
+                    yield emit_event(item)
                     continue
                     
                 source, data = item
@@ -198,53 +225,121 @@ async def run_langgraph_task(
                         
                         thinking_log.append(text_delta.strip())
                         
-                        yield Event(
-                            type=EventType.TASK_PROGRESS,
+                        yield emit_event(Event(
+                            type=EventType.NODE_ACTIVITY,
                             request_id=request_id,
                             payload={
                                 "task_id": task_id,
-                                "text_delta": text_delta,
-                                "full_text": "",
-                                "turn": 0,
-                                "node": node_name,
+                                "from_node": "supervisor",
+                                "to_node": next_step.lower(),
+                                "action": "delegation",
+                                "reason": reason,
+                                "briefing": briefing,
+                                "input_payload": {
+                                    "user_prompt": prompt,
+                                    "plan_context": state_update.get("plan", ""),
+                                },
+                                "output_payload": {
+                                    "decision": decision,
+                                    "briefing": briefing,
+                                    "assigned_specialist": next_step.lower(),
+                                    "updated_plan": state_update.get("plan", ""),
+                                },
+                                "status": "completed",
+                                "timestamp": int(time.time()),
                             },
-                        )
+                        ))
                     elif "messages" in state_update and isinstance(state_update["messages"], list):
                         for msg in state_update["messages"]:
-                            if msg.get("role") == "assistant" and msg.get("content"):
-                                full_response_parts.append(msg["content"])
-                                yield Event(
-                                    type=EventType.TASK_PROGRESS,
-                                    request_id=request_id,
-                                    payload={
-                                        "task_id": task_id,
-                                        "text_delta": msg["content"],
-                                        "full_text": msg["content"],
-                                        "turn": 0,
-                                        "node": node_name,
-                                    },
-                                )
+                            if msg.get("role") == "assistant":
+                                if msg.get("content"):
+                                    full_response_parts.append(msg["content"])
+                                    yield emit_event(Event(
+                                        type=EventType.TASK_PROGRESS,
+                                        request_id=request_id,
+                                        payload={
+                                            "task_id": task_id,
+                                            "text_delta": msg["content"],
+                                            "full_text": msg["content"],
+                                            "turn": 0,
+                                            "node": "assistant" if not msg.get("tool_calls") else node_name,
+                                        },
+                                    ))
+                                if msg.get("tool_calls"):
+                                    for tc in msg.get("tool_calls", []):
+                                        tool_name = tc.get("function", {}).get("name", "unknown")
+                                        args_str = tc.get("function", {}).get("arguments", "{}")
+                                        try:
+                                            tool_args = json.loads(args_str) if args_str else {}
+                                        except Exception:
+                                            tool_args = {}
+                                            
+                                        thinking_log.append(f"[TOOL] {tool_name}({args_str}) -> pending")
+                                        yield emit_event(Event(
+                                            type=EventType.TOOL_ACTIVITY,
+                                            request_id=request_id,
+                                            payload={
+                                                "task_id": task_id,
+                                                "tool_name": tool_name,
+                                                "tool_args": tool_args,
+                                                "status": "pending",
+                                                "node": node_name,
+                                                "from_node": node_name,
+                                                "to_node": "execute_tool",
+                                                "timestamp": int(time.time()),
+                                            },
+                                        ))
+                                elif msg.get("content"):
+                                    yield emit_event(Event(
+                                        type=EventType.NODE_ACTIVITY,
+                                        request_id=request_id,
+                                        payload={
+                                            "task_id": task_id,
+                                            "from_node": node_name,
+                                            "to_node": "supervisor",
+                                            "action": "step_completed",
+                                            "reason": f"{node_name.capitalize()} completed reasoning and formulated output.",
+                                            "input_payload": {
+                                                "phase": state_update.get("current_phase", "active"),
+                                            },
+                                            "output_payload": {
+                                                "response": msg.get("content", ""),
+                                                "plan": state_update.get("plan", ""),
+                                            },
+                                            "status": "completed",
+                                            "timestamp": int(time.time()),
+                                        },
+                                    ))
                             elif msg.get("role") == "tool":
-                                # Handle specialist tool calls by emitting TOOL_ACTIVITY instead of text delta
+                                # Handle specialist tool calls by emitting TOOL_ACTIVITY and NODE_ACTIVITY
                                 tool_name = msg.get("name", "unknown")
                                 tool_args = msg.get("args", {})
                                 tool_result = msg.get("content", "")
                                 
-                                thinking_log.append(f"[TOOL] {tool_name}({json.dumps(tool_args)}) -> completed")
+                                # Query state to find active specialist destination
+                                current_state_obj = await graph.aget_state(config)
+                                dest_node = current_state_obj.values.get("active_specialist") or "planner"
                                 
-                                yield Event(
+                                is_failed = isinstance(tool_result, str) and (tool_result.startswith("Error") or tool_result.startswith("Validation failed"))
+                                status_str = "failed" if is_failed else "completed"
+                                
+                                thinking_log.append(f"[TOOL] {tool_name}({json.dumps(tool_args)}) -> {status_str}")
+                                
+                                yield emit_event(Event(
                                     type=EventType.TOOL_ACTIVITY,
                                     request_id=request_id,
                                     payload={
                                         "task_id": task_id,
                                         "tool_name": tool_name,
                                         "tool_args": tool_args,
-                                        "status": "completed",
+                                        "status": status_str,
                                         "result": tool_result,
-                                        "node": node_name,
+                                        "node": dest_node,
+                                        "from_node": dest_node,
+                                        "to_node": "execute_tool",
                                         "timestamp": int(time.time()),
                                     },
-                                )
+                                ))
                     
                     # Check if it was executing a tool
                     if node_name == "execute_tool":
@@ -283,6 +378,8 @@ async def run_langgraph_task(
                     "state": TaskState.SUCCEEDED.value,
                     "latency_ms": elapsed_ms,
                     "response": full_response or "(task completed)",
+                    "thoughts": accumulated_thoughts,
+                    "session_id": session_id,
                 },
             )
         except Exception as e:

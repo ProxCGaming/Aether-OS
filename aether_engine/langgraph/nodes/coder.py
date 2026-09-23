@@ -22,7 +22,7 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
     system_prompt = f"You are a Coder agent. Write, test, and debug code based on the current plan and context.\n{plan_info}"
     messages = [{"role": "system", "content": system_prompt}] + state.get("messages", [])
     
-    if messages and messages[-1].get("role") != "user":
+    if messages and messages[-1].get("role") not in ("user", "tool"):
         messages.append({
             "role": "user",
             "content": "Please proceed with writing, testing, or debugging the code based on the current state."
