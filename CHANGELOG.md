@@ -4,7 +4,12 @@ All notable changes to the **Aether-OS** project will be documented in this file
 
 ## [Unreleased] (Current Session)
 
+### Added
+- **[2026-09-23 04:22] Environment Diagnostics Engine**: Replaced the static UI mockup in the Settings page with a live, dynamic capability-check runner. Pressing "Run Diagnostics Now" triggers a true backend test for the Python environment, terminal access, SQLite read/write permissions, local Ollama daemon connectivity, and `TAVILY_API_KEY` verification, with live results rendering directly into the UI!
+- **[2026-09-23 03:53] Auto-Title Generation**: Newly created conversations (previously generic "New Conversation") are now automatically renamed to a brief summary of the first user prompt sent in the session.
+
 ### Fixed
+- **[2026-09-23 04:35] Diagnostics Loading State**: Added a dynamic loading state to the "Run Diagnostics Now" button in the Settings UI so that users receive immediate visual feedback (loading spinner, disabled state) while the backend tests are running.
 - **Settings API Provider Caching**: API keys are now securely cached in the browser `localStorage` upon connection. If a key is disconnected from the backend, the UI text box remains pre-filled, saving users from needing to re-enter it manually.
 - **Model Disconnect Bug**: Fixed a UI bug in `App.jsx` where disconnecting a provider or saving a new configuration failed to instantly refresh the available model dropdown.
 - **Capability Auto-Router Priorities**: Fixed the backend `capability_router.py` logic which was ignoring the user's "Global Default Model" choice. The tiebreaker score was increased from `+1.0` to `+100.0`, ensuring standard chats always respect the user's choice instead of silently falling back to OpenRouter.

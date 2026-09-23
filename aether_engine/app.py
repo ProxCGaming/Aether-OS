@@ -66,6 +66,7 @@ from aether_engine.routing.startup import (
     StartupValidationResult,
     validate_startup_configuration,
 )
+from aether_engine.validation.diagnostics import run_environment_diagnostics
 from aether_engine.scheduler.capability_jobs import CapabilitySchedulerManager
 from aether_engine.secrets.dpapi import SecretDecryptionError
 from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
@@ -631,7 +632,19 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     # Create new session if none provided
                     title = prompt[:30] + "..." if len(prompt) > 30 else prompt
                     session_id = session_store.create_session(title)
-                
+                else:
+                    sess_info = session_store.get_session(session_id)
+                    if sess_info and sess_info.get("title") in ("New Conversation", "New Chat") and not sess_info.get("messages"):
+                        title = prompt[:30] + "..." if len(prompt) > 30 else prompt
+                        session_store.update_session_title(session_id, title)
+                        try:
+                            await ws.send_text(Event(
+                                type=EventType.SESSION_LIST_RESPONSE,
+                                request_id=req_id,
+                                payload={"sessions": session_store.list_sessions()}
+                            ).to_json())
+                        except Exception:
+                            pass
                 try:
                     session_store.add_message(session_id, "user", prompt)
                 except Exception as e:
@@ -1103,6 +1116,19 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     type=EventType.CAPABILITY_CHECK_HISTORY_RESPONSE,
                     request_id=req_id,
                     payload={"summary": status_sum, "history": history},
+                ).to_json())
+
+            elif msg.type == EventType.ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST:
+                diag_logs = run_environment_diagnostics()
+                # Determine overall summary status based on logs
+                failed_count = sum(1 for log in diag_logs if log["status"] == "FAILED")
+                await ws.send_text(Event(
+                    type=EventType.ENVIRONMENT_DIAGNOSTIC_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "summary": {"failed_count": failed_count},
+                        "history": diag_logs,
+                    },
                 ).to_json())
 
             elif msg.type == EventType.REFRESH_MODELS_REQUEST:

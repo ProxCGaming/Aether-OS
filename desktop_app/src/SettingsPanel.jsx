@@ -31,6 +31,10 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   const [selectedEpisode, setSelectedEpisode] = useState(null);
   
   const [downloadInput, setDownloadInput] = useState('');
+  
+  const [capabilityHistory, setCapabilityHistory] = useState([]);
+  const [capabilityStatus, setCapabilityStatus] = useState(null);
+  const [isDiagnosticsRunning, setIsDiagnosticsRunning] = useState(false);
 
   const handleDeleteEpisode = (taskId) => {
     if (!taskId) return;
@@ -165,6 +169,10 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
           setFacts(data.payload.facts || []);
         } else if (data.type === 'MEMORY_GRAPH_CLEAR_RESPONSE') {
           setFacts([]);
+        } else if (data.type === 'ENVIRONMENT_DIAGNOSTIC_RESPONSE') {
+          setCapabilityStatus(data.payload.summary);
+          setCapabilityHistory(data.payload.history || []);
+          setIsDiagnosticsRunning(false);
         }
       } catch (e) {
         // ignore JSON parse errors
@@ -720,22 +728,58 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
             <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '24px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#10b981', boxShadow: '0 0 10px rgba(16,185,129,0.5)' }}></div>
-                  <h3 style={{ fontSize: '16px' }}>System Healthy</h3>
+                  <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: capabilityStatus && capabilityStatus.failed_count === 0 ? '#10b981' : (capabilityStatus && capabilityStatus.failed_count > 0 ? '#ef4444' : '#6b7280'), boxShadow: capabilityStatus && capabilityStatus.failed_count === 0 ? '0 0 10px rgba(16,185,129,0.5)' : 'none' }}></div>
+                  <h3 style={{ fontSize: '16px' }}>{capabilityStatus ? (capabilityStatus.failed_count === 0 ? 'System Healthy' : `${capabilityStatus.failed_count} Issues Detected`) : 'Status Unknown'}</h3>
                 </div>
-                <button style={{ background: 'transparent', color: '#7c3aed', border: '1px solid rgba(124, 58, 237, 0.5)', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer' }}>
-                  Run Diagnostics Now
+                <button 
+                  onClick={() => {
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isDiagnosticsRunning) {
+                      setIsDiagnosticsRunning(true);
+                      wsRef.current.send(JSON.stringify({
+                        type: 'ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST',
+                        schema_version: 1,
+                        request_id: Date.now().toString(),
+                        payload: {}
+                      }));
+                    }
+                  }}
+                  disabled={isDiagnosticsRunning}
+                  style={{ 
+                    background: isDiagnosticsRunning ? 'rgba(124, 58, 237, 0.2)' : 'transparent', 
+                    color: isDiagnosticsRunning ? '#a78bfa' : '#7c3aed', 
+                    border: '1px solid rgba(124, 58, 237, 0.5)', 
+                    padding: '8px 16px', 
+                    borderRadius: '8px', 
+                    cursor: isDiagnosticsRunning ? 'wait' : 'pointer',
+                    transition: 'all 0.2s ease',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px'
+                  }}>
+                  {isDiagnosticsRunning ? (
+                    <>
+                      <svg style={{ width: '16px', height: '16px', animation: 'spin 1s linear infinite' }} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle style={{ opacity: 0.25 }} cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path style={{ opacity: 0.75 }} fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Testing...
+                    </>
+                  ) : (
+                    'Run Diagnostics Now'
+                  )}
                 </button>
               </div>
               
               <div style={{ background: 'rgba(0,0,0,0.5)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', padding: '16px', fontFamily: 'monospace', fontSize: '13px', color: '#10b981', height: '200px', overflowY: 'auto' }} className="chat-scroll">
-                <div style={{ color: '#9090a0', marginBottom: '8px' }}>[13:30:45] Initiating engine capability checks...</div>
-                <div>[13:30:46] Python Environment: OK (v3.12.0)</div>
-                <div>[13:30:46] Terminal Access: OK (Permissions granted)</div>
-                <div>[13:30:47] SQLite Storage: OK (Read/Write verified)</div>
-                <div style={{ color: '#fbbf24' }}>[13:30:48] Ollama Local Service: FAILED (Connection refused)</div>
-                <div>[13:30:49] Web Search API: OK (Key verified)</div>
-                <div style={{ color: '#9090a0', marginTop: '8px' }}>[13:30:50] Diagnostics complete.</div>
+                {capabilityHistory.length === 0 ? (
+                  <div style={{ color: '#9090a0', marginBottom: '8px' }}>[System] Ready to run diagnostics. Click the button above.</div>
+                ) : (
+                  capabilityHistory.map((log, idx) => (
+                    <div key={idx} style={{ color: log.status === 'OK' || log.status === 'RUNNING' ? '#10b981' : (log.status === 'WARN' ? '#fbbf24' : '#ef4444') }}>
+                      [{new Date(log.timestamp * 1000).toLocaleTimeString()}] {log.target_name}: {log.status} {log.details ? `(${log.details})` : ''}
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </div>

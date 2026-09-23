@@ -93,3 +93,15 @@ def delete_session(session_id: str) -> bool:
         cur.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         conn.commit()
         return cur.rowcount > 0
+
+def update_session_title(session_id: str, title: str) -> bool:
+    init_db()
+    now = int(time.time())
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
+            (title, now, session_id)
+        )
+        conn.commit()
+        return cur.rowcount > 0
