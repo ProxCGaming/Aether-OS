@@ -259,6 +259,39 @@ function App() {
               }
             });
           }
+        } else if (data.type === 'TOOL_ACTIVITY') {
+          setChatMessages(prev => {
+            const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
+            if (lastAgentIdx !== -1) {
+              const newMessages = [...prev];
+              const last = newMessages[lastAgentIdx];
+              const currentThoughts = last.thoughts || [];
+              const updatedThoughts = [...currentThoughts];
+              
+              if (data.payload.status !== 'pending') {
+                const pendingIdx = updatedThoughts.findLastIndex(t => 
+                  t.type === 'TOOL_ACTIVITY' && 
+                  t.payload.tool_name === data.payload.tool_name && 
+                  t.payload.status === 'pending'
+                );
+                if (pendingIdx !== -1) {
+                  updatedThoughts[pendingIdx] = { ...updatedThoughts[pendingIdx], payload: data.payload };
+                  newMessages[lastAgentIdx] = { ...last, thoughts: updatedThoughts };
+                  return newMessages;
+                }
+              }
+              
+              updatedThoughts.push({
+                type: 'TOOL_ACTIVITY',
+                payload: data.payload,
+                node: data.payload.node
+              });
+              
+              newMessages[lastAgentIdx] = { ...last, thoughts: updatedThoughts };
+              return newMessages;
+            }
+            return prev;
+          });
         } else if (data.type === 'TASK_COMPLETED') {
           setIsThinking(false);
           // Remove from active tasks for Dashboard

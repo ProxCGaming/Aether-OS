@@ -35,6 +35,12 @@ def init_episodic_db() -> None:
                 tokenize = 'porter unicode61'
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS episodic_thinking (
+                task_id TEXT PRIMARY KEY,
+                thinking_log TEXT
+            )
+        """)
         conn.commit()
 
 def init_embeddings_db() -> None:
@@ -69,7 +75,7 @@ def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
         return 0.0
     return dot / (norm_a * norm_b)
 
-async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags: List[str], outcome: str) -> None:
+async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags: List[str], outcome: str, thinking_log: str = None) -> None:
     init_episodic_db()
     init_embeddings_db()
     now = int(time.time())
@@ -80,6 +86,12 @@ async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags:
                VALUES (?, ?, ?, ?, ?, ?)""",
             (task_id, now, user_prompt, task_summary, tags_str, outcome)
         )
+        if thinking_log:
+            conn.execute(
+                """INSERT OR REPLACE INTO episodic_thinking (task_id, thinking_log)
+                   VALUES (?, ?)""",
+                (task_id, thinking_log)
+            )
         conn.commit()
     
     # Generate and store embedding
@@ -116,10 +128,14 @@ async def query_episodes(query: str, limit: int = 5) -> List[Dict[str, Any]]:
             # Let's just let it match terms by providing the clean string (which acts as AND).
             # If we want it to be more lenient, we can split and join with OR. Let's just use the clean string.
             cur.execute(
-                """SELECT *, rank 
-                   FROM episodic_memory 
-                   WHERE episodic_memory MATCH ? 
-                   ORDER BY rank LIMIT 100""",
+                """SELECT e.*, t.thinking_log, e.rank 
+                   FROM (
+                       SELECT *, rank 
+                       FROM episodic_memory 
+                       WHERE episodic_memory MATCH ? 
+                       ORDER BY rank LIMIT 100
+                   ) e
+                   LEFT JOIN episodic_thinking t ON e.task_id = t.task_id""",
                 (clean_query,)
             )
             bm25_rows = cur.fetchall()
@@ -157,7 +173,12 @@ async def query_episodes(query: str, limit: int = 5) -> List[Dict[str, Any]]:
                 rrf_scores[t_id]["score"] += 1.0 / (k + idx + 1)
             else:
                 # Need to fetch the row from episodic_memory if it matched semantic but not BM25
-                cur.execute("SELECT *, 0 as rank FROM episodic_memory WHERE task_id = ?", (t_id,))
+                cur.execute("""
+                    SELECT e.*, t.thinking_log, 0 as rank 
+                    FROM episodic_memory e
+                    LEFT JOIN episodic_thinking t ON e.task_id = t.task_id
+                    WHERE e.task_id = ?
+                """, (t_id,))
                 fetched = cur.fetchone()
                 if fetched:
                     rrf_scores[t_id] = {"row": dict(fetched), "score": 1.0 / (k + idx + 1)}
@@ -177,7 +198,12 @@ def get_all_episodes(limit: int = 50) -> List[Dict[str, Any]]:
     init_episodic_db()
     with _get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM episodic_memory ORDER BY timestamp DESC LIMIT ?", (limit,))
+        cur.execute("""
+            SELECT e.*, t.thinking_log 
+            FROM episodic_memory e
+            LEFT JOIN episodic_thinking t ON e.task_id = t.task_id
+            ORDER BY e.timestamp DESC LIMIT ?
+        """, (limit,))
         return [dict(row) for row in cur.fetchall()]
 
 def delete_episode(task_id: str) -> bool:
@@ -185,6 +211,7 @@ def delete_episode(task_id: str) -> bool:
     init_embeddings_db()
     with _get_conn() as conn:
         conn.execute("DELETE FROM episodic_memory WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM episodic_thinking WHERE task_id = ?", (task_id,))
         conn.commit()
     with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
         e_conn.execute("DELETE FROM episodic_embeddings WHERE task_id = ?", (task_id,))
@@ -197,6 +224,7 @@ def clear_all_episodes() -> bool:
     init_embeddings_db()
     with _get_conn() as conn:
         conn.execute("DELETE FROM episodic_memory")
+        conn.execute("DELETE FROM episodic_thinking")
         conn.commit()
     with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
         e_conn.execute("DELETE FROM episodic_embeddings")

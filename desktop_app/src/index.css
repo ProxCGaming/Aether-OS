@@ -27,7 +27,6 @@ body {
 /* Allow text selection inside chat, thoughts, code, and inputs */
 input, 
 textarea, 
-.chat-scroll,
 .chat-bubble, 
 .chat-bubble *, 
 .chat-thought-container,

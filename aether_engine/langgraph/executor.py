@@ -37,6 +37,8 @@ from aether_engine.tools.registry import ToolRegistry
 from aether_engine.providers.litellm_provider import LiteLLMProvider
 from aether_engine.memory import episodic
 from aether_engine.memory import knowledge_graph
+from aether_engine.event_bus import event_bus
+import json
 
 logger = logging.getLogger("aether_engine.langgraph.executor")
 
@@ -126,11 +128,42 @@ async def run_langgraph_task(
         start_time = time.time()
         full_response_parts: list[str] = []
         interrupted = False
+        thinking_log = []
+
+        event_queue = asyncio.Queue()
+        event_bus.subscribe(task_id, event_queue)
+
+        async def _graph_runner():
+            try:
+                async for evt in graph.astream(initial_state, config=config, stream_mode="updates"):
+                    await event_queue.put(("graph", evt))
+                await event_queue.put(("graph_done", None))
+            except Exception as e:
+                await event_queue.put(("graph_error", e))
+
+        runner_task = asyncio.create_task(_graph_runner())
 
         try:
-            async for event in graph.astream(initial_state, config=config, stream_mode="updates"):
-                # 'event' is a dict containing the node name and its state update
-                # e.g., {"researcher": {"messages": [...]}}
+            while True:
+                item = await event_queue.get()
+                if isinstance(item, Event):
+                    if item.type == EventType.TOOL_ACTIVITY:
+                        payload = item.payload
+                        status = payload.get("status")
+                        if status == "completed":
+                            thinking_log.append(f"[TOOL] {payload.get('tool_name')}({json.dumps(payload.get('tool_args', {}))}) -> completed")
+                        elif status == "failed":
+                            thinking_log.append(f"[TOOL] {payload.get('tool_name')}({json.dumps(payload.get('tool_args', {}))}) -> failed")
+                    yield item
+                    continue
+                    
+                source, data = item
+                if source == "graph_done":
+                    break
+                if source == "graph_error":
+                    raise data
+                    
+                event = data
                 for node_name, state_update in event.items():
                     if node_name == "__interrupt__":
                         intr_val = state_update[0].value
@@ -156,12 +189,21 @@ async def run_langgraph_task(
                         decision = log_entry.get("decision", {})
                         next_step = decision.get("next", "UNKNOWN")
                         reason = decision.get("reason", "")
+                        briefing = decision.get("briefing", "")
+                        
+                        text_delta = f"\n\n[Supervisor] -> Delegating to {next_step.upper()}\nReason: {reason}"
+                        if briefing:
+                            text_delta += f"\nBriefing: {briefing}"
+                        text_delta += "\n\n"
+                        
+                        thinking_log.append(text_delta.strip())
+                        
                         yield Event(
                             type=EventType.TASK_PROGRESS,
                             request_id=request_id,
                             payload={
                                 "task_id": task_id,
-                                "text_delta": f"\n\n[Supervisor] -> Delegating to {next_step.upper()}\nReason: {reason}\n\n",
+                                "text_delta": text_delta,
                                 "full_text": "",
                                 "turn": 0,
                                 "node": node_name,
@@ -183,15 +225,24 @@ async def run_langgraph_task(
                                     },
                                 )
                             elif msg.get("role") == "tool":
+                                # Handle specialist tool calls by emitting TOOL_ACTIVITY instead of text delta
+                                tool_name = msg.get("name", "unknown")
+                                tool_args = msg.get("args", {})
+                                tool_result = msg.get("content", "")
+                                
+                                thinking_log.append(f"[TOOL] {tool_name}({json.dumps(tool_args)}) -> completed")
+                                
                                 yield Event(
-                                    type=EventType.TASK_PROGRESS,
+                                    type=EventType.TOOL_ACTIVITY,
                                     request_id=request_id,
                                     payload={
                                         "task_id": task_id,
-                                        "text_delta": f"\n\n[Tool Executed: {msg.get('name')}]\n",
-                                        "full_text": f"\n\n[Tool Executed: {msg.get('name')}]\n",
-                                        "turn": 0,
+                                        "tool_name": tool_name,
+                                        "tool_args": tool_args,
+                                        "status": "completed",
+                                        "result": tool_result,
                                         "node": node_name,
+                                        "timestamp": int(time.time()),
                                     },
                                 )
                     
@@ -209,17 +260,20 @@ async def run_langgraph_task(
                 elapsed_ms = round((time.time() - start_time) * 1000, 2)
             full_response = "\n".join(full_response_parts).strip()
             
-            if not interrupted:
+            # Save the episode memory asynchronously if finished
+            if not interrupted and full_response:
                 try:
-                    await episodic.store_episode(task_id, prompt, full_response, ["task", "completed"], TaskState.SUCCEEDED.value)
-                    await knowledge_graph.extract_and_store_facts(
-                        provider=provider,
+                    thinking_log_str = "\n".join(thinking_log)
+                    await episodic.store_episode(
+                        task_id=task_id,
                         user_prompt=prompt,
-                        assistant_response=full_response,
-                        task_id=task_id
+                        task_summary=full_response[:200],  # using response snippet as summary
+                        tags=["task", "completed"],
+                        outcome=full_response,
+                        thinking_log=thinking_log_str,
                     )
-                except Exception as mem_e:
-                    logger.warning(f"Memory storage failed: {mem_e}")
+                except Exception as db_err:
+                    logger.error(f"Failed to store episode in DB for {task_id}: {db_err}")
                     
             yield Event(
                 type=EventType.TASK_COMPLETED,
@@ -234,18 +288,15 @@ async def run_langgraph_task(
         except Exception as e:
             logger.exception("LangGraph task failed")
             elapsed_ms = round((time.time() - start_time) * 1000, 2) if 'start_time' in locals() else 0.0
-            retriable = _is_retriable_error(e)
+            logger.error(f"Graph execution failed for task {task_id}: {e}", exc_info=True)
             yield Event(
                 type=EventType.TASK_FAILED,
                 request_id=request_id,
-                payload={
-                    "task_id": task_id,
-                    "state": TaskState.FAILED.value,
-                    "error": str(e),
-                    "retriable": retriable,
-                    "latency_ms": elapsed_ms,
-                },
+                payload={"task_id": task_id, "error": str(e)},
             )
+        finally:
+            event_bus.unsubscribe(task_id, event_queue)
+            runner_task.cancel()
 
 async def resume_langgraph_task(
     thread_id: str,

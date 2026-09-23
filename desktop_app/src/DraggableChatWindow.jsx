@@ -5,6 +5,71 @@ import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
 import './chat.css';
 
+const ToolActivityCard = ({ payload }) => {
+  const [expanded, setExpanded] = useState(false);
+  
+  if (!payload) return null;
+  
+  const { tool_name, tool_args, status, result, node } = payload;
+  
+  let argsStr = '';
+  try {
+    argsStr = typeof tool_args === 'string' ? tool_args : JSON.stringify(tool_args, null, 2);
+  } catch(e) { argsStr = String(tool_args); }
+  
+  const hasResult = result !== undefined && result !== null && result !== '';
+  let resultStr = '';
+  if (hasResult) {
+    try {
+      resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+    } catch(e) { resultStr = String(result); }
+  }
+
+  return (
+    <div className="tool-activity-card">
+      <div className="tool-header">
+        <div className="tool-name-container">
+          <TerminalSquare size={16} className="tool-icon" />
+          <span>{tool_name || 'unknown_tool'}</span>
+          <span style={{opacity: 0.6, fontSize: '10px'}}>[{node || 'system'}]</span>
+        </div>
+        <div className={`tool-status tool-status-${status}`}>
+          {status}
+        </div>
+      </div>
+      
+      {argsStr && argsStr !== '{}' && (
+        <div className="tool-args selectable-text">
+          <div style={{opacity: 0.6, marginBottom: '4px', fontSize: '11px'}}>Arguments:</div>
+          {argsStr}
+        </div>
+      )}
+      
+      {hasResult && !expanded && (
+        <div className="tool-result selectable-text">
+          <div style={{opacity: 0.6, marginBottom: '4px', fontSize: '11px'}}>Result Preview:</div>
+          {resultStr.slice(0, 150)}{resultStr.length > 150 ? '...' : ''}
+          {resultStr.length > 150 && (
+            <button className="tool-show-more-btn" onClick={() => setExpanded(true)} style={{marginTop: '6px', display: 'block'}}>
+              Show more
+            </button>
+          )}
+        </div>
+      )}
+      
+      {hasResult && expanded && (
+        <div className="tool-result selectable-text">
+          <div style={{opacity: 0.6, marginBottom: '4px', fontSize: '11px'}}>Full Result:</div>
+          {resultStr}
+          <button className="tool-show-more-btn" onClick={() => setExpanded(false)} style={{marginTop: '6px', display: 'block'}}>
+            Show less
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
 export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopTask }) {
   const [isExpanded, setIsExpanded] = useState(false);
 
@@ -96,6 +161,9 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
             </div>
           ) : (
             thoughts.map((t, idx) => {
+              if (t.type === 'TOOL_ACTIVITY') {
+                return <ToolActivityCard key={idx} payload={t.payload} />;
+              }
               const node = (t.node || 'node').toLowerCase();
               let badgeColor = '#a78bfa';
               let badgeBg = 'rgba(167, 139, 250, 0.15)';
@@ -392,12 +460,23 @@ export default function DraggableChatWindow({
     const menuHeight = isInput ? 180 : 130;
     let x = e.clientX;
     let y = e.clientY;
+    
+    let maxX = window.innerWidth;
+    let maxY = window.innerHeight;
 
-    if (x + menuWidth > window.innerWidth - 10) {
-      x = window.innerWidth - menuWidth - 10;
+    if (nodeRef.current) {
+      const rect = nodeRef.current.getBoundingClientRect();
+      x -= rect.left;
+      y -= rect.top;
+      maxX = rect.width;
+      maxY = rect.height;
     }
-    if (y + menuHeight > window.innerHeight - 10) {
-      y = window.innerHeight - menuHeight - 10;
+
+    if (x + menuWidth > maxX - 10) {
+      x = maxX - menuWidth - 10;
+    }
+    if (y + menuHeight > maxY - 10) {
+      y = maxY - menuHeight - 10;
     }
 
     setContextMenu({

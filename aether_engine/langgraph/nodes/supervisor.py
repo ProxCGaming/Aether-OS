@@ -8,6 +8,8 @@ from aether_engine.providers.litellm_provider import LiteLLMProvider
 from aether_engine.providers.base import StreamChunk, ToolCall
 from aether_engine.memory import episodic, session_store, knowledge_graph
 from aether_engine.audit import AuditLogger
+from aether_engine.event_bus import event_bus
+from aether_common.contracts import Event, EventType
 
 logger = logging.getLogger("aether_engine.langgraph.supervisor")
 _audit_logger = AuditLogger()
@@ -77,8 +79,21 @@ SUPERVISOR_MEMORY_TOOLS = [
 ]
 
 
-async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id: Optional[str], original_prompt: str) -> str:
+async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id: Optional[str], original_prompt: str, task_id: str) -> str:
     try:
+        if task_id:
+            event_bus.publish(task_id, Event(
+                type=EventType.TOOL_ACTIVITY,
+                payload={
+                    "task_id": task_id,
+                    "tool_name": tool_name,
+                    "tool_args": args,
+                    "status": "pending",
+                    "node": "supervisor",
+                    "timestamp": int(time.time())
+                }
+            ))
+
         result_str = f"Unknown tool: {tool_name}"
         if tool_name == "get_current_chat_history":
             if not session_id:
@@ -129,9 +144,37 @@ async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id
             "session_id": session_id,
             "result_preview": result_str[:200]
         })
+        
+        if task_id:
+            event_bus.publish(task_id, Event(
+                type=EventType.TOOL_ACTIVITY,
+                payload={
+                    "task_id": task_id,
+                    "tool_name": tool_name,
+                    "tool_args": args,
+                    "status": "completed",
+                    "result": result_str,
+                    "node": "supervisor",
+                    "timestamp": int(time.time())
+                }
+            ))
+            
         return result_str
     except Exception as e:
         logger.warning(f"Supervisor memory tool {tool_name} failed: {e}")
+        if task_id:
+            event_bus.publish(task_id, Event(
+                type=EventType.TOOL_ACTIVITY,
+                payload={
+                    "task_id": task_id,
+                    "tool_name": tool_name,
+                    "tool_args": args,
+                    "status": "failed",
+                    "result": f"Error: {e}",
+                    "node": "supervisor",
+                    "timestamp": int(time.time())
+                }
+            ))
         return f"Error executing {tool_name}: {e}"
 
 
@@ -282,7 +325,7 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
                 "type": "function",
                 "function": {"name": tc.name, "arguments": json.dumps(args)}
             })
-            result_str = await _execute_supervisor_memory_tool(tc.name, args, session_id, original_prompt)
+            result_str = await _execute_supervisor_memory_tool(tc.name, args, session_id, original_prompt, state.get("task_id", ""))
             tool_messages.append({
                 "role": "tool",
                 "tool_call_id": tc.call_id,
