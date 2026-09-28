@@ -36,8 +36,12 @@ class TestEngineWebSocket(unittest.TestCase):
         engine_state.token_path = self.token_file
         engine_state.audit_logger.log_path = self.audit_file
         self.token = engine_state.initialize_auth()
+        
+        self.patcher = patch("aether_engine.memory.session_store.DB_PATH", self.tmp_path / "test_memory.db")
+        self.patcher.start()
 
     def tearDown(self):
+        self.patcher.stop()
         self.tmp_dir.cleanup()
 
     def test_health_endpoint(self):
