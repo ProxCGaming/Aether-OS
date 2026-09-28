@@ -11,7 +11,8 @@ def setup_test_db(tmp_path):
         with patch("aether_engine.memory.episodic._audit_logger.log_event") as mock_log:
             yield test_db, mock_log
 
-def test_episodic_memory_store_and_query(setup_test_db):
+@pytest.mark.asyncio
+async def test_episodic_memory_store_and_query(setup_test_db):
     test_db, mock_log = setup_test_db
     
     task_id = "task-123"
@@ -26,7 +27,7 @@ def test_episodic_memory_store_and_query(setup_test_db):
     mock_log.assert_called_with("EPISODIC_MEMORY_STORED", {"task_id": task_id, "tags": tags})
     
     # Query with exact word
-    results = query_episodes("python")
+    results = await query_episodes("python")
     assert len(results) == 1
     assert results[0]["task_id"] == task_id
     assert results[0]["user_prompt"] == prompt
@@ -35,5 +36,5 @@ def test_episodic_memory_store_and_query(setup_test_db):
     mock_log.assert_called_with("EPISODIC_MEMORY_RETRIEVED", {"query": "python", "results_count": 1})
     
     # Query with no matches
-    results_empty = query_episodes("java")
+    results_empty = await query_episodes("java")
     assert len(results_empty) == 0

@@ -7,7 +7,7 @@ def test_litellm_provider_exception_handling():
     # This just verifies the syntax is valid by raising and catching an exception that matches the block.
     # The actual bug was a syntax error in the except clause tuple.
     try:
-        raise litellm.Timeout("timeout")
+        raise litellm.Timeout(message="timeout", model="test", llm_provider="test")
     except (litellm.RateLimitError, litellm.Timeout,
             litellm.APIConnectionError, litellm.ServiceUnavailableError,
             getattr(litellm, "MidStreamFallbackError", Exception)) as e:
