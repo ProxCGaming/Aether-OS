@@ -314,13 +314,22 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
     agent_tools = config.get("configurable", {}).get("agent_tools", {})
     allowed_tools = agent_tools.get("supervisor")
     if allowed_tools is not None and isinstance(allowed_tools, list):
+        import copy
         used_tools = set()
         for msg in state.get("messages", []):
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 for tc in msg.get("tool_calls"):
                     if isinstance(tc, dict):
                         used_tools.add(tc.get("function", {}).get("name"))
-        tools = [t for t in SUPERVISOR_MEMORY_TOOLS if t.get("function", {}).get("name") in allowed_tools or t.get("function", {}).get("name") in used_tools]
+        tools = []
+        for t in SUPERVISOR_MEMORY_TOOLS:
+            t_name = t.get("function", {}).get("name")
+            if t_name in allowed_tools:
+                tools.append(t)
+            elif t_name in used_tools:
+                disabled_t = copy.deepcopy(t)
+                disabled_t["function"]["description"] = f"DO NOT USE THIS TOOL. IT IS CURRENTLY DISABLED FOR YOUR ROLE."
+                tools.append(disabled_t)
     else:
         tools = SUPERVISOR_MEMORY_TOOLS
     
