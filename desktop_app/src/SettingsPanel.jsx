@@ -21,6 +21,10 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   const [plugins, setPlugins] = useState([]);
   const [newPluginSource, setNewPluginSource] = useState('');
   
+  // Advanced Config State
+  const [disableFallbacks, setDisableFallbacks] = useState(false);
+  const [fallbackChain, setFallbackChain] = useState('');
+  
   // A5: State for Reasoning Effort and Node model override
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem('reasoning_effort') || 'standard');
   const [agents, setAgents] = useState([]);
@@ -177,6 +181,11 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
           setCapabilityStatus(data.payload.summary);
           setCapabilityHistory(data.payload.history || []);
           setIsDiagnosticsRunning(false);
+        } else if (data.type === 'CONFIG_GET_RESPONSE' || data.type === 'CONFIG_UPDATE_RESPONSE') {
+          if (data.payload.config) {
+            setDisableFallbacks(data.payload.config.disable_fallbacks || false);
+            setFallbackChain((data.payload.config.fallback_chain || []).join(', '));
+          }
         }
       } catch (e) {
         // ignore JSON parse errors
@@ -234,6 +243,13 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
       }));
       wsRef.current.send(JSON.stringify({
         type: 'MEMORY_GRAPH_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+    } else if (activeMenu === 'Advanced' && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'CONFIG_GET_REQUEST',
         schema_version: 1,
         request_id: Date.now().toString(),
         payload: {}
@@ -1391,11 +1407,77 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
         )}
 
         {activeMenu === 'Advanced' && (
-          <div style={{ color: '#f0f0f5' }}>
-            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Advanced Settings</h2>
-            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>System configurations and developer options.</p>
-            <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: '#9090a0', marginTop: '64px' }}>
-              <h3>Advanced options coming soon...</h3>
+          <div style={{ color: '#f0f0f5', display: 'flex', flexDirection: 'column', gap: '24px' }}>
+            <div>
+              <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Advanced Settings</h2>
+              <p style={{ color: '#9090a0', fontSize: '14px' }}>System configurations and developer options.</p>
+            </div>
+            
+            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '16px', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Network size={18} style={{ color: '#a78bfa' }} /> Model Routing & Fallbacks
+              </h3>
+              
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
+                <div>
+                  <div style={{ fontWeight: 500, fontSize: '14px', marginBottom: '4px' }}>Disable Fallback System</div>
+                  <div style={{ fontSize: '12px', color: '#9090a0' }}>Prevent the system from automatically trying alternative models when the current one fails.</div>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={disableFallbacks}
+                    onChange={(e) => {
+                      const val = e.target.checked;
+                      setDisableFallbacks(val);
+                      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                        wsRef.current.send(JSON.stringify({
+                          type: 'CONFIG_UPDATE_REQUEST',
+                          schema_version: 1,
+                          request_id: Date.now().toString(),
+                          payload: { config: { disable_fallbacks: val } }
+                        }));
+                      }
+                    }}
+                    style={{ accentColor: '#7c3aed', width: '18px', height: '18px' }}
+                  />
+                </label>
+              </div>
+
+              {!disableFallbacks && (
+                <div>
+                  <div style={{ fontWeight: 500, fontSize: '14px', marginBottom: '8px' }}>Fallback Provider Chain (Optional)</div>
+                  <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
+                    Comma-separated list of providers to try in order (e.g., <code>openrouter, groq, google_gemini</code>). Leave empty for automatic selection.
+                  </div>
+                  <input
+                    type="text"
+                    value={fallbackChain}
+                    onChange={(e) => setFallbackChain(e.target.value)}
+                    onBlur={() => {
+                      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                        const parsedChain = fallbackChain.split(',').map(s => s.trim()).filter(Boolean);
+                        wsRef.current.send(JSON.stringify({
+                          type: 'CONFIG_UPDATE_REQUEST',
+                          schema_version: 1,
+                          request_id: Date.now().toString(),
+                          payload: { config: { fallback_chain: parsedChain } }
+                        }));
+                      }
+                    }}
+                    placeholder="E.g. openrouter, groq, anthropic"
+                    style={{
+                      width: '100%',
+                      background: 'rgba(0,0,0,0.2)',
+                      border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: '6px',
+                      padding: '10px 12px',
+                      color: '#fff',
+                      fontSize: '13px'
+                    }}
+                  />
+                </div>
+              )}
             </div>
           </div>
         )}

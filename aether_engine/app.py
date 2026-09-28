@@ -418,40 +418,61 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
     api_key = secret_store.load_provider(provider_name)
     base_url = engine_state.user_config.custom_base_urls.get(provider_name)
 
-    # Build fallback model list for per-node retry (intra-provider first, then cross-provider)
     fallback_models: List[FallbackModel] = []
-    try:
-        # 1. Intra-provider fallbacks: alternative healthy chat models from the SAME provider
-        same_provider_models = engine_state.model_registry.get_models_for_provider(provider_name)
-        for entry in same_provider_models:
-            if entry.id != model and entry.capabilities and "chat" in entry.capabilities:
-                fallback_models.append(FallbackModel(
-                    model=resolve_litellm_model(entry.id, provider_name),
-                    api_key=api_key,
-                    provider_name=provider_name,
-                    base_url=base_url,
-                ))
-            if len(fallback_models) >= 2:
-                break
+    
+    if not getattr(engine_state.user_config, "disable_fallbacks", False):
+        try:
+            # 1. Intra-provider fallbacks: alternative healthy chat models from the SAME provider
+            same_provider_models = engine_state.model_registry.get_models_for_provider(provider_name)
+            for entry in same_provider_models:
+                if entry.id != model and entry.capabilities and "chat" in entry.capabilities:
+                    fallback_models.append(FallbackModel(
+                        model=resolve_litellm_model(entry.id, provider_name),
+                        api_key=api_key,
+                        provider_name=provider_name,
+                        base_url=base_url,
+                    ))
+                if len(fallback_models) >= 2:
+                    break
 
-        # 2. Cross-provider candidates from healthy configured providers
-        candidates = get_fallback_candidates(
-            failed_provider=provider_name,
-            configured_providers=engine_state.configured_providers,
-            health_manager=engine_state.health_manager,
-            registry=engine_state.model_registry,
-        )
-        for entry in candidates:
-            fb_api_key = secret_store.load_provider(entry.provider)
-            fb_base_url = engine_state.user_config.custom_base_urls.get(entry.provider)
-            fallback_models.append(FallbackModel(
-                model=resolve_litellm_model(entry.id, entry.provider),
-                api_key=fb_api_key,
-                provider_name=entry.provider,
-                base_url=fb_base_url,
-            ))
-    except Exception:
-        pass  # Fallback computation is best-effort
+            # 2. Cross-provider candidates
+            fb_chain = getattr(engine_state.user_config, "fallback_chain", [])
+            if fb_chain:
+                # If custom fallback chain specified, pick top model from each in order
+                for fb_prov in fb_chain:
+                    if fb_prov == provider_name or not engine_state.health_manager.is_provider_available(fb_prov):
+                        continue
+                    fb_models = engine_state.model_registry.get_models_for_provider(fb_prov)
+                    for entry in fb_models:
+                        if entry.capabilities and "chat" in entry.capabilities:
+                            fb_api_key = secret_store.load_provider(fb_prov)
+                            fb_base_url = engine_state.user_config.custom_base_urls.get(fb_prov)
+                            fallback_models.append(FallbackModel(
+                                model=resolve_litellm_model(entry.id, fb_prov),
+                                api_key=fb_api_key,
+                                provider_name=fb_prov,
+                                base_url=fb_base_url,
+                            ))
+                            break # Just pick one per provider
+            else:
+                # Default logic using get_fallback_candidates
+                candidates = get_fallback_candidates(
+                    failed_provider=provider_name,
+                    configured_providers=engine_state.configured_providers,
+                    health_manager=engine_state.health_manager,
+                    registry=engine_state.model_registry,
+                )
+                for entry in candidates:
+                    fb_api_key = secret_store.load_provider(entry.provider)
+                    fb_base_url = engine_state.user_config.custom_base_urls.get(entry.provider)
+                    fallback_models.append(FallbackModel(
+                        model=resolve_litellm_model(entry.id, entry.provider),
+                        api_key=fb_api_key,
+                        provider_name=entry.provider,
+                        base_url=fb_base_url,
+                    ))
+        except Exception:
+            pass  # Fallback computation is best-effort
 
     return LiteLLMProvider(
         api_key=api_key,
@@ -1346,6 +1367,26 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     type=EventType.MCP_SERVER_LIST_RESPONSE,
                     request_id=req_id,
                     payload={"servers": servers},
+                ).to_json())
+
+            elif msg.type == EventType.CONFIG_GET_REQUEST:
+                await ws.send_text(Event(
+                    type=EventType.CONFIG_GET_RESPONSE,
+                    request_id=req_id,
+                    payload={"config": engine_state.user_config.to_dict()},
+                ).to_json())
+
+            elif msg.type == EventType.CONFIG_UPDATE_REQUEST:
+                config_data = msg.payload.get("config", {})
+                if "disable_fallbacks" in config_data:
+                    engine_state.user_config.disable_fallbacks = config_data["disable_fallbacks"]
+                if "fallback_chain" in config_data:
+                    engine_state.user_config.fallback_chain = config_data["fallback_chain"]
+                save_config(engine_state.user_config)
+                await ws.send_text(Event(
+                    type=EventType.CONFIG_UPDATE_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": True, "config": engine_state.user_config.to_dict()},
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_ADD_REQUEST:

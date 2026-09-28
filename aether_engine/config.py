@@ -94,6 +94,8 @@ class UserConfig:
     workspace_roots: List[str] = field(default_factory=list)
     agent_models: Dict[str, str] = field(default_factory=dict)
     agent_tools: Dict[str, List[str]] = field(default_factory=dict)
+    disable_fallbacks: bool = False
+    fallback_chain: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -110,6 +112,8 @@ class UserConfig:
             "workspace_roots": self.workspace_roots,
             "agent_models": self.agent_models,
             "agent_tools": self.agent_tools,
+            "disable_fallbacks": self.disable_fallbacks,
+            "fallback_chain": self.fallback_chain,
         }
 
     @classmethod
@@ -146,6 +150,8 @@ class UserConfig:
             workspace_roots=d.get("workspace_roots") if isinstance(d.get("workspace_roots"), list) else [],
             agent_models=_as_dict(d.get("agent_models")),
             agent_tools=_as_list_dict(d.get("agent_tools")),
+            disable_fallbacks=d.get("disable_fallbacks", False),
+            fallback_chain=d.get("fallback_chain", []),
         )
 
 
