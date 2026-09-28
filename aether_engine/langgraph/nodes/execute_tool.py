@@ -43,6 +43,25 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     registry = configurable.get("tool_registry")
     workspace_roots = configurable.get("workspace_roots", [])
     task_class = configurable.get("task_class", "standard")
+    
+    # Check if tool is allowed for the active specialist
+    active_agent = state.get("active_specialist")
+    agent_tools = configurable.get("agent_tools", {})
+    if active_agent and active_agent in agent_tools:
+        allowed_tools = agent_tools[active_agent]
+        if allowed_tools is not None and isinstance(allowed_tools, list):
+            if tool_name not in allowed_tools:
+                error_msg = f"Error: Tool '{tool_name}' is currently disabled for your agent role. You are not allowed to execute it."
+                logger.warning(f"Agent '{active_agent}' attempted to use disabled tool '{tool_name}'.")
+                return {
+                    "messages": [{
+                        "role": "tool",
+                        "name": tool_name,
+                        "content": error_msg,
+                        "tool_call_id": call_id,
+                    }],
+                    "pending_tool_call": None
+                }
 
     if not registry:
         result_text = f"Error: No tool registry provided to graph. Cannot execute {tool_name}."
