@@ -227,8 +227,23 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
     or episodic memory) before deciding delegation and formulating a targeted plan/briefing.
     """
     provider = config.get("configurable", {}).get("provider")
-    if not provider or not isinstance(provider, LiteLLMProvider):
-        raise RuntimeError("LiteLLMProvider not found in graph config")
+    
+    agent_models = config.get("configurable", {}).get("agent_models", {})
+    secret_store = config.get("configurable", {}).get("secret_store")
+    
+    agent_model_override = agent_models.get("supervisor")
+    if agent_model_override and agent_model_override != "inherit" and secret_store:
+        try:
+            parts = agent_model_override.split(":", 1)
+            if len(parts) == 2:
+                p_name, m_name = parts
+                from aether_engine.app import _create_provider_instance
+                provider = _create_provider_instance(p_name, m_name, secret_store)
+        except Exception:
+            pass
+            
+    if not provider or not hasattr(provider, "call_stream"):
+        raise RuntimeError("Valid provider not found in graph config")
 
     session_id = state.get("session_id") or config.get("configurable", {}).get("session_id")
 
@@ -296,8 +311,21 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
     content_parts = []
     accumulated_tool_calls: Dict[str, ToolCall] = {}
     
+    agent_tools = config.get("configurable", {}).get("agent_tools", {})
+    allowed_tools = agent_tools.get("supervisor")
+    if allowed_tools is not None and isinstance(allowed_tools, list):
+        used_tools = set()
+        for msg in state.get("messages", []):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg.get("tool_calls"):
+                    if isinstance(tc, dict):
+                        used_tools.add(tc.get("function", {}).get("name"))
+        tools = [t for t in SUPERVISOR_MEMORY_TOOLS if t.get("function", {}).get("name") in allowed_tools or t.get("function", {}).get("name") in used_tools]
+    else:
+        tools = SUPERVISOR_MEMORY_TOOLS
+    
     try:
-        async for chunk in provider.call_stream(messages, tools=SUPERVISOR_MEMORY_TOOLS):
+        async for chunk in provider.call_stream(messages, tools=tools):
             if chunk.text:
                 content_parts.append(chunk.text)
             if chunk.tool_calls:

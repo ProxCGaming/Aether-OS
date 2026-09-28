@@ -92,6 +92,8 @@ class UserConfig:
     })
     tool_policies: Dict[str, str] = field(default_factory=dict)
     workspace_roots: List[str] = field(default_factory=list)
+    agent_models: Dict[str, str] = field(default_factory=dict)
+    agent_tools: Dict[str, List[str]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -106,6 +108,8 @@ class UserConfig:
             "task_classes": self.task_classes,
             "tool_policies": self.tool_policies,
             "workspace_roots": self.workspace_roots,
+            "agent_models": self.agent_models,
+            "agent_tools": self.agent_tools,
         }
 
     @classmethod
@@ -117,6 +121,9 @@ class UserConfig:
         def _as_dict(value: Any) -> Dict[str, Any]:
             # Older/corrupted config files may contain null for these maps,
             # which would otherwise crash every save/remove/list operation.
+            return value if isinstance(value, dict) else {}
+            
+        def _as_list_dict(value: Any) -> Dict[str, List[str]]:
             return value if isinstance(value, dict) else {}
 
         return cls(
@@ -137,6 +144,8 @@ class UserConfig:
             }),
             tool_policies=_as_dict(d.get("tool_policies")),
             workspace_roots=d.get("workspace_roots") if isinstance(d.get("workspace_roots"), list) else [],
+            agent_models=_as_dict(d.get("agent_models")),
+            agent_tools=_as_list_dict(d.get("agent_tools")),
         )
 
 

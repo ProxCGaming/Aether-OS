@@ -20,7 +20,7 @@ def test_episodic_memory_store_and_query(setup_test_db):
     tags = ["python", "script"]
     outcome = "SUCCESS"
     
-    store_episode(task_id, prompt, summary, tags, outcome)
+    await store_episode(task_id, prompt, summary, tags, outcome)
     
     # Ensure audit log was called
     mock_log.assert_called_with("EPISODIC_MEMORY_STORED", {"task_id": task_id, "tags": tags})

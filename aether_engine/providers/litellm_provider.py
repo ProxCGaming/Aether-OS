@@ -476,7 +476,7 @@ class LiteLLMProvider(BaseProvider):
                 raise ProviderError(f"Model not found: {e}", retriable=True) from e
             except (litellm.RateLimitError, litellm.Timeout,
                     litellm.APIConnectionError, litellm.ServiceUnavailableError,
-                    getattr(litellm, "MidStreamFallbackError", ())) as e:
+                    getattr(litellm, "MidStreamFallbackError", Exception)) as e:
                 # Retriable errors — try next fallback model if available
                 last_error = e
                 if is_fallback or model_idx < len(models_to_try) - 1:

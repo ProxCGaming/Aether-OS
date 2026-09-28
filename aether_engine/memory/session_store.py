@@ -8,6 +8,8 @@ from pathlib import Path
 # Database path is ~/.aether/memory.db
 DB_PATH = Path.home() / ".aether" / "memory.db"
 
+_initialized = False
+
 def _get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -135,6 +137,37 @@ def update_session_title(session_id: str, title: str) -> bool:
         cur.execute(
             "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
             (title, now, session_id)
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+def truncate_session(session_id: str, message_id: str) -> bool:
+    init_db()
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM session_messages WHERE session_id = ? AND rowid >= (SELECT rowid FROM session_messages WHERE id = ?)",
+            (session_id, message_id)
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+def truncate_session_by_content(session_id: str, role: str, content: str) -> bool:
+    init_db()
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        # Find the most recent message matching this content and role
+        cur.execute(
+            "SELECT id FROM session_messages WHERE session_id = ? AND role = ? AND content = ? ORDER BY timestamp DESC, rowid DESC LIMIT 1", 
+            (session_id, role, content)
+        )
+        row = cur.fetchone()
+        if not row:
+            return False
+        msg_id = row["id"]
+        cur.execute(
+            "DELETE FROM session_messages WHERE session_id = ? AND rowid >= (SELECT rowid FROM session_messages WHERE id = ?)",
+            (session_id, msg_id)
         )
         conn.commit()
         return cur.rowcount > 0

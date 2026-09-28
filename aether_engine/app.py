@@ -740,6 +740,9 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     workspace_roots=workspace_roots,
                     disabled_nodes=engine_state.disabled_nodes,
                     session_id=session_id,
+                    agent_models=engine_state.user_config.agent_models,
+                    agent_tools=engine_state.user_config.agent_tools,
+                    secret_store=secret_store,
                 )
 
                 task_runner = asyncio.create_task(
@@ -1062,6 +1065,23 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     payload={"session_id": sess_id, "deleted": deleted},
                 ).to_json())
 
+            elif msg.type == EventType.SESSION_TRUNCATE_REQUEST:
+                sess_id = msg.payload.get("session_id")
+                msg_id = msg.payload.get("message_id")
+                content = msg.payload.get("content")
+                role = msg.payload.get("role", "user")
+                truncated = False
+                if sess_id:
+                    if msg_id:
+                        truncated = session_store.truncate_session(sess_id, msg_id)
+                    elif content:
+                        truncated = session_store.truncate_session_by_content(sess_id, role, content)
+                await ws.send_text(Event(
+                    type=EventType.SESSION_TRUNCATE_RESPONSE,
+                    request_id=req_id,
+                    payload={"session_id": sess_id, "truncated": truncated},
+                ).to_json())
+
             # -----------------------------------------------------------
             # Local Models (Ollama) & Task Download Events
             # -----------------------------------------------------------
@@ -1240,17 +1260,71 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
             # Tools, MCP, Plugins, Memory Events
             # -----------------------------------------------------------
             elif msg.type == EventType.TOOL_LIST_REQUEST:
-                all_tools = create_file_tools() + create_web_tools()
+                from aether_engine.langgraph.nodes.supervisor import SUPERVISOR_MEMORY_TOOLS
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                
+                all_tools = [create_current_time_tool()] + create_file_tools() + create_web_tools()
                 defs = []
                 for t in all_tools:
                     policy = engine_state.user_config.tool_policies.get(t.name, "Require Approval")
                     d = t.to_definition()
                     d["policy"] = policy
                     defs.append(d)
+                
+                # Add Supervisor Memory Tools
+                for mt in SUPERVISOR_MEMORY_TOOLS:
+                    d = mt.copy()
+                    policy = engine_state.user_config.tool_policies.get(d["function"]["name"], "Require Approval")
+                    d["policy"] = policy
+                    defs.append(d)
+                
+                # Add MCP Tools (scaffold)
+                for mt in GLOBAL_MCP_REGISTRY.get_mcp_tools():
+                    d = mt.copy()
+                    policy = engine_state.user_config.tool_policies.get(d["function"]["name"], "Require Approval")
+                    d["policy"] = policy
+                    defs.append(d)
+                    
                 await ws.send_text(Event(
                     type=EventType.TOOL_LIST_RESPONSE,
                     request_id=req_id,
                     payload={"tools": defs},
+                ).to_json())
+
+            elif msg.type == EventType.AGENT_LIST_REQUEST:
+                agents = [
+                    {"id": "supervisor", "name": "Supervisor", "description": "Routes tasks and queries memory."},
+                    {"id": "planner", "name": "Planner Agent", "description": "Breaks goals into structured steps."},
+                    {"id": "coder", "name": "Coder Agent", "description": "Writes, tests, and debugs code."},
+                    {"id": "researcher", "name": "Researcher Agent", "description": "Gathers information and synthesizes findings."}
+                ]
+                
+                for agent in agents:
+                    agent["model"] = engine_state.user_config.agent_models.get(agent["id"], "inherit")
+                    agent["tools"] = engine_state.user_config.agent_tools.get(agent["id"])
+                
+                await ws.send_text(Event(
+                    type=EventType.AGENT_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"agents": agents},
+                ).to_json())
+
+            elif msg.type == EventType.AGENT_UPDATE_REQUEST:
+                agent_id = msg.payload.get("agent_id")
+                model = msg.payload.get("model")
+                tools = msg.payload.get("tools")
+                
+                if agent_id:
+                    if model is not None:
+                        engine_state.user_config.agent_models[agent_id] = model
+                    if tools is not None:
+                        engine_state.user_config.agent_tools[agent_id] = tools
+                    save_config(engine_state.user_config)
+                
+                await ws.send_text(Event(
+                    type=EventType.AGENT_UPDATE_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": True, "agent_id": agent_id},
                 ).to_json())
 
             elif msg.type == EventType.TOOL_POLICY_SET_REQUEST:

@@ -29,7 +29,7 @@ async def test_supervisor_uses_episodic_memory(monkeypatch, tmp_path):
     init_episodic_db()
     
     # Store a test episode
-    store_episode("test_task_1", "make a pizza", "I made a pepperoni pizza", ["food"], "Success")
+    await store_episode("test_task_1", "make a pizza", "I made a pepperoni pizza", ["food"], "Success")
     
     provider = InspectProvider()
     config = RunnableConfig(configurable={"provider": provider})

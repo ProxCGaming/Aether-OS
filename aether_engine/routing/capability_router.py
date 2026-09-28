@@ -185,9 +185,9 @@ class CapabilityRouter:
             matched_tags = profile.required_tags.intersection(cap_set)
             score += len(matched_tags) * 10.0
 
-            # Missing required tag penalty
+            # Missing required tag massive penalty (overrides default bonus)
             missing_tags = profile.required_tags - cap_set
-            score -= len(missing_tags) * 15.0
+            score -= len(missing_tags) * 150.0
 
             # Tier bonus
             if tier == profile.preferred_tier:

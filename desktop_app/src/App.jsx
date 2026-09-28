@@ -89,6 +89,8 @@ function App() {
   const wsRef = useRef(null);
   const graphRef = useRef();
   const pendingSessionSwitchRef = useRef(null);
+  const sessionCacheRef = useRef({});
+  const activeTaskSessionRef = useRef(null);
 
   useEffect(() => {
     const unsubscribers = [];
@@ -207,6 +209,7 @@ function App() {
           if (data.payload?.task_id || data.request_id) {
             setActiveTaskIds(prev => new Set(prev).add(data.payload?.task_id || data.request_id));
           }
+          activeTaskSessionRef.current = data.payload?.session_id || activeSessionRef.current;
           setIsThinking(true);
           setChatMessages(prev => {
             if (prev.findLastIndex(m => m.role === 'agent' && !m.isFinal) === -1) {
@@ -228,7 +231,7 @@ function App() {
           }
           
           if (delta) {
-            setChatMessages(prev => {
+            const updateMessages = (prev) => {
               const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
               if (lastAgentIdx !== -1) {
                 const newMessages = [...prev];
@@ -262,14 +265,21 @@ function App() {
                   return [...prev, { role: 'agent', content: delta, thoughts: [], isFinal: false }];
                 }
               }
-            });
+            };
+            
+            if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
+              const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
+              sessionCacheRef.current[activeTaskSessionRef.current] = updateMessages(cached);
+            } else {
+              setChatMessages(updateMessages);
+            }
           }
         } else if (data.type === 'NODE_ACTIVITY') {
           // Tool calls are exclusively rendered and managed via TOOL_ACTIVITY
           if (data.payload?.action === 'tool_request' || data.payload?.action === 'tool_result') {
             return;
           }
-          setChatMessages(prev => {
+          const updateMessages = (prev) => {
             const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
             if (lastAgentIdx !== -1) {
               const newMessages = [...prev];
@@ -304,9 +314,16 @@ function App() {
               return newMessages;
             }
             return prev;
-          });
+          };
+          
+          if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
+            const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
+            sessionCacheRef.current[activeTaskSessionRef.current] = updateMessages(cached);
+          } else {
+            setChatMessages(updateMessages);
+          }
         } else if (data.type === 'TOOL_ACTIVITY') {
-          setChatMessages(prev => {
+          const updateMessages = (prev) => {
             const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
             if (lastAgentIdx !== -1) {
               const newMessages = [...prev];
@@ -348,7 +365,14 @@ function App() {
               return newMessages;
             }
             return prev;
-          });
+          };
+          
+          if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
+            const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
+            sessionCacheRef.current[activeTaskSessionRef.current] = updateMessages(cached);
+          } else {
+            setChatMessages(updateMessages);
+          }
         } else if (data.type === 'TASK_COMPLETED') {
           setIsThinking(false);
           // Remove from active tasks for Dashboard
@@ -363,7 +387,7 @@ function App() {
           }
           let result = data.payload.response || data.payload.result || data.payload.output;
           
-          setChatMessages(prev => {
+          const updateCompletedMessages = (prev) => {
             let newMessages = [...prev];
             const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
             
@@ -382,13 +406,21 @@ function App() {
               const finalContent = (result !== undefined && result !== null) ? (typeof result !== 'string' ? JSON.stringify(result, null, 2) : result) : '';
               return [...newMessages, { role: 'agent', content: finalContent, thoughts: data.payload.thoughts || [], isFinal: true }];
             }
-          });
+          };
+          
+          if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
+            const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
+            sessionCacheRef.current[activeTaskSessionRef.current] = updateCompletedMessages(cached);
+          } else {
+            setChatMessages(updateCompletedMessages);
+          }
         } else if (data.type === 'TASK_FAILED' || data.type === 'TASK_CANCELLED') {
           setIsThinking(false);
           if (data.payload?.task_id || data.request_id) {
             setActiveTaskIds(prev => { const next = new Set(prev); next.delete(data.payload?.task_id || data.request_id); return next; });
           }
-          setChatMessages(prev => {
+          
+          const updateFailedMessages = (prev) => {
             let newMessages = [...prev];
             const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
             
@@ -410,7 +442,14 @@ function App() {
               if (veryLast && veryLast.role === 'agent' && veryLast.isFinal) return newMessages;
               return [...newMessages, { role: 'agent', content: errorText, isFinal: true, hasError: true }];
             }
-          });
+          };
+          
+          if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
+            const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
+            sessionCacheRef.current[activeTaskSessionRef.current] = updateFailedMessages(cached);
+          } else {
+            setChatMessages(updateFailedMessages);
+          }
         } else if (data.type === 'SESSION_LIST_RESPONSE') {
           setSessions(data.payload.sessions || []);
           if (data.payload.sessions?.length > 0 && !activeSessionRef.current) {
@@ -423,22 +462,34 @@ function App() {
           if (data.request_id && data.request_id === pendingSessionSwitchRef.current) {
             pendingSessionSwitchRef.current = null; // Clear immediately to ignore any subsequent echoed broadcasts
             const sess = data.payload.session;
-            setChatMessages((sess && sess.messages) ? sess.messages.map(m => {
-              let parsedThoughts = m.thoughts;
-              if (typeof parsedThoughts === 'string') {
-                try {
-                  parsedThoughts = JSON.parse(parsedThoughts);
-                } catch (e) {
-                  parsedThoughts = [];
+            setChatMessages(prev => {
+              const backendMessages = (sess && sess.messages) ? sess.messages.map(m => {
+                let parsedThoughts = m.thoughts;
+                if (typeof parsedThoughts === 'string') {
+                  try {
+                    parsedThoughts = JSON.parse(parsedThoughts);
+                  } catch (e) {
+                    parsedThoughts = [];
+                  }
                 }
+                return {
+                  ...m,
+                  role: m.role === 'assistant' ? 'agent' : m.role,
+                  isFinal: true,
+                  thoughts: Array.isArray(parsedThoughts) ? parsedThoughts : []
+                };
+              }) : [];
+              
+              // If we are currently running a task in this session, the DB won't have its incomplete messages yet.
+              // We must merge it back from our cache or `prev` so the UI doesn't lose the stream.
+              if (activeTaskSessionRef.current === activeSessionRef.current && isThinking) {
+                 const activeMsg = prev.find(m => m.role === 'agent' && !m.isFinal);
+                 if (activeMsg) {
+                    return [...backendMessages, activeMsg];
+                 }
               }
-              return {
-                ...m,
-                role: m.role === 'assistant' ? 'agent' : m.role,
-                isFinal: true,
-                thoughts: Array.isArray(parsedThoughts) ? parsedThoughts : []
-              };
-            }) : []);
+              return backendMessages;
+            });
           }
         } else if (data.type === 'FALLBACK_STARTED') {
           setChatMessages(prev => [...prev, { 
@@ -619,6 +670,12 @@ function App() {
   };
 
   const handleSessionSwitch = (id) => {
+    setChatMessages(prev => {
+      if (activeSessionRef.current) {
+        sessionCacheRef.current[activeSessionRef.current] = prev;
+      }
+      return sessionCacheRef.current[id] || [];
+    });
     setActiveSession(id);
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const reqId = `switch_${Date.now()}`;
@@ -633,6 +690,7 @@ function App() {
   };
 
   const handleNewChat = () => {
+    setChatMessages([]); // Clear immediately for instant feel
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'SESSION_CREATE_REQUEST',
@@ -718,6 +776,41 @@ function App() {
       }));
     }
     setIsThinking(false);
+  };
+
+  const handleEditMessage = (msg, index) => {
+    // 1. Cancel any running task first so ghost progress doesn't stream in
+    if (isThinking) {
+      handleStopTask();
+    }
+
+    // 2. Tell the engine to wipe this message + everything after it from the DB
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'SESSION_TRUNCATE_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {
+          session_id: activeSession,
+          message_id: msg.id,
+          content: msg.content,
+          role: msg.role
+        }
+      }));
+    }
+
+    // 3. Prune the local chat messages from the edited message onward
+    setChatMessages(prev => {
+      let idx = index;
+      if (idx === undefined || idx < 0 || idx >= prev.length || (msg.id && prev[idx].id !== msg.id)) {
+        idx = prev.findIndex(m => (m.id && msg.id && m.id === msg.id) || (!m.id && !msg.id && m.content === msg.content && m.role === msg.role));
+      }
+      
+      if (idx !== -1) {
+        return prev.slice(0, idx);
+      }
+      return prev;
+    });
   };
 
   return (
@@ -834,6 +927,7 @@ function App() {
           isThinking={isThinking}
           providers={providers}
           onChangeModel={handleChangeModel}
+          onEditMessage={handleEditMessage}
           onDetach={(state) => {
             localStorage.setItem('floating_transfer_state', JSON.stringify({
               messages: chatMessages,

@@ -11,11 +11,39 @@ async def planner_node(state: AetherState, config: RunnableConfig) -> dict:
     Uses LiteLLMProvider from config for per-node fallback (ADR 0014 Fix 4).
     """
     provider = config.get("configurable", {}).get("provider")
-    if not provider or not isinstance(provider, LiteLLMProvider):
-        raise RuntimeError("LiteLLMProvider not found in graph config")
+    
+    agent_models = config.get("configurable", {}).get("agent_models", {})
+    agent_tools = config.get("configurable", {}).get("agent_tools", {})
+    secret_store = config.get("configurable", {}).get("secret_store")
+    
+    agent_model_override = agent_models.get("planner")
+    if agent_model_override and agent_model_override != "inherit" and secret_store:
+        try:
+            parts = agent_model_override.split(":", 1)
+            if len(parts) == 2:
+                p_name, m_name = parts
+                from aether_engine.app import _create_provider_instance
+                provider = _create_provider_instance(p_name, m_name, secret_store)
+        except Exception:
+            pass
+            
+    if not provider or not hasattr(provider, "call_stream"):
+        raise RuntimeError("Valid provider not found in graph config")
     
     registry = config.get("configurable", {}).get("tool_registry")
-    tools = registry.get_definitions() if registry else []
+    all_tools = registry.get_definitions() if registry else []
+    
+    allowed_tools = agent_tools.get("planner")
+    if allowed_tools is not None and isinstance(allowed_tools, list):
+        used_tools = set()
+        for msg in state.get("messages", []):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg.get("tool_calls"):
+                    if isinstance(tc, dict):
+                        used_tools.add(tc.get("function", {}).get("name"))
+        tools = [t for t in all_tools if t.get("function", {}).get("name") in allowed_tools or t.get("function", {}).get("name") in used_tools]
+    else:
+        tools = all_tools
     
     plan_text = state.get("plan", "")
     plan_info = f"\nCurrent Plan & Context:\n{plan_text}\n" if plan_text and plan_text != "No plan currently." else ""

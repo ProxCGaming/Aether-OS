@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity } from 'lucide-react';
+import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
 import './chat.css';
@@ -712,6 +712,7 @@ export default function DraggableChatWindow({
   onApprovePlugin,
   providers = [],
   onChangeModel = () => {},
+  onEditMessage,
   onDetach,
   isFloating,
   initialInput = ''
@@ -1095,7 +1096,22 @@ export default function DraggableChatWindow({
                     }}>
                       {msg.role === 'user' ? <User size={18} color="#fff" /> : <Bot size={18} color="#a78bfa" />}
                     </div>
-                    <div className={`chat-bubble ${msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-agent'}`}>
+                    <div className={`chat-bubble ${msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-agent'} msg-container`} style={{ position: 'relative' }}>
+                      {msg.role === 'user' && (
+                        <button 
+                          className="msg-edit-btn" 
+                          title="Edit and resend"
+                          onClick={() => {
+                            if (onEditMessage) onEditMessage(msg, i);
+                            setInput(msg.content);
+                            if (textareaRef.current) {
+                              textareaRef.current.focus();
+                            }
+                          }}
+                        >
+                          <Edit2 size={12} />
+                        </button>
+                      )}
                       {(msg.role === 'agent' || msg.role === 'assistant') && (
                         <ThinkingAccordion thoughts={msg.thoughts} isThinking={!msg.isFinal} hasError={msg.hasError} onStopTask={onStopTask} />
                       )}

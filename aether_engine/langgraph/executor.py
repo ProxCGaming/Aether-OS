@@ -71,6 +71,9 @@ async def run_langgraph_task(
     workspace_roots: Optional[List[str]] = None,
     disabled_nodes: Optional[set] = None,
     session_id: Optional[str] = None,
+    agent_models: Optional[Dict[str, str]] = None,
+    agent_tools: Optional[Dict[str, List[str]]] = None,
+    **kwargs,
 ) -> AsyncGenerator[Event, None]:
     """Execute a task prompt using the LangGraph multi-agent workflow."""
     task_id = task_id or str(uuid.uuid4())
@@ -94,8 +97,8 @@ async def run_langgraph_task(
         
         graph = compile_graph(checkpointer=saver)
         
-        # We use request_id as the thread_id so approvals can map back
-        thread_id = request_id or str(uuid.uuid4())
+        # Use session_id as the thread_id so chat memory persists across turns (ADR 0011)
+        thread_id = session_id or request_id or str(uuid.uuid4())
         config = {
             "configurable": {
                 "thread_id": thread_id,
@@ -107,6 +110,9 @@ async def run_langgraph_task(
                 "provider": provider,
                 "disabled_nodes": disabled_nodes or set(),
                 "session_id": session_id,
+                "agent_models": agent_models or {},
+                "agent_tools": agent_tools or {},
+                "secret_store": kwargs.get("secret_store"),
             }
         }
         

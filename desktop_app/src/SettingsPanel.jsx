@@ -23,7 +23,7 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   
   // A5: State for Reasoning Effort and Node model override
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem('reasoning_effort') || 'standard');
-  const [nodeModels, setNodeModels] = useState(() => JSON.parse(localStorage.getItem('node_models') || '{}'));
+  const [agents, setAgents] = useState([]);
 
   const [memoryTab, setMemoryTab] = useState('episodic');
   const [episodes, setEpisodes] = useState([]);
@@ -143,6 +143,10 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
           if (data.payload.success) {
             setTools(prev => prev.map(t => t.function.name === data.payload.tool_name ? { ...t, policy: data.payload.policy } : t));
           }
+        } else if (data.type === 'AGENT_LIST_RESPONSE') {
+          setAgents(data.payload.agents || []);
+        } else if (data.type === 'AGENT_UPDATE_RESPONSE') {
+          // Can optionally show a toast here
         } else if (data.type === 'MCP_SERVER_LIST_RESPONSE') {
           setMcpServers(data.payload.servers || {});
         } else if (data.type === 'MCP_SERVER_ADD_RESPONSE' || data.type === 'MCP_SERVER_REMOVE_RESPONSE') {
@@ -187,6 +191,20 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
 
   useEffect(() => {
     if (activeMenu === 'Tools' && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'TOOL_LIST_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+    } else if (activeMenu === 'Agents' && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'AGENT_LIST_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+      // Also fetch tools for the agent tool selector
       wsRef.current.send(JSON.stringify({
         type: 'TOOL_LIST_REQUEST',
         schema_version: 1,
@@ -683,39 +701,88 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
             <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Assign specialized models to individual agent nodes in the Aether execution graph.</p>
             
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-               {/* Mocking the fetched graph nodes for now */}
-               {['Planner Agent', 'Execution Worker', 'Reviewer', 'Tool Executor'].map(node => (
-                 <div key={node} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(124, 58, 237, 0.2)', borderRadius: '16px', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+               {agents.map(agent => (
+                 <div key={agent.id} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(124, 58, 237, 0.2)', borderRadius: '16px', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
                      <div style={{ background: 'rgba(124,58,237,0.2)', padding: '10px', borderRadius: '10px', color: '#a78bfa' }}>
                         <Box size={24} />
                      </div>
                      <div>
-                       <h3 style={{ fontSize: '16px', marginBottom: '4px' }}>{node}</h3>
-                       <p style={{ color: '#9090a0', fontSize: '13px' }}>Aether-OS Backend Node</p>
+                       <h3 style={{ fontSize: '16px', marginBottom: '4px' }}>{agent.name}</h3>
+                       <p style={{ color: '#9090a0', fontSize: '13px' }}>{agent.description}</p>
                      </div>
                    </div>
-                   <Dropdown 
-                     value={nodeModels[node] || 'inherit'}
-                     onChange={(val) => {
-                       const next = { ...nodeModels, [node]: val };
-                       setNodeModels(next);
-                       localStorage.setItem('node_models', JSON.stringify(next));
-                     }}
-                     options={[
-                       { value: 'inherit', label: '[Use Global Default Model]' },
-                       { value: 'gpt-4o', label: 'GPT-4o (OpenAI)' },
-                       { value: 'claude-3-5-sonnet', label: 'Claude 3.5 Sonnet' },
-                       { value: 'llama3', label: 'llama3 (Local)' }
-                     ]}
-                     style={{ width: '220px' }}
-                     align="right"
-                   />
+                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
+                     <Dropdown 
+                       value={agent.model || 'inherit'}
+                       onChange={(val) => {
+                         setAgents(prev => prev.map(a => a.id === agent.id ? { ...a, model: val } : a));
+                         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                           wsRef.current.send(JSON.stringify({
+                             type: 'AGENT_UPDATE_REQUEST',
+                             schema_version: 1,
+                             request_id: Date.now().toString(),
+                             payload: { agent_id: agent.id, model: val }
+                           }));
+                         }
+                       }}
+                       options={[
+                         { value: 'inherit', label: '[Use Global Default Model]' },
+                         ...(providers || []).flatMap(p => 
+                           (p.models || []).map(m => ({
+                             value: `${p.name}:${m}`,
+                             label: `${m} (${p.display_name})`
+                           }))
+                         )
+                       ]}
+                       style={{ width: '220px' }}
+                       align="right"
+                     />
+                     
+                     <div style={{ marginTop: '8px', width: '220px' }}>
+                        <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '4px' }}>Allowed Tools:</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', maxHeight: '100px', overflowY: 'auto', background: 'rgba(0,0,0,0.2)', padding: '8px', borderRadius: '8px' }}>
+                          {tools.map(t => {
+                            const isAllowed = !agent.tools || agent.tools.includes(t.function.name);
+                            return (
+                              <label key={t.function.name} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', cursor: 'pointer', color: isAllowed ? '#a78bfa' : '#9090a0' }}>
+                                <input 
+                                  type="checkbox" 
+                                  checked={!!isAllowed} 
+                                  onChange={(e) => {
+                                    const checked = e.target.checked;
+                                    const currentTools = agent.tools || tools.map(tool => tool.function.name);
+                                    const nextTools = checked 
+                                      ? [...currentTools, t.function.name]
+                                      : currentTools.filter(name => name !== t.function.name);
+                                      
+                                    setAgents(prev => prev.map(a => a.id === agent.id ? { ...a, tools: nextTools } : a));
+                                    
+                                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                                      wsRef.current.send(JSON.stringify({
+                                        type: 'AGENT_UPDATE_REQUEST',
+                                        schema_version: 1,
+                                        request_id: Date.now().toString(),
+                                        payload: { agent_id: agent.id, tools: nextTools }
+                                      }));
+                                    }
+                                  }}
+                                  style={{ accentColor: '#7c3aed', transform: 'scale(0.8)' }}
+                                />
+                                {t.function.name}
+                              </label>
+                            );
+                          })}
+                        </div>
+                     </div>
+                   </div>
                  </div>
                ))}
-               <div style={{ textAlign: 'center', color: '#9090a0', marginTop: '16px', fontSize: '13px' }}>
-                 Auto-fetching live nodes from LangGraph backend...
-               </div>
+               {agents.length === 0 && (
+                 <div style={{ textAlign: 'center', color: '#9090a0', marginTop: '16px', fontSize: '13px' }}>
+                   Loading agents...
+                 </div>
+               )}
             </div>
           </div>
         )}
