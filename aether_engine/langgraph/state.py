@@ -22,3 +22,4 @@ class AetherState(TypedDict):
     task_id: Optional[str]
     session_id: Optional[str]
     context_briefing: Optional[str]
+    active_skills: List[str]

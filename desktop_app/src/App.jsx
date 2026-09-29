@@ -58,6 +58,7 @@ function App() {
   useEffect(() => { activeSessionRef.current = activeSession; }, [activeSession]);
   const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Projects', 'Settings'
   const [initialInput, setInitialInput] = useState('');
+  const [slashCommands, setSlashCommands] = useState([]);
   
   useEffect(() => {
     if (isFloating) {
@@ -145,6 +146,7 @@ function App() {
                 wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
                 wsRef.current.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
                 wsRef.current.send(JSON.stringify({ type: 'PLUGIN_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+                wsRef.current.send(JSON.stringify({ type: 'SLASH_COMMAND_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
               } else {
                 setStatus('Offline / Engine Disconnected');
                 // If the engine crashes or drops connection, forcefully terminate any pending tasks so the UI doesn't hang spinning forever.
@@ -456,6 +458,13 @@ function App() {
             handleSessionSwitch(data.payload.sessions[0].id);
           } else if (isFloating && initialSession) {
             handleSessionSwitch(initialSession);
+          }
+        } else if (data.type === 'SLASH_COMMAND_LIST_RESPONSE') {
+          setSlashCommands(data.payload.commands || []);
+        } else if (data.type === 'WORKSPACE_ADD_RESPONSE' || data.type === 'WORKSPACE_REMOVE_RESPONSE') {
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'SLASH_COMMAND_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+            wsRef.current.send(JSON.stringify({ type: 'SKILL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
           }
         } else if (data.type === 'SESSION_GET_RESPONSE') {
           // Only replace chat messages if we explicitly requested a session switch and it matches exactly.
@@ -938,6 +947,7 @@ function App() {
           }}
           isFloating={isFloating}
           initialInput={initialInput}
+          slashCommands={slashCommands}
         />
       )}
 

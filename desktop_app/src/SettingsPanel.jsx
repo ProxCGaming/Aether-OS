@@ -21,6 +21,8 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   const [plugins, setPlugins] = useState([]);
   const [newPluginSource, setNewPluginSource] = useState('');
   
+  const [skills, setSkills] = useState([]);
+  
   // Advanced Config State
   const [disableFallbacks, setDisableFallbacks] = useState(false);
   const [fallbackChain, setFallbackChain] = useState('');
@@ -162,6 +164,8 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
         } else if (data.type === 'PLUGIN_LIST_RESPONSE') {
           const p = data.payload.plugins;
           setPlugins(Array.isArray(p) ? p : Object.values(p || {}));
+        } else if (data.type === 'SKILL_LIST_RESPONSE') {
+          setSkills(data.payload.skills || []);
         } else if (data.type === 'PLUGIN_INSTALL_RESPONSE' || data.type === 'PLUGIN_UNINSTALL_RESPONSE' || data.type === 'PLUGIN_TOGGLE_RESPONSE') {
           if (data.payload.success) {
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -230,6 +234,13 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
     } else if (activeMenu === 'Plugins' && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'PLUGIN_LIST_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+    } else if (activeMenu === 'Skills' && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'SKILL_LIST_REQUEST',
         schema_version: 1,
         request_id: Date.now().toString(),
         payload: {}
@@ -392,6 +403,7 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
     { id: 'Tools', icon: <Wrench size={18} />, label: 'Tools' },
     { id: 'MCP', icon: <Server size={18} />, label: 'MCP Servers' },
     { id: 'Plugins', icon: <Plug size={18} />, label: 'Plugins' },
+    { id: 'Skills', icon: <Box size={18} />, label: 'Skills' },
     { id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
     { id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
     { id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' }
@@ -1095,6 +1107,50 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                       >
                         Uninstall
                       </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeMenu === 'Skills' && (
+          <div style={{ color: '#f0f0f5' }}>
+            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Skills</h2>
+            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>
+              Dynamic behaviors, prompts, and tool requirements loaded from `.agents/skills`. Trigger these in chat with slash commands.
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {skills.length === 0 ? (
+                <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                  No skills found in workspace. Create a skill in <code>.agents/skills/</code>.
+                </div>
+              ) : (
+                skills.map(skill => (
+                  <div key={skill.name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
+                      <div>
+                        <h4 style={{ fontSize: '15px', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          {skill.name}
+                          <span style={{ fontSize: '11px', background: 'rgba(255,255,255,0.1)', padding: '2px 6px', borderRadius: '4px' }}>{skill.source}</span>
+                        </h4>
+                        <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>
+                          {skill.description}
+                        </p>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      {skill.slash_commands?.map(cmd => (
+                        <span key={cmd} style={{ fontSize: '12px', background: 'rgba(59, 130, 246, 0.2)', color: '#60a5fa', padding: '4px 8px', borderRadius: '6px' }}>
+                          {cmd}
+                        </span>
+                      ))}
+                      {skill.required_tools?.length > 0 && (
+                        <span style={{ fontSize: '12px', background: 'rgba(251, 191, 36, 0.15)', color: '#fbbf24', padding: '4px 8px', borderRadius: '6px' }}>
+                          {skill.required_tools.length} Tools Required
+                        </span>
+                      )}
                     </div>
                   </div>
                 ))

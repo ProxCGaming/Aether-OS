@@ -715,7 +715,8 @@ export default function DraggableChatWindow({
   onEditMessage,
   onDetach,
   isFloating,
-  initialInput = ''
+  initialInput = '',
+  slashCommands = []
 }) {
   const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
@@ -725,6 +726,12 @@ export default function DraggableChatWindow({
   const messagesEndRef = useRef(null);
   const nodeRef = useRef(null);
   const textareaRef = useRef(null);
+  const slashPopupRef = useRef(null);
+
+  const [showSlashPopup, setShowSlashPopup] = useState(false);
+  const [slashFilter, setSlashFilter] = useState('');
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [filteredCommands, setFilteredCommands] = useState([]);
 
   const showToast = (msg) => {
     setToastMessage(msg);
@@ -749,6 +756,72 @@ export default function DraggableChatWindow({
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (showSlashPopup && slashPopupRef.current) {
+      const selectedEl = slashPopupRef.current.children[slashIndex];
+      if (selectedEl) {
+        selectedEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    }
+  }, [slashIndex, showSlashPopup]);
+
+  const handleInputChange = (e) => {
+    const val = e.target.value;
+    setInput(val);
+    
+    if (val.startsWith('/')) {
+      const parts = val.split(' ');
+      if (parts.length === 1) {
+        const filterStr = parts[0].toLowerCase();
+        const filtered = slashCommands.filter(c => 
+          c.command.toLowerCase().includes(filterStr) || 
+          c.description.toLowerCase().includes(filterStr.substring(1))
+        );
+        setFilteredCommands(filtered);
+        setSlashIndex(0);
+        setShowSlashPopup(true);
+        setSlashFilter(filterStr);
+      } else {
+        setShowSlashPopup(false);
+      }
+    } else {
+      setShowSlashPopup(false);
+    }
+  };
+
+  const handleInputKeyDown = (e) => {
+    if (showSlashPopup && filteredCommands.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSlashIndex(prev => (prev < filteredCommands.length - 1 ? prev + 1 : 0));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSlashIndex(prev => (prev > 0 ? prev - 1 : filteredCommands.length - 1));
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        const selected = filteredCommands[slashIndex];
+        if (selected) {
+          setInput(selected.command + ' ');
+        }
+        setShowSlashPopup(false);
+        return;
+      }
+      if (e.key === 'Escape') {
+        setShowSlashPopup(false);
+        return;
+      }
+    }
+    
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit(e);
+    }
+  };
 
   const handleContextMenu = (e) => {
     const target = e.target;
@@ -1143,7 +1216,60 @@ export default function DraggableChatWindow({
             </div>
 
             {/* Input Area */}
-            <div style={{ padding: '16px', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+            <div style={{ padding: '16px', borderTop: '1px solid rgba(255,255,255,0.08)', position: 'relative' }}>
+              {showSlashPopup && filteredCommands.length > 0 && (
+                <div 
+                  ref={slashPopupRef}
+                  className="chat-scroll"
+                  style={{
+                    position: 'absolute',
+                    bottom: '100%',
+                    left: '16px',
+                    right: '16px',
+                    marginBottom: '8px',
+                    background: 'rgba(30, 41, 59, 0.95)',
+                    backdropFilter: 'blur(12px)',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    borderRadius: '12px',
+                    padding: '8px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    maxHeight: '200px',
+                    overflowY: 'auto',
+                    zIndex: 100,
+                    boxShadow: '0 -10px 40px rgba(0,0,0,0.5)'
+                  }}
+                >
+                  {filteredCommands.map((cmd, idx) => (
+                    <div
+                      key={cmd.command}
+                      onClick={() => {
+                        setInput(cmd.command + ' ');
+                        setShowSlashPopup(false);
+                        textareaRef.current?.focus();
+                      }}
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        background: idx === slashIndex ? 'rgba(59, 130, 246, 0.2)' : 'transparent',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '4px'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ color: idx === slashIndex ? '#60a5fa' : '#e2e8f0', fontWeight: 'bold' }}>{cmd.command}</span>
+                        {cmd.type === 'skill_invoke' && (
+                          <span style={{ fontSize: '10px', background: 'rgba(52, 211, 153, 0.2)', color: '#6ee7b7', padding: '2px 6px', borderRadius: '4px' }}>SKILL</span>
+                        )}
+                      </div>
+                      <span style={{ color: '#94a3b8', fontSize: '12px' }}>{cmd.description}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               <form onSubmit={handleSubmit} className="ios-glass-input" style={{ 
                 display: 'flex', 
                 alignItems: 'flex-end',
@@ -1152,13 +1278,8 @@ export default function DraggableChatWindow({
                 <textarea 
                   ref={textareaRef}
                   value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSubmit(e);
-                    }
-                  }}
+                  onChange={handleInputChange}
+                  onKeyDown={handleInputKeyDown}
                   placeholder="Message Aether..."
                   style={{
                     flex: 1,

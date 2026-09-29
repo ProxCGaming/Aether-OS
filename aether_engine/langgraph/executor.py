@@ -113,6 +113,8 @@ async def run_langgraph_task(
                 "agent_models": agent_models or {},
                 "agent_tools": agent_tools or {},
                 "secret_store": kwargs.get("secret_store"),
+                "user_config": kwargs.get("user_config"),
+                "forced_agent": kwargs.get("forced_agent"),
             }
         }
         
@@ -129,6 +131,7 @@ async def run_langgraph_task(
             "task_id": task_id,
             "session_id": session_id,
             "context_briefing": None,
+            "active_skills": kwargs.get("active_skills", []),
         }
 
         start_time = time.time()

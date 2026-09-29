@@ -94,6 +94,8 @@ class UserConfig:
     workspace_roots: List[str] = field(default_factory=list)
     agent_models: Dict[str, str] = field(default_factory=dict)
     agent_tools: Dict[str, List[str]] = field(default_factory=dict)
+    agent_skills: Dict[str, List[str]] = field(default_factory=dict)
+    custom_slash_commands: Dict[str, dict] = field(default_factory=dict)
     disable_fallbacks: bool = False
     fallback_chain: List[str] = field(default_factory=list)
 
@@ -112,6 +114,8 @@ class UserConfig:
             "workspace_roots": self.workspace_roots,
             "agent_models": self.agent_models,
             "agent_tools": self.agent_tools,
+            "agent_skills": self.agent_skills,
+            "custom_slash_commands": self.custom_slash_commands,
             "disable_fallbacks": self.disable_fallbacks,
             "fallback_chain": self.fallback_chain,
         }
@@ -150,6 +154,8 @@ class UserConfig:
             workspace_roots=d.get("workspace_roots") if isinstance(d.get("workspace_roots"), list) else [],
             agent_models=_as_dict(d.get("agent_models")),
             agent_tools=_as_list_dict(d.get("agent_tools")),
+            agent_skills=_as_list_dict(d.get("agent_skills")),
+            custom_slash_commands=_as_dict(d.get("custom_slash_commands")),
             disable_fallbacks=d.get("disable_fallbacks", False),
             fallback_chain=d.get("fallback_chain", []),
         )

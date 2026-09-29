@@ -260,6 +260,19 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
             "next": "END"
         }
 
+    forced_agent = config.get("configurable", {}).get("forced_agent")
+    if forced_agent and forced_agent != "supervisor":
+        return {
+            "delegation_log": [{
+                "timestamp": int(time.time()),
+                "prompt_summary": state.get("original_prompt", "")[:50] + "...",
+                "decision": {"next": forced_agent, "reason": "Forced via slash command."},
+                "task_id": state.get("task_id", "unknown")
+            }],
+            "active_specialist": forced_agent,
+            "next": forced_agent
+        }
+
     disabled_nodes = config.get("configurable", {}).get("disabled_nodes", set())
     available_nodes = [n for n in ["researcher", "planner", "coder"] if n not in disabled_nodes]
     

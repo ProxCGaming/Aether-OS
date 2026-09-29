@@ -110,6 +110,10 @@ class EngineState:
         for prov_name, prov_models in self.user_config.provider_models.items():
             if prov_models:
                 self.model_registry.update_provider_models(prov_name, prov_models)
+                
+        # Initialize skill manager roots
+        from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+        GLOBAL_SKILL_MANAGER.update_workspace_roots(self.user_config.workspace_roots or [])
 
         # Run startup consistency validation
         secret_store = SecretStore()
@@ -606,7 +610,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     if session_id and ev.payload.get("response"):
                         # Save the final response from assistant with full thought history
                         try:
-                            session_store.add_message(session_id, "assistant", ev.payload["response"], thoughts=ev.payload.get("thoughts"))
+                            await asyncio.to_thread(session_store.add_message, session_id, "assistant", ev.payload["response"], ev.payload.get("thoughts"))
                         except Exception as e:
                             logger.error(f"Failed to save session message: {e}")
 
@@ -668,7 +672,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 if not session_id:
                     # Create new session if none provided
                     title = prompt[:30] + "..." if len(prompt) > 30 else prompt
-                    session_id = session_store.create_session(title)
+                    session_id = await asyncio.to_thread(session_store.create_session, title)
                     try:
                         await ws.send_text(Event(
                             type=EventType.SESSION_CREATE_RESPONSE,
@@ -678,25 +682,25 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         await ws.send_text(Event(
                             type=EventType.SESSION_LIST_RESPONSE,
                             request_id=req_id,
-                            payload={"sessions": session_store.list_sessions()}
+                            payload={"sessions": await asyncio.to_thread(session_store.list_sessions)}
                         ).to_json())
                     except Exception:
                         pass
                 else:
-                    sess_info = session_store.get_session(session_id)
+                    sess_info = await asyncio.to_thread(session_store.get_session, session_id)
                     if sess_info and sess_info.get("title") in ("New Conversation", "New Chat") and not sess_info.get("messages"):
                         title = prompt[:30] + "..." if len(prompt) > 30 else prompt
-                        session_store.update_session_title(session_id, title)
+                        await asyncio.to_thread(session_store.update_session_title, session_id, title)
                         try:
                             await ws.send_text(Event(
                                 type=EventType.SESSION_LIST_RESPONSE,
                                 request_id=req_id,
-                                payload={"sessions": session_store.list_sessions()}
+                                payload={"sessions": await asyncio.to_thread(session_store.list_sessions)}
                             ).to_json())
                         except Exception:
                             pass
                 try:
-                    session_store.add_message(session_id, "user", prompt)
+                    await asyncio.to_thread(session_store.add_message, session_id, "user", prompt)
                 except Exception as e:
                     logger.error(f"Failed to save user message: {e}")
 
@@ -752,6 +756,29 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
                 workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
 
+                slash_cmd_str = msg.payload.get("slash_command")
+                if not slash_cmd_str and prompt.startswith("/"):
+                    slash_cmd_str = prompt.split(" ")[0]
+                
+                forced_agent = None
+                active_skills = []
+                
+                if slash_cmd_str:
+                    from aether_engine.skills.slash_registry import GLOBAL_SLASH_REGISTRY
+                    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+                    
+                    resolved = GLOBAL_SLASH_REGISTRY.resolve(slash_cmd_str)
+                    
+                    if resolved:
+                        if resolved.type == "agent_route":
+                            forced_agent = resolved.target
+                    else:
+                        skill_manifest = GLOBAL_SKILL_MANAGER.resolve_slash_command(slash_cmd_str)
+                        if skill_manifest:
+                            active_skills.append(skill_manifest.name)
+                            if skill_manifest.requirements.agents:
+                                forced_agent = skill_manifest.requirements.agents[0]
+
                 task_generator = run_langgraph_task(
                     prompt=prompt,
                     provider=provider_instance,
@@ -764,6 +791,9 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     agent_models=engine_state.user_config.agent_models,
                     agent_tools=engine_state.user_config.agent_tools,
                     secret_store=secret_store,
+                    user_config=engine_state.user_config,
+                    forced_agent=forced_agent,
+                    active_skills=active_skills,
                 )
 
                 task_runner = asyncio.create_task(
@@ -1052,7 +1082,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
             # Session Events
             # -----------------------------------------------------------
             elif msg.type == EventType.SESSION_LIST_REQUEST:
-                sessions = session_store.list_sessions()
+                sessions = await asyncio.to_thread(session_store.list_sessions)
                 await ws.send_text(Event(
                     type=EventType.SESSION_LIST_RESPONSE,
                     request_id=req_id,
@@ -1061,7 +1091,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
             elif msg.type == EventType.SESSION_GET_REQUEST:
                 sess_id = msg.payload.get("session_id")
-                session_data = session_store.get_session(sess_id) if sess_id else None
+                session_data = await asyncio.to_thread(session_store.get_session, sess_id) if sess_id else None
                 await ws.send_text(Event(
                     type=EventType.SESSION_GET_RESPONSE,
                     request_id=req_id,
@@ -1070,7 +1100,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
             elif msg.type == EventType.SESSION_CREATE_REQUEST:
                 title = msg.payload.get("title", "New Chat")
-                sess_id = session_store.create_session(title)
+                sess_id = await asyncio.to_thread(session_store.create_session, title)
                 await ws.send_text(Event(
                     type=EventType.SESSION_CREATE_RESPONSE,
                     request_id=req_id,
@@ -1079,7 +1109,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
             elif msg.type == EventType.SESSION_DELETE_REQUEST:
                 sess_id = msg.payload.get("session_id")
-                deleted = session_store.delete_session(sess_id) if sess_id else False
+                deleted = await asyncio.to_thread(session_store.delete_session, sess_id) if sess_id else False
                 await ws.send_text(Event(
                     type=EventType.SESSION_DELETE_RESPONSE,
                     request_id=req_id,
@@ -1094,9 +1124,9 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 truncated = False
                 if sess_id:
                     if msg_id:
-                        truncated = session_store.truncate_session(sess_id, msg_id)
+                        truncated = await asyncio.to_thread(session_store.truncate_session, sess_id, msg_id)
                     elif content:
-                        truncated = session_store.truncate_session_by_content(sess_id, role, content)
+                        truncated = await asyncio.to_thread(session_store.truncate_session_by_content, sess_id, role, content)
                 await ws.send_text(Event(
                     type=EventType.SESSION_TRUNCATE_RESPONSE,
                     request_id=req_id,
@@ -1572,6 +1602,42 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     payload={"success": True, "facts": []},
                 ).to_json())
 
+            elif msg.type == EventType.SKILL_LIST_REQUEST:
+                from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+                skills = [s.__dict__ for s in GLOBAL_SKILL_MANAGER.list_all()]
+                await ws.send_text(Event(
+                    type=EventType.SKILL_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"skills": skills},
+                ).to_json())
+
+            elif msg.type == EventType.SLASH_COMMAND_LIST_REQUEST:
+                from aether_engine.skills.slash_registry import GLOBAL_SLASH_REGISTRY
+                from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+                commands = [c.to_dict() for c in GLOBAL_SLASH_REGISTRY.get_all()]
+                
+                # Combine dynamic skill commands
+                skill_commands = []
+                for s in GLOBAL_SKILL_MANAGER.list_all():
+                    for cmd_str in s.slash_commands:
+                        skill_commands.append({
+                            "command": cmd_str,
+                            "description": f"Trigger skill: {s.name} - {s.description}",
+                            "type": "skill_invoke",
+                            "target": s.name,
+                            "aliases": [],
+                            "flags": []
+                        })
+                
+                # De-duplicate by command name
+                all_commands = {c["command"]: c for c in commands + skill_commands}
+                
+                await ws.send_text(Event(
+                    type=EventType.SLASH_COMMAND_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"commands": list(all_commands.values())},
+                ).to_json())
+
             elif msg.type == EventType.WORKSPACE_LIST_REQUEST:
                 roots = engine_state.user_config.workspace_roots or []
                 workspaces = []
@@ -1593,6 +1659,8 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 if ws_path and ws_path not in engine_state.user_config.workspace_roots:
                     engine_state.user_config.workspace_roots.append(ws_path)
                     save_config(engine_state.user_config)
+                    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+                    GLOBAL_SKILL_MANAGER.update_workspace_roots(engine_state.user_config.workspace_roots)
                     p = Path(ws_path)
                     await ws.send_text(Event(
                         type=EventType.WORKSPACE_ADD_RESPONSE,
@@ -1611,6 +1679,8 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 if ws_path in engine_state.user_config.workspace_roots:
                     engine_state.user_config.workspace_roots.remove(ws_path)
                     save_config(engine_state.user_config)
+                    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+                    GLOBAL_SKILL_MANAGER.update_workspace_roots(engine_state.user_config.workspace_roots)
                     await ws.send_text(Event(
                         type=EventType.WORKSPACE_REMOVE_RESPONSE,
                         request_id=req_id,

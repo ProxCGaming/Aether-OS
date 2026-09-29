@@ -56,9 +56,22 @@ async def planner_node(state: AetherState, config: RunnableConfig) -> dict:
     
     plan_text = state.get("plan", "")
     plan_info = f"\nCurrent Plan & Context:\n{plan_text}\n" if plan_text and plan_text != "No plan currently." else ""
+    # Skill Injection
+    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+    user_config = config.get("configurable", {}).get("user_config")
+    attached_skills = GLOBAL_SKILL_MANAGER.get_attached_skills("planner", user_config)
+    
+    skill_sections = []
+    skill_names = set(attached_skills)
+    for s_name in skill_names:
+        s_content = GLOBAL_SKILL_MANAGER.load_skill_content(s_name)
+        if s_content:
+            skill_sections.append(f"\n--- SKILL: {s_name} ---\n{s_content}\n--- END SKILL ---")
+    skill_text = "\n".join(skill_sections)
+    
     system_prompt = (
         "You are a Planner agent. Break goals into structured steps, monitor progress, adapt the plan, or respond directly to conversational input.\n"
-        f"{plan_info}"
+        f"{plan_info}{skill_text}"
     )
     messages = [{"role": "system", "content": system_prompt}] + state.get("messages", [])
     

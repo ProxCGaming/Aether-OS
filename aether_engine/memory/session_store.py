@@ -18,6 +18,9 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 def init_db() -> None:
+    global _initialized
+    if _initialized:
+        return
     with _get_conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
@@ -38,11 +41,13 @@ def init_db() -> None:
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             )
         """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_session_messages_session_id ON session_messages(session_id)")
         try:
             conn.execute("ALTER TABLE session_messages ADD COLUMN thoughts TEXT")
         except sqlite3.OperationalError:
             pass
         conn.commit()
+    _initialized = True
 
 def list_sessions() -> List[Dict[str, Any]]:
     init_db()

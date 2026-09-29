@@ -56,7 +56,20 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
     
     plan_text = state.get("plan", "")
     plan_info = f"\nCurrent Plan & Context:\n{plan_text}\n" if plan_text and plan_text != "No plan currently." else ""
-    system_prompt = f"You are a Researcher agent. Gather information and synthesize findings for other specialists.\n{plan_info}"
+    # Skill Injection
+    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+    user_config = config.get("configurable", {}).get("user_config")
+    attached_skills = GLOBAL_SKILL_MANAGER.get_attached_skills("researcher", user_config)
+    
+    skill_sections = []
+    skill_names = set(attached_skills)
+    for s_name in skill_names:
+        s_content = GLOBAL_SKILL_MANAGER.load_skill_content(s_name)
+        if s_content:
+            skill_sections.append(f"\n--- SKILL: {s_name} ---\n{s_content}\n--- END SKILL ---")
+    skill_text = "\n".join(skill_sections)
+    
+    system_prompt = f"You are a Researcher agent. Gather information and synthesize findings for other specialists.\n{plan_info}{skill_text}"
     messages = [{"role": "system", "content": system_prompt}] + state.get("messages", [])
     
     if messages and messages[-1].get("role") not in ("user", "tool"):
