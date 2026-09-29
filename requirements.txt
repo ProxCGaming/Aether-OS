@@ -14,3 +14,4 @@ langchain-mcp>=0.1.0
 langgraph-checkpoint-sqlite>=1.0.0
 pywin32>=306
 ddgs>=9.0.0
+PyYAML>=6.0.1

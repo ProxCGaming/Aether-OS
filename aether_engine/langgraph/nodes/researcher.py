@@ -62,7 +62,7 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
     attached_skills = GLOBAL_SKILL_MANAGER.get_attached_skills("researcher", user_config)
     
     skill_sections = []
-    skill_names = set(attached_skills)
+    skill_names = set(attached_skills) | set(state.get("active_skills", []))
     for s_name in skill_names:
         s_content = GLOBAL_SKILL_MANAGER.load_skill_content(s_name)
         if s_content:

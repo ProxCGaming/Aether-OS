@@ -69,16 +69,38 @@ class SkillManager:
             for skill_dir in base_dir.iterdir():
                 if not skill_dir.is_dir():
                     continue
-                manifest_path = skill_dir / "manifest.json"
-                if manifest_path.exists():
-                    try:
-                        manifest = SkillManifest.from_file(manifest_path)
-                        self._index[manifest.name] = manifest
-                        self._skill_paths[manifest.name] = skill_dir
-                        for cmd in manifest.trigger.slash_commands:
-                            self._slash_map[cmd] = manifest.name
-                    except Exception as e:
-                        logger.warning(f"Failed to load skill manifest at {manifest_path}: {e}")
+                
+                md_paths = [
+                    skill_dir / "SKILL.md",
+                    skill_dir / f"{skill_dir.name}_SKILL.md",
+                    skill_dir / f"{skill_dir.name}-skill.md"
+                ]
+                
+                manifest = None
+                for md_path in md_paths:
+                    if md_path.exists():
+                        try:
+                            manifest = SkillManifest.from_skill_md(md_path)
+                            break
+                        except Exception as e:
+                            logger.warning(f"Failed to parse SKILL.md at {md_path}: {e}")
+                
+                if not manifest:
+                    manifest_path = skill_dir / "manifest.json"
+                    if manifest_path.exists():
+                        try:
+                            manifest = SkillManifest.from_file(manifest_path)
+                        except Exception as e:
+                            logger.warning(f"Failed to load manifest.json at {manifest_path}: {e}")
+                
+                if manifest:
+                    if manifest.name != skill_dir.name:
+                        logger.warning(f"Skill name mismatch: {manifest.name} != {skill_dir.name}")
+                        
+                    self._index[manifest.name] = manifest
+                    self._skill_paths[manifest.name] = skill_dir
+                    for cmd in manifest.trigger.slash_commands:
+                        self._slash_map[cmd] = manifest.name
     
     def resolve_slash_command(self, command: str) -> Optional[SkillManifest]:
         """Resolve a slash command to its skill manifest."""
@@ -117,12 +139,34 @@ class SkillManager:
         if not skill_dir:
             return ""
             
-        skill_path = skill_dir / "SKILL.md"
-        if skill_path.exists():
-            content = skill_path.read_text(encoding="utf-8")
-            self._content_cache[skill_name] = content
-            return content
-        return ""
+        md_paths = [
+            skill_dir / "SKILL.md",
+            skill_dir / f"{skill_dir.name}_SKILL.md",
+            skill_dir / f"{skill_dir.name}-skill.md"
+        ]
+        
+        content = ""
+        for md_path in md_paths:
+            if md_path.exists():
+                content = md_path.read_text(encoding="utf-8")
+                break
+                
+        if not content:
+            return ""
+            
+        # Strip YAML frontmatter if present
+        lines = content.splitlines()
+        if lines and lines[0].strip() == "---":
+            end_idx = -1
+            for i in range(1, len(lines)):
+                if lines[i].strip() == "---":
+                    end_idx = i
+                    break
+            if end_idx != -1:
+                content = "\n".join(lines[end_idx+1:]).strip()
+                
+        self._content_cache[skill_name] = content
+        return content
     
     def check_requirements(self, skill_name: str, agent_tools: List[str]) -> RequirementCheck:
         """Verify the agent has the tools this skill needs."""
@@ -156,5 +200,39 @@ class SkillManager:
             )
             for m in self._index.values()
         ]
+    
+    def list_skill_scripts(self, skill_name: str) -> List[Path]:
+        """List executable scripts bundled with a skill (scripts/ directory)."""
+        skill_dir = self._skill_paths.get(skill_name)
+        if not skill_dir:
+            return []
+        scripts_dir = skill_dir / "scripts"
+        if not scripts_dir.exists() or not scripts_dir.is_dir():
+            return []
+        return [f for f in scripts_dir.iterdir() if f.is_file()]
+    
+    def load_skill_resource(self, skill_name: str, relative_path: str) -> str:
+        """Load a referenced file from within a skill directory (Stage 3 progressive disclosure).
+        
+        Args:
+            skill_name: The indexed skill name.
+            relative_path: Path relative to the skill root (e.g. 'references/REFERENCE.md').
+            
+        Returns:
+            The file contents as a string, or empty string if not found.
+        """
+        skill_dir = self._skill_paths.get(skill_name)
+        if not skill_dir:
+            return ""
+        target = (skill_dir / relative_path).resolve()
+        # Security: ensure the resolved path is still inside the skill directory
+        try:
+            target.relative_to(skill_dir.resolve())
+        except ValueError:
+            logger.warning(f"Skill resource path escapes skill directory: {relative_path}")
+            return ""
+        if target.exists() and target.is_file():
+            return target.read_text(encoding="utf-8")
+        return ""
 
 GLOBAL_SKILL_MANAGER = SkillManager()
