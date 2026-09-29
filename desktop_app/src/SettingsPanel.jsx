@@ -457,7 +457,7 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
       </div>
 
       {/* Settings Content Area */}
-      <div style={{ flex: 1, overflowY: 'auto', paddingRight: '16px' }} className="chat-scroll">
+      <div style={{ flex: 1, overflowY: 'auto', paddingRight: '16px', paddingBottom: '80px' }} className="chat-scroll">
         
         {activeMenu === 'General' && (
           <div style={{ color: '#f0f0f5' }}>

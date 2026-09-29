@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ForceGraph3D from 'react-force-graph-3d';
-import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn } from 'lucide-react';
+import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
 import SettingsPanel from './SettingsPanel';
 import Dashboard from './Dashboard';
@@ -58,6 +58,7 @@ function App() {
   useEffect(() => { activeSessionRef.current = activeSession; }, [activeSession]);
   const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Projects', 'Settings'
   const [initialInput, setInitialInput] = useState('');
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [slashCommands, setSlashCommands] = useState([]);
   
   useEffect(() => {
@@ -132,6 +133,8 @@ function App() {
           wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
           wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
           wsRef.current.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+          wsRef.current.send(JSON.stringify({ type: 'PLUGIN_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+          wsRef.current.send(JSON.stringify({ type: 'SLASH_COMMAND_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
         }
       }
 
@@ -844,6 +847,39 @@ function App() {
       )}
 
       <div style={{ flex: 1, position: 'relative', display: 'flex', zIndex: 10 }}>
+        {/* Toggle Button for Sidebar */}
+        {!isFloating && (
+          <button
+            onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+            style={{
+              position: 'absolute',
+              top: '22px',
+              left: '24px',
+              zIndex: 100,
+              background: 'rgba(255,255,255,0.05)',
+              border: '1px solid rgba(255,255,255,0.1)',
+              color: '#e2e8f0',
+              cursor: 'pointer',
+              padding: '6px',
+              borderRadius: '8px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transition: 'transform 160ms cubic-bezier(0.23, 1, 0.32, 1), background 160ms ease-out',
+              backdropFilter: 'blur(8px)'
+            }}
+            onMouseDown={(e) => e.currentTarget.style.transform = 'scale(0.95)'}
+            onMouseUp={(e) => e.currentTarget.style.transform = 'scale(1)'}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'scale(1)';
+              e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
+          >
+            <Menu size={20} />
+          </button>
+        )}
+
         {/* Sidebar Command Palette (Glassmorphism) */}
         {!isFloating && (
           <div className="glass-panel" style={{
@@ -855,10 +891,11 @@ function App() {
             left: 0,
             top: 0,
             padding: '24px 0',
-            zIndex: 20
+            zIndex: 20,
+            transform: isSidebarCollapsed ? 'translateX(-100%)' : 'translateX(0)',
+            transition: 'transform 250ms cubic-bezier(0.23, 1, 0.32, 1)'
           }}>
-            <div style={{ padding: '0 24px', marginBottom: '32px', display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <div style={{ width: '32px', height: '32px', background: 'linear-gradient(135deg, #7c3aed, #ec4899)', borderRadius: '8px' }}></div>
+            <div style={{ padding: '0 24px', paddingLeft: '72px', marginBottom: '32px', display: 'flex', alignItems: 'center', gap: '12px' }}>
               <div>
                 <h2 style={{ fontSize: '18px', margin: 0, color: '#fff' }}>AETHER-OS</h2>
                 <div style={{ fontSize: '12px', color: '#a78bfa', textTransform: 'uppercase', letterSpacing: '1px' }}>{status}</div>
@@ -948,6 +985,7 @@ function App() {
           isFloating={isFloating}
           initialInput={initialInput}
           slashCommands={slashCommands}
+          isSidebarCollapsed={isSidebarCollapsed}
         />
       )}
 
@@ -955,13 +993,14 @@ function App() {
         <div style={{
           position: 'absolute',
           top: '40px',
-          left: '360px',
+          left: isSidebarCollapsed ? '80px' : '360px',
           right: '40px',
           bottom: '40px',
           zIndex: 40,
           display: 'flex',
           justifyContent: 'center',
-          alignItems: 'center'
+          alignItems: 'center',
+          transition: 'left 250ms cubic-bezier(0.23, 1, 0.32, 1)'
         }}>
           <div className="ios-glass" style={{ width: '100%', height: '100%', padding: '32px', display: 'flex', flexDirection: 'column' }}>
             {activeTab === 'Settings' && (

@@ -5,6 +5,8 @@ All notable changes to the **Aether-OS** project will be documented in this file
 ## [Unreleased] (Current Session)
 
 ### Added
+- **[2026-09-30] Dynamic Skills System**: Added `SkillManager` and `SlashRegistry` to dynamically load, index, and trigger local `.agents/skills` directly via Slash Commands in the chat UI.
+- **[2026-09-30] UI Polish & Collapsible Sidebar**: Implemented a glassmorphic collapsible left sidebar with `emil-design-eng` aligned ease-out animation curves (`cubic-bezier(0.23, 1, 0.32, 1)`) and a responsive hamburger menu. Added a dynamic autocomplete slash command popup with custom scrolling.
 - **[2026-09-24] Live Tool Activity UI & Event Bus**: Added global event bus `aether_engine/event_bus.py` and `TOOL_ACTIVITY` events to stream tool invocations, parameters, and outputs in real time. Updated `DraggableChatWindow.jsx` with glassmorphic, expandable tool cards with syntax-highlighted payloads.
 - **[2026-09-24] Persistent Episodic Thinking History**: Added SQLite episodic thinking log table in `~/.aether/memory.db` and updated `session_store.py`, `executor.py`, and `DraggableChatWindow.jsx` to persist and restore execution pipelines and thinking steps across application restarts.
 - **[2026-09-24] Intra-Provider Fallback Resilience**: Extended `_create_provider_instance` in `app.py` to automatically include healthy alternative models from the same provider (e.g. `gemini-2.0-flash` when using `gemini-2.5-flash`) before cross-provider candidates, ensuring single-provider setups have automatic retry resilience.
@@ -16,6 +18,9 @@ All notable changes to the **Aether-OS** project will be documented in this file
 - **[2026-09-23 03:53] Auto-Title Generation**: Newly created conversations (previously generic "New Conversation") are now automatically renamed to a brief summary of the first user prompt sent in the session.
 
 ### Fixed
+- **[2026-09-30] Session Load Latency**: Eliminated extreme UI locking when switching chats by adding `CREATE INDEX IF NOT EXISTS idx_session_messages_session_id`, caching DB initialization state globally, and wrapping SQLite synchronous `session_store.py` calls in `asyncio.to_thread`.
+- **[2026-09-30] WebSocket Initialization**: Fixed a bug where `SLASH_COMMAND_LIST_REQUEST` and `PLUGIN_LIST_REQUEST` were skipped on hot-reload/mount if the WebSocket was already connected.
+- **[2026-09-30] Settings Scroll Cutoff**: Added `paddingBottom` to the Settings panel scroll container to ensure the deepest items are fully accessible.
 - **[2026-09-24] Gemini Model Discovery & Quota Exhaustion (`gemini-3-pro-image`)**: Filtered out media generation endpoints (`image`, `transcribe`, `lyria`, `audio`) in `discovery.py` that have `limit: 0` on Google AI Studio free tier. Restored `gemini-2.5-flash` as primary default model.
 - **[2026-09-24] Capability Misclassification & Route Hijacking**: Fixed `_infer_capabilities` and `select_route` in `aether_engine/routing/` to reject non-chat models, grant `code` to frontier LLMs, and prioritize the user's active/default model instead of diverting to media endpoints.
 - **[2026-09-24] Thinking Panel Deduplication & Scrolling Physics**: Deduplicated supervisor progress text and redundant tool cards in the thinking panel, and synchronized scrolling physics with the dropdown list.

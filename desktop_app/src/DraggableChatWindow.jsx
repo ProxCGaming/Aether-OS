@@ -716,7 +716,8 @@ export default function DraggableChatWindow({
   onDetach,
   isFloating,
   initialInput = '',
-  slashCommands = []
+  slashCommands = [],
+  isSidebarCollapsed = false
 }) {
   const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
@@ -932,7 +933,7 @@ export default function DraggableChatWindow({
       } : {
         position: 'absolute',
         top: '40px',
-        left: '360px',
+        left: isSidebarCollapsed ? '80px' : '360px',
         right: '40px',
         bottom: '40px',
         width: 'auto',
@@ -940,7 +941,7 @@ export default function DraggableChatWindow({
         display: 'flex',
         flexDirection: 'column',
         zIndex: 1000,
-        transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
+        transition: 'all 250ms cubic-bezier(0.23, 1, 0.32, 1)'
       }}
     >
       {/* Header */}
