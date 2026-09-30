@@ -1,6 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
-from aether_engine.app import app, disabled_nodes, engine_state
+from aether_engine.app import app
+from aether_engine.routes.websocket import disabled_nodes
+from aether_engine.state import engine_state
 
 client = TestClient(app)
 

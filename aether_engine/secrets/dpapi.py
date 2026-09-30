@@ -31,14 +31,32 @@ class WindowsDPAPIProtector(BaseProtector):
     def protect(self, data: bytes) -> bytes:
         if sys.platform == "win32":
             return _dpapi_encrypt(data)
-        # Non-Windows fallback: base64 encoding (not secure, dev only)
-        return base64.b64encode(data)
+        # Non-Windows fallback using keyring
+        import keyring
+        import uuid
+        secret_id = str(uuid.uuid4())
+        keyring.set_password("aether-os", secret_id, data.decode("utf-8"))
+        return f"keyring:{secret_id}".encode("utf-8")
 
     def unprotect(self, data: bytes) -> bytes:
         if sys.platform == "win32":
             return _dpapi_decrypt(data)
-        # Non-Windows fallback
-        return base64.b64decode(data)
+        # Non-Windows fallback using keyring
+        import keyring
+        secret_ref = data.decode("utf-8")
+        if secret_ref.startswith("keyring:"):
+            secret_id = secret_ref.split("keyring:", 1)[1]
+            secret = keyring.get_password("aether-os", secret_id)
+            if secret is None:
+                raise SecretDecryptionError("Secret not found in OS keychain.")
+            return secret.encode("utf-8")
+        else:
+            # Legacy fallback for existing base64 encoded secrets
+            import base64
+            try:
+                return base64.b64decode(data)
+            except Exception as e:
+                raise SecretDecryptionError(f"Failed to decode legacy secret: {e}")
 
 
 if sys.platform == "win32":

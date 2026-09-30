@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from PySide6.QtWidgets import QApplication, QPushButton
 
-from aether_engine.app import _validate_provider_key, engine_state
+from aether_engine.orchestration.core import _validate_provider_key
+from aether_engine.state import engine_state
 from aether_engine.providers.discovery import (
     _discover_openai_compatible_models,
     fetch_available_models,
@@ -127,10 +128,10 @@ async def test_validate_continues_after_model_specific_invalid_key():
             return {"status": "connected", "message": "ok", "latency_ms": 9.0}
         return {"status": "invalid_key", "message": "Invalid API key."}
 
-    with patch("aether_engine.app.fetch_available_models",
+    with patch("aether_engine.orchestration.core.fetch_available_models",
                new=AsyncMock(return_value=["401-model", "working-model"])), \
-         patch("aether_engine.app.validate_api_key", new=AsyncMock(side_effect=fake_validate)), \
-         patch("aether_engine.app.save_config"), \
+         patch("aether_engine.orchestration.core.validate_api_key", new=AsyncMock(side_effect=fake_validate)), \
+         patch("aether_engine.orchestration.core.save_config"), \
          patch.object(engine_state.health_manager, "record_success"), \
          patch.object(engine_state.health_manager, "record_failure"), \
          patch.object(engine_state.model_registry, "update_provider_models"):
@@ -150,10 +151,10 @@ async def test_validate_custom_key_connected_when_discovery_succeeds():
 
     name = "custom_discovery_only"
     try:
-        with patch("aether_engine.app.fetch_available_models",
+        with patch("aether_engine.orchestration.core.fetch_available_models",
                    new=AsyncMock(return_value=["m1", "m2", "m3"])), \
-             patch("aether_engine.app.validate_api_key", new=AsyncMock(side_effect=fake_validate)), \
-             patch("aether_engine.app.save_config"), \
+             patch("aether_engine.orchestration.core.validate_api_key", new=AsyncMock(side_effect=fake_validate)), \
+             patch("aether_engine.orchestration.core.save_config"), \
              patch.object(engine_state.health_manager, "record_success"), \
              patch.object(engine_state.health_manager, "record_failure"), \
              patch.object(engine_state.model_registry, "update_provider_models"):
@@ -177,9 +178,9 @@ async def test_validate_provider_key_retries_past_quota_models():
             return {"status": "connected", "message": "API key is valid.", "latency_ms": 12.0}
         return {"status": "network_error", "message": "quota exhausted"}
 
-    with patch("aether_engine.app.fetch_available_models", new=AsyncMock(return_value=discovered)), \
-         patch("aether_engine.app.validate_api_key", new=AsyncMock(side_effect=fake_validate)), \
-         patch("aether_engine.app.save_config"), \
+    with patch("aether_engine.orchestration.core.fetch_available_models", new=AsyncMock(return_value=discovered)), \
+         patch("aether_engine.orchestration.core.validate_api_key", new=AsyncMock(side_effect=fake_validate)), \
+         patch("aether_engine.orchestration.core.save_config"), \
          patch.object(engine_state.health_manager, "record_success"), \
          patch.object(engine_state.health_manager, "record_failure"), \
          patch.object(engine_state.model_registry, "update_provider_models"):
@@ -198,9 +199,9 @@ async def test_validate_provider_key_skips_persist_when_unregistered():
     async def fake_validate(provider, key, model="", base_url=None):
         return {"status": "connected", "message": "ok", "latency_ms": 5.0}
 
-    with patch("aether_engine.app.fetch_available_models", new=AsyncMock(return_value=["m1", "m2"])), \
-         patch("aether_engine.app.validate_api_key", new=AsyncMock(side_effect=fake_validate)), \
-         patch("aether_engine.app.save_config"), \
+    with patch("aether_engine.orchestration.core.fetch_available_models", new=AsyncMock(return_value=["m1", "m2"])), \
+         patch("aether_engine.orchestration.core.validate_api_key", new=AsyncMock(side_effect=fake_validate)), \
+         patch("aether_engine.orchestration.core.save_config"), \
          patch.object(engine_state.health_manager, "record_success"), \
          patch.object(engine_state.model_registry, "update_provider_models") as mock_update:
         result = await _validate_provider_key(

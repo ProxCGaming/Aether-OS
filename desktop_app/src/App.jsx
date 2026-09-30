@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { SocketProvider } from './contexts/SocketContext';
 import ForceGraph3D from 'react-force-graph-3d';
 import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
@@ -29,7 +30,7 @@ const initGraphData = {
 let lastRawIpcData = null;
 let lastRawIpcTime = 0;
 
-function App() {
+function AppContent() {
   const [graphData, setGraphData] = useState(initGraphData);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([]);
@@ -1159,4 +1160,10 @@ function TitleBar({ isChatDetached, onReattachChat, isThinking, onStopTask }) {
   );
 }
 
-export default App;
+export default function App() {
+  return (
+    <SocketProvider>
+      <AppContent />
+    </SocketProvider>
+  );
+}

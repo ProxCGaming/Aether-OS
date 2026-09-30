@@ -15,3 +15,4 @@ langgraph-checkpoint-sqlite>=1.0.0
 pywin32>=306
 ddgs>=9.0.0
 PyYAML>=6.0.1
+keyring>=24.0.0
