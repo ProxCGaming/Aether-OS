@@ -10,6 +10,7 @@ from aether_engine.memory import episodic, session_store, knowledge_graph
 from aether_engine.audit import AuditLogger
 from aether_engine.event_bus import event_bus
 from aether_common.contracts import Event, EventType
+from aether_engine.tools.policy import resolve_policy_by_name
 
 logger = logging.getLogger("aether_engine.langgraph.supervisor")
 _audit_logger = AuditLogger()
@@ -344,7 +345,17 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
                 disabled_t["function"]["description"] = f"DO NOT USE THIS TOOL. IT IS CURRENTLY DISABLED FOR YOUR ROLE."
                 tools.append(disabled_t)
     else:
-        tools = SUPERVISOR_MEMORY_TOOLS
+        tools = SUPERVISOR_MEMORY_TOOLS.copy()
+        
+    user_config = config.get("configurable", {}).get("user_config")
+    if user_config:
+        filtered_tools = []
+        for t in tools:
+            t_name = t.get("function", {}).get("name")
+            policy = resolve_policy_by_name(t_name, user_config.tool_policies)
+            if policy != "deny":
+                filtered_tools.append(t)
+        tools = filtered_tools
     
     try:
         async for chunk in provider.call_stream(messages, tools=tools):

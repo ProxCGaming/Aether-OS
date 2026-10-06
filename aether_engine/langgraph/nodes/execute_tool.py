@@ -13,13 +13,11 @@ from typing import Dict, Any
 
 from langchain_core.runnables import RunnableConfig
 from aether_engine.langgraph.state import AetherState
-from aether_engine.tools.registry import ToolExecutionError, ToolNotFoundError
+from aether_engine.tools.registry import ToolExecutionError, ToolNotFoundError, ToolRisk
 from aether_engine.validation.pre_flight import validate_tool_request
+from aether_engine.tools.policy import resolve_policy_by_name
 
 logger = logging.getLogger("aether_engine.langgraph.nodes.execute_tool")
-
-# Tools that require sandbox execution (same classification as the pause conditional edge in graph.py)
-RISKY_TOOLS = {"write_file", "execute_shell", "delete_file"}
 
 
 async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
@@ -66,6 +64,30 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     if not registry:
         result_text = f"Error: No tool registry provided to graph. Cannot execute {tool_name}."
     else:
+        # Layer 1 & 3: Check policy
+        user_config = configurable.get("user_config")
+        policy = resolve_policy_by_name(tool_name, user_config.tool_policies if user_config else {}, registry)
+        
+        if policy == "deny":
+            error_msg = f"Error: Tool '{tool_name}' is blocked by user policy (Deny)."
+            logger.warning(error_msg)
+            from aether_engine.audit import AuditLogger
+            AuditLogger().log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": tool_name, "agent": active_agent, "reason": "User Deny"})
+            return {
+                "messages": [{"role": "tool", "name": tool_name, "content": error_msg, "tool_call_id": call_id}],
+                "pending_tool_call": None
+            }
+        
+        if policy == "ask" and not pending.get("approved"):
+            error_msg = f"Error: Tool '{tool_name}' requires approval but was bypassed."
+            logger.warning(error_msg)
+            from aether_engine.audit import AuditLogger
+            AuditLogger().log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": tool_name, "agent": active_agent, "reason": "Bypassed Approval"})
+            return {
+                "messages": [{"role": "tool", "name": tool_name, "content": error_msg, "tool_call_id": call_id}],
+                "pending_tool_call": None
+            }
+
         # ── Step 1: Pre-flight validation (ADR 0009 §2) ──────────────────
         validation = validate_tool_request(tool_name, args, workspace_roots=workspace_roots)
         if not validation.is_valid:
@@ -73,7 +95,8 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
             result_text = f"Validation failed: {validation.error}"
         else:
             try:
-                if tool_name in RISKY_TOOLS:
+                tool = registry.get_tool(tool_name)
+                if tool.risk != ToolRisk.READ_ONLY:
                     # ── Step 2a: Risky tools → sandbox worker subprocess ──
                     logger.info(f"Routing risky tool {tool_name} through sandbox worker (task_class={task_class})")
                     from aether_engine.workers.sandbox import execute_tool_in_worker
@@ -86,7 +109,6 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                 else:
                     # ── Step 2b: Safe tools → direct in-process execution ──
                     logger.info(f"Executing safe tool {tool_name} with args {args}")
-                    tool = registry.get_tool(tool_name)
                     result = await tool.execute_fn(**args) if asyncio.iscoroutinefunction(tool.execute_fn) else tool.execute_fn(**args)
                     result_text = json.dumps(result) if not isinstance(result, str) else result
 

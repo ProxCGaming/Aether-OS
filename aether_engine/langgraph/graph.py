@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Any
 from langgraph.graph import StateGraph, START, END
 
 from aether_engine.langgraph.state import AetherState
@@ -6,9 +6,7 @@ from aether_engine.langgraph.nodes.supervisor import supervisor_node
 from aether_engine.langgraph.nodes.researcher import researcher_node
 from aether_engine.langgraph.nodes.planner import planner_node
 from aether_engine.langgraph.nodes.coder import coder_node
-
-# We define safe vs risky tools
-RISKY_TOOLS = {"write_file", "execute_shell", "delete_file"}
+from aether_engine.tools.policy import resolve_policy_by_name
 
 def supervisor_router(state: AetherState) -> Literal["researcher", "planner", "coder", "__end__"]:
     # The supervisor node sets 'next' in the state or we pull it from delegation_log
@@ -19,15 +17,27 @@ def supervisor_router(state: AetherState) -> Literal["researcher", "planner", "c
             return next_node
     return "__end__"
 
-def tool_router(state: AetherState) -> Literal["execute_tool", "pause_for_approval", "supervisor"]:
-    # Conditional edge classifying tool as risky or safe
+def tool_router(state: AetherState, config: Any) -> Literal["execute_tool", "pause_for_approval", "supervisor"]:
+    # Conditional edge using policy to determine if approval is needed
     pending = state.get("pending_tool_call")
     if not pending:
         # If no tool call, go back to supervisor
         return "supervisor"
     
     tool_name = pending.get("name")
-    if tool_name in RISKY_TOOLS:
+    
+    # Extract config
+    configurable = config.get("configurable", {})
+    user_config = configurable.get("user_config")
+    registry = configurable.get("tool_registry")
+    
+    if user_config:
+        policy = resolve_policy_by_name(tool_name, user_config.tool_policies, registry)
+    else:
+        # Fallback if no config, default to ask
+        policy = "ask"
+        
+    if policy == "ask":
         return "pause_for_approval"
     return "execute_tool"
 

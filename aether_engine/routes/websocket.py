@@ -899,28 +899,37 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
             elif msg.type == EventType.TOOL_LIST_REQUEST:
                 from aether_engine.langgraph.nodes.supervisor import SUPERVISOR_MEMORY_TOOLS
                 from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                from aether_engine.tools.policy import resolve_policy_by_name, KNOWN_NON_REGISTRY_TOOLS
+                from aether_engine.tools.registry import ToolRisk
                 
+                def enrich_tool(d, name, risk):
+                    user_val = engine_state.user_config.tool_policies.get(name)
+                    effective = resolve_policy_by_name(name, engine_state.user_config.tool_policies)
+                    d["risk"] = risk.value if isinstance(risk, ToolRisk) else risk
+                    d["effective_policy"] = effective
+                    d["policy_is_default"] = user_val is None
+                    d["always_allow_permitted"] = (risk == ToolRisk.READ_ONLY)
+                    d["policy"] = user_val or "Require Approval" # UI currently expects the raw setting in 'policy' too
+                    return d
+
                 all_tools = [create_current_time_tool()] + create_file_tools() + create_web_tools()
                 defs = []
                 for t in all_tools:
-                    policy = engine_state.user_config.tool_policies.get(t.name, "Require Approval")
                     d = t.to_definition()
-                    d["policy"] = policy
-                    defs.append(d)
+                    defs.append(enrich_tool(d, t.name, t.risk))
                 
                 # Add Supervisor Memory Tools
                 for mt in SUPERVISOR_MEMORY_TOOLS:
                     d = mt.copy()
-                    policy = engine_state.user_config.tool_policies.get(d["function"]["name"], "Require Approval")
-                    d["policy"] = policy
-                    defs.append(d)
+                    name = d["function"]["name"]
+                    risk = KNOWN_NON_REGISTRY_TOOLS.get(name, ToolRisk.EXECUTE)
+                    defs.append(enrich_tool(d, name, risk))
                 
                 # Add MCP Tools (scaffold)
                 for mt in GLOBAL_MCP_REGISTRY.get_mcp_tools():
                     d = mt.copy()
-                    policy = engine_state.user_config.tool_policies.get(d["function"]["name"], "Require Approval")
-                    d["policy"] = policy
-                    defs.append(d)
+                    name = d["function"]["name"]
+                    defs.append(enrich_tool(d, name, ToolRisk.EXECUTE))
                     
                 await ws.send_text(Event(
                     type=EventType.TOOL_LIST_RESPONSE,
@@ -967,13 +976,37 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
             elif msg.type == EventType.TOOL_POLICY_SET_REQUEST:
                 tool_name = msg.payload.get("tool_name")
                 policy = msg.payload.get("policy")
+                response_payload = {"success": True, "tool_name": tool_name, "policy": policy}
+                
                 if tool_name and policy:
+                    from aether_engine.tools.registry import ToolRisk, ToolNotFoundError
+                    from aether_engine.tools.policy import KNOWN_NON_REGISTRY_TOOLS
+                    from aether_engine.audit import AuditLogger
+                    
+                    risk = ToolRisk.EXECUTE
+                    try:
+                        all_tools = [create_current_time_tool()] + create_file_tools() + create_web_tools()
+                        t = next((t for t in all_tools if t.name == tool_name), None)
+                        if t:
+                            risk = t.risk
+                        elif tool_name in KNOWN_NON_REGISTRY_TOOLS:
+                            risk = KNOWN_NON_REGISTRY_TOOLS[tool_name]
+                    except Exception:
+                        pass
+                        
+                    if policy == "Always Allow" and risk != ToolRisk.READ_ONLY:
+                        policy = "Require Approval"
+                        response_payload["policy"] = policy
+                        response_payload["message"] = "Always Allow is not permitted for risky tools. Downgraded to Require Approval."
+                        AuditLogger().log_event("TOOL_POLICY_IGNORED", {"tool_name": tool_name, "requested": "Always Allow", "reason": "Risky tool"})
+
                     engine_state.user_config.tool_policies[tool_name] = policy
                     save_config(engine_state.user_config)
+                    
                 await ws.send_text(Event(
                     type=EventType.TOOL_POLICY_SET_RESPONSE,
                     request_id=req_id,
-                    payload={"success": True, "tool_name": tool_name, "policy": policy},
+                    payload=response_payload,
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_LIST_REQUEST:

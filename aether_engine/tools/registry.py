@@ -1,7 +1,15 @@
 import inspect
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
+
+
+class ToolRisk(Enum):
+    READ_ONLY = "read_only"
+    WRITE = "write"
+    DESTRUCTIVE = "destructive"
+    EXECUTE = "execute"
 
 
 class ToolError(Exception):
@@ -25,6 +33,10 @@ class Tool:
     description: str
     input_schema: Dict[str, Any] = field(default_factory=lambda: {"type": "object", "properties": {}})
     execute_fn: Callable[..., Any] = field(default=lambda **kw: None)
+    risk: ToolRisk = field(default=ToolRisk.EXECUTE) # default to fail closed
+    timeout_s: int = field(default=60)
+    max_output_chars: int = field(default=20000)
+    source: str = field(default="builtin")
 
     def to_definition(self) -> Dict[str, Any]:
         return {
@@ -50,6 +62,7 @@ def create_current_time_tool() -> Tool:
             "properties": {},
         },
         execute_fn=_get_current_time_fn,
+        risk=ToolRisk.READ_ONLY,
     )
 
 
@@ -82,6 +95,7 @@ def create_file_tools() -> List[Tool]:
                 "required": ["path"],
             },
             execute_fn=_write_file,
+            risk=ToolRisk.WRITE,
         ),
         Tool(
             name="delete_file",
@@ -92,6 +106,7 @@ def create_file_tools() -> List[Tool]:
                 "required": ["path"],
             },
             execute_fn=_delete_file,
+            risk=ToolRisk.DESTRUCTIVE,
         ),
         Tool(
             name="execute_shell",
@@ -102,6 +117,7 @@ def create_file_tools() -> List[Tool]:
                 "required": ["command"],
             },
             execute_fn=_execute_shell,
+            risk=ToolRisk.EXECUTE,
         ),
     ]
 
@@ -135,6 +151,7 @@ def create_web_tools() -> List[Tool]:
                 "required": ["query"],
             },
             execute_fn=_search_web,
+            risk=ToolRisk.READ_ONLY,
         )
     ]
 

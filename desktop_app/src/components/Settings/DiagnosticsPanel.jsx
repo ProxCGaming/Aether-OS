@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Download, Box } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 import Dropdown from '../../Dropdown';
+import MCPNotice from './MCPNotice';
+import PluginsNotice from './PluginsNotice';
 
 export default function DiagnosticsPanel({ activeMenu }) {
   const { wsRef, sendMessage } = useAetherSocket();
@@ -78,6 +80,8 @@ export default function DiagnosticsPanel({ activeMenu }) {
           <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>MCP Connections</h2>
           <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Manage remote Model Context Protocol servers.</p>
           
+          <MCPNotice />
+
           <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', marginBottom: '24px' }}>
             <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Add New Server</h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -164,6 +168,8 @@ export default function DiagnosticsPanel({ activeMenu }) {
           <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Plugins</h2>
           <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Manage active plugins and extensions for Aether-OS.</p>
           
+          <PluginsNotice />
+
           <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', marginBottom: '24px' }}>
             <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Install New Plugin</h3>
             <div style={{ display: 'flex', gap: '12px' }}>

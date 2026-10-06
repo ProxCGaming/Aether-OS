@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Key, Cpu, Settings as SettingsIcon, Monitor, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2 } from 'lucide-react';
+import { User, Key, Cpu, Settings as SettingsIcon, Monitor, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock } from 'lucide-react';
 import Dropdown from './Dropdown';
 import LocalModelsTab from './LocalModelsTab';
 import './chat.css';
@@ -698,36 +698,61 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                   No tools registered.
                 </div>
               ) : (
-                tools.map(tool => (
-                  <div key={tool.function.name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                      <h4 style={{ fontSize: '15px', fontWeight: 500 }}>{tool.function.name}</h4>
-                      <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>{tool.function.description}</p>
+                tools.map(tool => {
+                  const isWrite = tool.risk === 'write';
+                  const isDestructive = tool.risk === 'destructive';
+                  const isExecute = tool.risk === 'execute';
+                  
+                  let badge = null;
+                  if (isWrite) {
+                    badge = <span style={{ fontSize: '11px', background: 'rgba(245, 158, 11, 0.2)', color: '#fbbf24', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px' }}>Write</span>;
+                  } else if (isDestructive || isExecute) {
+                    badge = <span style={{ fontSize: '11px', background: 'rgba(239, 68, 68, 0.2)', color: '#f87171', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><Lock size={10} /> Risky</span>;
+                  }
+
+                  const defaultLabel = tool.effective_policy === 'allow' ? 'Always Allow (default)' : 'Require Approval (default)';
+                  
+                  const options = [
+                    { value: 'default_unset', label: defaultLabel },
+                    { value: 'Always Allow', label: 'Always Allow', disabled: !tool.always_allow_permitted },
+                    { value: 'Require Approval', label: 'Require Approval' },
+                    { value: 'Deny', label: 'Deny' }
+                  ];
+
+                  return (
+                    <div key={tool.function.name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div>
+                        <h4 style={{ fontSize: '15px', fontWeight: 500, display: 'flex', alignItems: 'center' }}>
+                          {tool.function.name}
+                          {badge}
+                        </h4>
+                        <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>{tool.function.description}</p>
+                        {!tool.always_allow_permitted && (
+                           <p style={{ fontSize: '11px', color: '#fbbf24', marginTop: '4px' }}>Always Allow is disabled for risky tools.</p>
+                        )}
+                      </div>
+                      <div>
+                        <Dropdown 
+                          value={tool.policy_is_default ? 'default_unset' : tool.policy}
+                          onChange={(val) => {
+                            if (val === 'default_unset') return;
+                            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                              wsRef.current.send(JSON.stringify({
+                                type: 'TOOL_POLICY_SET_REQUEST',
+                                schema_version: 1,
+                                request_id: Date.now().toString(),
+                                payload: { tool_name: tool.function.name, policy: val }
+                              }));
+                            }
+                          }}
+                          options={options}
+                          style={{ width: '220px' }}
+                          align="right"
+                        />
+                      </div>
                     </div>
-                    <div>
-                      <Dropdown 
-                        value={tool.policy || 'Require Approval'}
-                        onChange={(val) => {
-                          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                            wsRef.current.send(JSON.stringify({
-                              type: 'TOOL_POLICY_SET_REQUEST',
-                              schema_version: 1,
-                              request_id: Date.now().toString(),
-                              payload: { tool_name: tool.function.name, policy: val }
-                            }));
-                          }
-                        }}
-                        options={[
-                          { value: 'Always Allow', label: 'Always Allow' },
-                          { value: 'Require Approval', label: 'Require Approval' },
-                          { value: 'Deny', label: 'Deny' }
-                        ]}
-                        style={{ width: '160px' }}
-                        align="right"
-                      />
-                    </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>

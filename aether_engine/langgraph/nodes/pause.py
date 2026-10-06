@@ -41,5 +41,7 @@ def dummy_pause_node(state: AetherState, config: RunnableConfig) -> dict:
             "messages": [msg]
         }
 
-    # If approved, we do nothing and the graph proceeds to execute_tool!
-    return {}
+    # If approved, mutate the pending_tool_call to reflect approval, and graph proceeds to execute_tool
+    return {
+        "pending_tool_call": {**pending, "approved": True}
+    }

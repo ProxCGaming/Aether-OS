@@ -220,6 +220,7 @@ export default function Dropdown({
                   key={opt.value}
                   type="button"
                   onClick={() => {
+                    if (opt.disabled) return;
                     onChange(opt.value);
                     setIsOpen(false);
                   }}
@@ -230,20 +231,22 @@ export default function Dropdown({
                     background: isSelected ? 'rgba(var(--accent-rgb), 0.2)' : 'transparent',
                     border: 'none',
                     borderRadius: '6px',
-                    color: isSelected ? '#a78bfa' : '#e2e8f0',
+                    color: isSelected ? '#a78bfa' : (opt.disabled ? '#505060' : '#e2e8f0'),
                     fontSize: '13px',
-                    cursor: 'pointer',
+                    cursor: opt.disabled ? 'not-allowed' : 'pointer',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
-                    transition: 'background 0.2s'
+                    transition: 'background 0.2s',
+                    opacity: opt.disabled ? 0.6 : 1
                   }}
                   onMouseEnter={e => {
-                    if (!isSelected) e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+                    if (!isSelected && !opt.disabled) e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
                   }}
                   onMouseLeave={e => {
                     if (!isSelected) e.currentTarget.style.background = 'transparent';
                   }}
+                  disabled={opt.disabled}
                 >
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{opt.label}</span>
                   {isSelected && <Check size={14} color="#a78bfa" />}
