@@ -24,4 +24,5 @@ New ADRs use the next sequential 4-digit number: `NNNN-short-slug.md`.
 - [0019 — Autonomous supervisor memory orchestration](0019-autonomous-supervisor-memory-orchestration.md)
 - [0020 — Hybrid retrieval: local embeddings](0020-hybrid-retrieval-local-embeddings.md)
 - [0021 — Central tool policy and risk metadata](0021-central-tool-policy-and-risk-metadata.md)
+- [0022 — Phase 9: trust-boundary hardening + UI honesty](0022-phase-9-trust-boundary-hardening.md)
 - [ADR-0019 — Electron migration supersedes 0004](ADR-0019-electron-migration-supersedes-0004.md) (legacy `ADR-NNNN` naming; retained as-is)

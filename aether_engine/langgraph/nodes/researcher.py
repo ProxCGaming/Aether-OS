@@ -22,7 +22,7 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
             parts = agent_model_override.split(":", 1)
             if len(parts) == 2:
                 p_name, m_name = parts
-                from aether_engine.app import _create_provider_instance
+                from aether_engine.orchestration.core import _create_provider_instance
                 provider = _create_provider_instance(p_name, m_name, secret_store)
         except Exception:
             pass

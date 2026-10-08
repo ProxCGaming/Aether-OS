@@ -21,7 +21,10 @@ class TestFix1CheckpointDurability(unittest.TestCase):
         executor_path = Path(__file__).resolve().parent.parent / "aether_engine" / "langgraph" / "executor.py"
         source = executor_path.read_text(encoding="utf-8")
         self.assertNotIn('":memory:"', source, "executor.py still uses in-memory checkpointer!")
-        self.assertIn("checkpoints.db", source, "executor.py should reference checkpoints.db")
+        # Phase 9: the path now comes from the shared checkpointer constant
+        # (single source of truth) instead of a triplicated inline literal.
+        self.assertIn("DEFAULT_CHECKPOINT_DB", source, "executor.py should use the shared DEFAULT_CHECKPOINT_DB")
+        self.assertIn("from aether_engine.langgraph.checkpointer import DEFAULT_CHECKPOINT_DB", source)
 
     def test_default_checkpoint_path(self):
         """Verify the default checkpoint path is ~/.aether/checkpoints.db."""

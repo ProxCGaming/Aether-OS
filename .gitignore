@@ -49,3 +49,4 @@ node_modules/
 dist/
 dist-electron/
 build/
+.venv-phase9/

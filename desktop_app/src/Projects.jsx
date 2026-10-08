@@ -111,6 +111,8 @@ export default function Projects({ wsRef }) {
               )}
               <button 
                 onClick={() => handleRemoveWorkspace(ws.path)}
+                title="Remove workspace"
+                aria-label={`Remove workspace ${ws.path}`}
                 style={{ background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: 'none', padding: '8px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               >
                 <Trash2 size={16} />
