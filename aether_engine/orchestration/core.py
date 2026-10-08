@@ -349,4 +349,5 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
         provider_name=provider_name,
         base_url=base_url,
         fallback_models=fallback_models,
+        reasoning_effort=getattr(engine_state.user_config, "reasoning_effort", "standard"),
     )

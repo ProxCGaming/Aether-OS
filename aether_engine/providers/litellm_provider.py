@@ -176,6 +176,7 @@ class LiteLLMProvider(BaseProvider):
         provider_name: str = "google_gemini",
         base_url: Optional[str] = None,
         fallback_models: Optional[List[FallbackModel]] = None,
+        reasoning_effort: str = "standard",
     ):
         api_key = api_key.strip() if api_key else ""
         if not api_key and provider_name != "custom_openai" and provider_name != "openai_compatible":
@@ -188,6 +189,9 @@ class LiteLLMProvider(BaseProvider):
         self.litellm_model = resolve_litellm_model(model, provider_name)
         # Per-node fallback: list of FallbackModel with full provider config for cross-provider fallback
         self.fallback_models: List[FallbackModel] = fallback_models or []
+        # Phase 9, B2: user-selected reasoning depth, forwarded to litellm for
+        # reasoning-capable models ("standard" | "medium" | "high").
+        self.reasoning_effort = reasoning_effort or "standard"
 
     def _build_call_kwargs(
         self,
@@ -215,6 +219,11 @@ class LiteLLMProvider(BaseProvider):
         # Tools (OpenAI-compatible format)
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
+
+        # Phase 9, B2: forward the user's reasoning-effort preference. Only sent
+        # when non-default so models without reasoning support are unaffected.
+        if self.reasoning_effort and self.reasoning_effort != "standard":
+            kwargs["reasoning_effort"] = self.reasoning_effort
 
         return kwargs
 

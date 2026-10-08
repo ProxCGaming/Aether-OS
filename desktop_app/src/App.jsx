@@ -8,7 +8,7 @@ import Dashboard from './Dashboard';
 import Projects from './Projects';
 import './chat.css';
 
-// Dummy graph data for "first-run" state
+// Decorative background graph (branding, not live data — see Phase 9 B3)
 const initGraphData = {
   nodes: [
     { id: 'AETHER-OS', group: 1, val: 20 },
@@ -628,19 +628,9 @@ function AppContent() {
       window.electronAPI.getMemoryUsage().then(mb => setMemoryMb(mb)).catch(() => {});
     }
 
-    // Add some random ambient nodes to simulate a vast but empty network
-    const ambientNodes = [];
-    const ambientLinks = [];
-    for(let i=0; i<30; i++) {
-      ambientNodes.push({ id: `amb_${i}`, group: 4, val: Math.random() * 2 + 1 });
-      if (i > 0) {
-        ambientLinks.push({ source: `amb_${i}`, target: `amb_${Math.floor(Math.random() * i)}` });
-      }
-    }
-    setGraphData(prev => ({
-      nodes: [...prev.nodes, ...ambientNodes],
-      links: [...prev.links, ...ambientLinks]
-    }));
+    // Phase 9, B3: removed the 30 random "ambient" nodes that simulated a vast
+    // network. The background graph is decorative branding, not live data —
+    // it must not fabricate the appearance of a populated knowledge graph.
     return () => {
       clearInterval(memoryPoll);
       unsubscribers.forEach(unsub => {
@@ -1024,7 +1014,7 @@ function AppContent() {
                  />
                </div>
             )}
-            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} />}
+            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} onStartWorkflow={() => setActiveTab('Chat')} />}
             {activeTab === 'Projects' && <Projects wsRef={wsRef} />}
             {activeTab !== 'Settings' && activeTab !== 'Dashboard' && activeTab !== 'Projects' && (
                <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: '#9090a0' }}>

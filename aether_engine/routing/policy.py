@@ -1,7 +1,7 @@
 """Intelligent routing policy mapping task requirements and health state to model candidates."""
 from dataclasses import dataclass, field
 import re
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from aether_engine.routing.health import ProviderHealthManager
 from aether_engine.routing.registry import GLOBAL_MODEL_REGISTRY, ModelEntry, ModelRegistry
@@ -72,6 +72,7 @@ class RoutingPolicy:
         user_default_model: str = "gemini-2.5-flash",
         requirements: Optional[TaskRequirements] = None,
         requested_model: Optional[str] = None,
+        auxiliary_models: Optional[Dict[str, str]] = None,
     ) -> RoutingDecision:
         reqs = requirements or infer_task_requirements(prompt)
 
@@ -135,6 +136,22 @@ class RoutingPolicy:
 
         # Check for specialized requirements
         if reqs.has_images:
+            # Phase 9, B1: an explicit per-task auxiliary override wins over
+            # heuristics. Stored as "provider:::model" (or absent/"auto").
+            vision_override = (auxiliary_models or {}).get("vision", "auto")
+            if vision_override and vision_override != "auto":
+                o_provider, _, o_model = vision_override.partition(":::")
+                if (o_provider and o_model
+                        and o_provider in configured_providers
+                        and health_manager.is_provider_available(o_provider)):
+                    o_entry = self.registry.get_model(o_model)
+                    if o_entry and o_entry.provider == o_provider:
+                        return RoutingDecision(
+                            provider=o_provider,
+                            model=o_entry.id,
+                            reason=f"User auxiliary override (vision) → {o_entry.label}",
+                            capabilities=list(o_entry.capabilities),
+                        )
             if user_def_entry and "vision" in user_def_entry.capabilities:
                 return RoutingDecision(
                     provider=user_def_entry.provider,

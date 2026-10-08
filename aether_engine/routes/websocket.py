@@ -300,6 +300,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     user_default_provider=cfg.default_provider,
                     user_default_model=cfg.default_model,
                     requested_model=requested_model,
+                    auxiliary_models=cfg.auxiliary_models,
                 )
 
                 try:
@@ -1036,6 +1037,57 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     type=EventType.CONFIG_UPDATE_RESPONSE,
                     request_id=req_id,
                     payload={"success": True, "config": engine_state.user_config.to_dict()},
+                ).to_json())
+
+            elif msg.type == EventType.AUXILIARY_MODEL_SET_REQUEST:
+                # Phase 9, B1: per-task-class auxiliary model override. The Settings
+                # UI sends {task, provider, model}; model "auto" clears the override.
+                valid_tasks = {"vision", "web", "compression", "skills", "approval", "mcp", "title"}
+                task = msg.payload.get("task", "")
+                provider = msg.payload.get("provider", "")
+                model = msg.payload.get("model", "auto")
+                ok, error = True, ""
+                if task not in valid_tasks:
+                    ok, error = False, f"Unknown task class '{task}'."
+                elif model != "auto":
+                    if not provider or not model:
+                        ok, error = False, "Provider and model are required (or 'auto')."
+                    elif provider not in (engine_state.configured_providers or []):
+                        ok, error = False, f"Provider '{provider}' is not configured."
+                if ok:
+                    if model == "auto":
+                        engine_state.user_config.auxiliary_models.pop(task, None)
+                    else:
+                        engine_state.user_config.auxiliary_models[task] = f"{provider}:::{model}"
+                    save_config(engine_state.user_config)
+                    engine_state.audit_logger.log_event("AUXILIARY_MODEL_SET", {
+                        "task": task, "provider": provider, "model": model,
+                    })
+                await ws.send_text(Event(
+                    type=EventType.AUXILIARY_MODEL_SET_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "success": ok,
+                        "error": error,
+                        "auxiliary_models": dict(engine_state.user_config.auxiliary_models),
+                    },
+                ).to_json())
+
+            elif msg.type == EventType.REASONING_EFFORT_SET_REQUEST:
+                # Phase 9, B2: persist the user's reasoning-effort preference so the
+                # engine (not just localStorage) can act on it.
+                effort = msg.payload.get("effort", "")
+                ok, error = True, ""
+                if effort not in ("standard", "medium", "high"):
+                    ok, error = False, f"Invalid reasoning effort '{effort}'."
+                if ok:
+                    engine_state.user_config.reasoning_effort = effort
+                    save_config(engine_state.user_config)
+                    engine_state.audit_logger.log_event("REASONING_EFFORT_SET", {"effort": effort})
+                await ws.send_text(Event(
+                    type=EventType.REASONING_EFFORT_SET_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": ok, "error": error, "effort": engine_state.user_config.reasoning_effort},
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_ADD_REQUEST:

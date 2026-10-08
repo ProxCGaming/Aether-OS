@@ -33,13 +33,13 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   // A5: State for Reasoning Effort and Node model override
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem('reasoning_effort') || 'standard');
   const [agents, setAgents] = useState([]);
+  // Phase 9, B1: per-task auxiliary model overrides, task -> "provider:::model" (absent = auto)
+  const [auxModels, setAuxModels] = useState({});
 
   const [memoryTab, setMemoryTab] = useState('episodic');
   const [episodes, setEpisodes] = useState([]);
   const [facts, setFacts] = useState([]);
   const [selectedEpisode, setSelectedEpisode] = useState(null);
-  
-  const [downloadInput, setDownloadInput] = useState('');
   
   const [capabilityHistory, setCapabilityHistory] = useState([]);
   const [capabilityStatus, setCapabilityStatus] = useState(null);
@@ -192,6 +192,22 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
           if (data.payload.config) {
             setDisableFallbacks(data.payload.config.disable_fallbacks || false);
             setFallbackChain((data.payload.config.fallback_chain || []).join(', '));
+            // Phase 9, B1/B2: engine-persisted auxiliary models and reasoning effort.
+            setAuxModels(data.payload.config.auxiliary_models || {});
+            const serverEffort = data.payload.config.reasoning_effort;
+            if (serverEffort) {
+              setReasoningEffort(serverEffort);
+              localStorage.setItem('reasoning_effort', serverEffort);
+            }
+          }
+        } else if (data.type === 'AUXILIARY_MODEL_SET_RESPONSE') {
+          if (data.payload.success) {
+            setAuxModels(data.payload.auxiliary_models || {});
+          }
+        } else if (data.type === 'REASONING_EFFORT_SET_RESPONSE') {
+          if (data.payload.success && data.payload.effort) {
+            setReasoningEffort(data.payload.effort);
+            localStorage.setItem('reasoning_effort', data.payload.effort);
           }
         }
       } catch (e) {
@@ -261,7 +277,7 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
         request_id: Date.now().toString(),
         payload: {}
       }));
-    } else if (activeMenu === 'Advanced' && wsRef.current?.readyState === WebSocket.OPEN) {
+    } else if ((activeMenu === 'Advanced' || activeMenu === 'Models') && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'CONFIG_GET_REQUEST',
         schema_version: 1,
@@ -357,46 +373,10 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   };
 
 
-
-  const [showLlamaPrompt, setShowLlamaPrompt] = useState(false);
-  const [downloadingLlama, setDownloadingLlama] = useState(false);
-
-  const handleDownloadLocalModel = () => {
-    if (!downloadInput) return;
-    
-    // Check if we have llama.cpp installed (mock check for demo)
-    const hasLlamaCpp = localStorage.getItem('has_llama_cpp') === 'true';
-    
-    if (!hasLlamaCpp) {
-      setShowLlamaPrompt(true);
-      return;
-    }
-    
-    startModelDownload();
-  };
-
-  const startModelDownload = () => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'LOCAL_MODEL_DOWNLOAD_START',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { repo_id: downloadInput }
-      }));
-      setDownloadInput('');
-    }
-  };
-
-  const handleInstallLlama = () => {
-    setDownloadingLlama(true);
-    // Simulate downloading native dependencies
-    setTimeout(() => {
-      localStorage.setItem('has_llama_cpp', 'true');
-      setDownloadingLlama(false);
-      setShowLlamaPrompt(false);
-      startModelDownload();
-    }, 3000);
-  };
+  // NOTE (Phase 9, B3): the old llama.cpp "mock check for demo" download flow
+  // was deleted here — it was dead code (never rendered, never called). Local
+  // model downloads are handled for real by LocalModelsTab.jsx, which sends
+  // LOCAL_MODEL_DOWNLOAD_START with destination_dir.
 
   const menuItems = [
     { id: 'General', icon: <Monitor size={18} />, label: 'General' },
@@ -541,8 +521,17 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                        <Dropdown 
                          value={reasoningEffort}
                          onChange={(val) => {
+                           // Phase 9, B2: persist engine-side so it actually affects model calls.
                            setReasoningEffort(val);
                            localStorage.setItem('reasoning_effort', val);
+                           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                             wsRef.current.send(JSON.stringify({
+                               type: 'REASONING_EFFORT_SET_REQUEST',
+                               schema_version: 1,
+                               request_id: Date.now().toString(),
+                               payload: { effort: val }
+                             }));
+                           }
                          }}
                          options={[
                            { value: 'standard', label: 'Standard' },
@@ -577,13 +566,20 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                             <h4 style={{ fontSize: '14px', fontWeight: 600, margin: 0 }}>{task.name}</h4>
                             <span style={{ fontSize: '11px', color: '#9090a0' }}>{task.desc}</span>
                           </div>
-                          <p style={{ fontSize: '12px', color: '#a78bfa', marginTop: '4px', fontFamily: 'monospace' }}>auto · use main model</p>
+                          <p style={{ fontSize: '12px', color: '#a78bfa', marginTop: '4px', fontFamily: 'monospace' }}>{auxModels[task.id] ? auxModels[task.id].split(':::')[1] || auxModels[task.id] : 'auto · use main model'}</p>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                           <Dropdown 
-                            value="auto"
+                            value={auxModels[task.id] || 'auto'}
                             onChange={(val) => {
                               const [provider, model] = val.split(':::');
+                              // Phase 9, B1: optimistic update; engine confirms via AUXILIARY_MODEL_SET_RESPONSE.
+                              setAuxModels(prev => {
+                                const next = { ...prev };
+                                if (!model || model === 'auto') delete next[task.id];
+                                else next[task.id] = val;
+                                return next;
+                              });
                               if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                                 wsRef.current.send(JSON.stringify({
                                   type: 'AUXILIARY_MODEL_SET_REQUEST',

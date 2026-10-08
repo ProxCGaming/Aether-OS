@@ -98,6 +98,10 @@ class UserConfig:
     custom_slash_commands: Dict[str, dict] = field(default_factory=dict)
     disable_fallbacks: bool = False
     fallback_chain: List[str] = field(default_factory=list)
+    # Phase 9: per-task-class auxiliary model overrides, task -> "provider:::model" or "auto"
+    auxiliary_models: Dict[str, str] = field(default_factory=dict)
+    # Phase 9: reasoning effort for reasoning-capable models ("standard" | "medium" | "high")
+    reasoning_effort: str = "standard"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -118,6 +122,8 @@ class UserConfig:
             "custom_slash_commands": self.custom_slash_commands,
             "disable_fallbacks": self.disable_fallbacks,
             "fallback_chain": self.fallback_chain,
+            "auxiliary_models": self.auxiliary_models,
+            "reasoning_effort": self.reasoning_effort,
         }
 
     @classmethod
@@ -158,6 +164,8 @@ class UserConfig:
             custom_slash_commands=_as_dict(d.get("custom_slash_commands")),
             disable_fallbacks=d.get("disable_fallbacks", False),
             fallback_chain=d.get("fallback_chain", []),
+            auxiliary_models=_as_dict(d.get("auxiliary_models")),
+            reasoning_effort=d.get("reasoning_effort") or "standard",
         )
 
 

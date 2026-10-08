@@ -2,7 +2,7 @@ import React from 'react';
 import { Activity, Cpu, HardDrive, Network, Zap } from 'lucide-react';
 import './chat.css';
 
-export default function Dashboard({ status = 'Initializing', activeTasks = 0, pluginCount = 0, memoryMb = null }) {
+export default function Dashboard({ status = 'Initializing', activeTasks = 0, pluginCount = 0, memoryMb = null, onStartWorkflow }) {
   const isOnline = status === 'Online' || status.startsWith('Online');
   
   return (
@@ -49,7 +49,8 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
       <div>
         <h2 style={{ fontSize: '18px', fontWeight: 500, marginBottom: '16px' }}>Quick Actions</h2>
         <div style={{ display: 'flex', gap: '12px' }}>
-          <button style={{ background: 'rgba(var(--accent-rgb), 0.2)', border: '1px solid rgba(var(--accent-rgb), 0.5)', color: '#fff', padding: '12px 20px', borderRadius: '12px', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
+          {/* Phase 9, B3: previously a dead button with no onClick — now navigates to Chat to start a task. */}
+          <button onClick={onStartWorkflow} style={{ background: 'rgba(var(--accent-rgb), 0.2)', border: '1px solid rgba(var(--accent-rgb), 0.5)', color: '#fff', padding: '12px 20px', borderRadius: '12px', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
             <Zap size={16} /> Start New Workflow
           </button>
         </div>
