@@ -153,7 +153,7 @@ Design summary before code, same as every phase before this one —
 particularly for Part 4, where the research/rationale step is not
 optional.
 
-**Write one ADR: `ADR/0018-electron-migration-tools-mcp-plugins-memory-ui.md`.**
+**Write one ADR: `docs/adr/0018-electron-migration-tools-mcp-plugins-memory-ui.md`.**
 Document: the episodic bug and fix, confirmation each ported tab now
 reads/writes real engine state (not local-only UI state), whether
 `PLUGIN_APPROVAL_REQUEST` needed adding to `App.jsx` or already existed,

@@ -134,7 +134,7 @@ Design summary before code — specifically: confirm the embedding model
 choice, confirm brute-force vs indexed similarity search with reasoning,
 before implementing either.
 
-**Write one ADR: `ADR/0020-hybrid-retrieval-local-embeddings.md`.**
+**Write one ADR: `docs/adr/0020-hybrid-retrieval-local-embeddings.md`.**
 Cover: model choice and why, storage approach and why brute-force was
 or wasn't sufficient, the merge strategy for BM25+vector results, and
 explicit confirmation the embedding call routes through

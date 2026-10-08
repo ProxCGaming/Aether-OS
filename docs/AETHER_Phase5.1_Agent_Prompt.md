@@ -11,7 +11,7 @@ do not start Phase 5.5 (Extensions UI) until these are resolved and
 verified.
 
 ## Before you start
-Read `ADR/0009`, `0010`, `0011` in full. Every fix in this phase exists
+Read `docs/adr/0009`, `0010`, `0011` in full. Every fix in this phase exists
 because the live code currently contradicts a decision already recorded
 in one of those three ADRs. This phase does not change those decisions
 — it makes the code actually match them.
@@ -195,7 +195,7 @@ is still accurate if the file has changed since this audit), then fix
 it, then write a test that would have failed before your fix and passes
 after.
 
-**Write one new ADR: `ADR/0013-phase-5-1-sandbox-and-durability-fixes.md`.**
+**Write one new ADR: `docs/adr/0014-phase-5-1-sandbox-and-durability-fixes.md`.**
 For each of the four main fixes, state clearly: what the bug actually
 was (cite the exact file/function), why it mattered, and exactly what
 you changed. This ADR is a bug-fix record, not a new architectural
