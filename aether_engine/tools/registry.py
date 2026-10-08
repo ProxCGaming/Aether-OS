@@ -177,12 +177,71 @@ class ToolRegistry:
     def get_definitions(self) -> List[Dict[str, Any]]:
         return [tool.to_definition() for tool in self._tools.values()]
 
-    async def execute(self, name: str, args: Optional[Dict[str, Any]] = None) -> Any:
-        tool = self.get_tool(name)
+    async def execute(
+        self,
+        name: str,
+        args: Optional[Dict[str, Any]] = None,
+        *,
+        workspace_roots: Optional[list] = None,
+        task_class: str = "standard",
+        policies: Optional[Dict[str, str]] = None,
+        approved: bool = False,
+        audit_logger: Any = None,
+    ) -> Any:
+        """Execute a tool through the full trust pipeline (Phase 9, A2).
+
+        Pipeline (same as ``execute_tool_node``):
+          1. Policy check (ADR 0021) — ``deny`` always raises; ``ask`` raises
+             unless ``approved=True`` (fail-closed, ADR 0009).
+          2. Pre-flight validation (ADR 0009 §2) — failures raise.
+          3. Sandbox routing (ADR 0010) — non-READ_ONLY tools run in the
+             ``aether_worker`` subprocess via ``execute_tool_in_worker``;
+             READ_ONLY tools run in-process.
+
+        There is intentionally no silent direct-execution path anymore:
+        ``ToolRegistry.execute`` used to call ``tool.execute_fn`` with zero
+        policy, validation, or sandboxing, which made it a bypass around the
+        whole trust architecture for any future caller.
+        """
+        from aether_engine.audit import AuditLogger
+        from aether_engine.tools.policy import resolve_policy_by_name
+        from aether_engine.validation.pre_flight import validate_tool_request
+
+        tool = self.get_tool(name)  # raises ToolNotFoundError — preserved
         call_args = args or {}
+        log = audit_logger or AuditLogger()
+
+        # ── Step 1: policy (ADR 0021) ──────────────────────────────────
+        policy = resolve_policy_by_name(name, policies or {}, self)
+        if policy == "deny":
+            log.log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": name, "reason": "User Deny", "via": "registry.execute"})
+            raise ToolExecutionError(f"Tool '{name}' is blocked by policy (deny).")
+        if policy == "ask" and not approved:
+            log.log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": name, "reason": "Bypassed Approval", "via": "registry.execute"})
+            raise ToolExecutionError(
+                f"Tool '{name}' requires approval (policy=ask). "
+                "Pass approved=True only after explicit user consent."
+            )
+
+        # ── Step 2: pre-flight validation (ADR 0009 §2, fail-closed) ────
+        validation = validate_tool_request(name, call_args, workspace_roots=workspace_roots)
+        if not validation.is_valid:
+            raise ToolExecutionError(f"Pre-flight validation failed for '{name}': {validation.error}")
+
+        # ── Step 3: sandbox routing (ADR 0010) ─────────────────────────
         try:
+            if tool.risk != ToolRisk.READ_ONLY:
+                from aether_engine.workers.sandbox import execute_tool_in_worker
+                return await execute_tool_in_worker(
+                    tool_name=name,
+                    args=call_args,
+                    task_class=task_class,
+                    audit_logger=log,
+                )
             if inspect.iscoroutinefunction(tool.execute_fn):
                 return await tool.execute_fn(**call_args)
             return tool.execute_fn(**call_args)
+        except ToolExecutionError:
+            raise
         except Exception as e:
             raise ToolExecutionError(f"Error executing tool '{name}': {e}") from e

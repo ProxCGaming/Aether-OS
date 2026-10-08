@@ -1322,72 +1322,11 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
         if task_runner and not task_runner.done():
             task_runner.cancel()
 
-class InstallRequest(BaseModel):
-    source: str
-
-class ConfirmRequest(BaseModel):
-    prepare_data: Dict[str, Any]
-
-class ToggleRequest(BaseModel):
-    enabled: bool
-
-@router.get("/plugins")
-def list_plugins():
-    return engine_state.plugin_installer.get_all()
-
-@router.post("/plugins/install")
-def prepare_plugin(req: InstallRequest):
-    try:
-        data = engine_state.plugin_installer.prepare_install(req.source)
-        return data
-    except Exception as e:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail=str(e))
-
-@router.post("/plugins/confirm")
-def confirm_plugin(req: ConfirmRequest):
-    try:
-        engine_state.plugin_installer.install(req.prepare_data)
-        engine_state.audit_logger.log_event("PLUGIN_INSTALLED", {"manifest": req.prepare_data["manifest"]})
-        return {"status": "success"}
-    except Exception as e:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail=str(e))
-
-@router.delete("/plugins/{name}")
-def delete_plugin(name: str):
-    engine_state.plugin_installer.uninstall(name)
-    return {"status": "success"}
-
-@router.patch("/plugins/{name}/toggle")
-def toggle_plugin(name: str, req: ToggleRequest):
-    try:
-        engine_state.plugin_installer.toggle(name, req.enabled)
-        return {"status": "success"}
-    except Exception as e:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail=str(e))
-
-# --- AGENT NODES ENDPOINTS ---
-disabled_nodes = set()
-
-@router.get("/agents/nodes")
-def list_agent_nodes():
-    # Return fake list for UI
-    from aether_engine.routing.capability_router import CapabilityRouter
-    
-    # Just hardcoded ones based on capability router
-    nodes = [
-        {"name": "research", "model": engine_state.user_config.default_model, "enabled": "research" not in disabled_nodes},
-        {"name": "coding", "model": engine_state.user_config.default_model, "enabled": "coding" not in disabled_nodes},
-        {"name": "general", "model": engine_state.user_config.default_model, "enabled": "general" not in disabled_nodes},
-    ]
-    return nodes
-
-@router.patch("/agents/nodes/{name}/toggle")
-def toggle_agent_node(name: str, req: ToggleRequest):
-    if req.enabled:
-        disabled_nodes.discard(name)
-    else:
-        disabled_nodes.add(name)
-    return {"status": "success"}
+# --- Legacy unauthenticated HTTP management routes: REMOVED (Phase 9, A1) ---
+# The seven HTTP routes that used to live here (GET/POST/DELETE/PATCH on
+# /plugins and /agents/nodes) were deleted because they bypassed the ADR 0003
+# token handshake enforced on /ws/tasks. Their only callers were the retired
+# PySide6 UI (superseded by ADR-0019) and a test for that retired path.
+# Plugin/agent management is served exclusively over the authenticated
+# WebSocket (PLUGIN_INSTALL_REQUEST, AGENT_UPDATE_REQUEST, ...).
+# Do NOT re-add unauthenticated HTTP management routes.

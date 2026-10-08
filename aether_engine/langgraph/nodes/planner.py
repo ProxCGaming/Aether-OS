@@ -84,7 +84,7 @@ async def planner_node(state: AetherState, config: RunnableConfig) -> dict:
     content_parts = []
     accumulated_tool_calls = {}
     
-    async for chunk in provider.call_stream(messages, tools=tools):
+    async for chunk in provider.call_stream(messages, tools=tools, node_name="planner"):
         if chunk.text:
             content_parts.append(chunk.text)
         if chunk.tool_calls:

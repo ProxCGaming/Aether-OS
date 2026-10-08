@@ -54,11 +54,9 @@ def main():
         print("\n[ERROR] No keys could be decrypted. Nothing exported.")
         sys.exit(1)
 
-    # Write export file
-    EXPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    EXPORT_PATH.write_text(json.dumps(exported, indent=2), encoding="utf-8")
-
-    # Audit log: record that secrets were exported (provider names only, NOT key values)
+    # Audit FIRST (Phase 9, A5): the export must not happen unless the audit
+    # event lands. The old order wrote the plaintext file and then swallowed
+    # audit failures with a warning — fail-open on auditability (ADR 0003 §4).
     try:
         audit = AuditLogger()
         audit.log_event("SECRETS_EXPORTED", {
@@ -67,7 +65,12 @@ def main():
             "export_path": str(EXPORT_PATH),
         })
     except Exception as e:
-        print(f"  [WARN] Failed to write audit log: {e}")
+        print(f"\n[ERROR] Audit log write failed ({e}). Aborting export — no file written.")
+        sys.exit(1)
+
+    # Write export file (only reached if the audit event was recorded)
+    EXPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    EXPORT_PATH.write_text(json.dumps(exported, indent=2), encoding="utf-8")
 
     print()
     print(f"[SUCCESS] Exported {len(exported)} key(s) to:")

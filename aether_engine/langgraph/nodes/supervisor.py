@@ -358,7 +358,7 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
         tools = filtered_tools
     
     try:
-        async for chunk in provider.call_stream(messages, tools=tools):
+        async for chunk in provider.call_stream(messages, tools=tools, node_name="supervisor"):
             if chunk.text:
                 content_parts.append(chunk.text)
             if chunk.tool_calls:
@@ -371,7 +371,7 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
         logger.warning(f"Supervisor call_stream with tools failed: {e}; falling back to text prompt")
         content_parts = []
         accumulated_tool_calls = {}
-        async for chunk in provider.call_stream(messages):
+        async for chunk in provider.call_stream(messages, node_name="supervisor"):
             if chunk.text:
                 content_parts.append(chunk.text)
 
@@ -402,7 +402,7 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
 
         content_parts = []
         try:
-            async for chunk in provider.call_stream(follow_up_messages):
+            async for chunk in provider.call_stream(follow_up_messages, node_name="supervisor"):
                 if chunk.text:
                     content_parts.append(chunk.text)
                 if chunk.finish_reason:

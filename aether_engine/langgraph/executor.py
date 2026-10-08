@@ -2,7 +2,6 @@ import asyncio
 import logging
 import uuid
 import time
-from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 try:
@@ -38,6 +37,7 @@ from aether_engine.providers.litellm_provider import LiteLLMProvider
 from aether_engine.memory import episodic
 from aether_engine.memory import knowledge_graph
 from aether_engine.event_bus import event_bus
+from aether_engine.langgraph.checkpointer import DEFAULT_CHECKPOINT_DB
 import json
 
 logger = logging.getLogger("aether_engine.langgraph.executor")
@@ -90,7 +90,7 @@ async def run_langgraph_task(
     )
 
     # Persistent checkpointer: disk-backed SQLite so paused tasks survive Engine restarts (ADR 0011 §4).
-    db_path = Path.home() / ".aether" / "checkpoints.db"
+    db_path = DEFAULT_CHECKPOINT_DB
     db_path.parent.mkdir(parents=True, exist_ok=True)
     async with AsyncSqliteSaver.from_conn_string(str(db_path)) as saver:
         await saver.setup()
@@ -413,7 +413,7 @@ async def resume_langgraph_task(
     disabled_nodes: Optional[set] = None,
 ) -> AsyncGenerator[Event, None]:
     """Resume an interrupted LangGraph task and yield remaining events."""
-    db_path = Path.home() / ".aether" / "checkpoints.db"
+    db_path = DEFAULT_CHECKPOINT_DB
     async with AsyncSqliteSaver.from_conn_string(str(db_path)) as saver:
         await saver.setup()
         graph = compile_graph(checkpointer=saver)
@@ -550,7 +550,7 @@ async def resume_langgraph_task(
 
 async def get_pending_approvals() -> List[Dict[str, Any]]:
     """Query the checkpointer for threads blocked on an approval request."""
-    db_path = Path.home() / ".aether" / "checkpoints.db"
+    db_path = DEFAULT_CHECKPOINT_DB
     pending = []
     
     # We gracefully skip if the DB isn't initialized yet

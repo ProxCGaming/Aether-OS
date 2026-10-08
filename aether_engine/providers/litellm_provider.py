@@ -343,6 +343,7 @@ class LiteLLMProvider(BaseProvider):
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
+        node_name: Optional[str] = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream response chunks from any LiteLLM-supported provider.
 
@@ -435,6 +436,17 @@ class LiteLLMProvider(BaseProvider):
 
                 # If we got here, the call succeeded
                 if is_fallback:
+                    # Phase 9, A4: this must be visible in the audit log as its own
+                    # event, distinct from task-level FALLBACK_TRIGGERED (Phase 5.1
+                    # acceptance test #4). stdlib logging alone is not enough.
+                    from aether_engine.audit import AuditLogger
+                    AuditLogger().log_event("NODE_FALLBACK_TRIGGERED", {
+                        "node": node_name,
+                        "primary_model": self.litellm_model,
+                        "failed_provider": self.provider_name,
+                        "fallback_model": current_model,
+                        "fallback_provider": current_provider,
+                    })
                     logger.info(
                         f"NODE_FALLBACK_TRIGGERED: primary model '{self.litellm_model}' failed, "
                         f"succeeded with fallback model '{current_model}'"

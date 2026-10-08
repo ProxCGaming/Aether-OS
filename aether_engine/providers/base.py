@@ -71,6 +71,11 @@ class BaseProvider(ABC):
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
+        node_name: Optional[str] = None,
     ) -> AsyncGenerator[StreamChunk, None]:
-        """Stream response chunks and/or tool call requests for the given message history."""
+        """Stream response chunks and/or tool call requests for the given message history.
+
+        node_name is the LangGraph node making the call (if any); used for
+        audit logging of per-node fallback events.
+        """
         yield StreamChunk()

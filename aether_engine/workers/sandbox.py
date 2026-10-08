@@ -61,7 +61,18 @@ async def execute_tool_in_worker(
     try:
         job_obj = WorkerJobObject(time_cap, mem_cap)
     except Exception as e:
-        logger.warning(f"Failed to create Job Object: {e}")
+        # Fail closed (Phase 9, A3 / ADR 0010): if resource limits cannot be
+        # enforced, the tool must NOT run. The old behavior logged a warning
+        # and continued with job_obj=None, i.e. silently unlimited execution.
+        reason = f"resource limits unenforceable: {e}"
+        logger.error(f"Refusing to execute '{tool_name}': {reason}")
+        if audit_logger:
+            audit_logger.log_event("WORKER_EXECUTION_REFUSED", {
+                "tool": tool_name,
+                "task_class": task_class,
+                "reason": reason,
+            })
+        raise RuntimeError(f"Refusing to execute '{tool_name}': {reason}")
 
     start_time = time.time()
     proc = await asyncio.create_subprocess_exec(
