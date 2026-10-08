@@ -546,19 +546,31 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
 
                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '32px', marginBottom: '16px' }}>
                    <h3 style={{ fontSize: '18px', fontWeight: 500, margin: 0 }}>⚙ Auxiliary models</h3>
-                   <button style={{ background: 'transparent', color: '#a78bfa', border: 'none', fontSize: '13px', cursor: 'pointer' }}>Reset all to main</button>
+                   <button
+                     style={{ background: 'transparent', color: '#a78bfa', border: 'none', fontSize: '13px', cursor: 'pointer' }}
+                     onClick={() => {
+                       // Phase 9, B1: clear every override back to the main model.
+                       setAuxModels({});
+                       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                         wsRef.current.send(JSON.stringify({
+                           type: 'AUXILIARY_MODEL_SET_REQUEST',
+                           schema_version: 1,
+                           request_id: Date.now().toString(),
+                           payload: { task: 'vision', provider: '', model: 'auto' }
+                         }));
+                       }
+                     }}
+                   >Reset all to main</button>
                  </div>
                  <p style={{ color: '#9090a0', fontSize: '13px', marginBottom: '16px' }}>Helper tasks run on the main model by default. Assign a dedicated model to any task to override.</p>
                  
                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                    {[
+                     // Phase 9, B1 (UI honesty): only tasks with a real engine seam are
+                     // shown. Vision overrides are honored by the routing policy; the
+                     // other helper tasks have no engine call site yet, so no control
+                     // is rendered for them instead of a placebo dropdown.
                      { id: 'vision', name: 'Vision', desc: 'Image analysis' },
-                     { id: 'web', name: 'Web extract', desc: 'Page summarization' },
-                     { id: 'compression', name: 'Compression', desc: 'Context compaction' },
-                     { id: 'skills', name: 'Skills hub', desc: 'Skill search' },
-                     { id: 'approval', name: 'Approval', desc: 'Smart auto-approve' },
-                     { id: 'mcp', name: 'MCP', desc: 'MCP tool routing' },
-                     { id: 'title', name: 'Title gen', desc: 'Session titles' }
                    ].map(task => (
                      <div key={task.id} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div>

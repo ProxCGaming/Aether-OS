@@ -124,12 +124,18 @@ a placebo control.
   task requires vision (`has_images`) and a valid override exists for a
   configured, healthy provider, the override wins with reason
   "User auxiliary override (vision)". Overrides pointing at unconfigured
-  providers are ignored (fail-safe). The other six task classes are
-  persisted and returned so the UI is truthful; they are the documented seam
-  for future per-task routing.
-- Settings UI: dropdowns now initialize from `CONFIG_GET_RESPONSE`,
-  optimistically update on change, and sync on `AUXILIARY_MODEL_SET_RESPONSE`;
-  the per-task subtitle shows the actual override instead of hardcoded text.
+  providers are ignored (fail-safe).
+- Settings UI: the dropdown initializes from `CONFIG_GET_RESPONSE`,
+  optimistically updates on change, and syncs on
+  `AUXILIARY_MODEL_SET_RESPONSE`; the subtitle shows the actual override
+  instead of hardcoded text. **UI honesty decision:** the pre-existing UI
+  listed seven helper tasks (vision, web, compression, skills, approval,
+  mcp, title), but only vision has an engine call site — the other six
+  would have been placebo controls. Per the phase's acceptance rule (every
+  visible dropdown must demonstrably affect engine behavior or be removed),
+  only Vision is rendered. The backend still accepts and validates all
+  seven task ids as the documented seam for future phases. The previously
+  dead "Reset all to main" button now clears the override.
 
 ## B2. Reasoning effort is engine-visible
 

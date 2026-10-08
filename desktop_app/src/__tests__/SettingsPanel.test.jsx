@@ -92,3 +92,33 @@ describe('SettingsPanel Tools Tab', () => {
     expect(screen.getByText('Write')).toBeInTheDocument();
   });
 });
+
+describe('SettingsPanel auxiliary models (Phase 9 UI honesty)', () => {
+  it('renders only tasks with a real engine seam (Vision), no placebo dropdowns', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Models & Tasks'));
+    expect(screen.getByText('⚙ Auxiliary models')).toBeInTheDocument();
+    expect(screen.getByText('Vision')).toBeInTheDocument();
+
+    // The six helper tasks with no engine call site must not be rendered.
+    for (const label of ['Web extract', 'Compression', 'Skills hub', 'Approval', 'MCP', 'Title gen']) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+  });
+
+  it('Reset all to main clears the vision override over the socket', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Models & Tasks'));
+    fireEvent.click(screen.getByText('Reset all to main'));
+
+    const sent = wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
+    const reset = sent.find(m => m.type === 'AUXILIARY_MODEL_SET_REQUEST');
+    expect(reset).toBeDefined();
+    expect(reset.payload.task).toBe('vision');
+    expect(reset.payload.model).toBe('auto');
+  });
+});
