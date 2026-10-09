@@ -80,6 +80,10 @@ class UserConfig:
     window_width: int = 420
     window_height: int = 680
     provider_models: Dict[str, List[str]] = field(default_factory=dict)
+    # Models the provider returned but the discovery filter rejected
+    # (non-chat: embeddings, image, audio...), as {"id", "kind"} dicts.
+    # Shown in the provider card "View all" expander; never in chat selectors.
+    provider_excluded_models: Dict[str, List[Dict[str, str]]] = field(default_factory=dict)
     custom_base_urls: Dict[str, str] = field(default_factory=dict)
     custom_provider_names: Dict[str, str] = field(default_factory=dict)
     custom_provider_types: Dict[str, str] = field(default_factory=dict)
@@ -110,6 +114,7 @@ class UserConfig:
             "window_width": self.window_width,
             "window_height": self.window_height,
             "provider_models": self.provider_models,
+            "provider_excluded_models": self.provider_excluded_models,
             "custom_base_urls": self.custom_base_urls,
             "custom_provider_names": self.custom_provider_names,
             "custom_provider_types": self.custom_provider_types,
@@ -146,6 +151,7 @@ class UserConfig:
             window_width=int(d.get("window_width", 420)),
             window_height=int(d.get("window_height", 680)),
             provider_models=_as_dict(d.get("provider_models")),
+            provider_excluded_models=_as_dict(d.get("provider_excluded_models")),
             custom_base_urls=_as_dict(d.get("custom_base_urls")),
             custom_provider_names=_as_dict(d.get("custom_provider_names")),
             custom_provider_types=_as_dict(d.get("custom_provider_types")),
