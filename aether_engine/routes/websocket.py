@@ -509,6 +509,8 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         pname, key, base_url=base_url, persist_models=False
                     )
                     result["provider"] = pname
+                    # The UI keys its success/error styling off this flag.
+                    result["success"] = result.get("status") == "connected"
                     await ws.send_text(Event(
                         type=resp_type,
                         request_id=req_id,
@@ -527,6 +529,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 try:
                     if not isinstance(pname, str) or not pname.strip():
                         raise ValueError("Provider name is required.")
+                    discovery_error = None
                     is_custom_provider = (
                         pname == "custom_openai"
                         or pname.startswith("custom_")
@@ -563,7 +566,12 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         secret_store.save_provider(pname, key)
                         engine_state.health_manager.reset_provider(pname)
                         if not models:
-                            models = await fetch_available_models(pname, key, base_url=base_url)
+                            disc = await fetch_available_models(pname, key, base_url=base_url)
+                            models = disc.models
+                            if disc.error is not None:
+                                discovery_error = disc.error.to_dict()
+                            elif disc.excluded:
+                                engine_state.user_config.provider_excluded_models[pname] = disc.excluded
                         if models:
                             engine_state.user_config.provider_models[pname] = models
                             engine_state.model_registry.update_provider_models(pname, models)
@@ -587,14 +595,18 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
                     save_config(engine_state.user_config)
                     engine_state.audit_logger.log_event("PROVIDER_SAVED", {"provider": pname})
+                    save_payload = {
+                        "provider": pname,
+                        "success": True,
+                        "models": engine_state.user_config.provider_models.get(pname, []),
+                        "excluded_models": engine_state.user_config.provider_excluded_models.get(pname, []),
+                    }
+                    if discovery_error is not None:
+                        save_payload["discovery_error"] = discovery_error
                     await ws.send_text(Event(
                         type=EventType.PROVIDER_SAVE_RESPONSE,
                         request_id=req_id,
-                        payload={
-                            "provider": pname,
-                            "success": True,
-                            "models": engine_state.user_config.provider_models.get(pname, []),
-                        },
+                        payload=save_payload,
                     ).to_json())
                 except Exception as e:
                     await ws.send_text(Event(
@@ -853,7 +865,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
                         is_custom = pname == "custom_openai" or cfg.custom_provider_types.get(pname) == "openai_compatible"
                         if key or is_custom:
-                            disc_models = await fetch_available_models(
+                            disc = await fetch_available_models(
                                 provider_name=pname,
                                 api_key=key,
                                 base_url=base_url,
@@ -862,8 +874,8 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                             )
                             # Do not persist discovery data for unsaved/template
                             # providers; models still flow back to the UI response.
-                            if disc_models:
-                                refreshed_models[pname] = disc_models
+                            if disc.models or disc.excluded or disc.error:
+                                refreshed_models[pname] = disc
                             is_registered = (
                                 pname in stored
                                 or pname in cfg.custom_base_urls
@@ -871,9 +883,10 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                             )
                             # Only persist if it's a background auto-refresh (no target_provider).
                             # If target_provider is set, it's a manual UI click and should not save.
-                            if disc_models and is_registered and not target_provider:
-                                cfg.provider_models[pname] = disc_models
-                                engine_state.model_registry.update_provider_models(pname, disc_models)
+                            if disc.models and is_registered and not target_provider:
+                                cfg.provider_models[pname] = disc.models
+                                cfg.provider_excluded_models[pname] = disc.excluded
+                                engine_state.model_registry.update_provider_models(pname, disc.models)
                                 save_config(cfg)
                     except Exception as ref_err:
                         logger.error(f"Error during refresh models for {pname}: {ref_err}")
@@ -882,8 +895,12 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 # Surface freshly discovered models for the target provider even if
                 # it is an unsaved template (whose data we intentionally don't persist).
                 for prov in updated_providers:
-                    if prov.get("name") in refreshed_models:
-                        prov["models"] = refreshed_models[prov["name"]]
+                    disc = refreshed_models.get(prov.get("name"))
+                    if disc is not None:
+                        prov["models"] = disc.models
+                        prov["excluded_models"] = disc.excluded
+                        if disc.error is not None:
+                            prov["discovery_error"] = disc.error.to_dict()
                 await ws.send_text(Event(
                     type=EventType.REFRESH_MODELS_RESPONSE,
                     request_id=req_id,

@@ -342,12 +342,13 @@ class CapabilitySchedulerManager:
                         continue
 
                     # 1. Dynamically discover models from provider API
-                    models_to_test = await fetch_available_models(
+                    disc = await fetch_available_models(
                         provider_name=p.name,
                         api_key=key,
                         filter_reachability=True,
                         force_reachability=False,
                     )
+                    models_to_test = disc.models
 
                     # 2. Fallback to persisted provider_models from config
                     if not models_to_test:

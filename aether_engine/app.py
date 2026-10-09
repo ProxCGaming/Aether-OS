@@ -36,14 +36,15 @@ async def lifespan(_app: FastAPI):
             is_custom = pname == "custom_openai" or cfg.custom_provider_types.get(pname) == "openai_compatible"
             if key or is_custom:
                 base_url = cfg.custom_base_urls.get(pname)
-                disc_models = await fetch_available_models(pname, key, base_url=base_url)
-                if disc_models:
-                    cfg.provider_models[pname] = disc_models
-                    engine_state.model_registry.update_provider_models(pname, disc_models)
+                disc = await fetch_available_models(pname, key, base_url=base_url)
+                if disc.models:
+                    cfg.provider_models[pname] = disc.models
+                    cfg.provider_excluded_models[pname] = disc.excluded
+                    engine_state.model_registry.update_provider_models(pname, disc.models)
                     if cfg.default_provider == pname:
-                        if cfg.default_model not in disc_models or "lite" in cfg.default_model:
-                            cfg.default_model = disc_models[0]
-                            engine_state.active_model = disc_models[0]
+                        if cfg.default_model not in disc.models or "lite" in cfg.default_model:
+                            cfg.default_model = disc.models[0]
+                            engine_state.active_model = disc.models[0]
                     save_config(cfg)
         except Exception as e:
             logger.warning(f"Failed startup model discovery for {pname}: {e}")

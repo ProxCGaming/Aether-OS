@@ -91,11 +91,12 @@ async def _build_provider_list_async(store: SecretStore) -> list:
             try:
                 key = store.load_provider(p.name)
                 if key:
-                    disc_models = await fetch_available_models(p.name, key, base_url=base_url)
-                    if disc_models:
-                        models = disc_models
-                        cfg.provider_models[p.name] = disc_models
-                        engine_state.model_registry.update_provider_models(p.name, disc_models)
+                    disc = await fetch_available_models(p.name, key, base_url=base_url)
+                    if disc.models:
+                        models = disc.models
+                        cfg.provider_models[p.name] = disc.models
+                        cfg.provider_excluded_models[p.name] = disc.excluded
+                        engine_state.model_registry.update_provider_models(p.name, disc.models)
                         save_config(cfg)
             except Exception as e:
                 logger.warning(f"Error discovering models for {p.name}: {e}")
@@ -110,6 +111,7 @@ async def _build_provider_list_async(store: SecretStore) -> list:
             "supports_custom_url": getattr(p, "supports_custom_url", False),
             "base_url": base_url,
             "models": models,
+            "excluded_models": cfg.provider_excluded_models.get(p.name, []),
             "has_key": p.name in stored,
             "is_default": cfg.default_provider == p.name,
             "default_model": cfg.default_model if cfg.default_provider == p.name else (models[0] if models else ""),
@@ -131,11 +133,12 @@ async def _build_provider_list_async(store: SecretStore) -> list:
             try:
                 key = store.load_provider(pname) if pname in stored else ""
                 if key or provider_type == "openai_compatible":
-                    disc_models = await fetch_available_models(pname, key, base_url=base_url)
-                    if disc_models:
-                        models = disc_models
-                        cfg.provider_models[pname] = disc_models
-                        engine_state.model_registry.update_provider_models(pname, disc_models)
+                    disc = await fetch_available_models(pname, key, base_url=base_url)
+                    if disc.models:
+                        models = disc.models
+                        cfg.provider_models[pname] = disc.models
+                        cfg.provider_excluded_models[pname] = disc.excluded
+                        engine_state.model_registry.update_provider_models(pname, disc.models)
                         save_config(cfg)
             except Exception as e:
                 logger.warning(f"Error discovering models for {pname}: {e}")
@@ -148,6 +151,7 @@ async def _build_provider_list_async(store: SecretStore) -> list:
             "supports_custom_url": True,
             "base_url": base_url,
             "models": models,
+            "excluded_models": cfg.provider_excluded_models.get(pname, []),
             "has_key": pname in stored or provider_type == "openai_compatible",
             "is_default": cfg.default_provider == pname,
             "default_model": cfg.default_model if cfg.default_provider == pname else (models[0] if models else ""),
@@ -177,6 +181,7 @@ def _build_provider_list(store: SecretStore) -> list:
             "supports_custom_url": getattr(p, "supports_custom_url", False),
             "base_url": base_url,
             "models": models,
+            "excluded_models": cfg.provider_excluded_models.get(p.name, []),
             "has_key": p.name in stored,
             "is_default": cfg.default_provider == p.name,
             "default_model": cfg.default_model if cfg.default_provider == p.name else (models[0] if models else ""),
@@ -202,6 +207,7 @@ def _build_provider_list(store: SecretStore) -> list:
             "supports_custom_url": True,
             "base_url": base_url,
             "models": models,
+            "excluded_models": cfg.provider_excluded_models.get(pname, []),
             "has_key": pname in stored or provider_type == "openai_compatible",
             "is_default": cfg.default_provider == pname,
             "default_model": cfg.default_model if cfg.default_provider == pname else (models[0] if models else ""),
@@ -228,7 +234,8 @@ async def _validate_provider_key(
     """
     if not base_url:
         base_url = engine_state.user_config.custom_base_urls.get(provider_name)
-    discovered_models = await fetch_available_models(provider_name, api_key, base_url=base_url)
+    disc = await fetch_available_models(provider_name, api_key, base_url=base_url)
+    discovered_models = disc.models
 
     candidates: List[str] = [m for m in discovered_models if m][:MAX_VALIDATION_PINGS]
     if not candidates:
@@ -259,14 +266,30 @@ async def _validate_provider_key(
             "latency_ms": result.get("latency_ms", 0.0),
         }
 
-    # Attach discovered models to the result dictionary
+    # Attach discovered models (and the excluded ones, for the provider card
+    # "View all" expander) to the result dictionary.
     result["models"] = discovered_models
+    result["excluded_models"] = disc.excluded
+    if disc.error is not None:
+        result["discovery_error"] = disc.error.to_dict()
+        # The fetch failed AND no ping connected: surface the real fetch
+        # error (with HTTP code) instead of a generic ping failure.
+        if result.get("status") != "connected":
+            code_part = f"HTTP {disc.error.code}" if disc.error.code else "no response"
+            result = {
+                "status": "network_error",
+                "message": f"Model list fetch failed ({code_part}): {disc.error.message}",
+                "models": discovered_models,
+                "excluded_models": disc.excluded,
+                "discovery_error": disc.error.to_dict(),
+            }
 
     if result["status"] == "connected":
         latency = result.get("latency_ms", 100.0)
         engine_state.health_manager.record_success(provider_name, latency)
         if discovered_models and persist_models:
             engine_state.user_config.provider_models[provider_name] = discovered_models
+            engine_state.user_config.provider_excluded_models[provider_name] = disc.excluded
             engine_state.model_registry.update_provider_models(provider_name, discovered_models)
             save_config(engine_state.user_config)
     elif result["status"] == "invalid_key":
