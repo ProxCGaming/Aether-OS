@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication, QPushButton
 from aether_engine.orchestration.core import _validate_provider_key
 from aether_engine.state import engine_state
 from aether_engine.providers.discovery import (
+    DiscoveryResult,
     _discover_openai_compatible_models,
     fetch_available_models,
 )
@@ -38,10 +39,11 @@ async def test_openai_compatible_discovery_initializes_candidates():
         mock_get.return_value = mock_resp
 
         # Must not raise UnboundLocalError for `candidates`.
-        models = await _discover_openai_compatible_models(
+        models, excluded = await _discover_openai_compatible_models(
             base_url="https://example.com/v1", api_key="fake-key"
         )
         assert models == ["llama-3.3-70b"]
+        assert excluded == []
 
 
 def test_user_config_tolerates_null_maps():
@@ -87,10 +89,10 @@ async def test_custom_discovery_uses_base_url_for_non_prefixed_name():
         mock_resp.json.return_value = fake_response
         mock_get.return_value = mock_resp
 
-        models = await fetch_available_models(
+        result = await fetch_available_models(
             "my_lm_studio", "fake-key", base_url="https://example.com/v1"
         )
-        assert models == ["llama-3.3-70b"]
+        assert result.models == ["llama-3.3-70b"]
 
 
 def test_stable_custom_key_is_deterministic():
@@ -129,7 +131,7 @@ async def test_validate_continues_after_model_specific_invalid_key():
         return {"status": "invalid_key", "message": "Invalid API key."}
 
     with patch("aether_engine.orchestration.core.fetch_available_models",
-               new=AsyncMock(return_value=["401-model", "working-model"])), \
+               new=AsyncMock(return_value=DiscoveryResult(models=["401-model", "working-model"]))), \
          patch("aether_engine.orchestration.core.validate_api_key", new=AsyncMock(side_effect=fake_validate)), \
          patch("aether_engine.orchestration.core.save_config"), \
          patch.object(engine_state.health_manager, "record_success"), \
@@ -152,7 +154,7 @@ async def test_validate_custom_key_connected_when_discovery_succeeds():
     name = "custom_discovery_only"
     try:
         with patch("aether_engine.orchestration.core.fetch_available_models",
-                   new=AsyncMock(return_value=["m1", "m2", "m3"])), \
+                   new=AsyncMock(return_value=DiscoveryResult(models=["m1", "m2", "m3"]))), \
              patch("aether_engine.orchestration.core.validate_api_key", new=AsyncMock(side_effect=fake_validate)), \
              patch("aether_engine.orchestration.core.save_config"), \
              patch.object(engine_state.health_manager, "record_success"), \
@@ -178,7 +180,7 @@ async def test_validate_provider_key_retries_past_quota_models():
             return {"status": "connected", "message": "API key is valid.", "latency_ms": 12.0}
         return {"status": "network_error", "message": "quota exhausted"}
 
-    with patch("aether_engine.orchestration.core.fetch_available_models", new=AsyncMock(return_value=discovered)), \
+    with patch("aether_engine.orchestration.core.fetch_available_models", new=AsyncMock(return_value=DiscoveryResult(models=discovered))), \
          patch("aether_engine.orchestration.core.validate_api_key", new=AsyncMock(side_effect=fake_validate)), \
          patch("aether_engine.orchestration.core.save_config"), \
          patch.object(engine_state.health_manager, "record_success"), \
@@ -199,7 +201,7 @@ async def test_validate_provider_key_skips_persist_when_unregistered():
     async def fake_validate(provider, key, model="", base_url=None):
         return {"status": "connected", "message": "ok", "latency_ms": 5.0}
 
-    with patch("aether_engine.orchestration.core.fetch_available_models", new=AsyncMock(return_value=["m1", "m2"])), \
+    with patch("aether_engine.orchestration.core.fetch_available_models", new=AsyncMock(return_value=DiscoveryResult(models=["m1", "m2"]))), \
          patch("aether_engine.orchestration.core.validate_api_key", new=AsyncMock(side_effect=fake_validate)), \
          patch("aether_engine.orchestration.core.save_config"), \
          patch.object(engine_state.health_manager, "record_success"), \

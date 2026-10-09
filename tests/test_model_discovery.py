@@ -1,9 +1,18 @@
-"""Tests for dynamic API-based model discovery and registry updates."""
+"""Tests for dynamic API-based model discovery and registry updates.
+
+Discovery returns a DiscoveryResult: the filtered chat-capable list, the
+excluded list (with kind tags), and an optional DiscoveryError carrying the
+HTTP status code. There are no hardcoded fallback model lists — failures
+surface the real error.
+"""
+import os
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 import httpx
 
 from aether_engine.providers.discovery import (
+    DiscoveryError,
+    DiscoveryResult,
     fetch_available_models,
     _discover_gemini_models,
     _discover_openai_models,
@@ -12,6 +21,23 @@ from aether_engine.providers.discovery import (
     _discover_openrouter_models,
 )
 from aether_engine.routing.registry import ModelRegistry
+
+
+@pytest.fixture(autouse=True)
+def _no_proxy_env(monkeypatch):
+    """This VM has malformed proxy env vars that break httpx client
+    construction; strip them so the mocked HTTP layer is exercised."""
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
+                "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def _mock_get(fake_response, status_code=200):
+    mock_resp = MagicMock()
+    mock_resp.status_code = status_code
+    mock_resp.json.return_value = fake_response
+    mock_resp.text = "mock body"
+    return mock_resp
 
 
 @pytest.mark.asyncio
@@ -56,22 +82,25 @@ async def test_fetch_gemini_models_success():
         ]
     }
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = fake_response
-        mock_get.return_value = mock_resp
+        mock_get.return_value = _mock_get(fake_response)
 
-        models = await _discover_gemini_models("fake-key")
+        models, excluded = await _discover_gemini_models("fake-key")
         assert "gemini-2.0-flash" in models
         assert "gemini-2.5-flash" in models
-        # Alias blocklist should filter out latest tags
+        # Alias blocklist should filter out latest tags — but they stay visible
         assert "gemini-flash-latest" not in models
-        # Embedding model should be filtered out
+        excluded_ids = {e["id"]: e["kind"] for e in excluded}
+        assert excluded_ids["gemini-flash-latest"] == "other"
+        # Embedding model should be filtered out but reported
         assert "text-embedding-004" not in models
+        assert excluded_ids["text-embedding-004"] == "embedding"
         # Image, audio, transcribe, and music models must be filtered out
         assert "gemini-3-pro-image" not in models
         assert "gemini-3.5-transcribe" not in models
         assert "lyria-3.5" not in models
+        assert excluded_ids["gemini-3-pro-image"] == "image"
+        assert excluded_ids["gemini-3.5-transcribe"] == "audio"
+        assert excluded_ids["lyria-3.5"] == "audio"
 
 
 @pytest.mark.asyncio
@@ -85,16 +114,16 @@ async def test_fetch_openai_models_success():
         ]
     }
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = fake_response
-        mock_get.return_value = mock_resp
+        mock_get.return_value = _mock_get(fake_response)
 
-        models = await _discover_openai_models("fake-key")
+        models, excluded = await _discover_openai_models("fake-key")
         assert "gpt-4o" in models
         assert "gpt-4o-mini" in models
         assert "dall-e-3" not in models
         assert "text-embedding-ada-002" not in models
+        excluded_ids = {e["id"]: e["kind"] for e in excluded}
+        assert excluded_ids["dall-e-3"] == "image"
+        assert excluded_ids["text-embedding-ada-002"] == "embedding"
 
 
 @pytest.mark.asyncio
@@ -106,34 +135,87 @@ async def test_fetch_anthropic_models_success():
         ]
     }
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = fake_response
-        mock_get.return_value = mock_resp
+        mock_get.return_value = _mock_get(fake_response)
 
-        models = await _discover_anthropic_models("fake-key")
+        models, excluded = await _discover_anthropic_models("fake-key")
         assert "claude-3-5-sonnet-20241022" in models
         assert "claude-3-5-haiku-20241022" in models
+        assert excluded == []
 
 
 @pytest.mark.asyncio
 async def test_fetch_available_models_error_handling():
+    """Network failure surfaces a DiscoveryError with no HTTP code — and no
+    hardcoded fallback models."""
     with patch("httpx.AsyncClient.get", side_effect=httpx.ConnectError("Network down")):
-        models = await fetch_available_models("google_gemini", "fake-key")
-        # Should gracefully return empty list on network failure
-        assert models == []
+        result = await fetch_available_models("google_gemini", "fake-key")
+        assert isinstance(result, DiscoveryResult)
+        assert result.models == []
+        assert result.excluded == []
+        assert not result.ok
+        assert result.error is not None
+        assert result.error.code is None
+        assert "Network down" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_fetch_available_models_http_error_carries_status_code():
+    """A 401 from the provider is reported with its status code, not masked
+    by a fallback list."""
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = _mock_get({"error": "invalid key"}, status_code=401)
+
+        result = await fetch_available_models("openai", "bad-key")
+        assert result.models == []
+        assert not result.ok
+        assert result.error.code == 401
+        assert "401" in result.error.message
+        err_dict = result.error.to_dict()
+        assert err_dict == {"code": 401, "message": result.error.message}
+
+
+@pytest.mark.asyncio
+async def test_fetch_available_models_returns_excluded_list():
+    fake_response = {
+        "data": [
+            {"id": "meta-llama/llama-3.3-70b-instruct"},
+            {"id": "qwen/qwen-2.5-coder-32b-instruct"},
+            {"id": "text-embedding-3-small"},
+        ]
+    }
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = _mock_get(fake_response)
+
+        result = await fetch_available_models(
+            "custom_openai",
+            "fake-key",
+            base_url="https://api.groq.com/openai/v1",
+        )
+        assert result.ok
+        assert "meta-llama/llama-3.3-70b-instruct" in result.models
+        assert "qwen/qwen-2.5-coder-32b-instruct" in result.models
+        assert "text-embedding-3-small" not in result.models
+        excluded_ids = {e["id"]: e["kind"] for e in result.excluded}
+        assert excluded_ids["text-embedding-3-small"] == "embedding"
+
+
+@pytest.mark.asyncio
+async def test_fetch_available_models_empty_key():
+    result = await fetch_available_models("openai", "")
+    assert result.ok
+    assert result.models == []
 
 
 @pytest.mark.asyncio
 async def test_registry_update_provider_models():
     registry = ModelRegistry()
     registry.update_provider_models("google_gemini", ["gemini-test-1", "gemini-test-2"])
-    
+
     models = registry.get_models_for_provider("google_gemini")
     model_ids = [m.id for m in models]
     assert "gemini-test-1" in model_ids
     assert "gemini-test-2" in model_ids
-    
+
     # Check that entry was registered with valid priority and capabilities
     entry = registry.get_model("gemini-test-1")
     assert entry is not None
@@ -165,30 +247,3 @@ def test_resolve_litellm_model_openrouter_and_providers():
     # Custom OpenAI compatible
     assert resolve_litellm_model("llama-3.3-70b-versatile", "custom_openai") == "openai/llama-3.3-70b-versatile"
     assert resolve_litellm_model("my-custom-model", "custom") == "openai/my-custom-model"
-
-
-@pytest.mark.asyncio
-async def test_fetch_custom_openai_models_success():
-    fake_response = {
-        "data": [
-            {"id": "meta-llama/llama-3.3-70b-instruct"},
-            {"id": "qwen/qwen-2.5-coder-32b-instruct"},
-            {"id": "text-embedding-3-small"},
-        ]
-    }
-    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = fake_response
-        mock_get.return_value = mock_resp
-
-        models = await fetch_available_models(
-            "custom_openai",
-            "fake-key",
-            base_url="https://api.groq.com/openai/v1",
-        )
-        assert "meta-llama/llama-3.3-70b-instruct" in models
-        assert "qwen/qwen-2.5-coder-32b-instruct" in models
-        assert "text-embedding-3-small" not in models
-
-

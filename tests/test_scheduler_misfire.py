@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from aether_engine.scheduler.capability_jobs import CapabilitySchedulerManager
+from aether_engine.providers.discovery import DiscoveryResult
 
 
 @pytest.fixture
@@ -63,7 +64,7 @@ class TestSchedulerMisfire:
         mock_store.list_providers.return_value = ["google_gemini"]
         mock_store.load_provider.return_value = "fake-key"
 
-        mock_discovery = AsyncMock(return_value=["gemini-2.0-flash", "gemini-flash-latest"])
+        mock_discovery = AsyncMock(return_value=DiscoveryResult(models=["gemini-2.0-flash", "gemini-flash-latest"]))
         mock_self_test = AsyncMock(return_value={
             "model_id": "gemini-2.0-flash",
             "provider": "google_gemini",

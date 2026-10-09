@@ -15,6 +15,7 @@ from aether_common.contracts import (
 )
 from aether_engine.app import app, engine_state
 from aether_engine.providers.base import BaseProvider, StreamChunk
+from aether_engine.providers.discovery import DiscoveryResult
 from aether_engine.providers.litellm_provider import LiteLLMProvider
 from aether_engine.secrets.storage import SecretStore
 
@@ -332,7 +333,7 @@ class TestEngineWebSocket(unittest.TestCase):
                 valid_token = engine_state.auth_token
                 with patch("aether_engine.app.SecretStore") as mock_cls, \
                      patch("aether_engine.app.fetch_available_models",
-                           new=AsyncMock(return_value=["m1", "m2"])):
+                           new=AsyncMock(return_value=DiscoveryResult(models=["m1", "m2"]))):
                     mock_store = mock_cls.return_value
                     mock_store.list_providers.return_value = []
                     mock_store.save_provider.return_value = None
