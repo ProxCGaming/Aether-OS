@@ -10,12 +10,14 @@ from .base import (
     ToolCall,
     ToolResult,
 )
-from .discovery import fetch_available_models
+from .discovery import DiscoveryError, DiscoveryResult, fetch_available_models
 from .litellm_provider import LiteLLMProvider, resolve_litellm_model, validate_api_key
 
 __all__ = [
     "AuthenticationError",
     "BaseProvider",
+    "DiscoveryError",
+    "DiscoveryResult",
     "InvalidResponseError",
     "LiteLLMProvider",
     "NetworkError",
