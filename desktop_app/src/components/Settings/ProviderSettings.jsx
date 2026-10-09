@@ -9,6 +9,7 @@ export default function ProviderSettings({ providers = [] }) {
   const [expandedProvider, setExpandedProvider] = useState(null);
   const [validationState, setValidationState] = useState({});
   const [validationMsg, setValidationMsg] = useState({});
+  const [expandedModels, setExpandedModels] = useState({});
   const [customDisplayNames, setCustomDisplayNames] = useState({});
 
   useEffect(() => {
@@ -17,9 +18,13 @@ export default function ProviderSettings({ providers = [] }) {
         const data = JSON.parse(event.data);
         if (data.type === 'PROVIDER_VALIDATE_RESPONSE' || data.type === 'SETTINGS_PROVIDER_VALIDATE_RESULT') {
           const provider = data.payload.provider;
+          const discErr = data.payload.discovery_error;
+          const discErrText = discErr
+            ? ` (model list failed: ${discErr.code ? 'HTTP ' + discErr.code : 'no response'} — ${discErr.message})`
+            : '';
           if (data.payload.success) {
             setValidationState(prev => ({ ...prev, [provider]: 'success' }));
-            setValidationMsg(prev => ({ ...prev, [provider]: 'Test Successful' }));
+            setValidationMsg(prev => ({ ...prev, [provider]: 'Test Successful' + discErrText }));
             setTimeout(() => setValidationState(prev => ({ ...prev, [provider]: null })), 3000);
           } else {
             setValidationState(prev => ({ ...prev, [provider]: 'error' }));
@@ -28,9 +33,13 @@ export default function ProviderSettings({ providers = [] }) {
         } else if (data.type === 'PROVIDER_SAVE_RESPONSE') {
           const provider = data.payload.provider;
           const isCustomSave = provider.startsWith('custom_');
+          const discErr = data.payload.discovery_error;
+          const discErrText = discErr
+            ? ` Model list failed (${discErr.code ? 'HTTP ' + discErr.code : 'no response'}): ${discErr.message}`
+            : '';
           if (data.payload.success) {
             setValidationState(prev => ({ ...prev, [provider]: 'success', ...(isCustomSave ? { custom_openai: 'success' } : {}) }));
-            setValidationMsg(prev => ({ ...prev, [provider]: 'Saved!', ...(isCustomSave ? { custom_openai: 'Saved!' } : {}) }));
+            setValidationMsg(prev => ({ ...prev, [provider]: 'Saved!' + discErrText, ...(isCustomSave ? { custom_openai: 'Saved!' + discErrText } : {}) }));
             setTimeout(() => setValidationState(prev => ({ ...prev, [provider]: null, ...(isCustomSave ? { custom_openai: null } : {}) })), 3000);
           } else {
             setValidationState(prev => ({ ...prev, [provider]: 'error', ...(isCustomSave ? { custom_openai: 'error' } : {}) }));
@@ -205,6 +214,37 @@ export default function ProviderSettings({ providers = [] }) {
                       {validationState[providerName] === 'saving' ? 'Saving...' : 'Save Configuration'}
                     </button>
                   </div>
+
+                  {((p.models && p.models.length > 0) || (p.excluded_models && p.excluded_models.length > 0)) && (
+                    <div style={{ marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '12px' }}>
+                      <button
+                        onClick={() => setExpandedModels(prev => ({ ...prev, [providerName]: !prev[providerName] }))}
+                        style={{ background: 'transparent', color: '#a78bfa', border: 'none', fontSize: '13px', cursor: 'pointer', padding: 0 }}
+                      >
+                        {expandedModels[providerName] ? '▾ Hide' : `▸ View all ${(p.models?.length || 0) + (p.excluded_models?.length || 0)} models`}
+                      </button>
+                      {expandedModels[providerName] && (
+                        <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: '220px', overflowY: 'auto' }}>
+                          {(p.models || []).map(m => (
+                            <div key={m} style={{ fontSize: '13px', color: '#e2e8f0', fontFamily: 'monospace', padding: '4px 8px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
+                              {m}
+                            </div>
+                          ))}
+                          {(p.excluded_models || []).map(m => {
+                            const id = typeof m === 'string' ? m : m.id;
+                            const kind = typeof m === 'string' ? 'other' : (m.kind || 'other');
+                            const kindColors = { embedding: '#60a5fa', image: '#c084fc', audio: '#34d399', other: '#9ca3af' };
+                            return (
+                              <div key={id} style={{ fontSize: '13px', color: '#9ca3af', fontFamily: 'monospace', padding: '4px 8px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span>{id}</span>
+                                <span style={{ fontSize: '11px', color: kindColors[kind] || kindColors.other, border: `1px solid ${kindColors[kind] || kindColors.other}`, borderRadius: '8px', padding: '1px 8px', fontFamily: 'sans-serif' }}>{kind}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
