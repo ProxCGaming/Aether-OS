@@ -302,19 +302,27 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
         "- search_knowledge_graph: fetch long-term user facts, preferences, or project entities\n"
         "- search_past_episodes: fetch past completed tasks across previous sessions\n\n"
         "THINK CAREFULLY:\n"
-        "1. If the request is self-contained (e.g. code generation, calculation, generic explanation, basic greeting), "
-        "DO NOT call any memory tools. Directly output your JSON routing decision.\n"
-        "2. If the request asks for or depends on prior context (e.g. 'what is my name?', 'remember what we discussed?', "
-        "'continue the previous work', 'use my preferred language'), CALL the appropriate tool(s) to retrieve the facts.\n"
-        "3. Once you have the necessary context, output ONLY a JSON object with three keys:\n"
+        "1. NEVER call memory tools for self-contained requests. Examples that must be handled WITHOUT any tool call: "
+        "current time/date, greetings, basic math, code generation, generic explanations, definitions. "
+        "For these, output your JSON routing decision immediately.\n"
+        "2. ONLY call memory tools when the user explicitly refers to prior context, e.g. 'what is my name?', "
+        "'remember what we discussed?', 'continue the previous work', 'use my preferred style'.\n"
+        "3. The 'briefing' field is ONLY for facts you directly retrieved from memory tools. "
+        "Do NOT infer or hallucinate history — if you did not call a memory tool, set briefing to empty string.\n"
+        "4. Once you have the necessary context, output ONLY a JSON object with three keys:\n"
         f"   - 'next': the specialist name ({options_str}) or 'END'\n"
-        "   - 'reason': why you chose them and the operational goal\n"
-        "   - 'briefing': concise 1-2 sentence summary of any relevant retrieved facts to guide the specialist (or empty string if none)\n"
+        "   - 'reason': a concise description of the operational goal for the specialist\n"
+        "   - 'briefing': ONLY facts retrieved from memory tools (empty string if no tool was called)\n"
         "IMPORTANT: For simple questions or conversational input, delegate to 'planner'. "
         "Only use 'END' if a response has already been provided."
     )
 
-    messages = [{"role": "system", "content": system_prompt}] + state.get("messages", [])
+    state_messages = list(state.get("messages", []))
+    if not any(isinstance(m, dict) and m.get("role") == "user" for m in state_messages):
+        orig = state.get("original_prompt") or "Please review the task."
+        state_messages.insert(0, {"role": "user", "content": orig})
+
+    messages = [{"role": "system", "content": system_prompt}] + state_messages
 
     if messages and messages[-1].get("role") != "user":
         messages.append({
@@ -438,12 +446,12 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
     briefing = (decision.get("briefing") or "").strip()
     reason = decision.get("reason", "")
 
-    # Update plan with targeted briefing context so specialist receives the precise fact without bloated history
-    existing_plan = state.get("plan", "")
-    if briefing:
-        updated_plan = f"Context: {briefing}\nGoal: {reason}"
-    else:
-        updated_plan = existing_plan if existing_plan and existing_plan != "No plan currently." else f"Goal: {reason}"
+    # Update plan — only carry the operational goal forward.
+    # Deliberately do NOT re-inject the LLM-generated briefing as a 'Context:' block
+    # because it feeds back into the next supervisor call and causes the LLM to amplify
+    # hallucinated history (e.g. 'the user is repeatedly asking for X').
+    # Specialists receive the briefing directly via context_briefing, not via plan.
+    updated_plan = f"Goal: {reason}"
 
     log_entry = {
         "timestamp": int(time.time()),
