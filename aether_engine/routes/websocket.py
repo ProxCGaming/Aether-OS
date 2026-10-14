@@ -410,7 +410,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 ).to_json())
 
             elif msg.type in (EventType.TOOL_APPROVAL_GRANTED, EventType.TOOL_APPROVAL_REJECTED):
-                approval_key = msg.payload.get("approval_key")
+                approval_key = msg.payload.get("approval_key") or msg.request_id
                 is_approved = (msg.type == EventType.TOOL_APPROVAL_GRANTED)
                 
                 if is_approved:
@@ -450,7 +450,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     
                 req_id = msg.request_id or "resume"
                 task_runner = asyncio.create_task(
-                    execute_task_generator(resume_gen, engine_state.active_provider, engine_state.active_model, req_id, session_id=None)
+                    execute_task_generator(resume_gen, engine_state.active_provider, engine_state.active_model, req_id, session_id=session_id or engine_state.active_session_id)
                 )
 
             # -----------------------------------------------------------
