@@ -1,5 +1,10 @@
-from typing import Literal, Any
+from typing import Literal, Any, Optional
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END
+try:
+    from langgraph.config import get_config
+except ImportError:
+    get_config = None  # older langgraph versions
 
 from aether_engine.langgraph.state import AetherState
 from aether_engine.langgraph.nodes.supervisor import supervisor_node
@@ -17,7 +22,7 @@ def supervisor_router(state: AetherState) -> Literal["researcher", "planner", "c
             return next_node
     return "__end__"
 
-def tool_router(state: AetherState, config: Any) -> Literal["execute_tool", "pause_for_approval", "supervisor"]:
+def tool_router(state: AetherState, config: RunnableConfig | None = None) -> Literal["execute_tool", "pause_for_approval", "supervisor"]:
     # Conditional edge using policy to determine if approval is needed
     pending = state.get("pending_tool_call")
     if not pending:
@@ -26,17 +31,20 @@ def tool_router(state: AetherState, config: Any) -> Literal["execute_tool", "pau
     
     tool_name = pending.get("name")
     
-    # Extract config
-    configurable = config.get("configurable", {})
+    configurable = {}
+    if config and isinstance(config, dict):
+        configurable = config.get("configurable", {})
+    if not configurable and get_config is not None:
+        try:
+            configurable = get_config().get("configurable", {})
+        except Exception:
+            pass
+            
     user_config = configurable.get("user_config")
     registry = configurable.get("tool_registry")
+    user_policies = user_config.tool_policies if user_config else {}
     
-    if user_config:
-        policy = resolve_policy_by_name(tool_name, user_config.tool_policies, registry)
-    else:
-        # Fallback if no config, default to ask
-        policy = "ask"
-        
+    policy = resolve_policy_by_name(tool_name, user_policies, registry)
     if policy == "ask":
         return "pause_for_approval"
     return "execute_tool"
