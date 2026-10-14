@@ -219,7 +219,11 @@ class LiteLLMProvider(BaseProvider):
         return kwargs
 
     def _convert_messages(self, messages: Any) -> List[Dict[str, Any]]:
-        """Convert internal message format to OpenAI-compatible messages for LiteLLM."""
+        """Convert internal message format to OpenAI-compatible messages for LiteLLM.
+
+        Also normalizes turn structure for strict providers like Google Gemini / Vertex AI
+        which enforce that functionCall turns must immediately follow a user turn or functionResponse.
+        """
         if isinstance(messages, str):
             return [{"role": "user", "content": messages}]
 
@@ -232,29 +236,38 @@ class LiteLLMProvider(BaseProvider):
             role = msg.get("role", "user")
             content = msg.get("content", "")
 
-            if role == "tool":
-                call_id = msg.get("tool_call_id") or msg.get("call_id")
-                tool_name = msg.get("name", "tool")
+            if role in ("tool", "function"):
+                call_id = msg.get("tool_call_id") or msg.get("call_id") or msg.get("id")
+                tool_name = msg.get("name")
 
-                # If call_id was not explicitly stored on tool message, resolve it from the preceding assistant message
-                if not call_id:
+                # If call_id or tool_name missing, resolve from preceding assistant message
+                if not call_id or not tool_name:
                     for prev_m in reversed(converted):
                         if prev_m.get("role") == "assistant" and prev_m.get("tool_calls"):
                             for prev_tc in prev_m["tool_calls"]:
                                 fn = prev_tc.get("function", {})
-                                if fn.get("name") == tool_name:
-                                    call_id = prev_tc.get("id")
+                                if not tool_name or fn.get("name") == tool_name:
+                                    if not call_id:
+                                        call_id = prev_tc.get("id")
+                                    if not tool_name:
+                                        tool_name = fn.get("name")
                                     break
-                            if call_id:
+                                elif call_id and prev_tc.get("id") == call_id:
+                                    if not tool_name:
+                                        tool_name = fn.get("name")
+                                    break
+                            if call_id and tool_name:
                                 break
 
+                if not tool_name:
+                    tool_name = "tool"
                 if not call_id:
                     call_id = f"call_{tool_name}"
 
                 converted.append({
                     "role": "tool",
                     "content": str(content),
-                    "name": tool_name,
+                    "name": str(tool_name),
                     "tool_call_id": str(call_id),
                 })
             elif role == "assistant":
@@ -276,12 +289,16 @@ class LiteLLMProvider(BaseProvider):
                                 },
                             })
                         elif isinstance(tc, dict):
+                            fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                            tool_name = tc.get("name") or fn.get("name") or "tool"
+                            tool_args = tc.get("args") or fn.get("arguments") or {}
+                            call_id = tc.get("id") or tc.get("call_id") or f"call_{tool_name}"
                             tc_list.append({
-                                "id": tc.get("id", tc.get("call_id", f"call_{tc.get('name', 'tool')}")),
+                                "id": str(call_id),
                                 "type": "function",
                                 "function": {
-                                    "name": tc.get("name", "tool"),
-                                    "arguments": _safe_json_dumps(tc.get("args", {})),
+                                    "name": str(tool_name),
+                                    "arguments": _safe_json_dumps(tool_args),
                                 },
                             })
                     entry["tool_calls"] = tc_list
@@ -305,7 +322,36 @@ class LiteLLMProvider(BaseProvider):
                 else:
                     converted.append({"role": role, "content": str(content)})
 
-        return converted
+        # ── Turn Normalization for Gemini / Vertex AI strict constraints ──
+        # Gemini requires that the first non-system turn is "user", and functionCall turns
+        # must immediately follow a user turn or function response turn.
+        system_msgs = [m for m in converted if m.get("role") == "system"]
+        chat_msgs = [m for m in converted if m.get("role") != "system"]
+
+        if not chat_msgs:
+            return system_msgs + [{"role": "user", "content": "Hello"}]
+
+        # Ensure first chat message is user
+        if chat_msgs[0].get("role") in ("assistant", "tool"):
+            chat_msgs.insert(0, {"role": "user", "content": "Please proceed with the task."})
+
+        # Merge adjacent assistant messages to prevent consecutive model turns
+        normalized_chat: List[Dict[str, Any]] = []
+        for m in chat_msgs:
+            if normalized_chat and normalized_chat[-1].get("role") == "assistant" and m.get("role") == "assistant":
+                prev = normalized_chat[-1]
+                c1 = prev.get("content") or ""
+                c2 = m.get("content") or ""
+                merged_content = f"{c1}\n{c2}".strip() if (c1 or c2) else None
+                prev["content"] = merged_content
+                tc1 = prev.get("tool_calls") or []
+                tc2 = m.get("tool_calls") or []
+                if tc1 or tc2:
+                    prev["tool_calls"] = tc1 + tc2
+            else:
+                normalized_chat.append(m)
+
+        return system_msgs + normalized_chat
 
     def _convert_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert internal tool definitions to OpenAI-format function tools.
