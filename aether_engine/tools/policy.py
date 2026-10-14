@@ -1,11 +1,12 @@
 from typing import Dict
 from aether_engine.tools.registry import Tool, ToolRisk
 
-# known supervisor memory tools that don't live in the registry
+# known supervisor memory / safe built-in tools that might be evaluated without full registry
 KNOWN_NON_REGISTRY_TOOLS: Dict[str, ToolRisk] = {
     "get_current_chat_history": ToolRisk.READ_ONLY,
     "search_knowledge_graph": ToolRisk.READ_ONLY,
     "search_past_episodes": ToolRisk.READ_ONLY,
+    "get_current_time": ToolRisk.READ_ONLY,
 }
 
 def resolve_tool_policy(tool: Tool, user_policies: Dict[str, str]) -> str:
