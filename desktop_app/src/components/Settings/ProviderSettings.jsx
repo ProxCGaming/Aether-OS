@@ -77,10 +77,12 @@ export default function ProviderSettings({ providers = [] }) {
     sendMessage('PROVIDER_SAVE_REQUEST', {
       schema_version: 1,
       request_id: Date.now().toString(),
-      provider: finalProviderName,
-      api_key: apiKeyToSave,
-      base_url: baseUrls[providerName] || '',
-      ...(displayName && { display_name: displayName, provider_type: 'openai_compatible' })
+      payload: {
+        provider: finalProviderName,
+        api_key: apiKeyToSave,
+        base_url: baseUrls[providerName] || '',
+        ...(displayName && { display_name: displayName, provider_type: 'openai_compatible' })
+      }
     });
   };
 
@@ -89,9 +91,11 @@ export default function ProviderSettings({ providers = [] }) {
     sendMessage('SETTINGS_PROVIDER_VALIDATE_REQUEST', {
       schema_version: 1,
       request_id: Date.now().toString(),
-      provider: providerName,
-      api_key: keys[providerName] || '',
-      base_url: baseUrls[providerName] || ''
+      payload: {
+        provider: providerName,
+        api_key: keys[providerName] || '',
+        base_url: baseUrls[providerName] || ''
+      }
     });
   };
 
@@ -100,7 +104,9 @@ export default function ProviderSettings({ providers = [] }) {
     sendMessage('PROVIDER_REMOVE_REQUEST', {
       schema_version: 1,
       request_id: Date.now().toString(),
-      provider: providerName
+      payload: {
+        provider: providerName
+      }
     });
     setExpandedProvider(null);
   };
