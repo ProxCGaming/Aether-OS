@@ -60,7 +60,7 @@ describe('ProviderSettings Component', () => {
     fireEvent.click(testButton);
 
     expect(mockSendMessage).toHaveBeenCalledWith('SETTINGS_PROVIDER_VALIDATE_REQUEST', expect.objectContaining({
-      provider: 'google_gemini'
+      payload: expect.objectContaining({ provider: 'google_gemini' })
     }));
 
     // Simulate success response
@@ -100,8 +100,10 @@ describe('ProviderSettings Component', () => {
     // As per Phase 2, useAetherSocket queues messages when offline.
     // The component continues normally and passes the message to the hook.
     expect(mockSendMessage).toHaveBeenCalledWith('PROVIDER_SAVE_REQUEST', expect.objectContaining({
-      provider: 'openai',
-      api_key: 'sk-test'
+      payload: expect.objectContaining({
+        provider: 'openai',
+        api_key: 'sk-test'
+      })
     }));
   });
 });

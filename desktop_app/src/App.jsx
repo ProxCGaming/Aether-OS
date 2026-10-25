@@ -520,13 +520,20 @@ function AppContent() {
           }]);
         } else if (data.type === 'TOOL_APPROVAL_REQUEST') {
           setIsThinking(false);
-          setChatMessages(prev => [...prev, { 
+          const approvalMsg = { 
             id: data.request_id || Date.now().toString(),
             role: 'tool_approval', 
             tool_name: data.payload.tool_name,
-            tool_args: data.payload.tool_args,
+            tool_args: data.payload.tool_args || data.payload.args || {},
+            approval_key: data.payload.approval_key || data.request_id,
             isFinal: true
-          }]);
+          };
+          if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
+            const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
+            sessionCacheRef.current[activeTaskSessionRef.current] = [...cached, approvalMsg];
+          } else {
+            setChatMessages(prev => [...prev, approvalMsg]);
+          }
         } else if (data.type === 'PLUGIN_APPROVAL_REQUEST') {
           setIsThinking(false);
           setChatMessages(prev => [...prev, { 
@@ -716,16 +723,20 @@ function AppContent() {
     }
   };
 
-  const handleToolApproval = (requestId, approved) => {
+  const handleToolApproval = (requestId, approved, approvalKey) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const key = approvalKey || requestId;
       wsRef.current.send(JSON.stringify({
         type: approved ? 'TOOL_APPROVAL_GRANTED' : 'TOOL_APPROVAL_REJECTED',
         schema_version: 1,
         request_id: requestId,
-        payload: {}
+        payload: {
+          approval_key: key,
+          approved: approved
+        }
       }));
       // Remove the approval card from chat
-      setChatMessages(prev => prev.filter(m => m.id !== requestId));
+      setChatMessages(prev => prev.filter(m => m.id !== requestId && m.approval_key !== key));
       if (approved) setIsThinking(true);
     }
   };

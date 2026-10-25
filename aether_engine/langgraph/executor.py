@@ -135,6 +135,7 @@ async def run_langgraph_task(
         }
 
         start_time = time.time()
+        elapsed_ms = 0.0
         full_response_parts: list[str] = []
         interrupted = False
         thinking_log = []
@@ -211,7 +212,7 @@ async def run_langgraph_task(
                                     "tool_name": intr_val.get("tool_name"),
                                     "args": intr_val.get("args"),
                                     "task_id": task_id,
-                                    "approval_key": request_id,
+                                    "approval_key": thread_id,
                                     "task_class": intr_val.get("task_class"),
                                     "workspace_roots": workspace_roots or [],
                                 },
@@ -226,6 +227,7 @@ async def run_langgraph_task(
                         next_step = decision.get("next", "UNKNOWN")
                         reason = decision.get("reason", "")
                         briefing = decision.get("briefing", "")
+                        updated_plan = state_update.get("plan", "")
                         
                         text_delta = f"\n\n[Supervisor] -> Delegating to {next_step.upper()}\nReason: {reason}"
                         if briefing:
@@ -246,13 +248,12 @@ async def run_langgraph_task(
                                 "briefing": briefing,
                                 "input_payload": {
                                     "user_prompt": prompt,
-                                    "plan_context": state_update.get("plan", ""),
                                 },
                                 "output_payload": {
                                     "decision": decision,
-                                    "briefing": briefing,
+                                    "briefing": briefing if briefing else None,
                                     "assigned_specialist": next_step.lower(),
-                                    "updated_plan": state_update.get("plan", ""),
+                                    "updated_plan": updated_plan,
                                 },
                                 "status": "completed",
                                 "timestamp": int(time.time()),
@@ -362,35 +363,35 @@ async def run_langgraph_task(
 
             if not interrupted:
                 elapsed_ms = round((time.time() - start_time) * 1000, 2)
-            full_response = "\n".join(full_response_parts).strip()
-            
-            # Save the episode memory asynchronously if finished
-            if not interrupted and full_response:
-                try:
-                    thinking_log_str = "\n".join(thinking_log)
-                    await episodic.store_episode(
-                        task_id=task_id,
-                        user_prompt=prompt,
-                        task_summary=full_response[:200],  # using response snippet as summary
-                        tags=["task", "completed"],
-                        outcome=full_response,
-                        thinking_log=thinking_log_str,
-                    )
-                except Exception as db_err:
-                    logger.error(f"Failed to store episode in DB for {task_id}: {db_err}")
-                    
-            yield Event(
-                type=EventType.TASK_COMPLETED,
-                request_id=request_id,
-                payload={
-                    "task_id": task_id,
-                    "state": TaskState.SUCCEEDED.value,
-                    "latency_ms": elapsed_ms,
-                    "response": full_response or "(task completed)",
-                    "thoughts": accumulated_thoughts,
-                    "session_id": session_id,
-                },
-            )
+                full_response = "\n".join(full_response_parts).strip()
+                
+                # Save the episode memory asynchronously if finished
+                if full_response:
+                    try:
+                        thinking_log_str = "\n".join(thinking_log)
+                        await episodic.store_episode(
+                            task_id=task_id,
+                            user_prompt=prompt,
+                            task_summary=full_response[:200],  # using response snippet as summary
+                            tags=["task", "completed"],
+                            outcome=full_response,
+                            thinking_log=thinking_log_str,
+                        )
+                    except Exception as db_err:
+                        logger.error(f"Failed to store episode in DB for {task_id}: {db_err}")
+                        
+                yield Event(
+                    type=EventType.TASK_COMPLETED,
+                    request_id=request_id,
+                    payload={
+                        "task_id": task_id,
+                        "state": TaskState.SUCCEEDED.value,
+                        "latency_ms": elapsed_ms,
+                        "response": full_response or "(task completed)",
+                        "thoughts": accumulated_thoughts,
+                        "session_id": session_id,
+                    },
+                )
         except Exception as e:
             logger.exception("LangGraph task failed")
             elapsed_ms = round((time.time() - start_time) * 1000, 2) if 'start_time' in locals() else 0.0
@@ -530,6 +531,7 @@ async def resume_langgraph_task(
                         "state": TaskState.SUCCEEDED.value,
                         "latency_ms": elapsed_ms,
                         "response": full_response or "(task completed)",
+                        "session_id": state_obj.values.get("session_id"),
                     },
                 )
         except Exception as e:

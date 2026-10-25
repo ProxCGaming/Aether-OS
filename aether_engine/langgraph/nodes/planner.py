@@ -73,7 +73,12 @@ async def planner_node(state: AetherState, config: RunnableConfig) -> dict:
         "You are a Planner agent. Break goals into structured steps, monitor progress, adapt the plan, or respond directly to conversational input.\n"
         f"{plan_info}{skill_text}"
     )
-    messages = [{"role": "system", "content": system_prompt}] + state.get("messages", [])
+    state_messages = list(state.get("messages", []))
+    if not any(isinstance(m, dict) and m.get("role") == "user" for m in state_messages):
+        orig = state.get("original_prompt") or "Please proceed with breaking goals into structured steps and updating the plan."
+        state_messages.insert(0, {"role": "user", "content": orig})
+
+    messages = [{"role": "system", "content": system_prompt}] + state_messages
     
     if messages and messages[-1].get("role") not in ("user", "tool"):
         messages.append({
