@@ -80,6 +80,13 @@ logger = logging.getLogger("aether_engine.routes.websocket")
 
 router = APIRouter()
 
+# Phase 10.1 A1: pending plugin installs awaiting the user's approval.
+# Keyed by request id; each value is the prepare_install() payload
+# ({"source": ..., "manifest": {...}}) for one PLUGIN_INSTALL_REQUEST.
+# The install is only executed when the matching PLUGIN_APPROVAL_GRANTED
+# arrives; a PLUGIN_APPROVAL_REJECTED pops (discards) the entry.
+pending_plugin_installs: Dict[str, Dict[str, Any]] = {}
+
 async def _execute_tool_in_worker(tool_name: str, args: Dict[str, Any], task_class: str) -> Any:
     """Run an approved risky tool via the shared sandbox worker. Thin wrapper that injects engine_state context."""
     from aether_engine.workers.sandbox import execute_tool_in_worker
@@ -170,11 +177,12 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         TaskState.RUNNING,
                         ev.payload,
                     )
-                elif ev.type in (EventType.TASK_COMPLETED, EventType.TASK_CANCELLED, EventType.TASK_FAILED):
+                elif ev.type in (EventType.TASK_COMPLETED, EventType.TASK_CANCELLED, EventType.TASK_FAILED, EventType.TASK_INTERRUPTED):
                     to = {
                         EventType.TASK_COMPLETED: TaskState.SUCCEEDED,
                         EventType.TASK_CANCELLED: TaskState.CANCELLED,
                         EventType.TASK_FAILED: TaskState.FAILED,
+                        EventType.TASK_INTERRUPTED: TaskState.PENDING_APPROVAL,
                     }[ev.type]
                     engine_state.audit_logger.log_task_transition(
                         ev.payload.get("task_id", "unknown"),

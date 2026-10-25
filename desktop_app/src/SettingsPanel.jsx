@@ -288,21 +288,17 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   }, [activeMenu, wsRef]);
 
   useEffect(() => {
-    // Initialize local state with backend keys
-    const initKeys = {};
+    // Initialize local state with backend keys.
+    // Phase 10.1 C1: we never receive the actual API key for security, and
+    // keys are never mirrored to localStorage — the password field always
+    // starts empty; the user re-enters a key to change it. Configured state
+    // comes from the engine's has_key, never from a stored key.
     const initBaseUrls = {};
     if (Array.isArray(providers)) {
       providers.forEach(p => {
-        // We don't receive the actual API key for security, so we leave it empty.
-        // But we can pre-fill it from localStorage if the user previously entered it!
-        const savedLocalKey = localStorage.getItem(`aether_saved_key_${p.name}`);
-        if (savedLocalKey) {
-          initKeys[p.name] = savedLocalKey;
-        }
         initBaseUrls[p.name] = p.base_url || '';
       });
     }
-    setKeys(prev => ({...initKeys, ...prev}));
     setBaseUrls(prev => ({...initBaseUrls, ...prev}));
   }, [providers]);
 
@@ -324,9 +320,9 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
     setValidationState(prev => ({ ...prev, [providerName]: 'saving' }));
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const apiKeyToSave = keys[providerName] || '';
-      if (apiKeyToSave) {
-        localStorage.setItem(`aether_saved_key_${finalProviderName}`, apiKeyToSave);
-      }
+      // Phase 10.1 C1: keys are NEVER mirrored to localStorage (or any other
+      // renderer storage). The engine's secure secret store is the only
+      // destination — the key goes out via PROVIDER_SAVE_REQUEST only.
       wsRef.current.send(JSON.stringify({
         type: 'PROVIDER_SAVE_REQUEST',
         schema_version: 1,

@@ -361,7 +361,25 @@ async def run_langgraph_task(
                 if interrupted:
                     break
 
-            if not interrupted:
+            if interrupted:
+                # Phase 10.1 A2: an interrupted task is paused for approval,
+                # not failed and not complete. Emit a distinct interrupted
+                # outcome (state PENDING_APPROVAL) so the approval-pause ->
+                # kill-engine -> restart -> resume flow can pick the thread
+                # back up via its approval_key. Never TASK_FAILED/COMPLETED.
+                elapsed_ms = round((time.time() - start_time) * 1000, 2)
+                yield Event(
+                    type=EventType.TASK_INTERRUPTED,
+                    request_id=request_id,
+                    payload={
+                        "task_id": task_id,
+                        "state": TaskState.PENDING_APPROVAL.value,
+                        "latency_ms": elapsed_ms,
+                        "approval_key": thread_id,
+                        "session_id": session_id,
+                    },
+                )
+            else:
                 elapsed_ms = round((time.time() - start_time) * 1000, 2)
                 full_response = "\n".join(full_response_parts).strip()
                 
@@ -379,6 +397,20 @@ async def run_langgraph_task(
                         )
                     except Exception as db_err:
                         logger.error(f"Failed to store episode in DB for {task_id}: {db_err}")
+                    # Phase 10.1 A3: extract knowledge-graph facts on the
+                    # normal completion path too, with the same inputs as the
+                    # resumed path (provider, task prompt, full response,
+                    # task id). Previously this ran only on resume, so a task
+                    # completing normally left no facts in the graph.
+                    try:
+                        await knowledge_graph.extract_and_store_facts(
+                            provider=provider,
+                            user_prompt=prompt,
+                            assistant_response=full_response,
+                            task_id=task_id,
+                        )
+                    except Exception as mem_e:
+                        logger.warning(f"Memory storage failed: {mem_e}")
                         
                 yield Event(
                     type=EventType.TASK_COMPLETED,
@@ -432,6 +464,7 @@ async def resume_langgraph_task(
         }
         
         start_time = time.time()
+        elapsed_ms = 0.0
         full_response_parts: list[str] = []
         interrupted = False
         task_id = "unknown"
@@ -507,7 +540,22 @@ async def resume_langgraph_task(
                 if interrupted:
                     break
 
-            if not interrupted:
+            if interrupted:
+                # Phase 10.1 A2: same as the run path -- a re-interrupt on
+                # resume is still a pause for approval, not a failure.
+                elapsed_ms = round((time.time() - start_time) * 1000, 2)
+                yield Event(
+                    type=EventType.TASK_INTERRUPTED,
+                    request_id=thread_id,
+                    payload={
+                        "task_id": task_id,
+                        "state": TaskState.PENDING_APPROVAL.value,
+                        "latency_ms": elapsed_ms,
+                        "approval_key": thread_id,
+                        "session_id": state_obj.values.get("session_id"),
+                    },
+                )
+            else:
                 elapsed_ms = round((time.time() - start_time) * 1000, 2)
                 full_response = "\\n".join(full_response_parts).strip()
                 

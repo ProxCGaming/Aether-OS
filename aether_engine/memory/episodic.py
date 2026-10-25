@@ -11,6 +11,15 @@ import litellm
 from aether_engine.audit import AuditLogger
 
 _audit_logger = AuditLogger()
+logger = logging.getLogger(__name__)
+
+# Embedding model + timeout (Phase 10.1 B2).
+# Timeout is 30s, not the 10s DISCOVERY_TIMEOUT used for provider
+# validation: a cold Ollama start (model load + first embed) routinely
+# exceeds 10s, while provider pings are expected to answer promptly.
+# No better value was found in code; 30s is the prompt-required value.
+EMBEDDING_MODEL = "ollama/nomic-embed-text"
+EMBEDDING_TIMEOUT_SECONDS = 30.0
 
 # Database paths
 DB_PATH = Path.home() / ".aether" / "memory.db"
@@ -53,19 +62,51 @@ def init_embeddings_db() -> None:
         """)
         conn.commit()
 
-async def _embed_text(text: str) -> Optional[List[float]]:
+async def _embed_text(text: str, task_id: Optional[str] = None,
+                    context: str = "store") -> Optional[List[float]]:
+    """Embed ``text`` via Ollama. Returns ``None`` on failure — but never
+    silently: every failure is logged distinctly (model, error, episode id)
+    to the audit log and the module logger. No retry/backfill here
+    (Phase 10.3); callers must treat ``None`` as "not embedded"."""
     try:
         response = await asyncio.wait_for(
             litellm.aembedding(
-                model="ollama/nomic-embed-text",
+                model=EMBEDDING_MODEL,
                 input=[text],
                 api_base="http://127.0.0.1:11434"
             ),
-            timeout=1.0
+            timeout=EMBEDDING_TIMEOUT_SECONDS
         )
         return response.data[0]["embedding"]
-    except Exception as e:
+    except asyncio.TimeoutError as e:
+        _log_embedding_failure(e, task_id, context)
         return None
+    except Exception as e:
+        _log_embedding_failure(e, task_id, context)
+        return None
+
+
+def _log_embedding_failure(error: Exception, task_id: Optional[str],
+                           context: str) -> None:
+    """Log one embedding failure distinctly: model, error, episode id.
+
+    Uses the module-level audit logger (already imported at the top of
+    this module — no new import, no circular-import risk) via the
+    existing generic ``log_event``; no new audit event type was needed.
+    """
+    details = {
+        "task_id": task_id,
+        "context": context,
+        "model": EMBEDDING_MODEL,
+        "error": str(error) or repr(error),
+        "error_type": type(error).__name__,
+    }
+    _audit_logger.log_event("EPISODIC_EMBEDDING_FAILED", details)
+    logger.warning(
+        "EPISODIC_EMBEDDING_FAILED task_id=%s model=%s error_type=%s error=%s",
+        task_id, EMBEDDING_MODEL, type(error).__name__, error,
+        exc_info=True,
+    )
 
 def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     dot = sum(a * b for a, b in zip(vec1, vec2))
@@ -95,12 +136,23 @@ async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags:
         conn.commit()
     
     # Generate and store embedding
-    embedding = await _embed_text(task_summary)
+    embedding = await _embed_text(task_summary, task_id=task_id)
     if embedding:
         with _get_conn(EMBEDDINGS_DB_PATH) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO episodic_embeddings (task_id, embedding) VALUES (?, ?)",
                 (task_id, pickle.dumps(embedding))
+            )
+            conn.commit()
+    else:
+        # Embedding failed (already logged distinctly by _embed_text).
+        # Make "unembedded" explicit: drop any stale row for this task so
+        # absence from episodic_embeddings is a truthful marker, and the
+        # EPISODIC_MEMORY_STORED audit below records embedded=False.
+        with _get_conn(EMBEDDINGS_DB_PATH) as conn:
+            conn.execute(
+                "DELETE FROM episodic_embeddings WHERE task_id = ?",
+                (task_id,)
             )
             conn.commit()
 
@@ -143,7 +195,7 @@ async def query_episodes(query: str, limit: int = 5) -> List[Dict[str, Any]]:
             bm25_rows = []
 
         # 2. Semantic Search
-        query_embedding = await _embed_text(query)
+        query_embedding = await _embed_text(query, context="query")
         semantic_scores = {}
         if query_embedding:
             with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
