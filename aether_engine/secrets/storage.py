@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 from typing import List, Optional, Union
 
+from aether_engine.audit import AuditLogger
 from aether_engine.secrets.dpapi import (
     BaseProtector,
     SecretDecryptionError,
@@ -22,12 +23,29 @@ class SecretStore:
         self,
         db_path: Optional[Union[str, Path]] = None,
         protector: Optional[BaseProtector] = None,
+        audit_logger: Optional[AuditLogger] = None,
     ):
         if db_path is None:
             db_path = Path.home() / ".aether" / "secrets.db"
         self.db_path = Path(db_path)
         self.protector = protector if protector is not None else WindowsDPAPIProtector()
+        # Phase 10.2, C2: key loads/deletes are audited (critical/07 M4).
+        # No logger supplied -> default AuditLogger (same pattern as
+        # ToolRegistry.execute). Audit is best-effort here: a broken audit
+        # log must not break provider auth/startup (cf. critical/07 L4) —
+        # only scripts/export_keys.py fails closed on audit, deliberately.
+        self._audit_logger = audit_logger
         self._init_db()
+
+    def _audit(self, action: str, provider: str) -> None:
+        try:
+            logger = self._audit_logger or AuditLogger()
+            self._audit_logger = logger
+            # Provider name only — never a key value (audit.py redacts
+            # sensitive keys as a second line of defence).
+            logger.log_event(action, {"provider": provider})
+        except Exception:
+            pass
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,7 +127,16 @@ class SecretStore:
                 raise ProviderNotFoundError(f"Provider '{provider}' not found.")
             encrypted_bytes = row[0]
             decrypted_bytes = self.protector.unprotect(encrypted_bytes)
-            return decrypted_bytes.decode("utf-8")
+            decrypted = decrypted_bytes.decode("utf-8")
+            # Phase 10.2, C2: a successful decryption materialises the
+            # plaintext key — audit it (provider name only). This is the
+            # audit for the websocket PROVIDER_REVEAL_KEY_REQUEST path,
+            # which calls load_provider and previously logged nothing
+            # (critical/07 M4); it also covers export_keys.py, which
+            # reveals every stored key. Failed loads (not found /
+            # undecryptable) are not audited: no key was revealed.
+            self._audit("SECRET_LOADED", provider)
+            return decrypted
 
     def delete_provider(self, provider: str) -> bool:
         if not self.db_path.exists():
@@ -117,4 +144,10 @@ class SecretStore:
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             with conn:
                 cursor = conn.execute("DELETE FROM providers WHERE name = ?", (provider,))
-                return cursor.rowcount > 0
+                deleted = cursor.rowcount > 0
+        # Phase 10.2, C2: deleting a stored key is a destructive action —
+        # audit it, but only when a row was actually removed (critical/07
+        # M4). Provider name only, never a key value.
+        if deleted:
+            self._audit("SECRET_DELETED", provider)
+        return deleted

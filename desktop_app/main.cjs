@@ -20,14 +20,21 @@ function getToken() {
 }
 
 function connectEngine() {
+  // Phase 10.2 B1: the token is sent ONLY as an Authorization header.
+  // It must never appear in the URL query string (URLs land in logs,
+  // history and error reports). The token stays in the main process:
+  // the renderer never holds it — main owns this socket and forwards
+  // messages to the renderer via the 'engine-message' IPC channel.
   const token = getToken();
-  const wsUrl = token ? `ws://127.0.0.1:8000/ws/tasks?token=${token}` : 'ws://127.0.0.1:8000/ws/tasks';
-  
+  const wsUrl = 'ws://127.0.0.1:8000/ws/tasks';
+
   if (wsClient) {
     wsClient.close();
   }
 
-  wsClient = new WebSocket(wsUrl);
+  wsClient = token
+    ? new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${token}` } })
+    : new WebSocket(wsUrl);
 
   wsClient.on('open', () => {
     console.log('Main process connected to Engine WebSocket.');
@@ -167,10 +174,6 @@ ipcMain.handle('maximize-window', (event) => {
     if (win.isMaximized()) win.unmaximize()
     else win.maximize()
   }
-});
-
-ipcMain.handle('get-auth-token', () => {
-  return getToken();
 });
 
 ipcMain.handle('get-ws-status', () => {

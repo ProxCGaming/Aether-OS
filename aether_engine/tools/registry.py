@@ -232,16 +232,41 @@ class ToolRegistry:
         try:
             if tool.risk != ToolRisk.READ_ONLY:
                 from aether_engine.workers.sandbox import execute_tool_in_worker
-                return await execute_tool_in_worker(
+                result = await execute_tool_in_worker(
                     tool_name=name,
                     args=call_args,
                     task_class=task_class,
                     audit_logger=log,
                 )
-            if inspect.iscoroutinefunction(tool.execute_fn):
-                return await tool.execute_fn(**call_args)
-            return tool.execute_fn(**call_args)
+            elif inspect.iscoroutinefunction(tool.execute_fn):
+                result = await tool.execute_fn(**call_args)
+            else:
+                result = tool.execute_fn(**call_args)
         except ToolExecutionError:
             raise
         except Exception as e:
             raise ToolExecutionError(f"Error executing tool '{name}': {e}") from e
+
+        # Phase 10.2, C2: the registry previously audited only denials
+        # (TOOL_BLOCKED_BY_POLICY above). A successful destructive /
+        # execute / write tool therefore left no registry-level record
+        # that it had run — the only trace was the worker layer's
+        # WORKER_EXECUTION_COMPLETED, which records the process, not the
+        # registry's allow-decision, and carries no argument info. Log
+        # TOOL_EXECUTED for every successful non-READ_ONLY execution, with
+        # argument *names* only — never values, never the full payload
+        # (audit.py redacts sensitive/payload keys as a second line of
+        # defence). Best-effort: a broken audit log must not turn a
+        # successful execution into an error. READ_ONLY tools are not
+        # logged: they change nothing, and logging them would flood the
+        # trail (cf. SECRET_LOADED volume for routine key loads).
+        if tool.risk != ToolRisk.READ_ONLY:
+            try:
+                log.log_event("TOOL_EXECUTED", {
+                    "tool_name": name,
+                    "risk": tool.risk.value,
+                    "arg_keys": sorted(str(k) for k in call_args),
+                })
+            except Exception:
+                pass
+        return result
