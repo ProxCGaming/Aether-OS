@@ -1050,6 +1050,30 @@ export default function DraggableChatWindow({
             </div>
           </div>
           <div style={{ display: 'flex', gap: '12px' }}>
+            {/* Phase 10.3 C2: isMinimized used to be settable by nothing —
+                the state existed, the control did not. This toggle wires
+                it: minimise collapses the feed + input to the header bar,
+                restore brings them back. Minimize2/Maximize2 were already
+                imported and unused for this. */}
+            {isMinimized ? (
+              <button 
+                onClick={() => setIsMinimized(false)}
+                title="Restore chat"
+                aria-label="Restore chat"
+                style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
+              >
+                <Maximize2 size={14} />
+              </button>
+            ) : (
+              <button 
+                onClick={() => setIsMinimized(true)}
+                title="Minimise chat"
+                aria-label="Minimise chat"
+                style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
+              >
+                <Minimize2 size={14} />
+              </button>
+            )}
             {isFloating ? (
               <>
                 <button 

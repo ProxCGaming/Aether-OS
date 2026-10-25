@@ -4,6 +4,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Phase 10.3 B1: the only auxiliary task classes with a real engine seam.
+# routing/policy.py reads only "vision"; the other six helper tasks
+# (web, compression, skills, approval, mcp, title) have no engine call
+# site, so an override for them would be a placebo. Single source of
+# truth — routes/websocket.py imports this; UserConfig.from_dict filters
+# stale entries from old config files against it on load.
+AUXILIARY_TASK_CLASSES = frozenset({"vision"})
+
 CONFIG_PATH = Path.home() / ".aether" / "config.json"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
@@ -106,6 +114,27 @@ class UserConfig:
     auxiliary_models: Dict[str, str] = field(default_factory=dict)
     # Phase 9: reasoning effort for reasoning-capable models ("standard" | "medium" | "high")
     reasoning_effort: str = "standard"
+    # Phase 10.3 A1: memory retention. Age caps are in days; count caps are
+    # hard maxima enforced by pruning (oldest first). A value <= 0 disables
+    # that bound (no pruning on that axis). Defaults are documented here and
+    # nowhere else — the memory modules read them from UserConfig, they do
+    # not hardcode their own numbers.
+    #   Episodic: 90 days / 1000 episodes (working memory: recent tasks).
+    #   Knowledge graph: 365 days / 5000 facts (long-term memory: keep a year).
+    #   Sessions: 180 days / 200 sessions (chat history: half a year).
+    # Phase 10.3 A2: episodic semantic-similarity threshold (cosine).
+    # Episodes scoring below it never enter RRF in query_episodes.
+    # Default 0.3: nomic-embed-text emits L2-normalised embeddings and
+    # unrelated short texts score well below 0.3 while related task
+    # summaries score materially higher (same default as litellm's
+    # semantic tool filter). 0.0 restores the old unthresholded behaviour.
+    episodic_retention_days: int = 90
+    episodic_max_episodes: int = 1000
+    episodic_similarity_threshold: float = 0.3
+    kg_fact_retention_days: int = 365
+    kg_max_facts: int = 5000
+    session_retention_days: int = 180
+    session_max_sessions: int = 200
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -129,6 +158,13 @@ class UserConfig:
             "fallback_chain": self.fallback_chain,
             "auxiliary_models": self.auxiliary_models,
             "reasoning_effort": self.reasoning_effort,
+            "episodic_retention_days": self.episodic_retention_days,
+            "episodic_max_episodes": self.episodic_max_episodes,
+            "episodic_similarity_threshold": self.episodic_similarity_threshold,
+            "kg_fact_retention_days": self.kg_fact_retention_days,
+            "kg_max_facts": self.kg_max_facts,
+            "session_retention_days": self.session_retention_days,
+            "session_max_sessions": self.session_max_sessions,
         }
 
     @classmethod
@@ -144,6 +180,22 @@ class UserConfig:
             
         def _as_list_dict(value: Any) -> Dict[str, List[str]]:
             return value if isinstance(value, dict) else {}
+
+        def _as_int(value: Any, default: int) -> int:
+            # A corrupt retention value must not nuke the whole config
+            # (load_config falls back to all defaults on any from_dict
+            # exception); fall back to the documented default instead.
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _as_float(value: Any, default: float) -> float:
+            # Same guard as _as_int, for the similarity threshold.
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
 
         return cls(
             default_provider=d.get("default_provider") or "google_gemini",
@@ -170,8 +222,18 @@ class UserConfig:
             custom_slash_commands=_as_dict(d.get("custom_slash_commands")),
             disable_fallbacks=d.get("disable_fallbacks", False),
             fallback_chain=d.get("fallback_chain", []),
-            auxiliary_models=_as_dict(d.get("auxiliary_models")),
+            # Phase 10.3 B1: drop stale auxiliary overrides for task classes
+            # with no engine call site (old config files may still carry
+            # web/compression/skills/approval/mcp/title); only AUXILIARY_TASK_CLASSES survive a load.
+            auxiliary_models={k: v for k, v in _as_dict(d.get("auxiliary_models")).items() if k in AUXILIARY_TASK_CLASSES},
             reasoning_effort=d.get("reasoning_effort") or "standard",
+            episodic_retention_days=_as_int(d.get("episodic_retention_days"), 90),
+            episodic_max_episodes=_as_int(d.get("episodic_max_episodes"), 1000),
+            episodic_similarity_threshold=_as_float(d.get("episodic_similarity_threshold"), 0.3),
+            kg_fact_retention_days=_as_int(d.get("kg_fact_retention_days"), 365),
+            kg_max_facts=_as_int(d.get("kg_max_facts"), 5000),
+            session_retention_days=_as_int(d.get("session_retention_days"), 180),
+            session_max_sessions=_as_int(d.get("session_max_sessions"), 200),
         )
 
 

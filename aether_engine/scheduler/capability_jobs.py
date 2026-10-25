@@ -195,6 +195,7 @@ class CapabilitySchedulerManager:
                 self.scheduler = AsyncIOScheduler(event_loop=loop)
                 self.scheduler.start()
                 self._update_job_schedule(self.current_schedule)
+                self._register_memory_prune_job()
                 logger.info("CapabilitySchedulerManager started.")
             except (RuntimeError, Exception) as e:
                 logger.warning(f"AsyncIOScheduler start deferred (no running event loop yet): {e}")
@@ -235,6 +236,47 @@ class CapabilitySchedulerManager:
             replace_existing=True,
         )
         logger.info(f"Updated capability check schedule to '{interval}' with misfire recovery.")
+
+    def _register_memory_prune_job(self):
+        """Phase 10.3 A1: weekly retention pruning for all memory tiers.
+
+        This manager is the engine's only background scheduler, so the
+        prune job lives here next to the capability-check job — same
+        pattern, its own fixed weekly trigger, independent of the
+        user-set capability-check schedule. Deliberately NOT run at
+        startup: a startup prune would fire inside EngineState.initialize(),
+        which tests also call, and would prune the live ~/.aether DBs.
+        A weekly interval trigger only fires on schedule, never during a
+        test run. Manual trigger: run_memory_prune_now().
+        """
+        if not HAS_APSCHEDULER or not self.scheduler or not self.scheduler.running:
+            return
+        self.scheduler.add_job(
+            self._run_memory_prune_job,
+            trigger=IntervalTrigger(weeks=1),
+            id="memory_prune_weekly",
+            replace_existing=True,
+        )
+        logger.info("Registered weekly memory pruning job.")
+
+    def _run_memory_prune_job(self) -> Dict[str, Any]:
+        """Execute one memory-pruning run (sync job; APScheduler runs it
+        in the default executor). Returns per-tier counts."""
+        from aether_engine.config import load_config
+        from aether_engine.memory.pruning import prune_all
+
+        try:
+            results = prune_all(config=load_config())
+            logger.info(f"Memory pruning complete: {results}")
+            return results
+        except Exception as e:
+            logger.error(f"Memory pruning failed: {e}", exc_info=True)
+            return {"error": str(e)}
+
+    def run_memory_prune_now(self) -> Dict[str, Any]:
+        """Manual trigger for memory pruning (mirrors run_now for
+        capability checks)."""
+        return self._run_memory_prune_job()
 
     async def _execute_check_job(self, method: Optional[str] = None) -> Dict[str, Any]:
         """Execute a capability check run using Option A (benchmarks), C (self-tests), or Both."""

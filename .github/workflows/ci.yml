@@ -1,0 +1,64 @@
+# Minimal CI for Aether-OS (Phase 10.3 D1).
+#
+# Runs the repo's real test commands on every push / PR:
+#   - pytest, with the four PySide6 UI test files ignored: PySide6 is not
+#     installed in the Linux test venv (.venv-phase9) and those four files
+#     fail at collection without it. The other UI tests either import only
+#     stdlib-only modules (e.g. tests/test_ui_state.py) or self-skip when
+#     PySide6 is absent (tests/test_approval_drawer_override.py), so they
+#     need no ignore flag.
+#   - Jest in desktop_app/ (npm test -- --watchAll=false).
+#
+# Known limits (do NOT read a green run here as a full release gate):
+#   - The pytest job installs requirements.txt, which declares
+#     APScheduler but the lockfile/venv do not include it, so
+#     scheduler tests run with the graceful HAS_APSCHEDULER=False
+#     degradation, exactly as in .venv-phase9 (see ADR 0025).
+#   - The pytest job does not run the Electron app or the Windows-only
+#     paths (pywin32 is marker-guarded to Windows in requirements.txt).
+#   - Packaging (electron-builder) is NOT run here; `npm run dist` is a
+#     manual release step until a Windows packaging job is added.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    name: pytest (Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run pytest
+        run: >-
+          python -m pytest -q
+          --ignore=tests/test_provider_health_badge.py
+          --ignore=tests/test_providers_panel_fixes.py
+          --ignore=tests/test_settings_provider_state.py
+          --ignore=tests/test_ui_window_geometry.py
+
+  frontend:
+    name: Jest (desktop_app)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop_app
+    steps:
+      - uses: actions/checkout@v4
+      # Electron 44 (desktop_app/package.json) bundles Node 24; use the
+      # same major line as the local toolchain (node v24.22.1).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: desktop_app/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Run Jest
+        run: npm test -- --watchAll=false

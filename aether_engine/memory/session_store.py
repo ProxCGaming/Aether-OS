@@ -2,8 +2,14 @@ import sqlite3
 import uuid
 import time
 import json
+import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+from aether_engine.audit import AuditLogger
+from aether_engine.config import UserConfig, load_config
+
+logger = logging.getLogger("aether_engine.memory.session_store")
+_audit_logger = AuditLogger()
 
 # Database path is ~/.aether/memory.db
 DB_PATH = Path.home() / ".aether" / "memory.db"
@@ -176,3 +182,77 @@ def truncate_session_by_content(session_id: str, role: str, content: str) -> boo
         )
         conn.commit()
         return cur.rowcount > 0
+
+# ---------------------------------------------------------------------------
+# Phase 10.3 A1: retention / pruning. Before this, sessions had no pruning,
+# decay, or TTL — sessions + session_messages grew without bound. Bounds
+# come from UserConfig (config.py is the single source of the numbers);
+# explicit args here override them, and a bound <= 0 disables pruning on
+# that axis.
+#
+# Safety: nothing references a session from another tier (KG facts point
+# at task_ids, not session ids), so a session is pruned as a unit — its
+# messages go with it via the ON DELETE CASCADE foreign key, never left
+# orphaned. Age is judged on updated_at (last activity), not created_at,
+# so a long-lived but active chat is not pruned.
+# ---------------------------------------------------------------------------
+
+def prune_sessions(retention_days: Optional[int] = None,
+                   max_sessions: Optional[int] = None,
+                   *, config: Optional[UserConfig] = None,
+                   now: Optional[int] = None) -> Dict[str, int]:
+    """Prune sessions by age (on updated_at), then by count (oldest first).
+
+    Returns counts and logs them to the audit log (SESSIONS_PRUNED).
+    """
+    cfg = config if config is not None else load_config()
+    if retention_days is None:
+        retention_days = cfg.session_retention_days
+    if max_sessions is None:
+        max_sessions = cfg.session_max_sessions
+    now = int(time.time()) if now is None else int(now)
+
+    init_db()
+    pruned_sessions = 0
+    pruned_messages = 0
+
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        if retention_days and retention_days > 0:
+            cutoff = now - int(retention_days) * 86400
+            pruned_messages += cur.execute(
+                "SELECT COUNT(*) FROM session_messages WHERE session_id IN "
+                "(SELECT id FROM sessions WHERE updated_at < ?)",
+                (cutoff,),
+            ).fetchone()[0]
+            cur.execute("DELETE FROM sessions WHERE updated_at < ?", (cutoff,))
+            pruned_sessions += cur.rowcount
+
+        if max_sessions and max_sessions > 0:
+            total = cur.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+            excess = total - int(max_sessions)
+            if excess > 0:
+                rows = cur.execute(
+                    "SELECT id FROM sessions ORDER BY updated_at ASC LIMIT ?",
+                    (excess,),
+                ).fetchall()
+                ids = [r["id"] for r in rows]
+                placeholders = ",".join("?" for _ in ids)
+                pruned_messages += cur.execute(
+                    "SELECT COUNT(*) FROM session_messages WHERE session_id IN "
+                    f"({placeholders})",
+                    ids,
+                ).fetchone()[0]
+                cur.executemany("DELETE FROM sessions WHERE id = ?", [(i,) for i in ids])
+                pruned_sessions += cur.rowcount
+        conn.commit()
+
+    result = {
+        "pruned_sessions": pruned_sessions,
+        "pruned_messages": pruned_messages,
+        "retention_days": retention_days,
+        "max_sessions": max_sessions,
+    }
+    _audit_logger.log_event("SESSIONS_PRUNED", result)
+    logger.info("SESSIONS_PRUNED %s", result)
+    return result

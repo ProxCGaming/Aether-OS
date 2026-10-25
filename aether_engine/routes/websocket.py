@@ -29,6 +29,7 @@ from aether_common.contracts import (
 )
 from aether_engine.audit import AuditLogger
 from aether_engine.config import (
+    AUXILIARY_TASK_CLASSES,
     CLOUD_PROVIDERS,
     PROVIDER_MAP,
     UserConfig,
@@ -77,6 +78,15 @@ from aether_engine.memory import session_store
 from aether_engine.state import engine_state
 from aether_engine.orchestration.core import _build_provider_list_async, _build_provider_list, _validate_provider_key, _create_provider_instance
 logger = logging.getLogger("aether_engine.routes.websocket")
+
+# Phase 10.3, B1: the only task class with a real engine seam — see
+# AUXILIARY_TASK_CLASSES in aether_engine/config.py (single source of truth).
+# The Settings UI dropped the other six helper tasks in Phase 9 (commit
+# ce99048) because none of them has an engine call site — routing/policy.py
+# reads only "vision" — but this handler kept accepting and persisting all
+# seven, so a client got success:true for a setting the engine would
+# silently ignore. Keep this set to exactly the task classes the routing
+# policy honors; anything else is rejected, never stored.
 
 router = APIRouter()
 
@@ -1067,12 +1077,18 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
             elif msg.type == EventType.AUXILIARY_MODEL_SET_REQUEST:
                 # Phase 9, B1: per-task-class auxiliary model override. The Settings
                 # UI sends {task, provider, model}; model "auto" clears the override.
-                valid_tasks = {"vision", "web", "compression", "skills", "approval", "mcp", "title"}
+                # Phase 10.3, B1: only task classes in AUXILIARY_TASK_CLASSES are
+                # accepted. The other six (web, compression, skills, approval, mcp,
+                # title) have no engine call site, so accepting them would be a
+                # placebo — success:true for an override nothing ever reads.
+                # Stale entries for those tasks (e.g. from a config file written
+                # before Phase 10.3) are pruned here so the echoed dict never
+                # advertises an override the engine will not honor.
                 task = msg.payload.get("task", "")
                 provider = msg.payload.get("provider", "")
                 model = msg.payload.get("model", "auto")
                 ok, error = True, ""
-                if task not in valid_tasks:
+                if task not in AUXILIARY_TASK_CLASSES:
                     ok, error = False, f"Unknown task class '{task}'."
                 elif model != "auto":
                     if not provider or not model:
@@ -1087,6 +1103,16 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     save_config(engine_state.user_config)
                     engine_state.audit_logger.log_event("AUXILIARY_MODEL_SET", {
                         "task": task, "provider": provider, "model": model,
+                    })
+                stale = [t for t in engine_state.user_config.auxiliary_models
+                         if t not in AUXILIARY_TASK_CLASSES]
+                if stale:
+                    for t in stale:
+                        engine_state.user_config.auxiliary_models.pop(t, None)
+                    save_config(engine_state.user_config)
+                    engine_state.audit_logger.log_event("AUXILIARY_MODEL_PRUNED", {
+                        "tasks": stale,
+                        "reason": "task class has no engine call site",
                     })
                 await ws.send_text(Event(
                     type=EventType.AUXILIARY_MODEL_SET_RESPONSE,

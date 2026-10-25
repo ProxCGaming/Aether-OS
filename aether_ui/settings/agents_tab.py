@@ -52,7 +52,7 @@ class AgentsTab(QWidget):
         
         main_layout.addLayout(hdr_layout)
 
-        desc = QLabel("Live routing assignments for LangGraph nodes via CapabilityRouter.")
+        desc = QLabel("Live routing assignments for LangGraph nodes via RoutingPolicy.")
         desc.setStyleSheet(f"font-size: 14px; color: {TEXT_SECONDARY};")
         main_layout.addWidget(desc)
 

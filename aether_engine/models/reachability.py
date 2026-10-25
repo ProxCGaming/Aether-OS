@@ -9,12 +9,44 @@ import logging
 from pathlib import Path
 import sqlite3
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger("aether_engine.models.reachability")
 
 DEFAULT_REACHABILITY_DB = Path.home() / ".aether" / "reachability.db"
 DEFAULT_CACHE_TTL_SECONDS = 86400  # 24 hours
+
+
+class ReachableModels(List[str]):
+    """Result of a reachability sweep: the reachable model ids, plus the sweep error.
+
+    Subclasses ``list`` so existing callers keep working unchanged — empty
+    means "nothing reachable", and truthiness/iteration behave like a plain
+    list. ``error`` is a ``DiscoveryError`` (the discovery-v2 error shape:
+    ``code`` + ``message``) and is set when the sweep could not run at all
+    (no API key) or when it probed models but none was reachable. It is
+    ``None`` when at least one model is reachable, or when there was
+    nothing to probe (empty input).
+
+    ``code`` is ``None`` here by the same convention as discovery-v2
+    transport failures: a sweep has no single HTTP status — per-model
+    failures vary and are recorded per model in the reachability DB — so
+    the message carries the provider and the probed/reachable counts
+    instead of a fabricated status code.
+    """
+
+    def __init__(
+        self,
+        models: Iterable[str] = (),
+        error: Optional["DiscoveryError"] = None,
+    ):
+        super().__init__(models)
+        self.error = error
+
+    @property
+    def ok(self) -> bool:
+        """True when the sweep produced a usable result (mirrors DiscoveryResult.ok)."""
+        return self.error is None
 
 
 class ModelReachabilityChecker:
@@ -129,10 +161,26 @@ class ModelReachabilityChecker:
         force: bool = False,
         max_concurrency: int = 5,
         timeout: float = 4.0,
-    ) -> List[str]:
-        """Sweep candidate models with bounded concurrency and return only reachable ones."""
-        if not model_ids or not api_key:
-            return model_ids
+    ) -> ReachableModels:
+        """Sweep candidate models with bounded concurrency and return only reachable ones.
+
+        Returns a ``ReachableModels`` list. When nothing is reachable the
+        list is empty and ``.error`` carries a real ``DiscoveryError``
+        (discovery-v2 shape) — the unfiltered input list is never returned
+        as a silent success. Callers must treat an empty result as "no
+        models available", not as "all models available".
+        """
+        from aether_engine.providers.discovery import DiscoveryError
+
+        if not model_ids:
+            return ReachableModels()
+        if not api_key:
+            err = DiscoveryError(
+                code=None,
+                message=f"No API key for provider '{provider_name}': cannot probe model reachability",
+            )
+            logger.warning(f"Reachability sweep for {provider_name}: {err.message}")
+            return ReachableModels(error=err)
 
         semaphore = asyncio.Semaphore(max_concurrency)
 
@@ -162,7 +210,20 @@ class ModelReachabilityChecker:
             f"Reachability sweep complete for {provider_name}: "
             f"{len(reachable_models)}/{len(model_ids)} reachable."
         )
-        return reachable_models if reachable_models else model_ids
+        if reachable_models:
+            return ReachableModels(reachable_models)
+        # Phase 10.3 B2: never mask total failure by returning the full
+        # input list. Empty list + a real error; the caller must handle
+        # the "nothing reachable" state explicitly.
+        err = DiscoveryError(
+            code=None,
+            message=(
+                f"No reachable models for provider '{provider_name}': "
+                f"probed {len(model_ids)}, 0 reachable"
+            ),
+        )
+        logger.warning(f"Reachability sweep for {provider_name}: {err.message}")
+        return ReachableModels(error=err)
 
 
 # Global reachability checker singleton

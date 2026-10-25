@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 import litellm
 from aether_engine.audit import AuditLogger
+from aether_engine.config import UserConfig, load_config
 
 _audit_logger = AuditLogger()
 logger = logging.getLogger(__name__)
@@ -20,6 +21,29 @@ logger = logging.getLogger(__name__)
 # No better value was found in code; 30s is the prompt-required value.
 EMBEDDING_MODEL = "ollama/nomic-embed-text"
 EMBEDDING_TIMEOUT_SECONDS = 30.0
+
+# Phase 10.3 A2: episodic semantic-similarity threshold (cosine).
+# nomic-embed-text returns L2-normalised embeddings, so cosine is the
+# native similarity. Unrelated short texts score well below 0.3 while
+# genuinely related task summaries score materially higher, so 0.3 is a
+# conservative floor: it drops noise without cutting weak-but-real
+# matches. Same 0.3 default as litellm's own semantic tool filter
+# (litellm/proxy/_experimental/mcp_server/semantic_tool_filter.py).
+# The authoritative value lives in UserConfig
+# (episodic_similarity_threshold); this constant is only the fallback
+# when no config is available.
+EPISODIC_SIMILARITY_THRESHOLD = 0.3
+
+# Phase 10.3 A2: how many unembedded episodes one query_episodes() call
+# backfills (oldest first). Bounded so a query cannot stall on a long
+# embed queue when Ollama is slow; leftovers retry on the next query.
+DEFAULT_QUERY_BACKFILL_LIMIT = 5
+
+# Phase 10.3 A2: FTS5 tables for episodic_memory, keyed by the DB file
+# path, that the one-time dedupe migration has already run for in this
+# process. A fresh tmp DB in tests gets its own key, so the migration
+# still runs there on first init.
+_DEDUPED_DB_PATHS = set()
 
 # Database paths
 DB_PATH = Path.home() / ".aether" / "memory.db"
@@ -51,6 +75,9 @@ def init_episodic_db() -> None:
             )
         """)
         conn.commit()
+    # Phase 10.3 A2: collapse any duplicate FTS rows left by the old
+    # plain-INSERT store_episode (once per process per DB file).
+    _ensure_episodic_deduped()
 
 def init_embeddings_db() -> None:
     with _get_conn(EMBEDDINGS_DB_PATH) as conn:
@@ -122,6 +149,16 @@ async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags:
     now = int(time.time())
     tags_str = ",".join(tags)
     with _get_conn() as conn:
+        # Phase 10.3 A2: FTS5 cannot declare UNIQUE / PRIMARY KEY on
+        # task_id (SQLite rejects it at CREATE VIRTUAL TABLE time), so
+        # uniqueness is enforced here instead: delete any existing row
+        # for this task_id in the same transaction before inserting, so
+        # a re-store (resume / retry) replaces the old row instead of
+        # leaving a duplicate that would double-count in BM25/RRF.
+        conn.execute(
+            "DELETE FROM episodic_memory WHERE task_id = ?",
+            (task_id,)
+        )
         conn.execute(
             """INSERT INTO episodic_memory (task_id, timestamp, user_prompt, task_summary, tags, outcome)
                VALUES (?, ?, ?, ?, ?, ?)""",
@@ -162,7 +199,25 @@ async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags:
         "embedded": embedding is not None
     })
 
-async def query_episodes(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+async def query_episodes(query: str, limit: int = 5,
+                       *, similarity_threshold: Optional[float] = None,
+                       backfill_limit: int = DEFAULT_QUERY_BACKFILL_LIMIT,
+                       config: Optional[UserConfig] = None) -> List[Dict[str, Any]]:
+    """Hybrid BM25 + semantic retrieval, merged with RRF.
+
+    Phase 10.3 A2: the semantic leg is thresholded — an episode whose
+    cosine similarity with the query is below ``similarity_threshold``
+    never enters RRF, so irrelevant episodes can no longer dilute the
+    results purely by rank. The threshold gates the semantic leg only:
+    a lexical (BM25) match still returns on its own merit. Resolution
+    order: explicit arg, then ``config.episodic_similarity_threshold``,
+    then the module default. Before the semantic scan, up to
+    ``backfill_limit`` episodes stored unembedded (Phase 10.1 marker:
+    absent from ``episodic_embeddings``) are backfilled oldest-first,
+    so an episode stored while Ollama was down becomes retrievable on
+    the next query; pass ``backfill_limit=0`` to skip that.
+    """
+    threshold = _resolve_similarity_threshold(similarity_threshold, config)
     init_episodic_db()
     init_embeddings_db()
     with _get_conn() as conn:
@@ -194,6 +249,13 @@ async def query_episodes(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         except sqlite3.OperationalError:
             bm25_rows = []
 
+        # Phase 10.3 A2: backfill episodes stored unembedded (Phase 10.1
+        # marker: absent from episodic_embeddings) before the semantic
+        # scan, so they can participate in this query. Bounded per call;
+        # failures stay unembedded and retry on the next query.
+        if backfill_limit and backfill_limit > 0:
+            await backfill_episodic_embeddings(limit=backfill_limit, config=config)
+
         # 2. Semantic Search
         query_embedding = await _embed_text(query, context="query")
         semantic_scores = {}
@@ -204,7 +266,11 @@ async def query_episodes(query: str, limit: int = 5) -> List[Dict[str, Any]]:
                 for row in e_cur.fetchall():
                     emb = pickle.loads(row["embedding"])
                     sim = _cosine_similarity(query_embedding, emb)
-                    semantic_scores[row["task_id"]] = sim
+                    # Phase 10.3 A2: below-threshold episodes never enter
+                    # RRF — without this, every episode scored ~0 still
+                    # ranked and diluted the relevant hits.
+                    if sim >= threshold:
+                        semantic_scores[row["task_id"]] = sim
 
         # 3. RRF Merge
         k = 60
@@ -242,9 +308,143 @@ async def query_episodes(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         _audit_logger.log_event("EPISODIC_MEMORY_RETRIEVED", {
             "query": query,
             "results_count": len(results),
-            "hybrid": query_embedding is not None
+            "hybrid": query_embedding is not None,
+            "similarity_threshold": threshold,
         })
         return results
+
+
+def _resolve_similarity_threshold(similarity_threshold: Optional[float],
+                                  config: Optional[UserConfig]) -> float:
+    """Explicit arg wins, then UserConfig, then the module default."""
+    if similarity_threshold is not None:
+        return float(similarity_threshold)
+    cfg = config if config is not None else load_config()
+    return float(getattr(cfg, "episodic_similarity_threshold",
+                         EPISODIC_SIMILARITY_THRESHOLD))
+
+
+def dedupe_episodic_rows() -> Dict[str, Any]:
+    """One-time migration: collapse duplicate episodic_memory rows.
+
+    The old ``store_episode`` used a plain INSERT into the FTS5 table,
+    which cannot declare a UNIQUE constraint, so re-stores left duplicate
+    rows. For each duplicated ``task_id`` the newest row (latest
+    timestamp, then highest rowid) survives and the rest are deleted.
+    Nothing is silently dropped: the removed rows are logged to the audit
+    log (EPISODIC_MEMORY_DEDUPED) with the affected task_ids and counts.
+    Idempotent — a second run finds no duplicates and logs nothing.
+    """
+    init_episodic_db()
+    with _get_conn() as conn:
+        dup_ids = [
+            r["task_id"] for r in conn.execute(
+                "SELECT task_id FROM episodic_memory"
+                " GROUP BY task_id HAVING COUNT(*) > 1"
+            ).fetchall()
+        ]
+        removed = 0
+        for task_id in dup_ids:
+            rows = conn.execute(
+                "SELECT rowid FROM episodic_memory WHERE task_id = ?"
+                " ORDER BY timestamp DESC, rowid DESC",
+                (task_id,),
+            ).fetchall()
+            for r in rows[1:]:
+                conn.execute(
+                    "DELETE FROM episodic_memory WHERE rowid = ?",
+                    (r["rowid"],),
+                )
+                removed += 1
+        conn.commit()
+    result: Dict[str, Any] = {
+        "task_ids_deduped": len(dup_ids),
+        "rows_removed": removed,
+    }
+    if removed:
+        details = {"task_ids": dup_ids, "rows_removed": removed}
+        _audit_logger.log_event("EPISODIC_MEMORY_DEDUPED", details)
+        logger.warning("EPISODIC_MEMORY_DEDUPED %s", details)
+    return result
+
+
+def _ensure_episodic_deduped() -> None:
+    """Run the dedupe migration once per process per DB file.
+
+    Called from ``init_episodic_db`` so existing deployments heal
+    themselves on first use after the upgrade, with no new caller wiring
+    (the scheduler is Phase 10.3 A1's, out of scope for A2).
+    """
+    key = str(DB_PATH)
+    if key in _DEDUPED_DB_PATHS:
+        return
+    _DEDUPED_DB_PATHS.add(key)
+    dedupe_episodic_rows()
+
+
+async def backfill_episodic_embeddings(limit: Optional[int] = None,
+                                       *, config: Optional[UserConfig] = None
+                                       ) -> Dict[str, Any]:
+    """Embed episodes stored unembedded and write their embeddings.
+
+    The Phase 10.1 marker for "stored unembedded" is absence from
+    ``episodic_embeddings`` (a failed store also deletes any stale row,
+    so absence is truthful). Candidates are the oldest unembedded
+    episodes first; ``limit`` caps how many are attempted in one call
+    (``None`` = all). Each episode is embedded over its ``task_summary``
+    — the same text ``store_episode`` embeds. A failed embed is already
+    logged distinctly by ``_embed_text``; the episode simply stays
+    unembedded and is retried on the next backfill. Episodes with an
+    empty summary are skipped (nothing to embed). Returns counts and
+    logs them (EPISODIC_EMBEDDINGS_BACKFILLED).
+    """
+    init_episodic_db()
+    init_embeddings_db()
+    with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
+        embedded_ids = {
+            r[0] for r in e_conn.execute("SELECT task_id FROM episodic_embeddings")
+        }
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT task_id, task_summary FROM episodic_memory"
+            " ORDER BY timestamp ASC"
+        ).fetchall()
+    unembedded = [r for r in rows if r["task_id"] not in embedded_ids]
+    missing = [
+        r for r in unembedded if (r["task_summary"] or "").strip()
+    ]
+    skipped_empty = len(unembedded) - len(missing)
+    if limit is not None:
+        missing = missing[:limit]
+
+    backfilled = 0
+    failed_ids: List[str] = []
+    for r in missing:
+        embedding = await _embed_text(
+            r["task_summary"], task_id=r["task_id"], context="backfill"
+        )
+        if embedding:
+            with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
+                e_conn.execute(
+                    "INSERT OR REPLACE INTO episodic_embeddings (task_id, embedding)"
+                    " VALUES (?, ?)",
+                    (r["task_id"], pickle.dumps(embedding)),
+                )
+                e_conn.commit()
+            backfilled += 1
+        else:
+            failed_ids.append(r["task_id"])
+
+    result: Dict[str, Any] = {
+        "backfilled": backfilled,
+        "failed": len(failed_ids),
+        "failed_task_ids": failed_ids,
+        "skipped_empty": skipped_empty,
+        "checked": len(rows),
+    }
+    _audit_logger.log_event("EPISODIC_EMBEDDINGS_BACKFILLED", result)
+    logger.info("EPISODIC_EMBEDDINGS_BACKFILLED %s", result)
+    return result
 
 def get_all_episodes(limit: int = 50) -> List[Dict[str, Any]]:
     init_episodic_db()
@@ -283,3 +483,105 @@ def clear_all_episodes() -> bool:
         e_conn.commit()
     _audit_logger.log_event("EPISODIC_MEMORY_CLEARED_ALL", {})
     return True
+
+# ---------------------------------------------------------------------------
+# Phase 10.3 A1: retention / pruning. Before this, episodic memory had no
+# pruning, decay, or TTL — episodic_memory + episodic_embeddings grew
+# without bound. Bounds come from UserConfig (config.py is the single
+# source of the numbers); explicit args here override them, and a bound
+# <= 0 disables pruning on that axis.
+# ---------------------------------------------------------------------------
+
+def _delete_episode_rows(task_ids: List[str]) -> Dict[str, int]:
+    """Delete the FTS, thinking, and embedding rows for ``task_ids``.
+
+    An episode is three rows in two DBs; they are always deleted together
+    so pruning never leaves an orphan embedding/thinking row behind.
+    Returns row counts per table.
+    """
+    counts = {"episodes": 0, "thinking_rows": 0, "embedding_rows": 0}
+    if not task_ids:
+        return counts
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.executemany("DELETE FROM episodic_memory WHERE task_id = ?", [(t,) for t in task_ids])
+        counts["episodes"] = cur.rowcount
+        cur.executemany("DELETE FROM episodic_thinking WHERE task_id = ?", [(t,) for t in task_ids])
+        counts["thinking_rows"] = cur.rowcount
+        conn.commit()
+    with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
+        e_cur = e_conn.cursor()
+        e_cur.executemany("DELETE FROM episodic_embeddings WHERE task_id = ?", [(t,) for t in task_ids])
+        counts["embedding_rows"] = e_cur.rowcount
+        e_conn.commit()
+    return counts
+
+def prune_episodes(retention_days: Optional[int] = None,
+                   max_episodes: Optional[int] = None,
+                   *, config: Optional[UserConfig] = None,
+                   now: Optional[int] = None) -> Dict[str, int]:
+    """Prune episodic memory by age, then by count (oldest first).
+
+    Age: episodes with ``timestamp`` older than ``retention_days`` are
+    removed. Count: if more than ``max_episodes`` remain, the oldest
+    beyond the cap are removed. Each pruned episode loses its FTS row,
+    thinking row, and embedding row together (see ``_delete_episode_rows``).
+    Nothing else references an episode, so no keep-guard applies here —
+    the guard lives in the knowledge graph, where facts reference entities.
+    Returns counts and logs them to the audit log (EPISODIC_MEMORY_PRUNED).
+    """
+    cfg = config if config is not None else load_config()
+    if retention_days is None:
+        retention_days = cfg.episodic_retention_days
+    if max_episodes is None:
+        max_episodes = cfg.episodic_max_episodes
+    now = int(time.time()) if now is None else int(now)
+
+    init_episodic_db()
+    init_embeddings_db()
+
+    pruned_ids: List[str] = []
+    if retention_days and retention_days > 0:
+        cutoff = now - int(retention_days) * 86400
+        with _get_conn() as conn:
+            rows = conn.execute(
+                "SELECT task_id FROM episodic_memory WHERE timestamp < ?",
+                (cutoff,),
+            ).fetchall()
+        pruned_ids.extend(r["task_id"] for r in rows)
+
+    if max_episodes and max_episodes > 0:
+        with _get_conn() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM episodic_memory").fetchone()[0]
+            # Episodes already selected for age pruning are gone once the
+            # deletes below run, so subtract them from the count.
+            excess = total - len(pruned_ids) - int(max_episodes)
+            if excess > 0:
+                # Age-selected ids are the oldest rows, so fetching
+                # excess + len(pruned_ids) oldest rows guarantees at least
+                # `excess` not-yet-selected candidates.
+                rows = conn.execute(
+                    "SELECT task_id FROM episodic_memory ORDER BY timestamp ASC LIMIT ?",
+                    (excess + len(pruned_ids),),
+                ).fetchall()
+                seen = set(pruned_ids)
+                added = 0
+                for r in rows:
+                    if added >= excess:
+                        break
+                    if r["task_id"] not in seen:
+                        seen.add(r["task_id"])
+                        pruned_ids.append(r["task_id"])
+                        added += 1
+
+    counts = _delete_episode_rows(pruned_ids)
+    result = {
+        "pruned_episodes": counts["episodes"],
+        "pruned_thinking_rows": counts["thinking_rows"],
+        "pruned_embedding_rows": counts["embedding_rows"],
+        "retention_days": retention_days,
+        "max_episodes": max_episodes,
+    }
+    _audit_logger.log_event("EPISODIC_MEMORY_PRUNED", result)
+    logger.info("EPISODIC_MEMORY_PRUNED %s", result)
+    return result
