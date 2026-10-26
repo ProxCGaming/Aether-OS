@@ -357,10 +357,15 @@ class MCPRegistry:
 
         Removes the config immediately. A live session is closed here
         only when no event loop is running in this thread; when a loop
-        IS running, the session cannot be closed from this task (anyio
-        cancel-scope rule — see ``remove_server``), so the caller must
-        disconnect first (the websocket PLUGIN_UNINSTALL handler does).
-        Plugin servers are never connected at install/rollback time.
+        IS running and the server is connected, removal is REFUSED
+        (issue 011, S6 — completing the first review's S5, which 009
+        only half fixed): the session cannot be closed from this task
+        (anyio cancel-scope rule — see ``remove_server``), and deleting
+        the config anyway would leave a live session and handed-out
+        ``Tool`` objects executing. The caller must disconnect first
+        (``await remove_server``; the websocket PLUGIN_UNINSTALL
+        handler does). Raises MCPConfigError on refusal. Plugin
+        servers are never connected at install/rollback time.
         """
         if self._client.is_connected(name):
             try:
@@ -368,10 +373,10 @@ class MCPRegistry:
             except RuntimeError:
                 asyncio.run(self._client.disconnect(name))
             else:
-                logger.warning(
-                    "Removing MCP server %r with a live session from a sync "
-                    "caller; disconnect it first (await remove_server).",
-                    name,
+                raise MCPConfigError(
+                    f"MCP server '{name}' is connected; disconnect it "
+                    "first (await remove_server) — refusing to remove a "
+                    "live session from a sync caller."
                 )
         if name in self.servers:
             del self.servers[name]

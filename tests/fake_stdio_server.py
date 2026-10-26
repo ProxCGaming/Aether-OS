@@ -39,6 +39,15 @@ def intro() -> str:
     return "Introduce yourself briefly."
 
 
+@mcp.prompt()
+def duet() -> list:
+    """A prompt with an assistant turn (issue 011, S3 tagging)."""
+    return [
+        {"role": "user", "content": "Say hello."},
+        {"role": "assistant", "content": "Hello! I am the model."},
+    ]
+
+
 @mcp.tool()
 def echo_env(name: str) -> str:
     """Return the value of environment variable *name* ('' if missing)."""

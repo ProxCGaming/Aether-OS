@@ -14,7 +14,26 @@ def _read_mcp_config_file(source: Path, file_path: str) -> dict:
     is not valid JSON, or does not contain a JSON object. Never invents
     a fallback config: a corrupt config is a validation failure, not a
     dummy server.
+
+    Issue 011 (S4): *file_path* must stay inside the package. An
+    absolute path or any ``..`` segment is rejected outright, and in
+    the dir branch the resolved path must stay inside the resolved
+    package directory — a crafted manifest must not read an arbitrary
+    JSON file on disk as a server config (with an arbitrary
+    ``command``). The same guard runs before the zip branch, where a
+    ``..`` entry name would otherwise be looked up verbatim.
     """
+    path = Path(file_path)
+    if path.is_absolute():
+        raise ValueError(
+            f"MCP server config file '{file_path}' must be inside the "
+            "plugin package: absolute paths are not allowed."
+        )
+    if ".." in path.parts:
+        raise ValueError(
+            f"MCP server config file '{file_path}' must be inside the "
+            "plugin package: '..' segments are not allowed."
+        )
     raw: bytes
     if source.is_file() and source.suffix == ".zip":
         try:
@@ -29,7 +48,12 @@ def _read_mcp_config_file(source: Path, file_path: str) -> dict:
         except zipfile.BadZipFile as e:
             raise ValueError(f"Plugin package is not a valid zip file: {e}")
     elif source.is_dir():
-        cfg_path = source / file_path
+        cfg_path = (source / file_path).resolve()
+        if not cfg_path.is_relative_to(source.resolve()):
+            raise ValueError(
+                f"MCP server config file '{file_path}' must be inside the "
+                "plugin package."
+            )
         if not cfg_path.exists():
             raise ValueError(
                 f"MCP server config file '{file_path}' not found "
@@ -226,8 +250,14 @@ class PluginInstaller:
                 if skill_dir.exists():
                     shutil.rmtree(skill_dir)
             for mcp_name in installed_mcp:
-                GLOBAL_MCP_REGISTRY.remove_server_sync(mcp_name)
-                
+                # Issue 011 (S6): a connected server refuses a sync
+                # remove — that refusal must not mask the install
+                # failure being rolled back, so it is best-effort here.
+                try:
+                    GLOBAL_MCP_REGISTRY.remove_server_sync(mcp_name)
+                except Exception:
+                    pass
+
             raise RuntimeError(f"Installation failed, rolled back. Error: {e}")
 
     def uninstall(self, plugin_name: str):

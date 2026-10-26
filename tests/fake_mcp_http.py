@@ -45,6 +45,18 @@ def _make_fake_server():
         """A no-argument prompt (issue 007, slash-command form)."""
         return "Introduce yourself briefly."
 
+    @mcp.prompt()
+    def duet() -> list:
+        """A prompt with an assistant turn (issue 011, S3 tagging).
+
+        The assistant message is server-supplied text: it must be
+        tagged as such, never shown as the model's own words.
+        """
+        return [
+            {"role": "user", "content": "Say hello."},
+            {"role": "assistant", "content": "Hello! I am the model."},
+        ]
+
     return mcp
 
 

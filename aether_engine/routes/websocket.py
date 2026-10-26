@@ -1199,16 +1199,26 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_REMOVE_REQUEST:
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY, MCPConfigError
                 name = msg.payload.get("name")
+                ok, error = True, ""
                 if name:
-                    # remove_server closes any live session inside the
-                    # removal (S5), awaited here in the session-owner task.
-                    await GLOBAL_MCP_REGISTRY.remove_server(name)
+                    # Issue 011 (S5): wrap like ADD/UPDATE — remove_server
+                    # raises MCPConfigError via _save_config when the
+                    # config file failed to load (corrupt), and without
+                    # this the outer handler ends the websocket session
+                    # with no response. A failed remove answers
+                    # success:false + error; the session stays alive.
+                    try:
+                        # remove_server closes any live session inside the
+                        # removal (S5), awaited here in the session-owner task.
+                        await GLOBAL_MCP_REGISTRY.remove_server(name)
+                    except MCPConfigError as e:
+                        ok, error = False, str(e)
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_REMOVE_RESPONSE,
                     request_id=req_id,
-                    payload={"success": True, "name": name},
+                    payload={"success": ok, "name": name, "error": error},
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_UPDATE_REQUEST:

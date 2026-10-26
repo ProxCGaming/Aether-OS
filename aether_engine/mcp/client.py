@@ -21,6 +21,7 @@ import logging
 import os
 import re
 from contextlib import AsyncExitStack
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -37,6 +38,35 @@ MCP_RESOURCE_MAX_CHARS = 20000
 # Issue 007: cap for one prompt message, same scale — a prompt template
 # is user-supplied text from an untrusted server, never unbounded.
 MCP_PROMPT_MAX_CHARS = 20000
+
+# Issue 011 (S2): minimal environment allow-list for stdio children.
+# A stdio server is untrusted code: it gets the config ``env`` (expanded)
+# plus only these variables — never the engine's full environment, which
+# holds provider API keys. The SDK default allow-list is not used either:
+# it silently drops a server's own secrets (issue 003). Node / npx (the
+# filesystem server) needs PATH + HOME (+ TEMP on Windows); a Python
+# server run by absolute path needs PATH for its own subprocesses.
+MCP_STDIO_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH", "PATHEXT", "HOME", "USER", "USERNAME", "LOGNAME",
+        "LANG", "LC_ALL", "LC_CTYPE", "LANGUAGE",
+        "TEMP", "TMP", "TMPDIR",
+        "SystemRoot", "SystemDrive", "WINDIR", "ComSpec",
+        "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
+        "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
+        "VIRTUAL_ENV", "PYTHONPATH", "SHELL", "TERM", "OS",
+        # Proxy / CA-bundle config (no credentials, just endpoints and
+        # file paths). npx/npm resolve packages through the registry
+        # even when cached: without these, a stdio server started via
+        # npx hangs on registry access instead of starting (verified:
+        # filesystem server answers in ~1s with them, never without).
+        "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+        "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+        "NODE_EXTRA_CA_CERTS", "NODE_USE_ENV_PROXY",
+        "SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+    }
+)
 
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -172,7 +202,16 @@ class MCPClientManager:
                 read, write = await self._open_stdio_session(stack, config, timeout)
             else:
                 read, write = await self._open_http_session(stack, config, timeout)
-            session = ClientSession(read, write)
+            # Issue 011 (S1): every session call is bounded by the server
+            # config timeout. ClientSession's read timeout applies to all
+            # send_request calls (list_tools, list_resources, prompts, ...)
+            # via anyio.fail_after, raising McpError("Timed out while
+            # waiting for response to ...") — a stalled server can no
+            # longer hang the sequential websocket loop forever. Only
+            # call_tool overrides it, with the Tool timeout (see below).
+            session = ClientSession(
+                read, write, read_timeout_seconds=timedelta(seconds=timeout)
+            )
             await stack.enter_async_context(session)
             await asyncio.wait_for(session.initialize(), timeout=timeout)
         except BaseException as e:
@@ -196,24 +235,32 @@ class MCPClientManager:
     async def _open_stdio_session(self, stack: AsyncExitStack, config: dict, timeout: float):
         """Spawn the stdio subprocess and open its streams on *stack*.
 
-        The child's environment is the engine's environment plus the
-        config ``env`` (``${VAR}``-expanded, overriding on collision) —
-        the SDK's default would only inherit an allow-list of variables,
-        which would silently drop e.g. a server's API key from the
-        environment. ``cwd`` is passed through when set. The child's
-        stderr goes to the engine's stderr (SDK default); stdout is
-        protocol only. Closing the stack terminates the subprocess.
+        The child's environment is the config ``env`` (``${VAR}``-expanded,
+        overriding on collision) plus an explicit minimal allow-list of
+        the engine's environment (issue 011, S2) — never the full
+        ``os.environ``, which holds provider API keys a user-added
+        server must not see. The SDK's default would only inherit an
+        allow-list of variables, which would silently drop e.g. a
+        server's API key from the environment (issue 003); this is
+        the same idea, made explicit and auditable here instead.
+        ``cwd`` is passed through when set. The child's stderr goes to
+        the engine's stderr (SDK default); stdout is protocol only.
+        Closing the stack terminates the subprocess.
         """
         command = config.get("command")
         if not command:
             raise MCPClientError("stdio server config requires 'command'")
         env = {
-            **os.environ,
-            **{
+            k: v
+            for k, v in os.environ.items()
+            if k in MCP_STDIO_ENV_ALLOWLIST
+        }
+        env.update(
+            {
                 k: expand_env_vars(v)
                 for k, v in (config.get("env") or {}).items()
-            },
-        }
+            }
+        )
         params = StdioServerParameters(
             command=command,
             args=list(config.get("args") or []),
@@ -260,10 +307,28 @@ class MCPClientManager:
         self._sessions[name] = session
         self._configs[name] = dict(config)
         try:
+            # Issue 011 (S1): list_tools is bounded by the session read
+            # timeout (server config timeout). A server that stalls here
+            # is a failed connect, not a connected server with no tools:
+            # clean up the session opened in this task (closing it here
+            # is safe — this is the task that opened it, manual or
+            # owner) and report the failure instead of returning ok.
             tools = await session.list_tools()
             tool_count = len(tools.tools)
-        except Exception:
-            tool_count = 0
+        except Exception as e:
+            message = _failure_message(e)
+            logger.warning("MCP connect failed for %s while listing tools: %s", name, message)
+            try:
+                await stack.aclose()
+            except BaseException as close_e:
+                if _is_genuine_cancellation(close_e):
+                    raise
+                logger.warning("MCP connect cleanup failed for %s: %s", name, close_e)
+            self._stacks.pop(name, None)
+            self._sessions.pop(name, None)
+            self._configs.pop(name, None)
+            self._set_status(name, "failed", error=message)
+            return {"ok": False, "error": message}
         self._set_status(name, "connected", error=None, tool_count=tool_count)
         return {"ok": True, "error": None}
 
@@ -466,7 +531,22 @@ class MCPClientManager:
         session = self._sessions.get(name)
         if session is None:
             raise MCPClientError(f"MCP server '{name}' is not connected")
-        result = await session.list_tools()
+        try:
+            # Issue 011 (S1): bounded by the session read timeout (server
+            # config timeout); a stalled server fails here, marks the
+            # server failed, and never hangs the caller forever.
+            result = await session.list_tools()
+        except BaseException as e:
+            if _is_genuine_cancellation(e):
+                raise
+            if isinstance(e, BaseExceptionGroup):
+                message = _first_leaf_message(e)
+            else:
+                message = _failure_message(e)
+            self._set_status(name, "failed", error=message)
+            raise MCPClientError(
+                f"MCP server '{name}' list_tools failed: {message}"
+            ) from e
         return result.tools
 
     async def call_tool(
@@ -491,7 +571,15 @@ class MCPClientManager:
         # distinguished from a genuine cancellation by its message (see
         # _is_sdk_cancel): the synthesised one is a connection failure,
         # a genuine one re-raises.
-        inner = asyncio.ensure_future(session.call_tool(tool, args or {}))
+        # The per-request timeout overrides the session read timeout
+        # (issue 011, S1): a tool call is bounded by the Tool timeout
+        # (60s, issue 009 S2), never by the shorter server connect
+        # timeout — a slow tool must not be cut off at 30s.
+        inner = asyncio.ensure_future(
+            session.call_tool(
+                tool, args or {}, read_timeout_seconds=timedelta(seconds=timeout)
+            )
+        )
         try:
             result = await asyncio.wait_for(asyncio.shield(inner), timeout=timeout)
         except asyncio.TimeoutError:
@@ -638,7 +726,13 @@ class MCPClientManager:
         ``[{role, content}]`` — roles are "user" / "assistant" only,
         anything else is treated as "user". Each message is capped at
         ``MCP_PROMPT_MAX_CHARS`` with a truncation note, never silently
-        cut. No retry — a dead server fails immediately (PRD Q14).
+        cut. Issue 011 (S3): every message is prefixed with
+        ``[MCP prompt from server '<server>']`` — the text is
+        server-supplied, so the chat, the supervisor briefing and the
+        UI must be able to tell it from the model's (or the user's)
+        own words. Tagging, not re-roling: few-shot prompts
+        legitimately use assistant turns. No retry — a dead server
+        fails immediately (PRD Q14).
         """
         args = _validate_prompt_arguments(arguments)
         session = self._sessions.get(server)
@@ -658,6 +752,7 @@ class MCPClientManager:
                 f"MCP server '{server}' prompt '{prompt}' failed: {message}"
             ) from e
         messages = []
+        tag = f"[MCP prompt from server '{server}']"
         for msg in result.messages:
             role = msg.role if msg.role in ("user", "assistant") else "user"
             content = getattr(msg.content, "text", None)
@@ -668,7 +763,7 @@ class MCPClientManager:
                     content[:MCP_PROMPT_MAX_CHARS]
                     + f"\n...[prompt message truncated to {MCP_PROMPT_MAX_CHARS} chars]"
                 )
-            messages.append({"role": role, "content": content})
+            messages.append({"role": role, "content": f"{tag} {content}"})
         return messages
 
 
