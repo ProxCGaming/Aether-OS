@@ -518,6 +518,20 @@ function AppContent() {
             content: `✅ Fallback successful. Routing request through ${data.payload.provider || 'backup provider'}.`,
             isFinal: true
           }]);
+        } else if (data.type === 'MCP_RESOURCE_READ_RESPONSE') {
+          // Issue 006: a resource loaded into the current chat appears
+          // live as a system message (the engine also saved it to the
+          // session, so it survives a reload). Only for our session —
+          // a resource loaded into another session is not ours to show.
+          if (data.payload.success && data.payload.message
+              && data.payload.session_id === activeSessionRef.current) {
+            setChatMessages(prev => [...prev, {
+              id: data.request_id || Date.now().toString(),
+              role: 'system',
+              content: data.payload.message,
+              isFinal: true
+            }]);
+          }
         } else if (data.type === 'TOOL_APPROVAL_REQUEST') {
           setIsThinking(false);
           const approvalMsg = { 
@@ -1022,6 +1036,7 @@ function AppContent() {
                    providers={providers}
                    localModels={localModels}
                    defaultModel={defaultModel}
+                   activeSession={activeSession}
                  />
                </div>
             )}

@@ -31,6 +31,9 @@ from mcp.client.streamable_http import streamable_http_client
 
 logger = logging.getLogger("aether_engine.mcp.client")
 
+# Issue 006: cap for a loaded resource, same scale as Tool.max_output_chars.
+MCP_RESOURCE_MAX_CHARS = 20000
+
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
@@ -490,6 +493,65 @@ class MCPClientManager:
             )
         return _content_to_text(result.content)
 
+    # -- resources (issue 006) ------------------------------------------
+    async def list_resources(self, name: str) -> List[Dict[str, Any]]:
+        """List *name*'s resources as plain dicts (uri / name / description / mimeType)."""
+        session = self._sessions.get(name)
+        if session is None:
+            raise MCPClientError(f"MCP server '{name}' is not connected")
+        try:
+            result = await session.list_resources()
+        except BaseException as e:
+            if _is_genuine_cancellation(e):
+                raise
+            if isinstance(e, BaseExceptionGroup):
+                message = _first_leaf_message(e)
+            else:
+                message = _failure_message(e)
+            self._set_status(name, "failed", error=message)
+            raise MCPClientError(
+                f"MCP server '{name}' list_resources failed: {message}"
+            ) from e
+        return [
+            {
+                "uri": str(r.uri),
+                "name": r.name,
+                "description": r.description,
+                "mimeType": r.mimeType,
+            }
+            for r in result.resources
+        ]
+
+    async def read_resource(self, name: str, uri: str) -> str:
+        """Read resource *uri* from *name*; returns its text, capped at
+        ``MCP_RESOURCE_MAX_CHARS`` with a truncation note (never silently
+        cut). Read-only: nothing is executed. No retry — a dead server
+        fails immediately, like a tool call (PRD Q14).
+        """
+        session = self._sessions.get(name)
+        if session is None:
+            raise MCPClientError(f"MCP server '{name}' is not connected")
+        try:
+            result = await session.read_resource(uri)
+        except BaseException as e:
+            if _is_genuine_cancellation(e):
+                raise
+            if isinstance(e, BaseExceptionGroup):
+                message = _first_leaf_message(e)
+            else:
+                message = _failure_message(e)
+            self._set_status(name, "failed", error=message)
+            raise MCPClientError(
+                f"MCP server '{name}' resource '{uri}' failed: {message}"
+            ) from e
+        text = _resource_content_to_text(result.contents, uri)
+        if len(text) > MCP_RESOURCE_MAX_CHARS:
+            text = (
+                text[:MCP_RESOURCE_MAX_CHARS]
+                + f"\n...[resource truncated to {MCP_RESOURCE_MAX_CHARS} chars]"
+            )
+        return text
+
 
 def _first_leaf_message(group: BaseExceptionGroup) -> str:
     for exc in group.exceptions:
@@ -554,6 +616,19 @@ def _failure_message(exc: BaseException) -> str:
             return str(seen)
         seen = seen.__context__
     return exc.__class__.__name__
+
+
+def _resource_content_to_text(contents: List[Any], uri: str) -> str:
+    """Resource contents -> plain text. Binary (blob) contents are not
+    inlined — they are noted, never decoded as text."""
+    parts = []
+    for block in contents or []:
+        text = getattr(block, "text", None)
+        if text is not None:
+            parts.append(text)
+        else:
+            parts.append(f"[binary resource '{uri}' — content not inlined]")
+    return "\n".join(parts)
 
 
 def _content_to_text(content: List[Any]) -> str:

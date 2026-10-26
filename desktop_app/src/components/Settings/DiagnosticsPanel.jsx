@@ -5,9 +5,10 @@ import Dropdown from '../../Dropdown';
 import MCPNotice from './MCPNotice';
 import PluginsNotice from './PluginsNotice';
 
-export default function DiagnosticsPanel({ activeMenu }) {
+export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
   const { wsRef, sendMessage } = useAetherSocket();
   const [mcpServers, setMcpServers] = useState({});
+  const [mcpResources, setMcpResources] = useState({}); // issue 006: server name -> [{uri, name, description, mimeType}]
   const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '', url: '', headerKey: '', headerValue: '', envKey: '', envValue: '', cwd: '' });
   const [mcpTestResult, setMcpTestResult] = useState(null);
   const [plugins, setPlugins] = useState([]);
@@ -37,6 +38,21 @@ export default function DiagnosticsPanel({ activeMenu }) {
             // B1: the whole config file failed to parse — surface it.
             setMcpTestResult(`MCP config file error: ${data.payload.config_error}`);
           }
+          // Issue 006: list resources for every connected server, so
+          // the tab can offer "Load into chat" per resource.
+          Object.entries(data.payload.servers || {}).forEach(([srvName, srv]) => {
+            if (srv.status === 'connected') {
+              sendMessage('MCP_RESOURCE_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: srvName } });
+            }
+          });
+        } else if (data.type === 'MCP_RESOURCE_LIST_RESPONSE') {
+          if (data.payload.success) {
+            setMcpResources(prev => ({ ...prev, [data.payload.name]: data.payload.resources || [] }));
+          }
+        } else if (data.type === 'MCP_RESOURCE_READ_RESPONSE') {
+          setMcpTestResult(data.payload.success
+            ? `Loaded ${data.payload.uri} into chat${data.payload.truncated ? ' (truncated to 20000 chars)' : ''}`
+            : `Load ${data.payload.uri} failed: ${data.payload.error || 'unknown error'}`);
         } else if (data.type === 'MCP_SERVER_ADD_RESPONSE' || data.type === 'MCP_SERVER_REMOVE_RESPONSE') {
           if (data.payload.success) {
             sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
@@ -282,6 +298,24 @@ export default function DiagnosticsPanel({ activeMenu }) {
                         Enabled
                       </label>
                     </div>
+                    {(mcpResources[name] || []).length > 0 && (
+                      <div style={{ marginTop: '12px' }}>
+                        <div style={{ fontSize: '13px', color: '#c0c0d0', marginBottom: '6px' }}>Resources:</div>
+                        {(mcpResources[name] || []).map((res) => (
+                          <div key={res.uri} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', padding: '6px 0' }}>
+                            <span style={{ fontSize: '13px', color: '#9090a0', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={res.description || res.uri}>
+                              {res.name || res.uri}
+                            </span>
+                            <button
+                              onClick={() => sendMessage('MCP_RESOURCE_READ_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, uri: res.uri, session_id: activeSession } })}
+                              style={{ background: 'rgba(124, 58, 237, 0.15)', color: '#a78bfa', border: '1px solid rgba(124, 58, 237, 0.4)', padding: '4px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}
+                            >
+                              Load into chat
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div style={{ display: 'flex', gap: '8px' }}>
                     <button

@@ -20,6 +20,16 @@ def _make_fake_server():
         """Add two numbers."""
         return a + b
 
+    @mcp.resource("fake://notes")
+    def notes() -> str:
+        """A short note, for issue 006 resource tests."""
+        return "The launch code is 42."
+
+    @mcp.resource("fake://big")
+    def big() -> str:
+        """A 25,000-char resource, for the issue 006 truncation rule."""
+        return "x" * 25000
+
     return mcp
 
 

@@ -21,6 +21,12 @@ def add(a: int, b: int) -> int:
     return a + b
 
 
+@mcp.resource("fake://notes")
+def notes() -> str:
+    """A short note, for issue 006 resource tests."""
+    return "The launch code is 42."
+
+
 @mcp.tool()
 def echo_env(name: str) -> str:
     """Return the value of environment variable *name* ('' if missing)."""

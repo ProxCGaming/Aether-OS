@@ -1219,6 +1219,83 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     },
                 ).to_json())
 
+            elif msg.type == EventType.MCP_RESOURCE_LIST_REQUEST:
+                # Issue 006: list a connected server's resources.
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                resources, ok, error = [], True, ""
+                if not name:
+                    ok, error = False, "Server name is required."
+                else:
+                    try:
+                        resources = await GLOBAL_MCP_REGISTRY.list_resources(name)
+                    except Exception as e:
+                        ok, error = False, str(e)
+                await ws.send_text(Event(
+                    type=EventType.MCP_RESOURCE_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": ok, "name": name, "resources": resources, "error": error},
+                ).to_json())
+
+            elif msg.type == EventType.MCP_RESOURCE_READ_REQUEST:
+                # Issue 006: read a resource and load it into the current
+                # chat as a context message. Role "system": it is context,
+                # not something the user said — and the supervisor's
+                # get_current_chat_history briefing reads it back to the
+                # model on the next turn. If no session was given (or it
+                # no longer exists), create one so the resource is never
+                # lost. The UI also gets the message live in this response
+                # (App.jsx appends it) — the Settings panel alone cannot
+                # update the chat view.
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                uri = msg.payload.get("uri")
+                ok, error, content, session_id = True, "", "", msg.payload.get("session_id")
+                if not name or not uri:
+                    ok, error = False, "Server name and resource URI are required."
+                else:
+                    try:
+                        content = await GLOBAL_MCP_REGISTRY.read_resource(name, uri)
+                    except Exception as e:
+                        ok, error = False, str(e)
+                message = ""
+                truncated = content.endswith("...[resource truncated to 20000 chars]")
+                if ok:
+                    # A chat-save failure must return an error, never kill
+                    # the websocket (an exception here used to take the
+                    # whole connection down with it).
+                    try:
+                        if session_id:
+                            sess = await asyncio.to_thread(session_store.get_session, session_id)
+                            if sess is None:
+                                session_id = None
+                        if not session_id:
+                            session_id = await asyncio.to_thread(
+                                session_store.create_session, f"MCP resource: {uri}"
+                            )
+                        message = f"[MCP resource from server '{name}': {uri}]\n{content}"
+                        await asyncio.to_thread(
+                            session_store.add_message, session_id, "system", message
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to save MCP resource to chat: {e}")
+                        ok, error = False, f"Failed to save resource to chat: {e}"
+                        message = ""
+                    if ok:
+                        engine_state.audit_logger.log_event("MCP_RESOURCE_READ", {
+                            "server": name, "uri": uri, "session_id": session_id,
+                            "truncated": truncated,
+                        })
+                await ws.send_text(Event(
+                    type=EventType.MCP_RESOURCE_READ_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "success": ok, "name": name, "uri": uri, "content": content,
+                        "message": message, "truncated": truncated,
+                        "session_id": session_id, "error": error,
+                    },
+                ).to_json())
+
             elif msg.type == EventType.PLUGIN_LIST_REQUEST:
                 plugins_dict = engine_state.plugin_installer.get_all()
                 plugins_list = list(plugins_dict.values()) if plugins_dict else []

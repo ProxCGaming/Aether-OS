@@ -7,7 +7,7 @@ import ProviderSettings from './components/Settings/ProviderSettings';
 import MemoryManagement from './components/Settings/MemoryManagement';
 import DiagnosticsPanel from './components/Settings/DiagnosticsPanel';
 
-export default function SettingsPanel({ wsRef, providers = {}, localModels = [], defaultModel = '' }) {
+export default function SettingsPanel({ wsRef, providers = {}, localModels = [], defaultModel = '', activeSession = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
   const [modelTab, setModelTab] = useState('cloud'); // 'cloud' or 'local'
   const [keys, setKeys] = useState({});
@@ -767,7 +767,7 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
         )}
 
         {activeMenu === 'MCP' && (
-          <DiagnosticsPanel activeMenu='MCP' />
+          <DiagnosticsPanel activeMenu='MCP' activeSession={activeSession} />
         )}
 
         {activeMenu === 'Plugins' && (

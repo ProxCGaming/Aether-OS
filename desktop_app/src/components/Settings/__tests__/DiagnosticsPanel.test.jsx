@@ -308,6 +308,90 @@ describe('DiagnosticsPanel', () => {
     expect(screen.getByText("Update fake failed: Unknown MCP server 'fake'")).toBeInTheDocument();
   });
 
+  it('lists a connected server\'s resources and loads one into chat (006)', () => {
+    const listeners = {};
+    const mockWs = {
+      addEventListener: jest.fn((type, fn) => { listeners[type] = fn; }),
+      removeEventListener: jest.fn(),
+    };
+    useAetherSocket.mockReturnValue({
+      wsRef: { current: mockWs },
+      sendMessage: mockSendMessage,
+    });
+    render(<DiagnosticsPanel activeMenu="MCP" activeSession="sess-1" />);
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_SERVER_LIST_RESPONSE',
+          payload: {
+            servers: {
+              fake: { transport: 'streamable_http', url: 'http://127.0.0.1:9000/mcp', status: 'connected', tool_count: 1, auto_connect: true, enabled: true },
+            },
+          },
+        }),
+      });
+    });
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'MCP_RESOURCE_LIST_REQUEST',
+      expect.objectContaining({ payload: { name: 'fake' } })
+    );
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_RESOURCE_LIST_RESPONSE',
+          payload: {
+            success: true, name: 'fake',
+            resources: [{ uri: 'fake://notes', name: 'notes', description: 'A note', mimeType: 'text/plain' }],
+          },
+        }),
+      });
+    });
+    expect(screen.getByText('notes')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Load into chat'));
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'MCP_RESOURCE_READ_REQUEST',
+      expect.objectContaining({
+        payload: { name: 'fake', uri: 'fake://notes', session_id: 'sess-1' },
+      })
+    );
+  });
+
+  it('shows a loaded resource instead of doing nothing (006)', () => {
+    const listeners = {};
+    const mockWs = {
+      addEventListener: jest.fn((type, fn) => { listeners[type] = fn; }),
+      removeEventListener: jest.fn(),
+    };
+    useAetherSocket.mockReturnValue({
+      wsRef: { current: mockWs },
+      sendMessage: mockSendMessage,
+    });
+    render(<DiagnosticsPanel activeMenu="MCP" />);
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_RESOURCE_READ_RESPONSE',
+          payload: { success: true, name: 'fake', uri: 'fake://notes', truncated: false },
+        }),
+      });
+    });
+    expect(screen.getByText('Loaded fake://notes into chat')).toBeInTheDocument();
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_RESOURCE_READ_RESPONSE',
+          payload: { success: false, name: 'fake', uri: 'fake://notes', error: 'not connected' },
+        }),
+      });
+    });
+    expect(screen.getByText('Load fake://notes failed: not connected')).toBeInTheDocument();
+  });
+
   it('requests the plugin list when the Plugins menu is active', () => {
     render(<DiagnosticsPanel activeMenu="Plugins" />);
     expect(mockSendMessage).toHaveBeenCalledWith(

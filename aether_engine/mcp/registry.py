@@ -475,6 +475,24 @@ class MCPRegistry:
             return {"ok": False, "error": f"Unknown MCP server '{name}'", "tools": []}
         return await self._client.test_connection(name, config)
 
+    # -- resources (issue 006) ------------------------------------------
+    async def list_resources(self, name: str) -> List[Dict[str, Any]]:
+        """List *name*'s resources. Raises MCPClientError for an unknown
+        or disconnected server."""
+        if name not in self.servers:
+            from aether_engine.mcp.client import MCPClientError
+
+            raise MCPClientError(f"Unknown MCP server '{name}'")
+        return await self._client.list_resources(name)
+
+    async def read_resource(self, name: str, uri: str) -> str:
+        """Read resource *uri* from *name* (text, capped — see client)."""
+        if name not in self.servers:
+            from aether_engine.mcp.client import MCPClientError
+
+            raise MCPClientError(f"Unknown MCP server '{name}'")
+        return await self._client.read_resource(name, uri)
+
     async def _refresh_tools(self, name: str) -> None:
         mcp_tools = await self._client.list_tools(name)
         self._tools_cache[name] = [
