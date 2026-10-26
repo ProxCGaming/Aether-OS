@@ -532,6 +532,19 @@ function AppContent() {
               isFinal: true
             }]);
           }
+        } else if (data.type === 'MCP_PROMPT_RUN_RESPONSE') {
+          // Issue 007: a prompt run into the current chat appears live,
+          // one message per prompt message, with the prompt's own role.
+          // Only for our session.
+          if (data.payload.success && Array.isArray(data.payload.messages)
+              && data.payload.session_id === activeSessionRef.current) {
+            setChatMessages(prev => [...prev, ...data.payload.messages.map((m, i) => ({
+              id: `${data.request_id || Date.now().toString()}-${i}`,
+              role: m.role,
+              content: m.content,
+              isFinal: true
+            }))]);
+          }
         } else if (data.type === 'TOOL_APPROVAL_REQUEST') {
           setIsThinking(false);
           const approvalMsg = { 

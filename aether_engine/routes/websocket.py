@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from contextlib import asynccontextmanager
@@ -96,6 +97,54 @@ def _extract_token(ws: WebSocket, query_token: Optional[str]) -> Optional[str]:
         return query_token
     auth = ws.headers.get("authorization", "")
     return auth[7:].strip() if auth.startswith("Bearer ") else None
+
+
+async def _run_mcp_prompt_into_chat(
+    name: str, prompt_name: str, arguments: Any, session_id: Optional[str]
+) -> Dict[str, Any]:
+    """Run MCP prompt *prompt_name* on server *name* and insert its
+    messages into a chat session (issue 007).
+
+    Shared by the MCP_PROMPT_RUN handler and the ``/mcp:`` slash
+    command, so the two entry points cannot drift apart. Returns
+    {"ok", "messages", "session_id", "error"}. Arguments are validated
+    by the client (dict of strings, never executed). If no session was
+    given (or it no longer exists), a session is created so the prompt
+    is never lost. A chat-save failure returns an error, never kills
+    the websocket.
+    """
+    from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
+    ok, error, messages = True, "", []
+    if not name or not prompt_name:
+        return {"ok": False, "messages": [], "session_id": session_id,
+                "error": "Server name and prompt name are required."}
+    try:
+        messages = await GLOBAL_MCP_REGISTRY.get_prompt(name, prompt_name, arguments)
+    except Exception as e:
+        return {"ok": False, "messages": [], "session_id": session_id, "error": str(e)}
+    try:
+        if session_id:
+            sess = await asyncio.to_thread(session_store.get_session, session_id)
+            if sess is None:
+                session_id = None
+        if not session_id:
+            session_id = await asyncio.to_thread(
+                session_store.create_session, f"MCP prompt: {prompt_name}"
+            )
+        for msg in messages:
+            await asyncio.to_thread(
+                session_store.add_message, session_id, msg["role"], msg["content"]
+            )
+    except Exception as e:
+        logger.error(f"Failed to save MCP prompt to chat: {e}")
+        return {"ok": False, "messages": [], "session_id": session_id,
+                "error": f"Failed to save prompt to chat: {e}"}
+    engine_state.audit_logger.log_event("MCP_PROMPT_RUN", {
+        "server": name, "prompt": prompt_name, "session_id": session_id,
+        "message_count": len(messages),
+    })
+    return {"ok": True, "messages": messages, "session_id": session_id, "error": ""}
 
 @router.websocket("/ws/tasks")
 async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
@@ -285,6 +334,28 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                             ).to_json())
                         except Exception:
                             pass
+                # Issue 007: ``/mcp:<server>:<prompt>`` runs a prompt
+                # template into the chat instead of starting a graph task.
+                # No arguments in the slash form (use the MCP tab for
+                # prompts with arguments). The slash text itself is not
+                # saved as a user message — only the prompt's messages are.
+                _mcp_slash = re.match(r"^/mcp:([A-Za-z0-9_.\-]{1,100}):([A-Za-z0-9_.\-]+)$", prompt)
+                if _mcp_slash:
+                    _run = await _run_mcp_prompt_into_chat(
+                        _mcp_slash.group(1), _mcp_slash.group(2), None, session_id
+                    )
+                    await ws.send_text(Event(
+                        type=EventType.MCP_PROMPT_RUN_RESPONSE,
+                        request_id=req_id,
+                        payload={
+                            "success": _run["ok"], "name": _mcp_slash.group(1),
+                            "prompt": _mcp_slash.group(2),
+                            "messages": _run["messages"],
+                            "session_id": _run["session_id"], "error": _run["error"],
+                        },
+                    ).to_json())
+                    continue
+
                 try:
                     await asyncio.to_thread(session_store.add_message, session_id, "user", prompt)
                 except Exception as e:
@@ -1295,6 +1366,56 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         "session_id": session_id, "error": error,
                     },
                 ).to_json())
+
+            elif msg.type == EventType.MCP_PROMPT_LIST_REQUEST:
+                # Issue 007: list a connected server's prompt templates.
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                prompts, ok, error = [], True, ""
+                if not name:
+                    ok, error = False, "Server name is required."
+                else:
+                    try:
+                        prompts = await GLOBAL_MCP_REGISTRY.list_prompts(name)
+                    except Exception as e:
+                        ok, error = False, str(e)
+                await ws.send_text(Event(
+                    type=EventType.MCP_PROMPT_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": ok, "name": name, "prompts": prompts, "error": error},
+                ).to_json())
+
+            elif msg.type == EventType.MCP_PROMPT_RUN_REQUEST:
+                # Issue 007: run a prompt template and insert its messages
+                # into the current chat (same pattern as resources in
+                # 006, but with the prompt's own roles). Never auto-run:
+                # only an explicit Run / slash command reaches here.
+                name = msg.payload.get("name")
+                prompt_name = msg.payload.get("prompt")
+                arguments = msg.payload.get("arguments")
+                if arguments is not None and not isinstance(arguments, dict):
+                    await ws.send_text(Event(
+                        type=EventType.MCP_PROMPT_RUN_RESPONSE,
+                        request_id=req_id,
+                        payload={
+                            "success": False, "name": name, "prompt": prompt_name,
+                            "messages": [], "session_id": msg.payload.get("session_id"),
+                            "error": "MCP prompt arguments must be an object of string values.",
+                        },
+                    ).to_json())
+                else:
+                    result = await _run_mcp_prompt_into_chat(
+                        name, prompt_name, arguments, msg.payload.get("session_id")
+                    )
+                    await ws.send_text(Event(
+                        type=EventType.MCP_PROMPT_RUN_RESPONSE,
+                        request_id=req_id,
+                        payload={
+                            "success": result["ok"], "name": name, "prompt": prompt_name,
+                            "messages": result["messages"],
+                            "session_id": result["session_id"], "error": result["error"],
+                        },
+                    ).to_json())
 
             elif msg.type == EventType.PLUGIN_LIST_REQUEST:
                 plugins_dict = engine_state.plugin_installer.get_all()

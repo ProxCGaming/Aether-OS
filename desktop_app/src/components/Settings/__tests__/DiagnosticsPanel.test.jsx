@@ -392,6 +392,91 @@ describe('DiagnosticsPanel', () => {
     expect(screen.getByText('Load fake://notes failed: not connected')).toBeInTheDocument();
   });
 
+  it('lists a connected server\'s prompts and runs one into chat (007)', () => {
+    const listeners = {};
+    const mockWs = {
+      addEventListener: jest.fn((type, fn) => { listeners[type] = fn; }),
+      removeEventListener: jest.fn(),
+    };
+    useAetherSocket.mockReturnValue({
+      wsRef: { current: mockWs },
+      sendMessage: mockSendMessage,
+    });
+    render(<DiagnosticsPanel activeMenu="MCP" activeSession="sess-1" />);
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_SERVER_LIST_RESPONSE',
+          payload: {
+            servers: {
+              fake: { transport: 'streamable_http', url: 'http://127.0.0.1:9000/mcp', status: 'connected', tool_count: 1, auto_connect: true, enabled: true },
+            },
+          },
+        }),
+      });
+    });
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'MCP_PROMPT_LIST_REQUEST',
+      expect.objectContaining({ payload: { name: 'fake' } })
+    );
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_PROMPT_LIST_RESPONSE',
+          payload: {
+            success: true, name: 'fake',
+            prompts: [{ name: 'greet', description: 'Greet someone', arguments: [{ name: 'name', description: 'Who to greet', required: true }] }],
+          },
+        }),
+      });
+    });
+    expect(screen.getByText('greet')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText('name'), { target: { value: 'Arindam' } });
+    fireEvent.click(screen.getByText('Run in chat'));
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'MCP_PROMPT_RUN_REQUEST',
+      expect.objectContaining({
+        payload: { name: 'fake', prompt: 'greet', arguments: { name: 'Arindam' }, session_id: 'sess-1' },
+      })
+    );
+  });
+
+  it('shows a run prompt result instead of doing nothing (007)', () => {
+    const listeners = {};
+    const mockWs = {
+      addEventListener: jest.fn((type, fn) => { listeners[type] = fn; }),
+      removeEventListener: jest.fn(),
+    };
+    useAetherSocket.mockReturnValue({
+      wsRef: { current: mockWs },
+      sendMessage: mockSendMessage,
+    });
+    render(<DiagnosticsPanel activeMenu="MCP" />);
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_PROMPT_RUN_RESPONSE',
+          payload: { success: true, name: 'fake', prompt: 'greet' },
+        }),
+      });
+    });
+    expect(screen.getByText("Ran prompt 'greet' into chat")).toBeInTheDocument();
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_PROMPT_RUN_RESPONSE',
+          payload: { success: false, name: 'fake', prompt: 'greet', error: 'not connected' },
+        }),
+      });
+    });
+    expect(screen.getByText("Run prompt 'greet' failed: not connected")).toBeInTheDocument();
+  });
+
   it('requests the plugin list when the Plugins menu is active', () => {
     render(<DiagnosticsPanel activeMenu="Plugins" />);
     expect(mockSendMessage).toHaveBeenCalledWith(

@@ -121,6 +121,13 @@ class EventType(str, Enum):
     MCP_RESOURCE_LIST_RESPONSE = "MCP_RESOURCE_LIST_RESPONSE"
     MCP_RESOURCE_READ_REQUEST = "MCP_RESOURCE_READ_REQUEST"
     MCP_RESOURCE_READ_RESPONSE = "MCP_RESOURCE_READ_RESPONSE"
+    # MCP prompts (issue 007): list a server's prompt templates; running
+    # one inserts its messages into the current chat, ready to send.
+    # Never auto-run on connect.
+    MCP_PROMPT_LIST_REQUEST = "MCP_PROMPT_LIST_REQUEST"
+    MCP_PROMPT_LIST_RESPONSE = "MCP_PROMPT_LIST_RESPONSE"
+    MCP_PROMPT_RUN_REQUEST = "MCP_PROMPT_RUN_REQUEST"
+    MCP_PROMPT_RUN_RESPONSE = "MCP_PROMPT_RUN_RESPONSE"
 
     # Plugins Management
     PLUGIN_LIST_REQUEST = "PLUGIN_LIST_REQUEST"

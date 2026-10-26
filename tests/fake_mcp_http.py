@@ -30,6 +30,21 @@ def _make_fake_server():
         """A 25,000-char resource, for the issue 006 truncation rule."""
         return "x" * 25000
 
+    @mcp.prompt()
+    def greet(name: str) -> str:
+        """Greet someone by name (issue 007)."""
+        return f"Hello, {name}! Please introduce yourself."
+
+    @mcp.prompt()
+    def plan(topic: str) -> list:
+        """Plan a session about a topic (issue 007, list form)."""
+        return [{"role": "user", "content": f"Plan a session about {topic}."}]
+
+    @mcp.prompt()
+    def intro() -> str:
+        """A no-argument prompt (issue 007, slash-command form)."""
+        return "Introduce yourself briefly."
+
     return mcp
 
 

@@ -34,6 +34,10 @@ logger = logging.getLogger("aether_engine.mcp.client")
 # Issue 006: cap for a loaded resource, same scale as Tool.max_output_chars.
 MCP_RESOURCE_MAX_CHARS = 20000
 
+# Issue 007: cap for one prompt message, same scale — a prompt template
+# is user-supplied text from an untrusted server, never unbounded.
+MCP_PROMPT_MAX_CHARS = 20000
+
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
@@ -551,6 +555,107 @@ class MCPClientManager:
                 + f"\n...[resource truncated to {MCP_RESOURCE_MAX_CHARS} chars]"
             )
         return text
+
+    # -- prompts (issue 007) --------------------------------------------
+    async def list_prompts(self, name: str) -> List[Dict[str, Any]]:
+        """List *name*'s prompt templates as plain dicts (name /
+        description / arguments[{name, description, required}])."""
+        session = self._sessions.get(name)
+        if session is None:
+            raise MCPClientError(f"MCP server '{name}' is not connected")
+        try:
+            result = await session.list_prompts()
+        except BaseException as e:
+            if _is_genuine_cancellation(e):
+                raise
+            if isinstance(e, BaseExceptionGroup):
+                message = _first_leaf_message(e)
+            else:
+                message = _failure_message(e)
+            self._set_status(name, "failed", error=message)
+            raise MCPClientError(
+                f"MCP server '{name}' list_prompts failed: {message}"
+            ) from e
+        return [
+            {
+                "name": p.name,
+                "description": p.description,
+                "arguments": [
+                    {
+                        "name": a.name,
+                        "description": a.description,
+                        "required": bool(a.required),
+                    }
+                    for a in (p.arguments or [])
+                ],
+            }
+            for p in result.prompts
+        ]
+
+    async def get_prompt(
+        self, server: str, prompt: str, arguments: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, str]]:
+        """Run prompt template *prompt* on *server* with *arguments*.
+
+        Arguments are user-supplied and are validated, never executed:
+        they must be a dict of string values (the MCP protocol only
+        takes string arguments). Returns the prompt's messages as
+        ``[{role, content}]`` — roles are "user" / "assistant" only,
+        anything else is treated as "user". Each message is capped at
+        ``MCP_PROMPT_MAX_CHARS`` with a truncation note, never silently
+        cut. No retry — a dead server fails immediately (PRD Q14).
+        """
+        args = _validate_prompt_arguments(arguments)
+        session = self._sessions.get(server)
+        if session is None:
+            raise MCPClientError(f"MCP server '{server}' is not connected")
+        try:
+            result = await session.get_prompt(prompt, args)
+        except BaseException as e:
+            if _is_genuine_cancellation(e):
+                raise
+            if isinstance(e, BaseExceptionGroup):
+                message = _first_leaf_message(e)
+            else:
+                message = _failure_message(e)
+            self._set_status(server, "failed", error=message)
+            raise MCPClientError(
+                f"MCP server '{server}' prompt '{prompt}' failed: {message}"
+            ) from e
+        messages = []
+        for msg in result.messages:
+            role = msg.role if msg.role in ("user", "assistant") else "user"
+            content = getattr(msg.content, "text", None)
+            if content is None:
+                content = f"[non-text prompt content — not inlined]"
+            if len(content) > MCP_PROMPT_MAX_CHARS:
+                content = (
+                    content[:MCP_PROMPT_MAX_CHARS]
+                    + f"\n...[prompt message truncated to {MCP_PROMPT_MAX_CHARS} chars]"
+                )
+            messages.append({"role": role, "content": content})
+        return messages
+
+
+def _validate_prompt_arguments(arguments: Optional[Any]) -> Dict[str, str]:
+    """MCP prompt arguments must be a dict of string values.
+
+    Raises MCPClientError otherwise — a prompt's arguments come from
+    the user (panel form / slash command), and a non-string value has
+    no meaning in the MCP protocol; failing loudly beats coercing
+    silently (e.g. turning ``42`` into ``"42"`` and surprising the
+    server, or ``None`` into ``"None"``).
+    """
+    if arguments is None:
+        return {}
+    if not isinstance(arguments, dict):
+        raise MCPClientError("MCP prompt arguments must be an object of string values.")
+    for k, v in arguments.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise MCPClientError(
+                "MCP prompt arguments must be an object of string values."
+            )
+    return dict(arguments)
 
 
 def _first_leaf_message(group: BaseExceptionGroup) -> str:

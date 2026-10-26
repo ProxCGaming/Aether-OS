@@ -9,6 +9,8 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
   const { wsRef, sendMessage } = useAetherSocket();
   const [mcpServers, setMcpServers] = useState({});
   const [mcpResources, setMcpResources] = useState({}); // issue 006: server name -> [{uri, name, description, mimeType}]
+  const [mcpPrompts, setMcpPrompts] = useState({}); // issue 007: server name -> [{name, description, arguments}]
+  const [mcpPromptArgs, setMcpPromptArgs] = useState({}); // issue 007: "server:prompt" -> {arg: value}
   const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '', url: '', headerKey: '', headerValue: '', envKey: '', envValue: '', cwd: '' });
   const [mcpTestResult, setMcpTestResult] = useState(null);
   const [plugins, setPlugins] = useState([]);
@@ -40,15 +42,25 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
           }
           // Issue 006: list resources for every connected server, so
           // the tab can offer "Load into chat" per resource.
+          // Issue 007: same for prompt templates.
           Object.entries(data.payload.servers || {}).forEach(([srvName, srv]) => {
             if (srv.status === 'connected') {
               sendMessage('MCP_RESOURCE_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: srvName } });
+              sendMessage('MCP_PROMPT_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: srvName } });
             }
           });
         } else if (data.type === 'MCP_RESOURCE_LIST_RESPONSE') {
           if (data.payload.success) {
             setMcpResources(prev => ({ ...prev, [data.payload.name]: data.payload.resources || [] }));
           }
+        } else if (data.type === 'MCP_PROMPT_LIST_RESPONSE') {
+          if (data.payload.success) {
+            setMcpPrompts(prev => ({ ...prev, [data.payload.name]: data.payload.prompts || [] }));
+          }
+        } else if (data.type === 'MCP_PROMPT_RUN_RESPONSE') {
+          setMcpTestResult(data.payload.success
+            ? `Ran prompt '${data.payload.prompt}' into chat`
+            : `Run prompt '${data.payload.prompt}' failed: ${data.payload.error || 'unknown error'}`);
         } else if (data.type === 'MCP_RESOURCE_READ_RESPONSE') {
           setMcpTestResult(data.payload.success
             ? `Loaded ${data.payload.uri} into chat${data.payload.truncated ? ' (truncated to 20000 chars)' : ''}`
@@ -312,6 +324,48 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
                             >
                               Load into chat
                             </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {(mcpPrompts[name] || []).length > 0 && (
+                      <div style={{ marginTop: '12px' }}>
+                        <div style={{ fontSize: '13px', color: '#c0c0d0', marginBottom: '6px' }}>Prompts:</div>
+                        {(mcpPrompts[name] || []).map((pr) => (
+                          <div key={pr.name} style={{ padding: '6px 0' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                              <span style={{ fontSize: '13px', color: '#9090a0', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={pr.description || pr.name}>
+                                {pr.name}
+                              </span>
+                              <button
+                                onClick={() => sendMessage('MCP_PROMPT_RUN_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, prompt: pr.name, arguments: mcpPromptArgs[`${name}:${pr.name}`] || {}, session_id: activeSession } })}
+                                style={{ background: 'rgba(124, 58, 237, 0.15)', color: '#a78bfa', border: '1px solid rgba(124, 58, 237, 0.4)', padding: '4px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}
+                              >
+                                Run in chat
+                              </button>
+                            </div>
+                            {(pr.arguments || []).length > 0 && (
+                              <div style={{ display: 'flex', gap: '8px', marginTop: '6px', flexWrap: 'wrap' }}>
+                                {(pr.arguments || []).map((arg) => (
+                                  <input
+                                    key={arg.name}
+                                    type="text"
+                                    placeholder={arg.name}
+                                    title={arg.description || arg.name}
+                                    value={(mcpPromptArgs[`${name}:${pr.name}`] || {})[arg.name] || ''}
+                                    onChange={(e) => setMcpPromptArgs(prev => ({
+                                      ...prev,
+                                      [`${name}:${pr.name}`]: {
+                                        ...(prev[`${name}:${pr.name}`] || {}),
+                                        [arg.name]: e.target.value,
+                                      },
+                                    }))}
+                                    className="ios-glass-input"
+                                    style={{ flex: 1, minWidth: '120px', padding: '8px 12px', color: '#fff', outline: 'none', fontSize: '13px' }}
+                                  />
+                                ))}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>

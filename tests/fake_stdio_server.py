@@ -27,6 +27,18 @@ def notes() -> str:
     return "The launch code is 42."
 
 
+@mcp.prompt()
+def greet(name: str) -> str:
+    """Greet someone by name (issue 007)."""
+    return f"Hello, {name}! Please introduce yourself."
+
+
+@mcp.prompt()
+def intro() -> str:
+    """A no-argument prompt (issue 007, slash-command form)."""
+    return "Introduce yourself briefly."
+
+
 @mcp.tool()
 def echo_env(name: str) -> str:
     """Return the value of environment variable *name* ('' if missing)."""

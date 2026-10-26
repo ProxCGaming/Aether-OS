@@ -493,6 +493,27 @@ class MCPRegistry:
             raise MCPClientError(f"Unknown MCP server '{name}'")
         return await self._client.read_resource(name, uri)
 
+    # -- prompts (issue 007) --------------------------------------------
+    async def list_prompts(self, name: str) -> List[Dict[str, Any]]:
+        """List *name*'s prompt templates. Raises MCPClientError for an
+        unknown or disconnected server."""
+        if name not in self.servers:
+            from aether_engine.mcp.client import MCPClientError
+
+            raise MCPClientError(f"Unknown MCP server '{name}'")
+        return await self._client.list_prompts(name)
+
+    async def get_prompt(
+        self, name: str, prompt: str, arguments: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, str]]:
+        """Run prompt template *prompt* on *name* (messages, capped —
+        see client). Arguments are validated, never executed."""
+        if name not in self.servers:
+            from aether_engine.mcp.client import MCPClientError
+
+            raise MCPClientError(f"Unknown MCP server '{name}'")
+        return await self._client.get_prompt(name, prompt, arguments)
+
     async def _refresh_tools(self, name: str) -> None:
         mcp_tools = await self._client.list_tools(name)
         self._tools_cache[name] = [
