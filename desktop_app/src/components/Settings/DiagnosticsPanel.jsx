@@ -50,6 +50,12 @@ export default function DiagnosticsPanel({ activeMenu }) {
             ? `Test ${data.payload.name}: connected — tools: ${(data.payload.tools || []).join(', ') || 'none'}`
             : `Test ${data.payload.name} failed: ${data.payload.error || 'unknown error'}`);
           sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+        } else if (data.type === 'MCP_SERVER_UPDATE_RESPONSE') {
+          // Issue 004: a failed toggle must be visible, not silent.
+          if (!data.payload.success) {
+            setMcpTestResult(`Update ${data.payload.name} failed: ${data.payload.error || 'unknown error'}`);
+          }
+          sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
         } else if (data.type === 'MCP_SERVER_CONNECT_RESPONSE' || data.type === 'MCP_SERVER_DISCONNECT_RESPONSE') {
           // S9: a failed Connect/Disconnect must be visible, not silent.
           const verb = data.type === 'MCP_SERVER_CONNECT_RESPONSE' ? 'Connect' : 'Disconnect';
@@ -256,6 +262,26 @@ export default function DiagnosticsPanel({ activeMenu }) {
                     <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>
                       Status: {config.status || 'unknown'}{config.tool_count ? ` — ${config.tool_count} tool(s)` : ''}{config.error ? ` — ${config.error}` : ''}
                     </p>
+                    <div style={{ display: 'flex', gap: '16px', marginTop: '8px' }}>
+                      <label style={{ fontSize: '13px', color: '#c0c0d0', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={config.auto_connect !== false}
+                          onChange={(e) => sendMessage('MCP_SERVER_UPDATE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, auto_connect: e.target.checked } })}
+                          style={{ marginRight: '6px' }}
+                        />
+                        Auto-connect on startup
+                      </label>
+                      <label style={{ fontSize: '13px', color: '#c0c0d0', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={config.enabled !== false}
+                          onChange={(e) => sendMessage('MCP_SERVER_UPDATE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, enabled: e.target.checked } })}
+                          style={{ marginRight: '6px' }}
+                        />
+                        Enabled
+                      </label>
+                    </div>
                   </div>
                   <div style={{ display: 'flex', gap: '8px' }}>
                     <button

@@ -20,6 +20,18 @@ async def lifespan(_app: FastAPI):
         f"Auth token written to {engine_state.token_path}"
     )
 
+    # Issue 004: auto-connect enabled MCP servers in the background.
+    # start_auto_connect() returns immediately — it never blocks startup —
+    # and each server connects in its own owner task, so one dead server
+    # cannot block startup or the others. Local import so tests that
+    # patch aether_engine.mcp.registry.GLOBAL_MCP_REGISTRY get the patch.
+    try:
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
+        GLOBAL_MCP_REGISTRY.start_auto_connect()
+    except Exception as e:
+        logger.warning(f"MCP auto-connect failed to start: {e}")
+
     # Run background model discovery for configured providers on startup
     secret_store = SecretStore()
     stored = set(secret_store.list_providers())
@@ -50,6 +62,13 @@ async def lifespan(_app: FastAPI):
             logger.warning(f"Failed startup model discovery for {pname}: {e}")
 
     yield
+    # Issue 004: close any owner-task MCP sessions before shutdown.
+    try:
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
+        await GLOBAL_MCP_REGISTRY.stop_auto_connect()
+    except Exception as e:
+        logger.warning(f"MCP auto-connect stop failed: {e}")
     engine_state.shutdown()
     engine_state.audit_logger.log_event("ENGINE_STOPPED")
     logger.info("AETHER Engine stopped.")

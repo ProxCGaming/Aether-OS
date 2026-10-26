@@ -156,6 +156,11 @@ class MCPRegistry:
         self._invalid_servers: Dict[str, Dict[str, Any]] = {}
         # Set when the whole config file could not be parsed at all.
         self._config_load_error: Optional[str] = None
+        # Auto-connect (issue 004): background owner tasks, one per
+        # eligible server, plus a guard so engine startup (lifespan)
+        # never starts them twice.
+        self._auto_connect_started = False
+        self._auto_connect_tasks: List[asyncio.Task] = []
         self._load_config()
 
     @property
@@ -244,6 +249,89 @@ class MCPRegistry:
         self.servers[name] = normalised
         self._save_config()
 
+    async def update_server(
+        self, name: str, *, auto_connect: Optional[bool] = None,
+        enabled: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Toggle a server's ``auto_connect`` / ``enabled`` flags (issue 004).
+
+        Persists the change. Disabling a connected server disconnects
+        it; re-enabling does not reconnect — the user clicks Connect
+        (or restarts the engine for auto-connect). Toggling
+        ``auto_connect`` takes effect at the next engine start; it does
+        not connect or disconnect anything now. Returns the redacted
+        config. Raises MCPConfigError for an unknown server or a
+        non-boolean flag.
+        """
+        if name not in self.servers:
+            raise MCPConfigError(f"Unknown MCP server '{name}'")
+        updates: Dict[str, Any] = {}
+        if auto_connect is not None:
+            if not isinstance(auto_connect, bool):
+                raise MCPConfigError(f"MCP server {name!r} 'auto_connect' must be true/false.")
+            updates["auto_connect"] = auto_connect
+        if enabled is not None:
+            if not isinstance(enabled, bool):
+                raise MCPConfigError(f"MCP server {name!r} 'enabled' must be true/false.")
+            updates["enabled"] = enabled
+        if updates:
+            self.servers[name] = validate_mcp_server_config(
+                name, {**self.servers[name], **updates}
+            )
+            self._save_config()
+        if enabled is False:
+            await self.disconnect_server(name)
+        return redact_mcp_config_for_ui(self.servers[name])
+
+    def get_server_status(self, name: str) -> Dict[str, Any]:
+        """Live status for one server (connected / failed / disabled / ...)."""
+        status = self._client.get_status(name)
+        config = self.servers.get(name)
+        if config is not None and not config.get("enabled", True):
+            status = dict(status, status="disabled")
+        return status
+
+    # -- auto-connect (issue 004) ---------------------------------------
+    def start_auto_connect(self) -> List[str]:
+        """Connect every enabled, auto-connect server in the background.
+
+        Non-blocking: returns immediately with the names it attempted.
+        One dead server cannot block startup or the others — each runs
+        in its own owner task with its own timeout, and failures are
+        isolated (see _auto_connect_one). Idempotent: a second call
+        while already started returns [] until stop_auto_connect().
+        """
+        if self._auto_connect_started:
+            return []
+        self._auto_connect_started = True
+        attempted: List[str] = []
+        for name, config in self.servers.items():
+            if not config.get("enabled", True):
+                continue
+            if not config.get("auto_connect", True):
+                continue
+            attempted.append(name)
+            task = asyncio.create_task(self._auto_connect_one(name))
+            self._auto_connect_tasks.append(task)
+        return attempted
+
+    async def _auto_connect_one(self, name: str) -> None:
+        try:
+            await self.connect_server_owned(name)
+        except Exception as e:
+            # Failure isolation: a dead server must never break startup
+            # or the other servers. Its status is already "failed".
+            logger.warning("MCP auto-connect failed for %s: %s", name, e)
+
+    async def stop_auto_connect(self) -> None:
+        """Stop auto-connect: close every owner-task session (shutdown)."""
+        self._auto_connect_started = False
+        self._auto_connect_tasks = []
+        try:
+            await self._client.shutdown_owned()
+        except Exception as e:
+            logger.warning("MCP auto-connect stop failed: %s", e)
+
     async def remove_server(self, name: str):
         """
         Removes a server from the allow-list and closes any live session
@@ -307,9 +395,7 @@ class MCPRegistry:
         """
         out = {}
         for name, config in self.servers.items():
-            status = self._client.get_status(name)
-            if not config.get("enabled", True):
-                status = dict(status, status="disabled")
+            status = self.get_server_status(name)
             out[name] = {
                 **redact_mcp_config_for_ui(config),
                 "status": status["status"],
@@ -326,6 +412,26 @@ class MCPRegistry:
         return out
 
     # -- live connections (delegated to the client) ----------------------
+    async def _finish_connect(self, name: str, result: Dict[str, Any]) -> Dict[str, Any]:
+        """After a successful connect, refresh the cached tools.
+
+        A session that cannot list its tools is not a connected server
+        (S4): disconnect it, mark it failed with the error, and report
+        the failure — never leave a session behind with no tools.
+        """
+        if result["ok"]:
+            try:
+                await self._refresh_tools(name)
+            except Exception as e:
+                message = str(e) or e.__class__.__name__
+                logger.warning(
+                    "MCP connect failed for %s while listing tools: %s", name, message
+                )
+                await self._client.disconnect(name)
+                self._client.set_failed(name, message)
+                return {"ok": False, "error": message}
+        return result
+
     async def connect_server(self, name: str) -> Dict[str, Any]:
         config = self.servers.get(name)
         if config is None:
@@ -336,23 +442,28 @@ class MCPRegistry:
                     f"{self._invalid_servers[name]['error']}",
                 }
             return {"ok": False, "error": f"Unknown MCP server '{name}'"}
-        result = await self._client.connect(name, config)
-        if result["ok"]:
-            try:
-                await self._refresh_tools(name)
-            except Exception as e:
-                # S4: a session that cannot list its tools is not a
-                # connected server. Disconnect it, mark it failed with the
-                # error, and report the failure — never leave a session
-                # behind with no tools.
-                message = str(e) or e.__class__.__name__
-                logger.warning(
-                    "MCP connect failed for %s while listing tools: %s", name, message
-                )
-                await self._client.disconnect(name)
-                self._client.set_failed(name, message)
-                return {"ok": False, "error": message}
-        return result
+        return await self._finish_connect(name, await self._client.connect(name, config))
+
+    async def connect_server_owned(self, name: str) -> Dict[str, Any]:
+        """Like :meth:`connect_server`, but the session lives in a
+        dedicated owner task (issue 004, auto-connect).
+
+        The owner task opens the session and parks; later disconnects
+        from any task are routed through it, so a stdio session is
+        actually closed instead of leaking (anyio cancel-scope rule).
+        """
+        config = self.servers.get(name)
+        if config is None:
+            if name in self._invalid_servers:
+                return {
+                    "ok": False,
+                    "error": f"MCP server '{name}' has an invalid config: "
+                    f"{self._invalid_servers[name]['error']}",
+                }
+            return {"ok": False, "error": f"Unknown MCP server '{name}'"}
+        return await self._finish_connect(
+            name, await self._client.connect_owned(name, config)
+        )
 
     async def disconnect_server(self, name: str) -> Dict[str, Any]:
         self._tools_cache.pop(name, None)

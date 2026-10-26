@@ -1143,6 +1143,27 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     payload={"success": True, "name": name},
                 ).to_json())
 
+            elif msg.type == EventType.MCP_SERVER_UPDATE_REQUEST:
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY, MCPConfigError
+                name = msg.payload.get("name")
+                ok, error, config = True, "", None
+                if not name:
+                    ok, error = False, "Server name is required."
+                else:
+                    try:
+                        config = await GLOBAL_MCP_REGISTRY.update_server(
+                            name,
+                            auto_connect=msg.payload.get("auto_connect"),
+                            enabled=msg.payload.get("enabled"),
+                        )
+                    except MCPConfigError as e:
+                        ok, error = False, str(e)
+                await ws.send_text(Event(
+                    type=EventType.MCP_SERVER_UPDATE_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": ok, "name": name, "config": config, "error": error},
+                ).to_json())
+
             elif msg.type == EventType.MCP_SERVER_CONNECT_REQUEST:
                 from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
                 name = msg.payload.get("name")
@@ -1151,10 +1172,14 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     if name
                     else {"ok": False, "error": "Server name is required."}
                 )
+                server_status = GLOBAL_MCP_REGISTRY.get_server_status(name) if name else {}
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_CONNECT_RESPONSE,
                     request_id=req_id,
-                    payload={"success": result["ok"], "name": name, "error": result.get("error", "")},
+                    payload={
+                        "success": result["ok"], "name": name, "error": result.get("error", ""),
+                        "status": server_status.get("status"), "tool_count": server_status.get("tool_count", 0),
+                    },
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_DISCONNECT_REQUEST:
@@ -1165,10 +1190,14 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     if name
                     else {"ok": False, "error": "Server name is required."}
                 )
+                server_status = GLOBAL_MCP_REGISTRY.get_server_status(name) if name else {}
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_DISCONNECT_RESPONSE,
                     request_id=req_id,
-                    payload={"success": result["ok"], "name": name, "error": result.get("error", "")},
+                    payload={
+                        "success": result["ok"], "name": name, "error": result.get("error", ""),
+                        "status": server_status.get("status"), "tool_count": server_status.get("tool_count", 0),
+                    },
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_TEST_REQUEST:

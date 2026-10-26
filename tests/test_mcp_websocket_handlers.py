@@ -119,8 +119,12 @@ class TestMCPWebSocketHandlers:
     def test_test_lists_tools_without_leaving_a_session(self):
         url, stop = start_fake_http_server()
         try:
+            # Issue 004: auto_connect must be off here, or the lifespan
+            # auto-connect (engine startup) would connect this server
+            # before TEST runs, and the "no session left" assertion below
+            # would be testing startup, not TEST.
             self.registry.add_server(
-                "fake", {"transport": "streamable_http", "url": url, "timeout": 10}
+                "fake", {"transport": "streamable_http", "url": url, "timeout": 10, "auto_connect": False}
             )
             with TestClient(app) as client:
                 with self._connect(client) as ws:

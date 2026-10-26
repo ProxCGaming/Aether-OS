@@ -87,6 +87,14 @@ class MCPClientManager:
         self._stacks: Dict[str, AsyncExitStack] = {}
         self._configs: Dict[str, dict] = {}
         self._status: Dict[str, Dict[str, Any]] = {}
+        # Sessions opened by a background (auto-connect) task: the task
+        # that opened the session must also close it — anyio forbids
+        # exiting a cancel scope from a different task, and closing a
+        # stdio stack from another task silently leaks the subprocess
+        # (issue 004). The owner task parks after opening the session and
+        # closes the stack itself when its close event is set.
+        self._owner_tasks: Dict[str, asyncio.Task] = {}
+        self._close_events: Dict[str, asyncio.Event] = {}
 
     # -- status ---------------------------------------------------------
     def get_status(self, name: str) -> Dict[str, Any]:
@@ -103,7 +111,11 @@ class MCPClientManager:
         current = self._status.get(name, {"status": "disconnected", "error": None, "tool_count": 0})
         current["status"] = status
         current["error"] = error
-        if tool_count is not None:
+        if status == "disconnected":
+            # No session, no tools: a disconnected server never reports
+            # a stale tool count to the UI.
+            current["tool_count"] = 0
+        elif tool_count is not None:
             current["tool_count"] = tool_count
         self._status[name] = current
 
@@ -192,11 +204,13 @@ class MCPClientManager:
         return read, write
 
     # -- lifecycle -------------------------------------------------------
-    async def connect(self, name: str, config: dict) -> Dict[str, Any]:
-        """Connect to *name*; returns {"ok": bool, "error": str|None}."""
-        if name in self._sessions:
-            return {"ok": True, "error": None}
-        timeout = float(config.get("timeout") or 30)
+    async def _open_and_register(self, name: str, config: dict) -> Dict[str, Any]:
+        """Open a session in *this* task and register it.
+
+        Shared by :meth:`connect` and the owner task in
+        :meth:`connect_owned`. Returns {"ok": bool, "error": str|None}.
+        Only a genuine cancellation escapes (re-raised by _open_session).
+        """
         try:
             # No asyncio.wait_for around _open_session: cancelling inside the
             # SDK's anyio cancel scope corrupts its task group. The httpx
@@ -218,7 +232,152 @@ class MCPClientManager:
         self._set_status(name, "connected", error=None, tool_count=tool_count)
         return {"ok": True, "error": None}
 
+    async def connect(self, name: str, config: dict) -> Dict[str, Any]:
+        """Connect to *name* in the caller's task; returns {"ok": bool, "error": str|None}."""
+        if name in self._sessions:
+            if self.get_status(name)["status"] == "connected":
+                return {"ok": True, "error": None}
+            await self._drop_dead_session(name)
+        owner = self._owner_tasks.get(name)
+        if owner is not None and not owner.done():
+            return {"ok": True, "error": None}
+        return await self._open_and_register(name, config)
+
+    async def connect_owned(self, name: str, config: dict) -> Dict[str, Any]:
+        """Connect to *name* in a dedicated owner task (issue 004).
+
+        For auto-connect: the caller must not block on the connect, and
+        the session must be closable later from a different task (the
+        websocket handler). The owner task opens the session, signals
+        readiness, then parks until :meth:`disconnect` sets its close
+        event — and closes the stack itself, in the task that opened it.
+        Returns {"ok": bool, "error": str|None} once the session is up
+        (or the connect has failed); the owner task keeps running.
+        """
+        if name in self._sessions:
+            if self.get_status(name)["status"] == "connected":
+                return {"ok": True, "error": None}
+            await self._drop_dead_session(name)
+        owner = self._owner_tasks.get(name)
+        if owner is not None and not owner.done():
+            return {"ok": True, "error": None}
+        ready = asyncio.Event()
+        result: Dict[str, Any] = {}
+
+        async def _owner() -> None:
+            close = asyncio.Event()
+            self._close_events[name] = close
+            my_stack = my_session = my_config = None
+            try:
+                try:
+                    res = await self._open_and_register(name, config)
+                except BaseException:
+                    ready.set()
+                    raise
+                result.update(res)
+                ready.set()
+                if not result.get("ok"):
+                    return
+                # Capture our own registrations: a later reconnect may
+                # replace them, and this task must never remove a new
+                # session's registrations when it finishes.
+                my_stack = self._stacks.get(name)
+                my_session = self._sessions.get(name)
+                my_config = self._configs.get(name)
+                await close.wait()
+                if self._stacks.get(name) is my_stack:
+                    self._stacks.pop(name, None)
+                if self._sessions.get(name) is my_session:
+                    self._sessions.pop(name, None)
+                if self._configs.get(name) is my_config:
+                    self._configs.pop(name, None)
+                if my_stack is not None:
+                    try:
+                        await my_stack.aclose()
+                    except BaseException as e:
+                        if _is_genuine_cancellation(e):
+                            raise
+                        logger.warning("MCP disconnect failed for %s: %s", name, e)
+                self._set_status(name, "disconnected", error=None)
+            finally:
+                if self._owner_tasks.get(name) is asyncio.current_task():
+                    self._owner_tasks.pop(name, None)
+                if self._close_events.get(name) is close:
+                    self._close_events.pop(name, None)
+
+        task = asyncio.create_task(_owner())
+        self._owner_tasks[name] = task
+        await ready.wait()
+        if not result.get("ok"):
+            self._owner_tasks.pop(name, None)
+            self._close_events.pop(name, None)
+            return {"ok": False, "error": result.get("error") or "MCP connection was cancelled"}
+        return {"ok": True, "error": None}
+
+    async def _drop_dead_session(self, name: str) -> None:
+        """Drop a failed (dead) session registration so a fresh connect can open a new one.
+
+        The session is already dead — closing it is best-effort. For an
+        owned session the owner task is woken and awaited (bounded), so
+        its stack is closed in the task that opened it; for a manual
+        session the stack is closed here. A live session is never
+        dropped: callers only reach this when status is "failed".
+        """
+        owner = self._owner_tasks.get(name)
+        if owner is not None and not owner.done():
+            event = self._close_events.get(name)
+            if event is not None:
+                event.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(owner), timeout=10)
+            except asyncio.TimeoutError:
+                logger.warning("MCP dead-session teardown timed out for %s", name)
+                self._owner_tasks.pop(name, None)
+                self._close_events.pop(name, None)
+            except asyncio.CancelledError as e:
+                if _is_genuine_cancellation(e):
+                    raise
+                logger.warning("MCP dead-session teardown failed for %s", name)
+            return
+        stack = self._stacks.pop(name, None)
+        self._sessions.pop(name, None)
+        self._configs.pop(name, None)
+        if stack is not None:
+            try:
+                await stack.aclose()
+            except BaseException as e:
+                if _is_genuine_cancellation(e):
+                    raise
+                logger.warning("MCP dead-session close failed for %s: %s", name, e)
+        self._set_status(name, "disconnected", error=None)
+
     async def disconnect(self, name: str) -> Dict[str, Any]:
+        owner = self._owner_tasks.get(name)
+        if owner is not None and not owner.done():
+            # Route the close through the owner task: closing the stack
+            # from this task would hit the anyio cancel-scope rule and
+            # leak the session (stdio subprocess). Never cancel the owner
+            # — cancelling inside the SDK's cancel scope corrupts it.
+            event = self._close_events.get(name)
+            if event is not None:
+                event.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(owner), timeout=30)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "MCP disconnect timed out for %s; owner task abandoned", name
+                )
+                self._owner_tasks.pop(name, None)
+                self._close_events.pop(name, None)
+                self._set_status(name, "disconnected", error=None)
+            except asyncio.CancelledError as e:
+                if _is_genuine_cancellation(e):
+                    raise
+                logger.warning("MCP disconnect failed for %s: owner task ended", name)
+                self._set_status(name, "disconnected", error=None)
+            return {"ok": True, "error": None}
+        self._owner_tasks.pop(name, None)
+        self._close_events.pop(name, None)
         stack = self._stacks.pop(name, None)
         self._sessions.pop(name, None)
         self._configs.pop(name, None)
@@ -231,6 +390,19 @@ class MCPClientManager:
                 logger.warning("MCP disconnect failed for %s: %s", name, e)
         self._set_status(name, "disconnected", error=None)
         return {"ok": True, "error": None}
+
+    async def shutdown_owned(self) -> None:
+        """Close every owner-task session (engine shutdown, issue 004).
+
+        Bounded: an owner still mid-connect (e.g. a 30s blackhole) must
+        not hold shutdown hostage — wait at most 10s, then return; the
+        process is exiting anyway.
+        """
+        owners = [t for t in self._owner_tasks.values() if not t.done()]
+        for event in list(self._close_events.values()):
+            event.set()
+        if owners:
+            await asyncio.wait(owners, timeout=10)
 
     async def test_connection(self, name: str, config: dict) -> Dict[str, Any]:
         """Connect, list tools, disconnect. Leaves no session behind."""

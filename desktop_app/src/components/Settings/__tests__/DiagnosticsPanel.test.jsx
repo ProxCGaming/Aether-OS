@@ -215,6 +215,99 @@ describe('DiagnosticsPanel', () => {
     expect(screen.getByText(/MCP config file error: MCP config file is corrupt/)).toBeInTheDocument();
   });
 
+  it('shows auto-connect and enabled toggles from the server list (004)', () => {
+    const listeners = {};
+    const mockWs = {
+      addEventListener: jest.fn((type, fn) => { listeners[type] = fn; }),
+      removeEventListener: jest.fn(),
+    };
+    useAetherSocket.mockReturnValue({
+      wsRef: { current: mockWs },
+      sendMessage: mockSendMessage,
+    });
+    render(<DiagnosticsPanel activeMenu="MCP" />);
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_SERVER_LIST_RESPONSE',
+          payload: {
+            servers: {
+              fake: { transport: 'streamable_http', url: 'http://127.0.0.1:9000/mcp', status: 'connected', tool_count: 1, auto_connect: true, enabled: true },
+              off: { transport: 'streamable_http', url: 'http://127.0.0.1:9001/mcp', status: 'disabled', tool_count: 0, auto_connect: false, enabled: false },
+            },
+          },
+        }),
+      });
+    });
+
+    const autoConnectBoxes = screen.getAllByLabelText('Auto-connect on startup');
+    expect(autoConnectBoxes[0].checked).toBe(true);
+    expect(autoConnectBoxes[1].checked).toBe(false);
+    const enabledBoxes = screen.getAllByLabelText('Enabled');
+    expect(enabledBoxes[0].checked).toBe(true);
+    expect(enabledBoxes[1].checked).toBe(false);
+    expect(screen.getByText(/Status: connected — 1 tool/)).toBeInTheDocument();
+    expect(screen.getByText(/Status: disabled/)).toBeInTheDocument();
+  });
+
+  it('unchecking auto-connect sends MCP_SERVER_UPDATE_REQUEST (004)', () => {
+    const listeners = {};
+    const mockWs = {
+      addEventListener: jest.fn((type, fn) => { listeners[type] = fn; }),
+      removeEventListener: jest.fn(),
+    };
+    useAetherSocket.mockReturnValue({
+      wsRef: { current: mockWs },
+      sendMessage: mockSendMessage,
+    });
+    render(<DiagnosticsPanel activeMenu="MCP" />);
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_SERVER_LIST_RESPONSE',
+          payload: {
+            servers: {
+              fake: { transport: 'streamable_http', url: 'http://127.0.0.1:9000/mcp', status: 'connected', tool_count: 1, auto_connect: true, enabled: true },
+            },
+          },
+        }),
+      });
+    });
+
+    fireEvent.click(screen.getByLabelText('Auto-connect on startup'));
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'MCP_SERVER_UPDATE_REQUEST',
+      expect.objectContaining({
+        payload: { name: 'fake', auto_connect: false },
+      })
+    );
+  });
+
+  it('shows a failed server update instead of doing nothing (004)', () => {
+    const listeners = {};
+    const mockWs = {
+      addEventListener: jest.fn((type, fn) => { listeners[type] = fn; }),
+      removeEventListener: jest.fn(),
+    };
+    useAetherSocket.mockReturnValue({
+      wsRef: { current: mockWs },
+      sendMessage: mockSendMessage,
+    });
+    render(<DiagnosticsPanel activeMenu="MCP" />);
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_SERVER_UPDATE_RESPONSE',
+          payload: { success: false, name: 'fake', error: "Unknown MCP server 'fake'" },
+        }),
+      });
+    });
+    expect(screen.getByText("Update fake failed: Unknown MCP server 'fake'")).toBeInTheDocument();
+  });
+
   it('requests the plugin list when the Plugins menu is active', () => {
     render(<DiagnosticsPanel activeMenu="Plugins" />);
     expect(mockSendMessage).toHaveBeenCalledWith(
