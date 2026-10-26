@@ -86,7 +86,7 @@ def validate_mcp_server_config(name: str, config: dict) -> dict:
     Rules (PRD §4 Q6): exactly one transport — ``command`` (stdio) or
     ``url`` (Streamable HTTP), never both, never neither; ``transport``
     is inferred from the shape when omitted (standard ``mcpServers``
-    format); ``headers``/``env`` are string dicts; timeout 0–300s,
+    format); ``headers``/``env`` are string dicts; timeout 1–300s,
     default 30; ``enabled``/``auto_connect`` default true.
     """
     if not isinstance(name, str) or not _NAME_RE.match(name):
@@ -134,7 +134,7 @@ def validate_mcp_server_config(name: str, config: dict) -> dict:
 
     timeout = cfg.get("timeout", 30)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 300:
-        raise MCPConfigError(f"MCP server {name!r} 'timeout' must be 0-300 seconds.")
+        raise MCPConfigError(f"MCP server {name!r} 'timeout' must be 1-300 seconds.")
     cfg["timeout"] = timeout
     cfg["enabled"] = bool(cfg.get("enabled", True))
     cfg["auto_connect"] = bool(cfg.get("auto_connect", True))
@@ -524,6 +524,10 @@ class MCPRegistry:
         """One MCP tool -> one Aether Tool: ``server__tool``, EXECUTE, in-process."""
         original_name = mcp_tool.name
         prefixed = f"{server}__{original_name}"
+        # The Tool owns its output cap (max_output_chars, default 20000);
+        # the closure reads it off the constructed Tool so a changed cap
+        # is honoured instead of a hardcoded number.
+        holder: Dict[str, Any] = {}
 
         async def _execute(**kwargs):
             # Graceful failure lives here: a dead server returns an error
@@ -532,11 +536,12 @@ class MCPRegistry:
             result = await execute_mcp_tool_async(
                 server, original_name, kwargs, self._client, timeout=MCP_TOOL_TIMEOUT_S
             )
-            if len(result) > 20000:
-                return result[:20000] + "\n...[output truncated to 20000 chars]"
+            cap = holder["tool"].max_output_chars
+            if len(result) > cap:
+                return result[:cap] + f"\n...[output truncated to {cap} chars]"
             return result
 
-        return Tool(
+        tool = Tool(
             name=prefixed,
             description=mcp_tool.description or f"MCP tool {original_name} from server {server}.",
             input_schema=_valid_input_schema(mcp_tool.inputSchema),
@@ -545,6 +550,8 @@ class MCPRegistry:
             timeout_s=MCP_TOOL_TIMEOUT_S,
             source=f"mcp:{server}",
         )
+        holder["tool"] = tool
+        return tool
 
     def get_mcp_tools(self, filter_node: str = None) -> List[Tool]:
         """

@@ -41,6 +41,34 @@ MCP_PROMPT_MAX_CHARS = 20000
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
+def _host_matches_no_proxy(host: str) -> bool:
+    """True if *host* is listed in NO_PROXY / no_proxy (never raises).
+
+    Entries are comma/space separated; ``*`` matches everything, a
+    leading-dot entry (``.example.com``) matches the domain and its
+    subdomains, anything else matches exactly. Malformed entries (e.g.
+    the ``[::1]`` that used to break httpx URL parsing) are ignored, not
+    fatal — a bad NO_PROXY entry must never break a request. CIDR ranges
+    are not supported and are ignored.
+    """
+    try:
+        raw = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+        host = host.lower()
+        for entry in re.split(r"[,\s]+", raw):
+            entry = entry.strip().strip("[]").lower()
+            if not entry:
+                continue
+            if entry == "*":
+                return True
+            if entry == host:
+                return True
+            if entry.startswith(".") and host.endswith(entry):
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _make_http_client(url: str, headers: Optional[Dict[str, str]], timeout: float) -> httpx.AsyncClient:
     """Build the httpx client for one server URL.
 
@@ -49,12 +77,12 @@ def _make_http_client(url: str, headers: Optional[Dict[str, str]], timeout: floa
     *every* request fail at URL parse time, even to localhost. So we build
     the client explicitly with ``trust_env=False``: localhost servers never
     go through a proxy (standard ``no_proxy`` behaviour); remote servers
-    use the plain ``HTTP(S)_PROXY`` env value if one is set, and no proxy
-    otherwise.
+    use the plain ``HTTP(S)_PROXY`` env value if one is set and the host
+    is not listed in ``NO_PROXY``, and no proxy otherwise.
     """
     host = (urlparse(url).hostname or "").lower()
     local = host in ("localhost", "127.0.0.1", "::1")
-    if local:
+    if local or _host_matches_no_proxy(host):
         return httpx.AsyncClient(headers=headers, timeout=timeout, proxy=None, trust_env=False)
     scheme = urlparse(url).scheme
     proxy = os.environ.get("HTTPS_PROXY" if scheme == "https" else "HTTP_PROXY") or os.environ.get(
@@ -424,7 +452,14 @@ class MCPClientManager:
         except Exception as e:
             return {"ok": False, "error": str(e), "tools": []}
         finally:
-            await stack.aclose()
+            # Closing must never mask the test result (same guard as
+            # disconnect): only a genuine cancellation escapes.
+            try:
+                await stack.aclose()
+            except BaseException as e:
+                if _is_genuine_cancellation(e):
+                    raise
+                logger.warning("MCP test_connection close failed for %s: %s", name, e)
 
     # -- tools ------------------------------------------------------------
     async def list_tools(self, name: str):

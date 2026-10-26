@@ -5,8 +5,13 @@ The old scaffold raised a *simulated* ConnectionError. Now a real failure
 returned as a plain error string the model can reason about, so the graph
 never crashes. No retry (PRD Q14): the server is marked failed by the
 client and the user reconnects manually.
+
+There is deliberately no synchronous entry point (issue 010 N5): the old
+``execute_mcp_tool_with_fallback`` returned "cannot call an MCP tool from
+inside a running event loop" as if the server were unavailable — a
+programming error masquerading as a server failure. Callers use the async
+path; with no client it returns the unavailable message, it does not raise.
 """
-import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -34,29 +39,3 @@ async def execute_mcp_tool_async(
         error_msg = format_mcp_error(server_name, tool_name, e)
         logger.error(error_msg)
         return error_msg
-
-
-def execute_mcp_tool_with_fallback(
-    server_name: str, tool_name: str, kwargs: Dict[str, Any], client: Any = None,
-    timeout: Optional[float] = None,
-) -> str:
-    """Synchronous entry point (kept for callers that cannot await).
-
-    Without a client there is nothing to call — return the unavailable
-    message instead of raising. With a client but inside a running event
-    loop, do not block the loop; return the unavailable message and let
-    the async path (``execute_mcp_tool_async``) be used instead.
-    """
-    if client is None:
-        return format_mcp_error(server_name, tool_name, "no MCP client connected")
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(
-            execute_mcp_tool_async(server_name, tool_name, kwargs, client, timeout=timeout)
-        )
-    return format_mcp_error(
-        server_name,
-        tool_name,
-        "cannot call an MCP tool from inside a running event loop without awaiting it",
-    )

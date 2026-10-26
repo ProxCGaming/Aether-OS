@@ -157,7 +157,6 @@ def create_web_tools() -> List[Tool]:
 
 
 def build_tool_registry(
-    user_config: Any = None,
     mcp_tools: Optional[List[Tool]] = None,
     *,
     include_file_tools: bool = True,
@@ -167,10 +166,11 @@ def build_tool_registry(
 
     Built-ins + MCP tools, in one place, so the three registry
     construction sites in ``routes/websocket.py`` (task start, approval
-    resume, tool list) can no longer drift apart. ``user_config`` is
-    accepted for future per-agent filtering; in v1 all agents get all
-    MCP tools (PRD Q10), so it is currently unused. ``include_file_tools``
-    exists because task start only offers file tools for coding tasks.
+    resume, tool list) can no longer drift apart. There is deliberately
+    no ``user_config`` parameter: in v1 all agents get all MCP tools
+    (PRD Q10), so per-agent filtering would be a dead parameter.
+    ``include_file_tools`` exists because task start only offers file
+    tools for coding tasks.
     """
     registry = ToolRegistry()
     registry.register(create_current_time_tool())

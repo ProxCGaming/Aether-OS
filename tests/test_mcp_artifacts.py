@@ -2,7 +2,7 @@ import pytest
 import os
 from aether_engine.artifacts.manager import save_artifact, get_task_artifact_dir
 from aether_engine.mcp.registry import MCPRegistry
-from aether_engine.mcp.fallback import execute_mcp_tool_with_fallback
+from aether_engine.mcp.fallback import execute_mcp_tool_async
 
 def test_artifact_manager(tmp_path, monkeypatch):
     import aether_engine.artifacts.manager as am
@@ -26,11 +26,12 @@ def test_mcp_registry():
     registry.remove_server_sync("test_server")
     assert "test_server" not in registry.list_servers()
 
-def test_mcp_fallback():
+async def test_mcp_fallback():
     # A real failure (no client connected) returns an error message rather
     # than throwing an exception — and it is a real message, not the old
-    # simulated connection failure.
-    result = execute_mcp_tool_with_fallback("test_server", "test_tool", {"arg1": "val"})
+    # simulated connection failure. (Issue 010 N5: the sync entry point
+    # is deleted; this now exercises the async path with no client.)
+    result = await execute_mcp_tool_async("test_server", "test_tool", {"arg1": "val"}, client=None)
     assert "test_server MCP is unavailable" in result
     assert "test_tool" in result
     assert "Simulated" not in result

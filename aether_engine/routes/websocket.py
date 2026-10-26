@@ -406,7 +406,6 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
                 reqs = infer_task_requirements(prompt)
                 tools = build_tool_registry(
-                    engine_state.user_config,
                     mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
                     include_file_tools=reqs.wants_code or (requested_model is not None),
                 )
@@ -505,7 +504,6 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
 
                 tools = build_tool_registry(
-                    engine_state.user_config,
                     mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
                 )
 
@@ -1006,7 +1004,6 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     return d
 
                 all_tools = build_tool_registry(
-                    engine_state.user_config,
                     mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
                 ).get_tools()
                 defs = []
