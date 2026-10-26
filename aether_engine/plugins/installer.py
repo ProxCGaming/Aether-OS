@@ -1,9 +1,82 @@
+import json
 import os
 import shutil
 import zipfile
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from .manifest import parse_manifest, PluginManifest
+
+
+def _read_mcp_config_file(source: Path, file_path: str) -> dict:
+    """Read one MCP server config JSON from a plugin package (zip or dir).
+
+    Raises ValueError with a named message when the file is missing,
+    is not valid JSON, or does not contain a JSON object. Never invents
+    a fallback config: a corrupt config is a validation failure, not a
+    dummy server.
+    """
+    raw: bytes
+    if source.is_file() and source.suffix == ".zip":
+        try:
+            with zipfile.ZipFile(source, "r") as z:
+                try:
+                    raw = z.read(file_path)
+                except KeyError:
+                    raise ValueError(
+                        f"MCP server config file '{file_path}' not found "
+                        "in plugin package."
+                    )
+        except zipfile.BadZipFile as e:
+            raise ValueError(f"Plugin package is not a valid zip file: {e}")
+    elif source.is_dir():
+        cfg_path = source / file_path
+        if not cfg_path.exists():
+            raise ValueError(
+                f"MCP server config file '{file_path}' not found "
+                "in plugin package."
+            )
+        raw = cfg_path.read_bytes()
+    else:
+        raise ValueError(f"Plugin source not found: {source}")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ValueError(
+            f"MCP server config file '{file_path}' is not valid JSON: {e}"
+        )
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"MCP server config file '{file_path}' must contain a JSON object."
+        )
+    return data
+
+
+def resolve_mcp_server_configs(source: Any, manifest: PluginManifest) -> List[Tuple[str, dict]]:
+    """Load + validate every MCP server a manifest declares.
+
+    Validate first, add second: this returns the *normalised* configs
+    (same schema as issue 001, ``validate_mcp_server_config``) and
+    raises before the caller mutates anything — no file is copied, no
+    skill installed, no server added — when any entry is invalid.
+    Raises ValueError / MCPConfigError with a named message.
+    """
+    from aether_engine.mcp.registry import validate_mcp_server_config
+
+    src_path = Path(source)
+    resolved: List[Tuple[str, dict]] = []
+    for mcp_def in manifest.mcp_servers:
+        if not mcp_def.file_path:
+            raise ValueError(
+                f"MCP server {mcp_def.name!r} declares no config file "
+                "(file_path): a plugin MCP server needs a JSON config "
+                "inside the package."
+            )
+        raw_config = _read_mcp_config_file(src_path, mcp_def.file_path)
+        resolved.append(
+            (mcp_def.name, validate_mcp_server_config(mcp_def.name, raw_config))
+        )
+    return resolved
+
 
 class PluginInstaller:
     def __init__(self, plugins_dir: Path):
@@ -51,6 +124,10 @@ class PluginInstaller:
             raise ValueError("Invalid plugin package: manifest.json not found")
 
         manifest = PluginManifest(**manifest_data)
+        # Issue 008: fail fast, before the approval step — a manifest
+        # whose MCP servers do not validate is rejected here with the
+        # named error, not after the user approves the install.
+        resolve_mcp_server_configs(src_path, manifest)
         return {
             "source": source,
             "manifest": manifest.model_dump()
@@ -60,7 +137,16 @@ class PluginInstaller:
         source = Path(prepare_data["source"])
         manifest = PluginManifest(**prepare_data["manifest"])
         plugin_name = manifest.name
-        
+
+        # Issue 008: validate FIRST, before any mutation — before the
+        # backup move, before any file is copied, before any server is
+        # added. A bad manifest fails here with the named error and the
+        # previous install (if any) is left untouched.
+        try:
+            mcp_configs = resolve_mcp_server_configs(source, manifest)
+        except Exception as e:
+            raise RuntimeError(f"Installation failed, rolled back. Error: {e}")
+
         target_dir = self.plugins_dir / plugin_name
         
         # Rollback mechanism
@@ -108,20 +194,14 @@ class PluginInstaller:
             for tool_def in manifest.tools:
                 installed_tools.append(tool_def.name)
                 
-            # 3. Install MCP Servers
-            for mcp_def in manifest.mcp_servers:
-                config_dict = {}
-                if mcp_def.file_path:
-                    # Try to load config from JSON if provided
-                    cfg_path = target_dir / mcp_def.file_path
-                    if cfg_path.exists():
-                        import json
-                        try:
-                            config_dict = json.loads(cfg_path.read_text())
-                        except Exception:
-                            config_dict = {"command": "dummy"}
-                GLOBAL_MCP_REGISTRY.add_server(mcp_def.name, config_dict)
-                installed_mcp.append(mcp_def.name)
+            # 3. Install MCP Servers — configs were already loaded and
+            # validated (issue 008) before any mutation above, so this
+            # only adds the pre-validated configs. No re-reading, no
+            # dummy fallback: a corrupt config can never become a
+            # silently installed server.
+            for mcp_name, config_dict in mcp_configs:
+                GLOBAL_MCP_REGISTRY.add_server(mcp_name, config_dict)
+                installed_mcp.append(mcp_name)
 
             self._registry[plugin_name] = {
                 "manifest": manifest.model_dump(),
