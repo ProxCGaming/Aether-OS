@@ -1,9 +1,8 @@
 """Raw MCP SDK client — one long-lived ``ClientSession`` per server.
 
-Issue 001: Streamable HTTP only. stdio is issue 003 and is refused here
-with a clear error, not a crash. No retry anywhere (PRD Q14): a failed
-connect / call fails immediately and the server is marked failed; the
-user reconnects manually.
+Transports: Streamable HTTP (issue 001) and stdio (issue 003). No retry
+anywhere (PRD Q14): a failed connect / call fails immediately and the
+server is marked failed; the user reconnects manually.
 
 Design notes:
 - Transports are internal branches of this one deep module, not one file
@@ -13,6 +12,9 @@ Design notes:
 - Header / env values support ``${VAR}`` / ``${VAR:-default}`` expansion
   from the environment. A variable with no value and no default is left
   untouched so a missing secret is visible, not silently empty.
+- stdio servers log to stderr, never stdout (stdout is protocol only);
+  the SDK's stdio client sends the child's stderr to the engine's
+  stderr by default, so a chatty server cannot corrupt the protocol.
 """
 import asyncio
 import logging
@@ -24,6 +26,7 @@ from urllib.parse import urlparse
 
 import httpx
 from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 logger = logging.getLogger("aether_engine.mcp.client")
@@ -112,27 +115,16 @@ class MCPClientManager:
     async def _open_session(self, config: dict):
         """Open a session for *config*; caller owns the returned stack."""
         transport = config.get("transport")
-        if transport == "stdio":
-            raise MCPClientError("stdio transport is not implemented yet (issue 003)")
-        if transport != "streamable_http":
+        if transport not in ("stdio", "streamable_http"):
             raise MCPClientError(f"Unsupported MCP transport: {transport!r}")
-
-        url = config.get("url")
-        if not url:
-            raise MCPClientError("Streamable HTTP server config requires 'url'")
         timeout = float(config.get("timeout") or 30)
-        headers = {
-            k: expand_env_vars(v)
-            for k, v in (config.get("headers") or {}).items()
-        }
 
         stack = AsyncExitStack()
         try:
-            http_client = _make_http_client(url, headers, timeout)
-            await stack.enter_async_context(http_client)
-            read, write, _get_session_id = await stack.enter_async_context(
-                streamable_http_client(url, http_client=http_client)
-            )
+            if transport == "stdio":
+                read, write = await self._open_stdio_session(stack, config, timeout)
+            else:
+                read, write = await self._open_http_session(stack, config, timeout)
             session = ClientSession(read, write)
             await stack.enter_async_context(session)
             await asyncio.wait_for(session.initialize(), timeout=timeout)
@@ -153,6 +145,51 @@ class MCPClientManager:
                 raise MCPClientError(_first_leaf_message(e)) from e
             raise MCPClientError(_failure_message(e)) from e
         return stack, session
+
+    async def _open_stdio_session(self, stack: AsyncExitStack, config: dict, timeout: float):
+        """Spawn the stdio subprocess and open its streams on *stack*.
+
+        The child's environment is the engine's environment plus the
+        config ``env`` (``${VAR}``-expanded, overriding on collision) —
+        the SDK's default would only inherit an allow-list of variables,
+        which would silently drop e.g. a server's API key from the
+        environment. ``cwd`` is passed through when set. The child's
+        stderr goes to the engine's stderr (SDK default); stdout is
+        protocol only. Closing the stack terminates the subprocess.
+        """
+        command = config.get("command")
+        if not command:
+            raise MCPClientError("stdio server config requires 'command'")
+        env = {
+            **os.environ,
+            **{
+                k: expand_env_vars(v)
+                for k, v in (config.get("env") or {}).items()
+            },
+        }
+        params = StdioServerParameters(
+            command=command,
+            args=list(config.get("args") or []),
+            env=env,
+            cwd=config.get("cwd"),
+        )
+        return await stack.enter_async_context(stdio_client(params))
+
+    async def _open_http_session(self, stack: AsyncExitStack, config: dict, timeout: float):
+        """Open the Streamable HTTP streams on *stack*."""
+        url = config.get("url")
+        if not url:
+            raise MCPClientError("Streamable HTTP server config requires 'url'")
+        headers = {
+            k: expand_env_vars(v)
+            for k, v in (config.get("headers") or {}).items()
+        }
+        http_client = _make_http_client(url, headers, timeout)
+        await stack.enter_async_context(http_client)
+        read, write, _get_session_id = await stack.enter_async_context(
+            streamable_http_client(url, http_client=http_client)
+        )
+        return read, write
 
     # -- lifecycle -------------------------------------------------------
     async def connect(self, name: str, config: dict) -> Dict[str, Any]:

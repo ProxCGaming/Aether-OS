@@ -57,7 +57,7 @@ async def test_call_on_disconnected_server_fails_gracefully(manager):
     assert "ghost" in str(ctx.value)
 
 
-async def test_dead_server_fails_immediately_no_retry(manager):
+async def test_dead_server_blackhole_fails_in_one_timeout(manager):
     """One attempt only: a black-hole server (accepts TCP, never answers)
     with a 3s timeout must fail in ~3s, not ~9s (3 retries)."""
     import socket
@@ -115,14 +115,6 @@ async def test_dead_server_fails_immediately_no_retry(manager):
     assert result["ok"] is False
     assert result["error"]
     assert manager.get_status("dead")["status"] == "failed"
-
-
-async def test_stdio_transport_rejected_in_issue_001(manager):
-    # stdio is issue 003 — in 001 the client must refuse it clearly, not crash.
-    config = {"transport": "stdio", "command": "echo", "args": [], "timeout": 2}
-    result = await manager.connect("local", config)
-    assert result["ok"] is False
-    assert "stdio" in result["error"].lower()
 
 
 async def test_genuine_cancellation_still_propagates(fake_url, manager):
