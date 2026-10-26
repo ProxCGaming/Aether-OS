@@ -8,7 +8,8 @@ import PluginsNotice from './PluginsNotice';
 export default function DiagnosticsPanel({ activeMenu }) {
   const { wsRef, sendMessage } = useAetherSocket();
   const [mcpServers, setMcpServers] = useState({});
-  const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '' });
+  const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '', url: '' });
+  const [mcpTestResult, setMcpTestResult] = useState(null);
   const [plugins, setPlugins] = useState([]);
   const [newPluginSource, setNewPluginSource] = useState('');
   const [agents, setAgents] = useState([]);
@@ -33,6 +34,19 @@ export default function DiagnosticsPanel({ activeMenu }) {
         if (data.type === 'MCP_SERVER_LIST_RESPONSE') {
           setMcpServers(data.payload.servers || {});
         } else if (data.type === 'MCP_SERVER_ADD_RESPONSE' || data.type === 'MCP_SERVER_REMOVE_RESPONSE') {
+          if (data.payload.success) {
+            sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+          } else if (data.type === 'MCP_SERVER_ADD_RESPONSE' && data.payload.error) {
+            // A rejected config (e.g. both command and url) must be visible,
+            // not silently ignored.
+            setMcpTestResult(`Add ${data.payload.name} failed: ${data.payload.error}`);
+          }
+        } else if (data.type === 'MCP_SERVER_TEST_RESPONSE') {
+          setMcpTestResult(data.payload.success
+            ? `Test ${data.payload.name}: connected — tools: ${(data.payload.tools || []).join(', ') || 'none'}`
+            : `Test ${data.payload.name} failed: ${data.payload.error || 'unknown error'}`);
+          sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+        } else if (data.type === 'MCP_SERVER_CONNECT_RESPONSE' || data.type === 'MCP_SERVER_DISCONNECT_RESPONSE') {
           if (data.payload.success) {
             sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
           }
@@ -109,21 +123,40 @@ export default function DiagnosticsPanel({ activeMenu }) {
                 placeholder="Arguments (comma separated)" 
                 style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
               />
-              <button 
+              <input
+                type="text"
+                value={newMcpServer.url}
+                onChange={(e) => setNewMcpServer({...newMcpServer, url: e.target.value})}
+                className="ios-glass-input"
+                placeholder="Server URL for remote (Streamable HTTP, e.g. https://21st.dev/api/mcp)"
+                style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
+              />
+              <button
                 onClick={() => {
-                  if (newMcpServer.name && newMcpServer.command) {
+                  if (newMcpServer.name && newMcpServer.url) {
+                    // Remote server: URL wins over command.
                     sendMessage('MCP_SERVER_ADD_REQUEST', {
                       schema_version: 1,
                       request_id: Date.now().toString(),
-                      payload: { 
-                        name: newMcpServer.name, 
-                        config: { 
-                          command: newMcpServer.command, 
-                          args: newMcpServer.args.split(',').map(s => s.trim()).filter(Boolean) 
+                      payload: {
+                        name: newMcpServer.name,
+                        config: { transport: 'streamable_http', url: newMcpServer.url.trim() }
+                      }
+                    });
+                    setNewMcpServer({ name: '', command: '', args: '', url: '' });
+                  } else if (newMcpServer.name && newMcpServer.command) {
+                    sendMessage('MCP_SERVER_ADD_REQUEST', {
+                      schema_version: 1,
+                      request_id: Date.now().toString(),
+                      payload: {
+                        name: newMcpServer.name,
+                        config: {
+                          command: newMcpServer.command,
+                          args: newMcpServer.args.split(',').map(s => s.trim()).filter(Boolean)
                         }
                       }
                     });
-                    setNewMcpServer({ name: '', command: '', args: '' });
+                    setNewMcpServer({ name: '', command: '', args: '', url: '' });
                   }
                 }}
                 style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '12px 24px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, alignSelf: 'flex-start' }}
@@ -132,6 +165,10 @@ export default function DiagnosticsPanel({ activeMenu }) {
               </button>
             </div>
           </div>
+
+          {mcpTestResult && (
+            <div style={{ color: '#fbbf24', fontSize: '13px', marginBottom: '16px' }}>{mcpTestResult}</div>
+          )}
 
           <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Configured Servers</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -145,11 +182,32 @@ export default function DiagnosticsPanel({ activeMenu }) {
                   <div>
                     <h4 style={{ fontSize: '15px', fontWeight: 500 }}>{name}</h4>
                     <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px', fontFamily: 'monospace' }}>
-                      {config.command} {config.args?.join(' ')}
+                      {config.url ? config.url : `${config.command || ''} ${config.args?.join(' ') || ''}`}
+                    </p>
+                    <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>
+                      Status: {config.status || 'unknown'}{config.tool_count ? ` — ${config.tool_count} tool(s)` : ''}{config.error ? ` — ${config.error}` : ''}
                     </p>
                   </div>
-                  <div>
-                    <button 
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      onClick={() => sendMessage('MCP_SERVER_TEST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
+                      style={{ background: 'rgba(124, 58, 237, 0.15)', color: '#a78bfa', border: '1px solid rgba(124, 58, 237, 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                    >
+                      Test
+                    </button>
+                    <button
+                      onClick={() => sendMessage('MCP_SERVER_CONNECT_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
+                      style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                    >
+                      Connect
+                    </button>
+                    <button
+                      onClick={() => sendMessage('MCP_SERVER_DISCONNECT_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
+                      style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                    >
+                      Disconnect
+                    </button>
+                    <button
                       onClick={() => sendMessage('MCP_SERVER_REMOVE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
                       style={{ background: 'rgba(242, 65, 91, 0.15)', color: '#FA5870', border: '1px solid rgba(242, 65, 91, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
                     >

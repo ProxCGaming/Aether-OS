@@ -11,7 +11,7 @@ export default function MCPNotice() {
       color: '#fbbf24',
       fontSize: '13px'
     }}>
-      <strong>Notice:</strong> MCP Tools are currently in display-only mode. They are registered and visible to the model, but execution is not yet implemented.
+      <strong>Notice:</strong> MCP tools run only when their server is connected. A disconnected server&apos;s tools are not visible to the model.
     </div>
   );
 }

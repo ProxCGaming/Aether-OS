@@ -27,7 +27,10 @@ def test_mcp_registry():
     assert "test_server" not in registry.list_servers()
 
 def test_mcp_fallback():
-    # The simulated connection failure should return an error message rather than throwing an exception
+    # A real failure (no client connected) returns an error message rather
+    # than throwing an exception — and it is a real message, not the old
+    # simulated connection failure.
     result = execute_mcp_tool_with_fallback("test_server", "test_tool", {"arg1": "val"})
     assert "test_server MCP is unavailable" in result
     assert "test_tool" in result
+    assert "Simulated" not in result

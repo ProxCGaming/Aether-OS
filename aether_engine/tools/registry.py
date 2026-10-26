@@ -156,6 +156,35 @@ def create_web_tools() -> List[Tool]:
     ]
 
 
+def build_tool_registry(
+    user_config: Any = None,
+    mcp_tools: Optional[List[Tool]] = None,
+    *,
+    include_file_tools: bool = True,
+    include_web_tools: bool = True,
+) -> "ToolRegistry":
+    """One place that builds the full registry (PRD Q3).
+
+    Built-ins + MCP tools, in one place, so the three registry
+    construction sites in ``routes/websocket.py`` (task start, approval
+    resume, tool list) can no longer drift apart. ``user_config`` is
+    accepted for future per-agent filtering; in v1 all agents get all
+    MCP tools (PRD Q10), so it is currently unused. ``include_file_tools``
+    exists because task start only offers file tools for coding tasks.
+    """
+    registry = ToolRegistry()
+    registry.register(create_current_time_tool())
+    if include_file_tools:
+        for tool in create_file_tools():
+            registry.register(tool)
+    if include_web_tools:
+        for tool in create_web_tools():
+            registry.register(tool)
+    for tool in mcp_tools or []:
+        registry.register(tool)
+    return registry
+
+
 class ToolRegistry:
     """Registry holding tool definitions and handling on-demand asynchronous tool executions."""
 
@@ -173,6 +202,9 @@ class ToolRegistry:
         if name not in self._tools:
             raise ToolNotFoundError(f"Tool '{name}' is not registered.")
         return self._tools[name]
+
+    def get_tools(self) -> List[Tool]:
+        return list(self._tools.values())
 
     def get_definitions(self) -> List[Dict[str, Any]]:
         return [tool.to_definition() for tool in self._tools.values()]
@@ -230,6 +262,21 @@ class ToolRegistry:
 
         # ── Step 3: sandbox routing (ADR 0010) ─────────────────────────
         try:
+            if tool.source.startswith("mcp:"):
+                # MCP tools run in-process in the engine (PRD Q4): the
+                # worker hardcodes 3 builtin tools and cannot hold MCP
+                # sessions, so routing an MCP tool there would silently
+                # no-op. The MCP server itself is already isolated.
+                if inspect.iscoroutinefunction(tool.execute_fn):
+                    result = await tool.execute_fn(**call_args)
+                else:
+                    result = tool.execute_fn(**call_args)
+                if isinstance(result, str) and len(result) > tool.max_output_chars:
+                    result = (
+                        result[: tool.max_output_chars]
+                        + f"\n...[output truncated to {tool.max_output_chars} chars]"
+                    )
+                return result
             if tool.risk != ToolRisk.READ_ONLY:
                 from aether_engine.workers.sandbox import execute_tool_in_worker
                 return await execute_tool_in_worker(

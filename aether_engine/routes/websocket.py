@@ -69,7 +69,7 @@ from aether_engine.validation.diagnostics import run_environment_diagnostics
 from aether_engine.scheduler.capability_jobs import CapabilitySchedulerManager
 from aether_engine.secrets.dpapi import SecretDecryptionError
 from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
-from aether_engine.tools.registry import ToolRegistry, create_current_time_tool, create_file_tools, create_web_tools
+from aether_engine.tools.registry import build_tool_registry, create_current_time_tool, create_file_tools, create_web_tools
 from aether_engine.routing.task_class_router import infer_task_class
 from aether_engine.workers.job_object import WorkerJobObject
 from aether_engine.memory import session_store
@@ -328,18 +328,17 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     ).to_json())
                     continue
 
-                tools = ToolRegistry()
-                tools.register(create_current_time_tool())
-                
+                # One central builder (PRD Q3) — task start, approval resume
+                # and tool list used to build registries independently and
+                # had already drifted apart.
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
                 reqs = infer_task_requirements(prompt)
-                
-                # Only give file/shell tools if it's a coding task or explicitly requested
-                if reqs.wants_code or (requested_model is not None):
-                    for tool in create_file_tools():
-                        tools.register(tool)
-                # Always provide web search as a safe fallback
-                for tool in create_web_tools():
-                    tools.register(tool)
+                tools = build_tool_registry(
+                    engine_state.user_config,
+                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
+                    include_file_tools=reqs.wants_code or (requested_model is not None),
+                )
 
                 workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
 
@@ -429,10 +428,15 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 except Exception:
                     continue # Ignore if provider cannot be instantiated
 
-                tools = ToolRegistry()
-                tools.register(create_current_time_tool())
-                for tool in create_file_tools(): tools.register(tool)
-                for tool in create_web_tools(): tools.register(tool)
+                # Same central builder as task start (PRD Q3) — the resume
+                # path used to register all file tools unconditionally while
+                # task start gated them on coding tasks.
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
+                tools = build_tool_registry(
+                    engine_state.user_config,
+                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
+                )
 
                 workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
 
@@ -930,25 +934,22 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     d["policy"] = user_val or "Require Approval" # UI currently expects the raw setting in 'policy' too
                     return d
 
-                all_tools = [create_current_time_tool()] + create_file_tools() + create_web_tools()
+                all_tools = build_tool_registry(
+                    engine_state.user_config,
+                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
+                ).get_tools()
                 defs = []
                 for t in all_tools:
                     d = t.to_definition()
                     defs.append(enrich_tool(d, t.name, t.risk))
-                
+
                 # Add Supervisor Memory Tools
                 for mt in SUPERVISOR_MEMORY_TOOLS:
                     d = mt.copy()
                     name = d["function"]["name"]
                     risk = KNOWN_NON_REGISTRY_TOOLS.get(name, ToolRisk.EXECUTE)
                     defs.append(enrich_tool(d, name, risk))
-                
-                # Add MCP Tools (scaffold)
-                for mt in GLOBAL_MCP_REGISTRY.get_mcp_tools():
-                    d = mt.copy()
-                    name = d["function"]["name"]
-                    defs.append(enrich_tool(d, name, ToolRisk.EXECUTE))
-                    
+
                 await ws.send_text(Event(
                     type=EventType.TOOL_LIST_RESPONSE,
                     request_id=req_id,
@@ -1029,7 +1030,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
             elif msg.type == EventType.MCP_SERVER_LIST_REQUEST:
                 from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                servers = GLOBAL_MCP_REGISTRY.list_servers()
+                servers = GLOBAL_MCP_REGISTRY.list_servers_with_status()
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_LIST_RESPONSE,
                     request_id=req_id,
@@ -1108,26 +1109,81 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_ADD_REQUEST:
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY, MCPConfigError
                 name = msg.payload.get("name")
                 config = msg.payload.get("config", {})
+                ok, error = True, ""
                 if name and config:
-                    GLOBAL_MCP_REGISTRY.add_server(name, config)
+                    try:
+                        GLOBAL_MCP_REGISTRY.add_server(name, config)
+                    except MCPConfigError as e:
+                        ok, error = False, str(e)
+                else:
+                    ok, error = False, "Server name and config are required."
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_ADD_RESPONSE,
                     request_id=req_id,
-                    payload={"success": True, "name": name, "config": config},
+                    payload={"success": ok, "name": name, "config": config, "error": error},
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_REMOVE_REQUEST:
                 from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
                 name = msg.payload.get("name")
                 if name:
+                    # Disconnect first so no live session is left behind.
+                    await GLOBAL_MCP_REGISTRY.disconnect_server(name)
                     GLOBAL_MCP_REGISTRY.remove_server(name)
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_REMOVE_RESPONSE,
                     request_id=req_id,
                     payload={"success": True, "name": name},
+                ).to_json())
+
+            elif msg.type == EventType.MCP_SERVER_CONNECT_REQUEST:
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                result = (
+                    await GLOBAL_MCP_REGISTRY.connect_server(name)
+                    if name
+                    else {"ok": False, "error": "Server name is required."}
+                )
+                await ws.send_text(Event(
+                    type=EventType.MCP_SERVER_CONNECT_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": result["ok"], "name": name, "error": result.get("error", "")},
+                ).to_json())
+
+            elif msg.type == EventType.MCP_SERVER_DISCONNECT_REQUEST:
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                result = (
+                    await GLOBAL_MCP_REGISTRY.disconnect_server(name)
+                    if name
+                    else {"ok": False, "error": "Server name is required."}
+                )
+                await ws.send_text(Event(
+                    type=EventType.MCP_SERVER_DISCONNECT_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": result["ok"], "name": name, "error": result.get("error", "")},
+                ).to_json())
+
+            elif msg.type == EventType.MCP_SERVER_TEST_REQUEST:
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                result = (
+                    await GLOBAL_MCP_REGISTRY.test_connection(name)
+                    if name
+                    else {"ok": False, "error": "Server name is required.", "tools": []}
+                )
+                await ws.send_text(Event(
+                    type=EventType.MCP_SERVER_TEST_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "success": result["ok"],
+                        "name": name,
+                        "error": result.get("error", ""),
+                        "tools": result.get("tools", []),
+                    },
                 ).to_json())
 
             elif msg.type == EventType.PLUGIN_LIST_REQUEST:

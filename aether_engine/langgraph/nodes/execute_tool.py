@@ -96,7 +96,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
         else:
             try:
                 tool = registry.get_tool(tool_name)
-                if tool.risk != ToolRisk.READ_ONLY:
+                if tool.risk != ToolRisk.READ_ONLY and not tool.source.startswith("mcp:"):
                     # ── Step 2a: Risky tools → sandbox worker subprocess ──
                     logger.info(f"Routing risky tool {tool_name} through sandbox worker (task_class={task_class})")
                     from aether_engine.workers.sandbox import execute_tool_in_worker
@@ -108,6 +108,8 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                     result_text = json.dumps(result) if not isinstance(result, str) else (result or f"Tool {tool_name} completed.")
                 else:
                     # ── Step 2b: Safe tools → direct in-process execution ──
+                    # MCP tools also run in-process (PRD Q4): the worker
+                    # cannot hold MCP sessions.
                     logger.info(f"Executing safe tool {tool_name} with args {args}")
                     result = await tool.execute_fn(**args) if asyncio.iscoroutinefunction(tool.execute_fn) else tool.execute_fn(**args)
                     result_text = json.dumps(result) if not isinstance(result, str) else result
