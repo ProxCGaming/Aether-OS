@@ -1034,7 +1034,10 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_LIST_RESPONSE,
                     request_id=req_id,
-                    payload={"servers": servers},
+                    payload={
+                        "servers": servers,
+                        "config_error": getattr(GLOBAL_MCP_REGISTRY, "config_load_error", None),
+                    },
                 ).to_json())
 
             elif msg.type == EventType.CONFIG_GET_REQUEST:
@@ -1109,7 +1112,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_ADD_REQUEST:
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY, MCPConfigError
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY, MCPConfigError, redact_mcp_config_for_ui
                 name = msg.payload.get("name")
                 config = msg.payload.get("config", {})
                 ok, error = True, ""
@@ -1123,16 +1126,17 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_ADD_RESPONSE,
                     request_id=req_id,
-                    payload={"success": ok, "name": name, "config": config, "error": error},
+                    # S1: never echo header/env values back to the UI.
+                    payload={"success": ok, "name": name, "config": redact_mcp_config_for_ui(config), "error": error},
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_REMOVE_REQUEST:
                 from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
                 name = msg.payload.get("name")
                 if name:
-                    # Disconnect first so no live session is left behind.
-                    await GLOBAL_MCP_REGISTRY.disconnect_server(name)
-                    GLOBAL_MCP_REGISTRY.remove_server(name)
+                    # remove_server closes any live session inside the
+                    # removal (S5), awaited here in the session-owner task.
+                    await GLOBAL_MCP_REGISTRY.remove_server(name)
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_REMOVE_RESPONSE,
                     request_id=req_id,
@@ -1244,6 +1248,14 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
             elif msg.type == EventType.PLUGIN_UNINSTALL_REQUEST:
                 name = msg.payload.get("name")
                 try:
+                    # Disconnect the plugin's MCP servers first, in this
+                    # (session-owner) task — remove_server_sync inside
+                    # uninstall() cannot close a live session from a sync
+                    # caller (anyio cancel-scope rule, see registry.py).
+                    from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                    installed = engine_state.plugin_installer.get_all().get(name, {})
+                    for mcp_name in installed.get("installed_mcp", []):
+                        await GLOBAL_MCP_REGISTRY.disconnect_server(mcp_name)
                     engine_state.plugin_installer.uninstall(name)
                     await ws.send_text(Event(
                         type=EventType.PLUGIN_UNINSTALL_RESPONSE,

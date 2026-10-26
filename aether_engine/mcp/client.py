@@ -104,6 +104,10 @@ class MCPClientManager:
             current["tool_count"] = tool_count
         self._status[name] = current
 
+    def set_failed(self, name: str, error: str) -> None:
+        """Mark *name* failed (e.g. after a tool-list refresh failure)."""
+        self._set_status(name, "failed", error=error)
+
     # -- session plumbing ------------------------------------------------
     async def _open_session(self, config: dict):
         """Open a session for *config*; caller owns the returned stack."""
@@ -138,7 +142,7 @@ class MCPClientManager:
                 await stack.aclose()
             except BaseException:
                 pass
-            if isinstance(e, asyncio.CancelledError) and _task_is_being_cancelled():
+            if _is_genuine_cancellation(e):
                 raise
             if isinstance(e, MCPClientError):
                 raise
@@ -185,7 +189,7 @@ class MCPClientManager:
             try:
                 await stack.aclose()
             except BaseException as e:  # closing must never raise
-                if isinstance(e, asyncio.CancelledError) and _task_is_being_cancelled():
+                if _is_genuine_cancellation(e):
                     raise
                 logger.warning("MCP disconnect failed for %s: %s", name, e)
         self._set_status(name, "disconnected", error=None)
@@ -214,18 +218,53 @@ class MCPClientManager:
         result = await session.list_tools()
         return result.tools
 
-    async def call_tool(self, server: str, tool: str, args: Optional[Dict[str, Any]] = None) -> str:
-        """Call *tool* on *server*; returns the result text. No retry."""
+    async def call_tool(
+        self, server: str, tool: str, args: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> str:
+        """Call *tool* on *server*; returns the result text. No retry.
+
+        *timeout* is the tool-call timeout (the Tool's timeout_s, 60s);
+        when omitted it falls back to the server's connect timeout. The
+        connect timeout never bounds a tool call.
+        """
         session = self._sessions.get(server)
         if session is None:
             raise MCPClientError(f"MCP server '{server}' is not connected")
-        timeout = float((self._configs.get(server) or {}).get("timeout") or 30)
+        if timeout is None:
+            timeout = float((self._configs.get(server) or {}).get("timeout") or 30)
+        # The session call runs in a child task so a timeout cancels only
+        # the call, not our work — but the SDK's anyio machinery can still
+        # cancel OUR task directly (the session's cancel scope was entered
+        # here at connect time). That synthesised CancelledError is
+        # distinguished from a genuine cancellation by its message (see
+        # _is_sdk_cancel): the synthesised one is a connection failure,
+        # a genuine one re-raises.
+        inner = asyncio.ensure_future(session.call_tool(tool, args or {}))
         try:
-            result = await asyncio.wait_for(
-                session.call_tool(tool, args or {}), timeout=timeout
+            result = await asyncio.wait_for(asyncio.shield(inner), timeout=timeout)
+        except asyncio.TimeoutError:
+            inner.cancel()
+            try:
+                await inner
+            except BaseException:
+                pass
+            message = f"tool call '{tool}' timed out after {timeout}s"
+            self._set_status(server, "failed", error=message)
+            raise MCPClientError(
+                f"MCP server '{server}' tool call '{tool}' failed: {message}"
+            )
+        except asyncio.CancelledError as e:
+            if _is_genuine_cancellation(e):
+                inner.cancel()
+                raise
+            message = "connection lost (server closed the connection)"
+            self._set_status(server, "failed", error=message)
+            raise MCPClientError(
+                f"MCP server '{server}' tool call '{tool}' failed: {message}"
             )
         except BaseException as e:
-            if isinstance(e, asyncio.CancelledError) and _task_is_being_cancelled():
+            if _is_genuine_cancellation(e):
                 raise
             if isinstance(e, BaseExceptionGroup):
                 message = _first_leaf_message(e)
@@ -252,6 +291,37 @@ def _first_leaf_message(group: BaseExceptionGroup) -> str:
     return group.__class__.__name__
 
 
+def _is_sdk_cancel(exc: BaseException) -> bool:
+    """True if *exc* is a CancelledError synthesised by the SDK's anyio
+    machinery (dead server), not a genuine cancellation of our task.
+
+    Verified in this environment (mcp 1.30 / anyio): anyio raises
+    ``CancelledError('Cancelled via cancel scope <hex>')`` when its task
+    group fails, while a bare ``task.cancel()`` — every cancellation the
+    engine itself issues — raises it with empty args. Fail-safe: an
+    unrecognised message is treated as a genuine cancellation.
+    """
+    return (
+        isinstance(exc, asyncio.CancelledError)
+        and bool(exc.args)
+        and str(exc.args[0]).startswith("Cancelled via cancel scope")
+    )
+
+
+def _is_genuine_cancellation(exc: BaseException) -> bool:
+    """True only if our task was actually asked to cancel.
+
+    ``_task_is_being_cancelled()`` alone is not enough: the SDK's
+    synthesised cancellation also sets our task's cancelling count, so
+    the SDK message must be excluded (see ``_is_sdk_cancel``).
+    """
+    return (
+        isinstance(exc, asyncio.CancelledError)
+        and _task_is_being_cancelled()
+        and not _is_sdk_cancel(exc)
+    )
+
+
 def _task_is_being_cancelled() -> bool:
     """True only if *our* task was actually asked to cancel.
 
@@ -260,6 +330,8 @@ def _task_is_being_cancelled() -> bool:
     WouldBlock, which anyio turns into a cancel-scope CancelledError).
     That is a connection failure, not a cancellation of our work — and it
     must be reported as one instead of escaping as CancelledError.
+    Use ``_is_genuine_cancellation`` (which also excludes the SDK
+    message) rather than this helper on its own.
     """
     task = asyncio.current_task()
     return task is not None and task.cancelling() > 0

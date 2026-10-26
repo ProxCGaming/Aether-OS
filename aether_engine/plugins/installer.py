@@ -146,7 +146,7 @@ class PluginInstaller:
                 if skill_dir.exists():
                     shutil.rmtree(skill_dir)
             for mcp_name in installed_mcp:
-                GLOBAL_MCP_REGISTRY.remove_server(mcp_name)
+                GLOBAL_MCP_REGISTRY.remove_server_sync(mcp_name)
                 
             raise RuntimeError(f"Installation failed, rolled back. Error: {e}")
 
@@ -159,7 +159,7 @@ class PluginInstaller:
         # Remove MCP
         from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
         for mcp_name in data.get("installed_mcp", []):
-            GLOBAL_MCP_REGISTRY.remove_server(mcp_name)
+            GLOBAL_MCP_REGISTRY.remove_server_sync(mcp_name)
             
         # Remove skills
         for skill_path_str in data.get("installed_skills", []):

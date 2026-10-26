@@ -50,9 +50,59 @@ async def test_test_connection_returns_tools_without_leaving_session(fake_url, m
 
 
 async def test_call_on_disconnected_server_fails_gracefully(manager):
-    with pytest.raises(Exception) as ctx:
+    from aether_engine.mcp.client import MCPClientError
+
+    with pytest.raises(MCPClientError) as ctx:
         await manager.call_tool("ghost", "add", {"a": 1, "b": 2})
     assert "ghost" in str(ctx.value)
+
+
+async def test_dead_server_fails_immediately_no_retry(manager):
+    """One attempt only: a black-hole server (accepts TCP, never answers)
+    with a 3s timeout must fail in ~3s, not ~9s (3 retries)."""
+    import socket
+    import threading
+    import time
+
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(5)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+
+    def _accept_forever():
+        while not stop.is_set():
+            try:
+                listener.settimeout(0.2)
+                conn, _ = listener.accept()
+                # Hold the connection open, never answer: one attempt burns
+                # the whole timeout, a retry would burn it again.
+                conn.settimeout(5)
+                try:
+                    conn.recv(4096)
+                except OSError:
+                    pass
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=_accept_forever, daemon=True)
+    thread.start()
+    try:
+        config = {
+            "transport": "streamable_http",
+            "url": f"http://127.0.0.1:{port}/mcp",
+            "timeout": 3,
+        }
+        start = time.monotonic()
+        result = await manager.connect("blackhole", config)
+        elapsed = time.monotonic() - start
+        assert result["ok"] is False
+        assert elapsed < 7.0, f"connect took {elapsed:.1f}s — looks like retries"
+    finally:
+        stop.set()
+        listener.close()
+        thread.join(timeout=2)
 
 
 async def test_dead_server_fails_immediately_no_retry(manager):
@@ -73,6 +123,32 @@ async def test_stdio_transport_rejected_in_issue_001(manager):
     result = await manager.connect("local", config)
     assert result["ok"] is False
     assert "stdio" in result["error"].lower()
+
+
+async def test_genuine_cancellation_still_propagates(fake_url, manager):
+    """A bare task.cancel() during a tool call must still cancel the call —
+    the SDK-cancel discriminator must not swallow real cancellations."""
+    import asyncio
+
+    config = {"transport": "streamable_http", "url": fake_url, "timeout": 10}
+    assert (await manager.connect("fake", config))["ok"] is True
+    session = manager._sessions["fake"]
+    original_call_tool = session.call_tool
+
+    async def _slow(*args, **kwargs):
+        await asyncio.sleep(30)
+        return await original_call_tool(*args, **kwargs)
+
+    session.call_tool = _slow
+    task = asyncio.create_task(manager.call_tool("fake", "add", {"a": 1, "b": 2}))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    try:
+        await manager.disconnect("fake")
+    except BaseException:
+        pass
 
 
 def test_header_env_var_expansion():

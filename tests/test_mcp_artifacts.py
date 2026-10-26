@@ -23,7 +23,7 @@ def test_mcp_registry():
     servers = registry.list_servers()
     assert "test_server" in servers
     
-    registry.remove_server("test_server")
+    registry.remove_server_sync("test_server")
     assert "test_server" not in registry.list_servers()
 
 def test_mcp_fallback():

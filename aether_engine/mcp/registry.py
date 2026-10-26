@@ -11,9 +11,11 @@ appear only after it has been connected (``connect_server`` /
 ``test_connection`` never happens implicitly here — the websocket layer
 drives connects). Before that it returns ``[]``, honestly.
 """
+import asyncio
 import json
 import logging
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +31,44 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,100}$")
 
 class MCPConfigError(ValueError):
     """Raised when an MCP server name or config fails validation."""
+
+
+# Tool-call timeout (PRD §4: Tool.timeout_s, default 60s). The server
+# config timeout bounds *connects* only; a tool call is bounded by this.
+MCP_TOOL_TIMEOUT_S = 60
+
+
+def redact_mcp_config_for_ui(config: Any) -> Dict[str, Any]:
+    """Copy of *config* that is safe to send to the UI.
+
+    Header / env *values* are secrets (API keys) and must never reach
+    browser memory, websocket traffic, or logs — only the names are
+    returned, e.g. ``headers: ["x-api-key"]``.
+    """
+    if not isinstance(config, dict):
+        return {}
+    out = dict(config)
+    for field in ("headers", "env"):
+        value = out.get(field)
+        if isinstance(value, dict):
+            out[field] = sorted(value.keys())
+    return out
+
+
+def _valid_input_schema(schema: Any) -> Dict[str, Any]:
+    """An MCP tool's inputSchema must be an object schema.
+
+    Servers are untrusted: a non-dict schema, or a schema whose type is
+    not ``"object"``, falls back to an empty object schema with a warning
+    instead of breaking tool conversion or the model call.
+    """
+    if isinstance(schema, dict) and schema.get("type") == "object":
+        return schema
+    logger.warning(
+        "MCP tool inputSchema is not an object schema (%r); using empty object schema.",
+        schema,
+    )
+    return {"type": "object", "properties": {}}
 
 
 def _str_dict(value: Any, field: str) -> Dict[str, str]:
@@ -111,26 +151,78 @@ class MCPRegistry:
         self._client = client or MCPClientManager()
         self.servers: Dict[str, dict] = {}
         self._tools_cache: Dict[str, List[Tool]] = {}
+        # Entries that failed validation: kept in memory (never silently
+        # dropped) and preserved on disk by _save_config.
+        self._invalid_servers: Dict[str, Dict[str, Any]] = {}
+        # Set when the whole config file could not be parsed at all.
+        self._config_load_error: Optional[str] = None
         self._load_config()
 
+    @property
+    def config_load_error(self) -> Optional[str]:
+        """Error from the last config-file load, or None if it loaded."""
+        return self._config_load_error
+
     def _load_config(self):
-        if not self._config_path.exists():
-            self.servers = {}
-            return
-        with open(self._config_path, "r") as f:
-            raw = json.load(f)
         self.servers = {}
+        self._invalid_servers = {}
+        self._config_load_error = None
+        if not self._config_path.exists():
+            return
+        try:
+            with open(self._config_path, "r") as f:
+                raw = json.load(f)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            # B1: a corrupt file must never be silently destroyed. Keep a
+            # .bak, refuse to load that registry, surface the error.
+            self._config_load_error = (
+                f"MCP config file {self._config_path} is corrupt and was not loaded: {e}"
+            )
+            try:
+                backup = self._config_path.with_name(self._config_path.name + ".bak")
+                shutil.copyfile(self._config_path, backup)
+                self._config_load_error += f" A backup was saved to {backup}."
+            except OSError:
+                pass
+            logger.error(self._config_load_error)
+            return
+        if not isinstance(raw, dict):
+            self._config_load_error = (
+                f"MCP config file {self._config_path} is corrupt: top level must be an object."
+            )
+            try:
+                backup = self._config_path.with_name(self._config_path.name + ".bak")
+                shutil.copyfile(self._config_path, backup)
+                self._config_load_error += f" A backup was saved to {backup}."
+            except OSError:
+                pass
+            logger.error(self._config_load_error)
+            return
         for name, config in (raw or {}).items():
             try:
                 self.servers[name] = validate_mcp_server_config(name, config)
             except MCPConfigError as e:
-                # Never let one bad entry break loading the rest.
-                logger.warning("Skipping invalid MCP server %r: %s", name, e)
+                # Never let one bad entry break loading the rest — and
+                # never delete it: it stays in memory marked invalid and
+                # is written back out by _save_config.
+                logger.warning("Keeping invalid MCP server %r in memory (not loaded): %s", name, e)
+                self._invalid_servers[name] = {"config": config, "error": str(e)}
 
     def _save_config(self):
+        if self._config_load_error is not None:
+            # The file on disk is corrupt JSON we refused to load. Writing
+            # over it now would destroy the user's data.
+            raise MCPConfigError(
+                "MCP config file is corrupt and was not loaded; fix or delete it "
+                "(a .bak backup was saved) before adding servers."
+            )
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
+        data: Dict[str, Any] = {}
+        for name, entry in self._invalid_servers.items():
+            data[name] = entry["config"]
+        data.update(self.servers)
         with open(self._config_path, "w") as f:
-            json.dump(self.servers, f, indent=4)
+            json.dump(data, f, indent=4)
 
     def add_server(self, name: str, config: dict):
         """
@@ -152,15 +244,53 @@ class MCPRegistry:
         self.servers[name] = normalised
         self._save_config()
 
-    def remove_server(self, name: str):
+    async def remove_server(self, name: str):
         """
-        Removes a server from the allow-list. Callers should disconnect it
-        first (``disconnect_server``) — removal alone does not close a live
-        session.
+        Removes a server from the allow-list and closes any live session
+        inside the removal (S5). Async because closing an MCP session must
+        be awaited in the task that opened it: the SDK's anyio cancel
+        scope cannot be exited from a different task (doing so cancels
+        the owner task). Sync callers use ``remove_server_sync``.
         """
+        await self.disconnect_server(name)
+        removed = False
+        if name in self.servers:
+            del self.servers[name]
+            removed = True
+        if name in self._invalid_servers:
+            del self._invalid_servers[name]
+            removed = True
+        if removed:
+            self._tools_cache.pop(name, None)
+            self._save_config()
+
+    def remove_server_sync(self, name: str):
+        """Synchronous removal for sync callers (``plugins/installer.py``).
+
+        Removes the config immediately. A live session is closed here
+        only when no event loop is running in this thread; when a loop
+        IS running, the session cannot be closed from this task (anyio
+        cancel-scope rule — see ``remove_server``), so the caller must
+        disconnect first (the websocket PLUGIN_UNINSTALL handler does).
+        Plugin servers are never connected at install/rollback time.
+        """
+        if self._client.is_connected(name):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(self._client.disconnect(name))
+            else:
+                logger.warning(
+                    "Removing MCP server %r with a live session from a sync "
+                    "caller; disconnect it first (await remove_server).",
+                    name,
+                )
         if name in self.servers:
             del self.servers[name]
             self._tools_cache.pop(name, None)
+            self._save_config()
+        elif name in self._invalid_servers:
+            del self._invalid_servers[name]
             self._save_config()
 
     def get_server(self, name: str) -> Optional[dict]:
@@ -170,17 +300,28 @@ class MCPRegistry:
         return dict(self.servers)
 
     def list_servers_with_status(self) -> Dict[str, dict]:
-        """Configs plus live status (connected / failed / disabled), tool count, error."""
+        """Configs plus live status (connected / failed / disabled), tool count, error.
+
+        Header / env *values* are redacted (S1) — only the names leave the
+        engine. Invalid entries are included, marked ``status: "invalid"``.
+        """
         out = {}
         for name, config in self.servers.items():
             status = self._client.get_status(name)
             if not config.get("enabled", True):
                 status = dict(status, status="disabled")
             out[name] = {
-                **config,
+                **redact_mcp_config_for_ui(config),
                 "status": status["status"],
                 "tool_count": status.get("tool_count", 0),
                 "error": status.get("error"),
+            }
+        for name, entry in self._invalid_servers.items():
+            out[name] = {
+                **redact_mcp_config_for_ui(entry["config"]),
+                "status": "invalid",
+                "tool_count": 0,
+                "error": entry["error"],
             }
         return out
 
@@ -188,10 +329,29 @@ class MCPRegistry:
     async def connect_server(self, name: str) -> Dict[str, Any]:
         config = self.servers.get(name)
         if config is None:
+            if name in self._invalid_servers:
+                return {
+                    "ok": False,
+                    "error": f"MCP server '{name}' has an invalid config: "
+                    f"{self._invalid_servers[name]['error']}",
+                }
             return {"ok": False, "error": f"Unknown MCP server '{name}'"}
         result = await self._client.connect(name, config)
         if result["ok"]:
-            await self._refresh_tools(name)
+            try:
+                await self._refresh_tools(name)
+            except Exception as e:
+                # S4: a session that cannot list its tools is not a
+                # connected server. Disconnect it, mark it failed with the
+                # error, and report the failure — never leave a session
+                # behind with no tools.
+                message = str(e) or e.__class__.__name__
+                logger.warning(
+                    "MCP connect failed for %s while listing tools: %s", name, message
+                )
+                await self._client.disconnect(name)
+                self._client.set_failed(name, message)
+                return {"ok": False, "error": message}
         return result
 
     async def disconnect_server(self, name: str) -> Dict[str, Any]:
@@ -217,8 +377,11 @@ class MCPRegistry:
 
         async def _execute(**kwargs):
             # Graceful failure lives here: a dead server returns an error
-            # string, it never raises into the graph.
-            result = await execute_mcp_tool_async(server, original_name, kwargs, self._client)
+            # string, it never raises into the graph. The call timeout is
+            # the Tool's timeout (S2: 60s), not the server connect timeout.
+            result = await execute_mcp_tool_async(
+                server, original_name, kwargs, self._client, timeout=MCP_TOOL_TIMEOUT_S
+            )
             if len(result) > 20000:
                 return result[:20000] + "\n...[output truncated to 20000 chars]"
             return result
@@ -226,10 +389,10 @@ class MCPRegistry:
         return Tool(
             name=prefixed,
             description=mcp_tool.description or f"MCP tool {original_name} from server {server}.",
-            input_schema=mcp_tool.inputSchema or {"type": "object", "properties": {}},
+            input_schema=_valid_input_schema(mcp_tool.inputSchema),
             execute_fn=_execute,
             risk=ToolRisk.EXECUTE,
-            timeout_s=60,
+            timeout_s=MCP_TOOL_TIMEOUT_S,
             source=f"mcp:{server}",
         )
 

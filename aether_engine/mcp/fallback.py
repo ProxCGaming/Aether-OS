@@ -23,11 +23,12 @@ def format_mcp_error(server_name: str, tool_name: str, error: Any) -> str:
 
 
 async def execute_mcp_tool_async(
-    server_name: str, tool_name: str, kwargs: Dict[str, Any], client: Any
+    server_name: str, tool_name: str, kwargs: Dict[str, Any], client: Any,
+    timeout: Optional[float] = None,
 ) -> str:
     """Attempt the real call via *client*; on failure return the error string."""
     try:
-        result = await client.call_tool(server_name, tool_name, kwargs or {})
+        result = await client.call_tool(server_name, tool_name, kwargs or {}, timeout=timeout)
         return result if isinstance(result, str) else str(result)
     except Exception as e:
         error_msg = format_mcp_error(server_name, tool_name, e)
@@ -36,7 +37,8 @@ async def execute_mcp_tool_async(
 
 
 def execute_mcp_tool_with_fallback(
-    server_name: str, tool_name: str, kwargs: Dict[str, Any], client: Any = None
+    server_name: str, tool_name: str, kwargs: Dict[str, Any], client: Any = None,
+    timeout: Optional[float] = None,
 ) -> str:
     """Synchronous entry point (kept for callers that cannot await).
 
@@ -51,7 +53,7 @@ def execute_mcp_tool_with_fallback(
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(
-            execute_mcp_tool_async(server_name, tool_name, kwargs, client)
+            execute_mcp_tool_async(server_name, tool_name, kwargs, client, timeout=timeout)
         )
     return format_mcp_error(
         server_name,

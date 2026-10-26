@@ -115,18 +115,27 @@ async def test_execute_tool_node_runs_mcp_tool_in_process(connected_tools, monke
     assert result["messages"][0]["content"].strip() == "8"
 
 
-async def test_dead_mcp_tool_fails_gracefully_as_tool_result(mcp_registry, fake_url):
-    """Kill the server after connecting: the tool call returns a clear
-    error string, it does not raise into the graph."""
-    from aether_engine.mcp.fallback import execute_mcp_tool_async
+async def test_dead_mcp_tool_fails_gracefully_as_tool_result(mcp_registry):
+    """Kill the server mid-session, then call through the converted Tool:
+    the call returns a clear error string, it does not raise into the graph."""
+    from aether_engine.tools.registry import build_tool_registry
 
-    mcp_registry.add_server(
-        "fake", {"transport": "streamable_http", "url": fake_url, "timeout": 10}
-    )
-    await mcp_registry.connect_server("fake")
-    # Simulate a dead server by dropping the session without a clean close.
-    client = mcp_registry._client
-    await client.disconnect("fake")
-    result = await execute_mcp_tool_async("fake", "add", {"a": 1, "b": 2}, client)
-    assert "fake MCP is unavailable" in result
-    assert "add" in result
+    url, stop = start_fake_http_server()
+    try:
+        mcp_registry.add_server(
+            "fake", {"transport": "streamable_http", "url": url, "timeout": 10}
+        )
+        assert (await mcp_registry.connect_server("fake"))["ok"] is True
+        tools = mcp_registry.get_mcp_tools()
+        assert [t.name for t in tools] == ["fake__add"]
+
+        stop()  # kill the server mid-session
+        registry = build_tool_registry(mcp_tools=tools)
+        result = await registry.execute("fake__add", {"a": 1, "b": 2}, approved=True)
+        assert "fake MCP is unavailable" in result
+        assert "add" in result
+    finally:
+        try:
+            await mcp_registry.disconnect_server("fake")
+        except Exception:
+            pass

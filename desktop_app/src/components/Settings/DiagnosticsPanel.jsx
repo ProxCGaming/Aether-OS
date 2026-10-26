@@ -8,7 +8,7 @@ import PluginsNotice from './PluginsNotice';
 export default function DiagnosticsPanel({ activeMenu }) {
   const { wsRef, sendMessage } = useAetherSocket();
   const [mcpServers, setMcpServers] = useState({});
-  const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '', url: '' });
+  const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '', url: '', headerKey: '', headerValue: '', envKey: '', envValue: '', cwd: '' });
   const [mcpTestResult, setMcpTestResult] = useState(null);
   const [plugins, setPlugins] = useState([]);
   const [newPluginSource, setNewPluginSource] = useState('');
@@ -33,6 +33,10 @@ export default function DiagnosticsPanel({ activeMenu }) {
         const data = JSON.parse(event.data);
         if (data.type === 'MCP_SERVER_LIST_RESPONSE') {
           setMcpServers(data.payload.servers || {});
+          if (data.payload.config_error) {
+            // B1: the whole config file failed to parse — surface it.
+            setMcpTestResult(`MCP config file error: ${data.payload.config_error}`);
+          }
         } else if (data.type === 'MCP_SERVER_ADD_RESPONSE' || data.type === 'MCP_SERVER_REMOVE_RESPONSE') {
           if (data.payload.success) {
             sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
@@ -47,9 +51,12 @@ export default function DiagnosticsPanel({ activeMenu }) {
             : `Test ${data.payload.name} failed: ${data.payload.error || 'unknown error'}`);
           sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
         } else if (data.type === 'MCP_SERVER_CONNECT_RESPONSE' || data.type === 'MCP_SERVER_DISCONNECT_RESPONSE') {
-          if (data.payload.success) {
-            sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+          // S9: a failed Connect/Disconnect must be visible, not silent.
+          const verb = data.type === 'MCP_SERVER_CONNECT_RESPONSE' ? 'Connect' : 'Disconnect';
+          if (!data.payload.success) {
+            setMcpTestResult(`${verb} ${data.payload.name} failed: ${data.payload.error || 'unknown error'}`);
           }
+          sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
         } else if (data.type === 'PLUGIN_LIST_RESPONSE') {
           const p = data.payload.plugins;
           setPlugins(Array.isArray(p) ? p : Object.values(p || {}));
@@ -131,20 +138,80 @@ export default function DiagnosticsPanel({ activeMenu }) {
                 placeholder="Server URL for remote (Streamable HTTP, e.g. https://21st.dev/api/mcp)"
                 style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
               />
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <input
+                  type="text"
+                  value={newMcpServer.headerKey}
+                  onChange={(e) => setNewMcpServer({...newMcpServer, headerKey: e.target.value})}
+                  className="ios-glass-input"
+                  placeholder="Header name (e.g. x-api-key)"
+                  style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+                />
+                <input
+                  type="text"
+                  value={newMcpServer.headerValue}
+                  onChange={(e) => setNewMcpServer({...newMcpServer, headerValue: e.target.value})}
+                  className="ios-glass-input"
+                  placeholder="Header value (use ${VAR_NAME} for secrets)"
+                  style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <input
+                  type="text"
+                  value={newMcpServer.envKey}
+                  onChange={(e) => setNewMcpServer({...newMcpServer, envKey: e.target.value})}
+                  className="ios-glass-input"
+                  placeholder="Env var name (local servers)"
+                  style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+                />
+                <input
+                  type="text"
+                  value={newMcpServer.envValue}
+                  onChange={(e) => setNewMcpServer({...newMcpServer, envValue: e.target.value})}
+                  className="ios-glass-input"
+                  placeholder="Env var value"
+                  style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+                />
+              </div>
+              <input
+                type="text"
+                value={newMcpServer.cwd}
+                onChange={(e) => setNewMcpServer({...newMcpServer, cwd: e.target.value})}
+                className="ios-glass-input"
+                placeholder="Working directory (cwd, local servers)"
+                style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
+              />
               <button
                 onClick={() => {
+                  // S6: command AND url filled means two transports — warn
+                  // instead of silently sending only the URL.
+                  if (newMcpServer.command.trim() && newMcpServer.url.trim()) {
+                    setMcpTestResult('Both a command and a URL are filled — pick one transport: a local command or a remote URL.');
+                    return;
+                  }
+                  const resetForm = { name: '', command: '', args: '', url: '', headerKey: '', headerValue: '', envKey: '', envValue: '', cwd: '' };
                   if (newMcpServer.name && newMcpServer.url) {
-                    // Remote server: URL wins over command.
+                    const headers = newMcpServer.headerKey.trim()
+                      ? { [newMcpServer.headerKey.trim()]: newMcpServer.headerValue }
+                      : undefined;
                     sendMessage('MCP_SERVER_ADD_REQUEST', {
                       schema_version: 1,
                       request_id: Date.now().toString(),
                       payload: {
                         name: newMcpServer.name,
-                        config: { transport: 'streamable_http', url: newMcpServer.url.trim() }
+                        config: {
+                          transport: 'streamable_http',
+                          url: newMcpServer.url.trim(),
+                          ...(headers ? { headers } : {}),
+                        }
                       }
                     });
-                    setNewMcpServer({ name: '', command: '', args: '', url: '' });
+                    setNewMcpServer(resetForm);
                   } else if (newMcpServer.name && newMcpServer.command) {
+                    const env = newMcpServer.envKey.trim()
+                      ? { [newMcpServer.envKey.trim()]: newMcpServer.envValue }
+                      : undefined;
                     sendMessage('MCP_SERVER_ADD_REQUEST', {
                       schema_version: 1,
                       request_id: Date.now().toString(),
@@ -152,11 +219,13 @@ export default function DiagnosticsPanel({ activeMenu }) {
                         name: newMcpServer.name,
                         config: {
                           command: newMcpServer.command,
-                          args: newMcpServer.args.split(',').map(s => s.trim()).filter(Boolean)
+                          args: newMcpServer.args.split(',').map(s => s.trim()).filter(Boolean),
+                          ...(env ? { env } : {}),
+                          ...(newMcpServer.cwd.trim() ? { cwd: newMcpServer.cwd.trim() } : {}),
                         }
                       }
                     });
-                    setNewMcpServer({ name: '', command: '', args: '', url: '' });
+                    setNewMcpServer(resetForm);
                   }
                 }}
                 style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '12px 24px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, alignSelf: 'flex-start' }}
