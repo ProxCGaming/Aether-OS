@@ -1,1 +1,5 @@
-npm test
+#!/usr/bin/env sh
+set -e
+npx --no -- lint-staged
+scripts/check-jest-test.sh
+scripts/check-large-files.sh
