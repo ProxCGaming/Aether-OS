@@ -1,0 +1,33 @@
+# Known pytest failures — pre-push baseline (issue 004).
+#
+# Recorded 27 Oct 2026 on branch commit-rules-tracer (commit 1f2e360) by
+# running:  uv run python -m pytest -q --tb=no -rf
+# Result then: 16 failed, 259 passed, 2 skipped.
+#
+# The pre-push hook (.husky/pre-push) blocks a push when the failure LIST
+# differs from this file — not when the count is non-zero. These 16 are
+# pre-existing failures, not a reason to block.
+#
+# How to update this baseline: fix the failing test, then re-run the
+# suite with the command above, replace the list below with the new
+# failure list (one test node id per line, sorted), and say in the commit
+# message which baseline entry was fixed. Never delete an entry without
+# the fix that makes it pass, and never add an entry to hide a new
+# failure.
+#
+tests/test_engine_ws.py::TestEngineWebSocket::test_custom_provider_save_uses_provided_display_name
+tests/test_engine_ws.py::TestEngineWebSocket::test_provider_save_and_remove
+tests/test_engine_ws.py::TestEngineWebSocket::test_websocket_task_cancellation_flow
+tests/test_engine_ws.py::TestEngineWebSocket::test_websocket_task_flow_with_provider
+tests/test_episodic_memory.py::test_episodic_memory_store_and_query
+tests/test_phase5_1_fixes.py::TestFix2SandboxEnforcement::test_risky_tools_set_matches_graph
+tests/test_phase5_2_fixes.py::test_tool_filtering_keeps_used_tools
+tests/test_providers_panel_fixes.py::test_custom_discovery_uses_base_url_for_non_prefixed_name
+tests/test_providers_panel_fixes.py::test_openai_compatible_discovery_initializes_candidates
+tests/test_session_store.py::test_session_lifecycle
+tests/test_session_store.py::test_session_thoughts
+tests/test_startup_validation.py::TestStartupValidation::test_missing_model_falls_back_to_provider_default
+tests/test_startup_validation.py::TestStartupValidation::test_offline_default_provider_selects_next_healthy_provider
+tests/test_startup_validation.py::TestStartupValidation::test_perfect_consistency
+tests/test_startup_validation.py::TestStartupValidation::test_provider_with_no_secret_falls_back_to_keyed_provider
+tests/test_workspace_containment.py::test_workspace_containment

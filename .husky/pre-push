@@ -1,0 +1,91 @@
+#!/usr/bin/env sh
+# Pre-push full gate (issue 004).
+# Runs the full Python suite, then the full Jest suite, in that order.
+# Uses `uv run` (issue 005), so the same command works on Windows and
+# Linux — no OS branching in the hook.
+#
+# pytest is judged by its FAILURE LIST, not its exit code or count:
+#   - Full pytest currently has 16 pre-existing failures. A naive
+#     `pytest ... || exit 1` hook would block EVERY push forever.
+#     Instead the hook compares the current failure list against the
+#     recorded baseline in scripts/pytest-known-failures.txt and blocks
+#     only when the list DIFFERS. New failures are printed; tests that
+#     newly pass are printed too, so the human knows to update the
+#     baseline (see the header of that file for how).
+#   - pytest on this VM exits 139 (segfault, Qt teardown) AFTER printing
+#     its summary, in all venvs — environmental, not a test result.
+#     The hook therefore parses pytest's output and deliberately ignores
+#     its exit code. If no test summary is found at all, the push is
+#     blocked (fail closed): an unreadable result is never a pass.
+# Jest is 30/30 green, so it is a straight pass/fail gate on exit code.
+# Either suite failing blocks the push, and the hook prints which one.
+#
+# uv is resolved PATH-first, then $HOME/.local/bin/uv — a non-login
+# shell may not have ~/.local/bin on PATH even though uv is installed
+# there (same bug class as the Gitleaks PATH defect fixed in 1f2e360).
+# The hook fails with a clear "install uv" message only if uv is
+# genuinely absent.
+set -u
+
+if command -v uv >/dev/null 2>&1; then
+  UV=uv
+elif [ -x "$HOME/.local/bin/uv" ]; then
+  UV="$HOME/.local/bin/uv"
+else
+  echo "pre-push: 'uv' was not found on PATH, so the Python suite could not run." >&2
+  echo "Install uv (https://docs.astral.sh/uv/getting-started/installation/) and run 'uv sync', then push again." >&2
+  exit 1
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+BASELINE="$REPO_ROOT/scripts/pytest-known-failures.txt"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+if [ ! -f "$BASELINE" ]; then
+  echo "pre-push: baseline file missing: scripts/pytest-known-failures.txt" >&2
+  echo "pre-push: cannot judge the pytest suite without it — push blocked." >&2
+  exit 1
+fi
+
+# --- Python suite -------------------------------------------------------
+# Husky runs this hook under `sh -e`, so ANY command returning non-zero
+# would abort the script immediately — including pytest (exit 139) and a
+# grep that finds no matches. Every fallible command below is therefore
+# guarded with `|| true` or run inside an `if`, and the gate decisions
+# are made by parsing the captured output, never by a bare exit code.
+echo "pre-push: running full pytest suite..."
+"$UV" run python -m pytest -q --tb=no -rf > "$WORK/pytest.log" 2>&1 || true
+# Exit code deliberately ignored: pytest exits 139 (segfault, Qt teardown)
+# after printing its summary on this VM. Judge by the output instead.
+if ! grep -q "short test summary info" "$WORK/pytest.log"; then
+  echo "pre-push: pytest produced no test summary — cannot judge the suite." >&2
+  echo "pre-push: run 'uv run python -m pytest -q' by hand, fix the run, then push again." >&2
+  exit 1
+fi
+grep '^FAILED ' "$WORK/pytest.log" | awk '{print $2}' > "$WORK/current.txt" || true
+grep '^ERROR ' "$WORK/pytest.log" | awk '{print $2}' >> "$WORK/current.txt" || true
+sort -u "$WORK/current.txt" -o "$WORK/current.txt"
+grep -v '^#' "$BASELINE" | grep -v '^$' | sort -u > "$WORK/baseline.txt"
+SUMMARY="$(grep -E '[0-9]+ failed.*passed' "$WORK/pytest.log" | tail -n 1)"
+if ! cmp -s "$WORK/current.txt" "$WORK/baseline.txt"; then
+  echo "pre-push: pytest FAILED — failure list differs from the known baseline." >&2
+  echo "pre-push: $SUMMARY" >&2
+  echo "pre-push: new failures (not in scripts/pytest-known-failures.txt):" >&2
+  comm -13 "$WORK/baseline.txt" "$WORK/current.txt" | sed 's/^/  NEW FAILED /' >&2
+  echo "pre-push: newly passing (were failing in the baseline — update it if genuine):" >&2
+  comm -23 "$WORK/baseline.txt" "$WORK/current.txt" | sed 's/^/  FIXED /' >&2
+  exit 1
+fi
+echo "pre-push: pytest matches the known baseline ($SUMMARY)."
+
+# --- Jest suite ---------------------------------------------------------
+echo "pre-push: running full Jest suite..."
+if ! npm test > "$WORK/jest.log" 2>&1; then
+  echo "pre-push: Jest FAILED — push blocked." >&2
+  grep -E '^(FAIL|Tests:)' "$WORK/jest.log" | sed 's/^/  /' >&2
+  exit 1
+fi
+echo "pre-push: Jest passed."
+echo "pre-push: all gates passed — pushing."
+exit 0
