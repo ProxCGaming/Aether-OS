@@ -1,2 +1,2 @@
 #!/usr/bin/env sh
-node .husky/commit-msg.js "$1"
+npx --no -- commitlint --edit "$1"
