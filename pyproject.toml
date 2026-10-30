@@ -27,6 +27,7 @@ dependencies = [
     "aiosqlite>=0.22.1",
     # Windows-only: no Linux/macOS wheels exist; uv skips it elsewhere.
     "pywin32>=306; sys_platform == 'win32'",
+    "pydantic>=2.14.0,<3.0.0",
 ]
 
 [dependency-groups]
