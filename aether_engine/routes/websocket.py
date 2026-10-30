@@ -25,6 +25,7 @@ from aether_engine.langgraph.executor import (
     resume_langgraph_task,
     run_langgraph_task,
 )
+from aether_engine.langgraph.fast_chat import load_session_history, run_fast_chat
 from aether_engine.memory import session_store
 from aether_engine.orchestration.core import (
     _build_provider_list_async,
@@ -32,6 +33,7 @@ from aether_engine.orchestration.core import (
     _validate_provider_key,
 )
 from aether_engine.providers.discovery import fetch_available_models
+from aether_engine.routing.intent import classify_intent
 from aether_engine.routing.policy import (
     RoutingDecision,
     infer_task_requirements,
@@ -386,17 +388,6 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     ).to_json())
                     continue
 
-                # One central builder (PRD Q3) — task start, approval resume
-                # and tool list used to build registries independently and
-                # had already drifted apart.
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-
-                reqs = infer_task_requirements(prompt)
-                tools = build_tool_registry(
-                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
-                    include_file_tools=reqs.wants_code or (requested_model is not None),
-                )
-
                 workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
 
                 slash_cmd_str = msg.payload.get("slash_command")
@@ -424,22 +415,53 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                             if skill_manifest.requirements.agents:
                                 forced_agent = skill_manifest.requirements.agents[0]
 
-                task_generator = run_langgraph_task(
-                    prompt=prompt,
-                    provider=provider_instance,
-                    tools=tools,
-                    request_id=req_id,
-                    approval_handler=None,
-                    workspace_roots=workspace_roots,
-                    disabled_nodes=engine_state.disabled_nodes,
-                    session_id=session_id,
-                    agent_models=engine_state.user_config.agent_models,
-                    agent_tools=engine_state.user_config.agent_tools,
-                    secret_store=secret_store,
-                    user_config=engine_state.user_config,
-                    forced_agent=forced_agent,
-                    active_skills=active_skills,
-                )
+                # Epic 1, E1-04: fast-chat split. Slash commands, skill
+                # invocations and forced agents always take the graph;
+                # everything else is classified — plain conversation
+                # streams straight from the resolved chat model with no
+                # supervisor round-trip, work goes to the graph as before.
+                intent = None
+                if not slash_cmd_str and not forced_agent and not active_skills:
+                    intent = await classify_intent(prompt, provider=provider_instance)
+
+                if intent is not None and intent.is_chat:
+                    history = await asyncio.to_thread(
+                        load_session_history, session_id, prompt)
+                    task_generator = run_fast_chat(
+                        prompt,
+                        provider_instance,
+                        history,
+                        request_id=req_id,
+                        session_id=session_id,
+                    )
+                else:
+                    # One central builder (PRD Q3) — task start, approval
+                    # resume and tool list used to build registries
+                    # independently and had already drifted apart.
+                    from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
+                    reqs = infer_task_requirements(prompt)
+                    tools = build_tool_registry(
+                        mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
+                        include_file_tools=reqs.wants_code or (requested_model is not None),
+                    )
+
+                    task_generator = run_langgraph_task(
+                        prompt=prompt,
+                        provider=provider_instance,
+                        tools=tools,
+                        request_id=req_id,
+                        approval_handler=None,
+                        workspace_roots=workspace_roots,
+                        disabled_nodes=engine_state.disabled_nodes,
+                        session_id=session_id,
+                        agent_models=engine_state.user_config.agent_models,
+                        agent_tools=engine_state.user_config.agent_tools,
+                        secret_store=secret_store,
+                        user_config=engine_state.user_config,
+                        forced_agent=forced_agent,
+                        active_skills=active_skills,
+                    )
 
                 task_runner = asyncio.create_task(
                     execute_task_generator(task_generator, decision.provider, decision.model, req_id, session_id=session_id)
