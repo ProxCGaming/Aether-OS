@@ -119,6 +119,10 @@ class UserConfig:
     # default (approval-required). Applied in
     # MCPRegistry.get_mcp_tools at registry-build time.
     mcp_tool_risk_overrides: dict[str, str] = field(default_factory=dict)
+    # Epic 7, E7-02: TTSR stream rules for model output —
+    # [{"name": str, "pattern": regex, "action": "redact"|"block"}].
+    # Empty = off. Entries are validated by clean_ttsr_rules at load.
+    ttsr_rules: list[dict] = field(default_factory=list)
     # Epic 4, E4-01: which memory backend the facade resolves to.
     # "native" (the built-in episodic + KG stores) is the production
     # default; "mem0" / "langmem" / "graphiti" select the external
@@ -214,6 +218,7 @@ class UserConfig:
             "tool_policies": self.tool_policies,
             "path_rules": self.path_rules,
             "mcp_tool_risk_overrides": dict(self.mcp_tool_risk_overrides),
+            "ttsr_rules": list(self.ttsr_rules),
             "memory_backend": self.memory_backend,
             "extra_shell_deny_patterns": self.extra_shell_deny_patterns,
             "extra_shell_ask_patterns": self.extra_shell_ask_patterns,
@@ -304,6 +309,7 @@ class UserConfig:
             tool_policies=_as_dict(d.get("tool_policies")),
             path_rules=[r for r in d.get("path_rules", []) if isinstance(r, dict)] if isinstance(d.get("path_rules"), list) else [],
             mcp_tool_risk_overrides=_clean_mcp_risk_overrides(d.get("mcp_tool_risk_overrides")),
+            ttsr_rules=_clean_ttsr_rules(d.get("ttsr_rules")),
             memory_backend=str(d.get("memory_backend") or "native").strip().lower(),
             extra_shell_deny_patterns=[p for p in d.get("extra_shell_deny_patterns", []) if isinstance(p, str)] if isinstance(d.get("extra_shell_deny_patterns"), list) else [],
             extra_shell_ask_patterns=[p for p in d.get("extra_shell_ask_patterns", []) if isinstance(p, str)] if isinstance(d.get("extra_shell_ask_patterns"), list) else [],
@@ -351,6 +357,13 @@ def _clean_mcp_risk_overrides(value) -> dict[str, str]:
         if isinstance(k, str) and "__" in k and str(v) in valid
     }
 
+
+
+def _clean_ttsr_rules(raw) -> list[dict]:
+    """Epic 7, E7-02: delegate to the TTSR module's validator."""
+    from aether_engine.providers.ttsr import clean_ttsr_rules
+
+    return clean_ttsr_rules(raw)
 
 def load_config(path: Path | None = None) -> UserConfig:
     p = path or CONFIG_PATH

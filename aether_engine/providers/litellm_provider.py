@@ -182,6 +182,7 @@ class LiteLLMProvider(BaseProvider):
         base_url: str | None = None,
         fallback_models: list[FallbackModel] | None = None,
         reasoning_effort: str = "standard",
+        ttsr_rules: list | None = None,
     ):
         api_key = api_key.strip() if api_key else ""
         if not api_key and provider_name != "custom_openai" and provider_name != "openai_compatible":
@@ -197,6 +198,10 @@ class LiteLLMProvider(BaseProvider):
         # Phase 9, B2: user-selected reasoning depth, forwarded to litellm for
         # reasoning-capable models ("standard" | "medium" | "high").
         self.reasoning_effort = reasoning_effort or "standard"
+        # Epic 7, E7-02: TTSR stream rules (empty = off).
+        from aether_engine.providers.ttsr import StreamRules
+
+        self.stream_rules = StreamRules(ttsr_rules)
 
     def _build_call_kwargs(
         self,
@@ -498,6 +503,24 @@ class LiteLLMProvider(BaseProvider):
                     # Emit text chunks as they arrive (thinking rides
                     # along on its own field, never inside the text)
                     if text or thinking:
+                        # Epic 7, E7-02: TTSR rules vet the text
+                        # before it leaves the provider. A block rule
+                        # stops the stream (audited); redactions are
+                        # applied in place.
+                        if text and self.stream_rules.active:
+                            text, blocked_rule = self.stream_rules.apply(text)
+                            if blocked_rule is not None:
+                                from aether_engine.audit import AuditLogger
+
+                                AuditLogger().log_event("TTSR_BLOCKED", {
+                                    "node": node_name,
+                                    "rule": blocked_rule,
+                                    "model": self.litellm_model,
+                                })
+                                raise ProviderError(
+                                    f"Stream blocked by TTSR rule '{blocked_rule}'",
+                                    retriable=False,
+                                )
                         yielded_any = True
                         yield StreamChunk(text=text, thinking=thinking, finish_reason=finish_reason)
                     elif finish_reason and not accumulated_tool_calls:
