@@ -117,6 +117,12 @@ class UserConfig:
     # default (approval-required). Applied in
     # MCPRegistry.get_mcp_tools at registry-build time.
     mcp_tool_risk_overrides: dict[str, str] = field(default_factory=dict)
+    # Epic 4, E4-01: which memory backend the facade resolves to.
+    # "native" (the built-in episodic + KG stores) is the production
+    # default; "mem0" / "langmem" / "graphiti" select the external
+    # adapters and fail loudly when their package/service is absent.
+    # Switching backends switches stores — no automatic migration.
+    memory_backend: str = "native"
     # Epic 2, E2-07: user regex patterns appended to the built-in shell
     # safety rules (validation/shell_rules.py).
     extra_shell_deny_patterns: list[str] = field(default_factory=list)
@@ -203,6 +209,7 @@ class UserConfig:
             "tool_policies": self.tool_policies,
             "path_rules": self.path_rules,
             "mcp_tool_risk_overrides": dict(self.mcp_tool_risk_overrides),
+            "memory_backend": self.memory_backend,
             "extra_shell_deny_patterns": self.extra_shell_deny_patterns,
             "extra_shell_ask_patterns": self.extra_shell_ask_patterns,
             "approval_mode": self.approval_mode,
@@ -291,6 +298,7 @@ class UserConfig:
             tool_policies=_as_dict(d.get("tool_policies")),
             path_rules=[r for r in d.get("path_rules", []) if isinstance(r, dict)] if isinstance(d.get("path_rules"), list) else [],
             mcp_tool_risk_overrides=_clean_mcp_risk_overrides(d.get("mcp_tool_risk_overrides")),
+            memory_backend=str(d.get("memory_backend") or "native").strip().lower(),
             extra_shell_deny_patterns=[p for p in d.get("extra_shell_deny_patterns", []) if isinstance(p, str)] if isinstance(d.get("extra_shell_deny_patterns"), list) else [],
             extra_shell_ask_patterns=[p for p in d.get("extra_shell_ask_patterns", []) if isinstance(p, str)] if isinstance(d.get("extra_shell_ask_patterns"), list) else [],
             approval_mode=d.get("approval_mode") if d.get("approval_mode") in ("ask", "write") else "ask",
