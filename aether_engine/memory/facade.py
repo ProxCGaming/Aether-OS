@@ -234,13 +234,14 @@ def get_memory_backend(user_config=None, *, backend_name: str | None = None) -> 
     return backend
 
 
-def backend_or_none(user_config=None, *, context: str = "memory call") -> MemoryBackend | None:
+def backend_or_none(user_config=None, *, context: str = "memory call",
+                    backend_name: str | None = None) -> MemoryBackend | None:
     """The configured backend, or None (with a loud log) when it is
     unavailable — the degradation contract for task paths: memory
     must never crash a chat, and its absence must never be silent.
     """
     try:
-        return get_memory_backend(user_config)
+        return get_memory_backend(user_config, backend_name=backend_name)
     except MemoryBackendUnavailable as e:
         logger.warning("Memory backend unavailable for %s: %s", context, e)
         return None
