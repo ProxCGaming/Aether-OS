@@ -193,6 +193,20 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
     active_downloads: dict[str, asyncio.Task] = {}
     secret_store = SecretStore()
 
+    # Epic 2, E2-10: install the web-search seam for this connection —
+    # keys resolve through the encrypted secret store (provider name =
+    # "exa"/"brave"/"tavily"/"firecrawl"), and the provider choice is
+    # read live from the user config on every search.
+    from aether_engine.tools.web_search import (
+        set_search_config_loader,
+        set_search_key_loader,
+    )
+
+    set_search_key_loader(secret_store.load_provider)
+    set_search_config_loader(
+        lambda: (engine_state.user_config.search_provider, engine_state.user_config.search_fallback_to_ddgs)
+    )
+
     async def _title_session_in_background(session_id: str, p_name: str, p_model: str, response_text: str):
         """E1-08: give a still-default session title a model-written one.
 
@@ -1239,7 +1253,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 await ws.send_text(Event(
                     type=EventType.TOOL_LIST_RESPONSE,
                     request_id=req_id,
-                    payload={"tools": defs},
+                    payload={"tools": defs, "approval_mode": engine_state.user_config.approval_mode},
                 ).to_json())
 
             elif msg.type == EventType.AGENT_LIST_REQUEST:
@@ -1312,6 +1326,20 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     type=EventType.TOOL_POLICY_SET_RESPONSE,
                     request_id=req_id,
                     payload=response_payload,
+                ).to_json())
+
+            elif msg.type == EventType.APPROVAL_MODE_SET_REQUEST:
+                # Epic 2, E2-08: approval mode selector in Settings.
+                mode = msg.payload.get("mode")
+                success = mode in ("ask", "write")
+                if success:
+                    engine_state.user_config.approval_mode = mode
+                    save_config(engine_state.user_config)
+                    engine_state.audit_logger.log_event("APPROVAL_MODE_SET", {"mode": mode})
+                await ws.send_text(Event(
+                    type=EventType.APPROVAL_MODE_SET_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": success, "mode": engine_state.user_config.approval_mode},
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_LIST_REQUEST:

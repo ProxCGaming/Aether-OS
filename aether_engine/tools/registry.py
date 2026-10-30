@@ -395,6 +395,12 @@ class ToolRegistry:
         # ── Step 2: pre-flight validation (ADR 0009 §2, fail-closed) ────
         validation = validate_tool_request(name, call_args, workspace_roots=workspace_roots)
         if not validation.is_valid:
+            # E2-12: containment escapes and other validation failures
+            # belong in the audit trail, not just the error string.
+            try:
+                log.log_event("TOOL_VALIDATION_FAILED", {"tool_name": name, "error": validation.error, "via": "registry.execute"})
+            except Exception:  # best-effort audit write
+                logger.debug("Failed to write TOOL_VALIDATION_FAILED audit event", exc_info=True)
             raise ToolExecutionError(f"Pre-flight validation failed for '{name}': {validation.error}")
 
         # ── Step 3: sandbox routing (ADR 0010) ─────────────────────────

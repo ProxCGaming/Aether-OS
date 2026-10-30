@@ -107,6 +107,9 @@ class EventType(str, Enum):
     THINKING = "THINKING"
     # Epic 1, E1-17: agent scratchpad content for the display-only panel
     SCRATCHPAD = "SCRATCHPAD"
+    # Epic 2, E2-08: approval mode get/set for Settings
+    APPROVAL_MODE_SET_REQUEST = "APPROVAL_MODE_SET_REQUEST"
+    APPROVAL_MODE_SET_RESPONSE = "APPROVAL_MODE_SET_RESPONSE"
     # Epic 2, E2-09: approval-cache grants (list + revoke for Settings)
     APPROVAL_GRANTS_REQUEST = "APPROVAL_GRANTS_REQUEST"
     APPROVAL_GRANTS_RESPONSE = "APPROVAL_GRANTS_RESPONSE"
