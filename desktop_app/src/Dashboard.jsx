@@ -1,9 +1,42 @@
-import React from 'react';
-import { Activity, Cpu, HardDrive, Network, Zap } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Activity, Cpu, Database, HardDrive, HeartPulse, Network, Zap } from 'lucide-react';
 import './chat.css';
 
-export default function Dashboard({ status = 'Initializing', activeTasks = 0, pluginCount = 0, memoryMb = null, onStartWorkflow }) {
+export default function Dashboard({ status = 'Initializing', activeTasks = 0, pluginCount = 0, memoryMb = null, providerHealth = {}, wsRef = null, onStartWorkflow }) {
   const isOnline = status === 'Online' || status.startsWith('Online');
+  // Epic 6, E6-05: memory stats come from the engine on mount
+  // (MEMORY_EPISODES_RESPONSE carries backend + embedding stats).
+  const [memoryStats, setMemoryStats] = useState(null);
+  useEffect(() => {
+    if (!wsRef?.current) return;
+    const handleMessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'MEMORY_EPISODES_RESPONSE') {
+          setMemoryStats({
+            backend: data.payload.backend || 'native',
+            ...(data.payload.embedding_stats || {}),
+          });
+        }
+      } catch (e) {
+        // ignore malformed frames
+      }
+    };
+    wsRef.current.addEventListener('message', handleMessage);
+    wsRef.current.send(JSON.stringify({
+      type: 'MEMORY_EPISODES_REQUEST', schema_version: 1,
+      request_id: Date.now().toString(), payload: {},
+    }));
+    return () => {
+      if (wsRef.current) wsRef.current.removeEventListener('message', handleMessage);
+    };
+  }, [wsRef]);
+  const healthEntries = Object.entries(providerHealth || {});
+  const healthCounts = healthEntries.reduce((acc, [, h]) => {
+    const key = h && h.status ? h.status : 'unknown';
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
   
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', color: '#f0f0f5', padding: '16px', overflowY: 'auto' }} className="chat-scroll">
@@ -35,6 +68,37 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
             <Network size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Plugins</span>
           </div>
           <div style={{ fontSize: '24px', fontWeight: 500 }}>{pluginCount} Active</div>
+        </div>
+
+        {/* Provider Health — Epic 5 health snapshot via App state */}
+        <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a78bfa', marginBottom: '12px' }}>
+            <HeartPulse size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Provider Health</span>
+          </div>
+          {healthEntries.length === 0 ? (
+            <div style={{ fontSize: '15px', color: '#9090a0' }}>No providers reporting yet</div>
+          ) : (
+            <div style={{ fontSize: '15px', lineHeight: 1.7 }}>
+              {Object.entries(healthCounts).map(([state, n]) => (
+                <div key={state} style={{ textTransform: 'capitalize' }}>{state}: {n}</div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Memory — engine memory stats (Epic 4 facade reporting) */}
+        <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a78bfa', marginBottom: '12px' }}>
+            <Database size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Memory</span>
+          </div>
+          {memoryStats === null ? (
+            <div style={{ fontSize: '15px', color: '#9090a0' }}>Loading…</div>
+          ) : (
+            <div style={{ fontSize: '15px', lineHeight: 1.7 }}>
+              <div>Backend: {memoryStats.backend}</div>
+              <div>Episodes: {memoryStats.episodes ?? 0} ({memoryStats.embedded ?? 0} embedded{memoryStats.pending ? `, ${memoryStats.pending} pending` : ''})</div>
+            </div>
+          )}
         </div>
 
         {/* Memory Usage — real metric from Electron process.memoryUsage() IPC */}

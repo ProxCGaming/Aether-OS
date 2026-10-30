@@ -18,6 +18,15 @@ export default function Projects({ wsRef }) {
           if (data.payload.success && data.payload.workspace) {
             setWorkspaces(prev => [...prev, data.payload.workspace]);
           }
+        } else if (data.type === 'WORKSPACE_SET_ACTIVE_RESPONSE') {
+          if (data.payload.success && wsRef.current) {
+            wsRef.current.send(JSON.stringify({
+              type: 'WORKSPACE_LIST_REQUEST',
+              schema_version: 1,
+              request_id: Date.now().toString(),
+              payload: {}
+            }));
+          }
         } else if (data.type === 'WORKSPACE_REMOVE_RESPONSE') {
           if (data.payload.success) {
             setWorkspaces(prev => prev.filter(w => w.path !== data.payload.path));
@@ -64,6 +73,17 @@ export default function Projects({ wsRef }) {
     }
   };
 
+  const handleSetActive = (path) => {
+    if (wsRef?.current) {
+      wsRef.current.send(JSON.stringify({
+        type: 'WORKSPACE_SET_ACTIVE_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { path }
+      }));
+    }
+  };
+
   const handleRemoveWorkspace = (path) => {
     if (wsRef?.current) {
       wsRef.current.send(JSON.stringify({
@@ -92,7 +112,7 @@ export default function Projects({ wsRef }) {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
         {workspaces.map(ws => (
-          <div key={ws.path} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div key={ws.path} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', opacity: ws.exists === false ? 0.55 : 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
               <div style={{ background: 'rgba(59, 130, 246, 0.2)', padding: '12px', borderRadius: '12px', color: '#60a5fa' }}>
                 <Folder size={24} />
@@ -103,6 +123,20 @@ export default function Projects({ wsRef }) {
               </div>
             </div>
             <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+              {ws.is_active && (
+                <div style={{ color: '#a78bfa', fontSize: '12px', border: '1px solid rgba(167,139,250,0.5)', borderRadius: '8px', padding: '3px 10px' }}>Active</div>
+              )}
+              {ws.exists === false && (
+                <div style={{ color: '#f59e0b', fontSize: '12px' }}>Folder missing</div>
+              )}
+              {!ws.is_active && ws.exists !== false && (
+                <button
+                  onClick={() => handleSetActive(ws.path)}
+                  style={{ background: 'rgba(255,255,255,0.06)', color: '#e2e8f0', border: '1px solid rgba(255,255,255,0.15)', padding: '6px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px' }}
+                >
+                  Set active
+                </button>
+              )}
               {/* Only show Indexed badge if the engine reports is_indexed === true */}
               {ws.is_indexed && (
                 <div style={{ color: '#10b981', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}>

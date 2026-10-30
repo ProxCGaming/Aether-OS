@@ -21,6 +21,10 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
   // Epic 2: approval mode ('ask' | 'write', from TOOL_LIST_RESPONSE) and
   // the remembered scoped-approval grants (E2-09 approval cache).
   const [approvalMode, setApprovalMode] = useState('ask');
+  // Epic 6, E6-06: settings search + reset-to-defaults state.
+  const [settingsQuery, setSettingsQuery] = useState('');
+  const [resetArmed, setResetArmed] = useState(false);
+  const [resetDone, setResetDone] = useState(false);
   const [approvalGrants, setApprovalGrants] = useState([]);
   const [mcpServers, setMcpServers] = useState({});
   const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '' });
@@ -232,6 +236,9 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
           setCapabilityStatus(data.payload.summary);
           setCapabilityHistory(data.payload.history || []);
           setIsDiagnosticsRunning(false);
+        } else if (data.type === 'CONFIG_RESET_RESPONSE') {
+          setResetArmed(false);
+          setResetDone(true);
         } else if (data.type === 'CONFIG_GET_RESPONSE' || data.type === 'CONFIG_UPDATE_RESPONSE') {
           if (data.payload.config) {
             setDisableFallbacks(data.payload.config.disable_fallbacks || false);
@@ -425,16 +432,16 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
   // LOCAL_MODEL_DOWNLOAD_START with destination_dir.
 
   const menuItems = [
-    { id: 'Providers', icon: <Key size={18} />, label: 'API Providers' },
-    { id: 'Models', icon: <Cpu size={18} />, label: 'Models & Tasks' },
-    { id: 'Agents', icon: <Network size={18} />, label: 'Agents' },
-    { id: 'Tools', icon: <Wrench size={18} />, label: 'Tools' },
-    { id: 'MCP', icon: <Server size={18} />, label: 'MCP Servers' },
-    { id: 'Plugins', icon: <Plug size={18} />, label: 'Plugins' },
-    { id: 'Skills', icon: <Box size={18} />, label: 'Skills' },
-    { id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
-    { id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
-    { id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' }
+    { keywords: 'api key provider connect model list', id: 'Providers', icon: <Key size={18} />, label: 'API Providers' },
+    { keywords: 'default model local ollama tasks auxiliary vision', id: 'Models', icon: <Cpu size={18} />, label: 'Models & Tasks' },
+    { keywords: 'agent models supervisor planner researcher coder', id: 'Agents', icon: <Network size={18} />, label: 'Agents' },
+    { keywords: 'tools approval grants policy risk', id: 'Tools', icon: <Wrench size={18} />, label: 'Tools' },
+    { keywords: 'mcp servers tools resources prompts', id: 'MCP', icon: <Server size={18} />, label: 'MCP Servers' },
+    { keywords: 'plugins install enable disable', id: 'Plugins', icon: <Plug size={18} />, label: 'Plugins' },
+    { keywords: 'skills slash commands enable disable', id: 'Skills', icon: <Box size={18} />, label: 'Skills' },
+    { keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
+    { keywords: 'capabilities diagnostics environment scheduler', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
+    { keywords: 'advanced routing fallbacks reset defaults developer', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' }
   ];
 
   return (
@@ -449,7 +456,19 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
         borderRight: '1px solid rgba(255,255,255,0.08)',
         paddingRight: '24px'
       }}>
-        {menuItems.map(item => (
+        <input
+          type="text"
+          aria-label="Search settings"
+          placeholder="Search settings…"
+          value={settingsQuery}
+          onChange={(e) => setSettingsQuery(e.target.value)}
+          style={{ padding: '10px 14px', borderRadius: '10px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', outline: 'none', fontSize: '13px', marginBottom: '4px' }}
+        />
+        {menuItems.filter(item => {
+          const q = settingsQuery.trim().toLowerCase();
+          if (!q) return true;
+          return item.label.toLowerCase().includes(q) || (item.keywords || '').toLowerCase().includes(q);
+        }).map(item => (
           <div
             key={item.id}
             onClick={() => setActiveMenu(item.id)}
@@ -937,6 +956,29 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
             <div>
               <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Advanced Settings</h2>
               <p style={{ color: '#9090a0', fontSize: '14px' }}>System configurations and developer options.</p>
+            </div>
+
+            <div style={{ background: 'rgba(239,68,68,0.05)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: '12px', padding: '24px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Reset all settings</h3>
+              <p style={{ color: '#9090a0', fontSize: '13px', margin: '0 0 16px 0' }}>
+                Restores every engine setting to its default and saves immediately. Your API keys (held in the
+                encrypted secret store), your files, and your memory are NOT touched.
+              </p>
+              {resetDone ? (
+                <div style={{ color: '#10b981', fontSize: '13px' }}>Settings were reset to defaults.</div>
+              ) : (
+                <button
+                  onClick={() => {
+                    if (!resetArmed) { setResetArmed(true); return; }
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ type: 'CONFIG_RESET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+                    }
+                  }}
+                  style={{ background: resetArmed ? '#ef4444' : 'rgba(239,68,68,0.15)', color: resetArmed ? '#fff' : '#f87171', border: '1px solid rgba(239,68,68,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                >
+                  {resetArmed ? 'Click again to confirm reset' : 'Reset all settings'}
+                </button>
+              )}
             </div>
             
             <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>

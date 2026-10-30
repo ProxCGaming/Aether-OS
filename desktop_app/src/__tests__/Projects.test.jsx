@@ -87,3 +87,30 @@ describe('Projects', () => {
     expect(removeCalls[0].payload.path).toBe('/home/user/proj');
   });
 });
+
+describe('Projects (Epic 6, E6-04)', () => {
+  it('shows Active + missing states and can set a workspace active', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<Projects wsRef={wsRef} />);
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_LIST_RESPONSE',
+          payload: {
+            workspaces: [
+              { path: '/srv/main', name: 'main', is_indexed: false, is_active: true, exists: true },
+              { path: '/srv/gone', name: 'gone', is_indexed: false, is_active: false, exists: false },
+              { path: '/srv/side', name: 'side', is_indexed: false, is_active: false, exists: true },
+            ],
+          },
+        }),
+      });
+    });
+    expect(screen.getByText('Active')).toBeInTheDocument();
+    expect(screen.getByText('Folder missing')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Set active'));
+    const sent = wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
+    const setActive = sent.find((m) => m.type === 'WORKSPACE_SET_ACTIVE_REQUEST');
+    expect(setActive.payload.path).toBe('/srv/side');
+  });
+});
