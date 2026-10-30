@@ -602,6 +602,9 @@ function AppContent() {
             tool_name: data.payload.tool_name,
             tool_args: data.payload.tool_args || data.payload.args || {},
             approval_key: data.payload.approval_key || data.request_id,
+            // Epic 2: engine-built preview ({diff} for edit_file, or
+            // {error} when no preview could be built, or null).
+            preview: data.payload.preview || null,
             isFinal: true
           };
           if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
@@ -907,7 +910,7 @@ function AppContent() {
     }
   };
 
-  const handleToolApproval = (requestId, approved, approvalKey) => {
+  const handleToolApproval = (requestId, approved, approvalKey, scope) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const key = approvalKey || requestId;
       wsRef.current.send(JSON.stringify({
@@ -916,7 +919,10 @@ function AppContent() {
         request_id: requestId,
         payload: {
           approval_key: key,
-          approved: approved
+          approved: approved,
+          // Epic 2, E2-09: a scoped grant ("file" / "folder") rides the
+          // GRANTED event; a plain approve sends no scope (= "once").
+          ...(approved && scope ? { scope } : {})
         }
       }));
       // Remove the approval card from chat

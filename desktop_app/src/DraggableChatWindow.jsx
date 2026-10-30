@@ -168,6 +168,88 @@ export function PayloadDrawer({ title, data, icon: Icon, defaultOpen = false, em
   );
 }
 
+// Epic 2 UI batch: the engine may attach a preview to an approval
+// request — a unified diff (edit_file), or an error explaining why no
+// preview could be built. Rendered inside both approval surfaces
+// (the ToolActivityCard box and the standalone approval card) so the
+// user sees what they are approving before deciding.
+export function ApprovalPreview({ preview }) {
+  if (!preview) return null;
+  if (typeof preview.diff === 'string' && preview.diff.length > 0) {
+    const diffLines = preview.diff.split('\n');
+    return (
+      <div
+        className="approval-diff-preview"
+        data-testid="approval-diff-preview"
+        style={{
+          background: 'rgba(0, 0, 0, 0.45)',
+          border: '1px solid rgba(255, 255, 255, 0.1)',
+          borderRadius: '8px',
+          padding: '10px 12px',
+          maxHeight: '240px',
+          overflowY: 'auto',
+          fontFamily: 'monospace',
+          fontSize: '12px',
+          lineHeight: 1.5,
+        }}
+      >
+        {diffLines.map((line, idx) => {
+          let cls = 'diff-line diff-line-context';
+          let color = '#cbd5e1';
+          let background = 'transparent';
+          if (line.startsWith('+++') || line.startsWith('---')) {
+            cls = 'diff-line diff-line-meta';
+            color = '#e2e8f0';
+          } else if (line.startsWith('+')) {
+            cls = 'diff-line diff-line-add';
+            color = '#4ade80';
+            background = 'rgba(74, 222, 128, 0.08)';
+          } else if (line.startsWith('-')) {
+            cls = 'diff-line diff-line-del';
+            color = '#f87171';
+            background = 'rgba(248, 113, 113, 0.08)';
+          } else if (line.startsWith('@@')) {
+            cls = 'diff-line diff-line-hunk';
+            color = '#9090a0';
+          }
+          return (
+            <div key={idx} className={cls} style={{ color, background, whiteSpace: 'pre', padding: '0 4px', borderRadius: '3px' }}>
+              {line || ' '}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+  if (typeof preview.error === 'string' && preview.error.length > 0) {
+    return (
+      <div
+        className="approval-preview-error"
+        data-testid="approval-preview-error"
+        style={{
+          fontSize: '12px',
+          color: '#fbbf24',
+          background: 'rgba(245, 158, 11, 0.1)',
+          border: '1px solid rgba(245, 158, 11, 0.3)',
+          borderRadius: '8px',
+          padding: '8px 10px',
+        }}
+      >
+        ⚠ No preview available: {preview.error}
+      </div>
+    );
+  }
+  return null;
+}
+
+// Epic 2, E2-09 (scoped approvals): when the pending call targets a
+// file path, the approval can be remembered for that file or its
+// folder. Returns the path string, or null when scoping doesn't apply.
+export function approvalScopePath(args) {
+  if (args && typeof args.path === 'string' && args.path.length > 0) return args.path;
+  return null;
+}
+
 export function ToolActivityCard({ payload, isNested = false, pendingApproval = null, onApproveTool = null }) {
   if (!payload) return null;
 
@@ -175,6 +257,8 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
   const isPending = status === 'pending';
   const isFailed = status === 'failed';
   const needsApproval = isPending && !!pendingApproval;
+  const approvalPreview = (pendingApproval && pendingApproval.preview) || payload.preview || null;
+  const scopePath = approvalScopePath((pendingApproval && pendingApproval.tool_args) || tool_args);
 
   const callerNode = from_node || node || 'agent';
   const targetNode = to_node || 'execute_tool';
@@ -222,7 +306,8 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
             <div style={{ fontSize: '12px', color: '#cbd5e1' }}>
               The agent is requesting permission to execute <strong>{tool_name}</strong>.
             </div>
-            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '4px' }}>
+            <ApprovalPreview preview={approvalPreview} />
+            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'flex-end', marginTop: '4px' }}>
               <button 
                 onClick={() => onApproveTool && onApproveTool(pendingApproval.id, false, pendingApproval.approval_key)}
                 style={{
@@ -238,6 +323,40 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
               >
                 Reject Request
               </button>
+              {scopePath && (
+                <>
+                  <button
+                    onClick={() => onApproveTool && onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, 'file')}
+                    style={{
+                      padding: '6px 14px',
+                      borderRadius: '8px',
+                      background: 'rgba(255, 255, 255, 0.08)',
+                      color: '#e2e8f0',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      fontWeight: 500
+                    }}
+                  >
+                    Approve + remember file
+                  </button>
+                  <button
+                    onClick={() => onApproveTool && onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, 'folder')}
+                    style={{
+                      padding: '6px 14px',
+                      borderRadius: '8px',
+                      background: 'rgba(255, 255, 255, 0.08)',
+                      color: '#e2e8f0',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      fontWeight: 500
+                    }}
+                  >
+                    Approve + remember folder
+                  </button>
+                </>
+              )}
               <button 
                 onClick={() => onApproveTool && onApproveTool(pendingApproval.id, true, pendingApproval.approval_key)}
                 style={{
@@ -1321,7 +1440,12 @@ export default function DraggableChatWindow({
                         <div style={{ background: 'rgba(0,0,0,0.5)', padding: '12px', borderRadius: '8px', fontFamily: 'monospace', fontSize: '12px', color: '#a78bfa', marginBottom: '20px', overflowX: 'auto' }}>
                           {JSON.stringify(msg.tool_args, null, 2)}
                         </div>
-                        <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+                        {msg.preview && (
+                          <div style={{ marginBottom: '20px' }}>
+                            <ApprovalPreview preview={msg.preview} />
+                          </div>
+                        )}
+                        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                           <button 
                             onClick={() => onApproveTool && onApproveTool(msg.id, false, msg.approval_key)}
                             className="ios-close-btn"
@@ -1330,6 +1454,24 @@ export default function DraggableChatWindow({
                             <X size={16} style={{ marginRight: '6px' }} />
                             Reject Request
                           </button>
+                          {approvalScopePath(msg.tool_args) && (
+                            <>
+                              <button 
+                                onClick={() => onApproveTool && onApproveTool(msg.id, true, msg.approval_key, 'file')}
+                                className="ios-close-btn"
+                                style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center' }}
+                              >
+                                Approve + remember file
+                              </button>
+                              <button 
+                                onClick={() => onApproveTool && onApproveTool(msg.id, true, msg.approval_key, 'folder')}
+                                className="ios-close-btn"
+                                style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center' }}
+                              >
+                                Approve + remember folder
+                              </button>
+                            </>
+                          )}
                           <button 
                             onClick={() => onApproveTool && onApproveTool(msg.id, true, msg.approval_key)}
                             className="ios-close-btn"

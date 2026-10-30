@@ -18,6 +18,10 @@ export default function SettingsPanel({ wsRef, providers = [], localModels = [],
   const [customDisplayNames, setCustomDisplayNames] = useState({}); // for custom_openai
   
   const [tools, setTools] = useState([]);
+  // Epic 2: approval mode ('ask' | 'write', from TOOL_LIST_RESPONSE) and
+  // the remembered scoped-approval grants (E2-09 approval cache).
+  const [approvalMode, setApprovalMode] = useState('ask');
+  const [approvalGrants, setApprovalGrants] = useState([]);
   const [mcpServers, setMcpServers] = useState({});
   const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '' });
 
@@ -104,6 +108,32 @@ export default function SettingsPanel({ wsRef, providers = [], localModels = [],
     }
   };
 
+  const handleApprovalModeChange = (mode) => {
+    // Optimistic: the selector reflects the choice immediately; the
+    // APPROVAL_MODE_SET_RESPONSE confirms (or the next TOOL_LIST_RESPONSE
+    // corrects) it.
+    setApprovalMode(mode);
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'APPROVAL_MODE_SET_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { mode }
+      }));
+    }
+  };
+
+  const handleRevokeGrant = (id) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'APPROVAL_GRANT_REVOKE_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { id }
+      }));
+    }
+  };
+
   const handleClearAllFacts = () => {
     if (window.confirm("Are you sure you want to clear all facts from the Knowledge Graph?")) {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -148,6 +178,20 @@ export default function SettingsPanel({ wsRef, providers = [], localModels = [],
           }
         } else if (data.type === 'TOOL_LIST_RESPONSE') {
           setTools(data.payload.tools || []);
+          if (data.payload.approval_mode) {
+            setApprovalMode(data.payload.approval_mode);
+          }
+        } else if (data.type === 'APPROVAL_MODE_SET_RESPONSE') {
+          if (data.payload.success && data.payload.mode) {
+            setApprovalMode(data.payload.mode);
+          }
+        } else if (data.type === 'APPROVAL_GRANTS_RESPONSE') {
+          setApprovalGrants(data.payload.grants || []);
+        } else if (data.type === 'APPROVAL_GRANT_REVOKE_RESPONSE') {
+          // The revoke response carries the refreshed grants list.
+          if (Array.isArray(data.payload.grants)) {
+            setApprovalGrants(data.payload.grants);
+          }
         } else if (data.type === 'TOOL_POLICY_SET_RESPONSE') {
           if (data.payload.success) {
             setTools(prev => prev.map(t => t.function.name === data.payload.tool_name ? { ...t, policy: data.payload.policy } : t));
@@ -225,6 +269,12 @@ export default function SettingsPanel({ wsRef, providers = [], localModels = [],
     if (activeMenu === 'Tools' && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'TOOL_LIST_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+      wsRef.current.send(JSON.stringify({
+        type: 'APPROVAL_GRANTS_REQUEST',
         schema_version: 1,
         request_id: Date.now().toString(),
         payload: {}
@@ -693,7 +743,60 @@ export default function SettingsPanel({ wsRef, providers = [], localModels = [],
           <div style={{ color: '#f0f0f5' }}>
             <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Tools Sandbox</h2>
             <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Configure auto-approval policies for built-in tools.</p>
-            
+
+            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <div>
+                <h4 style={{ fontSize: '15px', fontWeight: 500 }}>Approval mode</h4>
+                <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>
+                  {approvalMode === 'write'
+                    ? 'Write tools run without asking. Execute and destructive tools still require approval.'
+                    : 'Every non-read-only tool asks for approval before it runs.'}
+                </p>
+              </div>
+              <div>
+                <Dropdown
+                  value={approvalMode}
+                  onChange={handleApprovalModeChange}
+                  options={[
+                    { value: 'ask', label: 'Ask for approval' },
+                    { value: 'write', label: 'Auto-approve writes' }
+                  ]}
+                  style={{ width: '220px' }}
+                  align="right"
+                />
+              </div>
+            </div>
+
+            <div data-testid="approval-grants" style={{ marginBottom: '24px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '4px' }}>Approval grants</h3>
+              <p style={{ fontSize: '13px', color: '#9090a0', marginBottom: '12px' }}>Files and folders you approved with &quot;remember&quot; — matching tool calls run without asking until you revoke the grant.</p>
+              {approvalGrants.length === 0 ? (
+                <div style={{ color: '#9090a0', fontSize: '14px', padding: '16px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                  No approval grants remembered.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {approvalGrants.map(grant => (
+                    <div key={grant.id} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span style={{ fontFamily: 'monospace', fontSize: '13px' }}>{grant.prefix}</span>
+                        <span style={{ fontSize: '11px', background: 'rgba(59, 130, 246, 0.2)', color: '#93c5fd', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px' }}>up to {grant.ceiling}</span>
+                        {grant.tool_name && (
+                          <span style={{ fontSize: '11px', color: '#9090a0', marginLeft: '8px' }}>{grant.tool_name}</span>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => handleRevokeGrant(grant.id)}
+                        style={{ padding: '6px 12px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.15)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.35)', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}
+                      >
+                        Revoke
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               {tools.length === 0 ? (
                 <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
