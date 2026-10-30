@@ -1,10 +1,13 @@
 """Intelligent routing policy mapping task requirements and health state to model candidates."""
 from dataclasses import dataclass, field
-import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from aether_engine.routing.health import ProviderHealthManager
-from aether_engine.routing.registry import GLOBAL_MODEL_REGISTRY, ModelEntry, ModelRegistry
+from aether_engine.routing.registry import (
+    GLOBAL_MODEL_REGISTRY,
+    ModelEntry,
+    ModelRegistry,
+)
 
 
 @dataclass
@@ -21,7 +24,7 @@ class RoutingDecision:
     provider: str
     model: str
     reason: str
-    capabilities: List[str] = field(default_factory=list)
+    capabilities: list[str] = field(default_factory=list)
 
 
 _CODE_KEYWORDS = {
@@ -37,7 +40,7 @@ _REASONING_KEYWORDS = {
 
 def infer_task_requirements(
     prompt: str,
-    images: Optional[List[Any]] = None,
+    images: list[Any] | None = None,
     prefer_local: bool = False,
 ) -> TaskRequirements:
     """Infer task requirements by inspecting prompt tokens and attached assets."""
@@ -60,19 +63,19 @@ def infer_task_requirements(
 class RoutingPolicy:
     """Evaluates task requirements, provider availability, and user preferences to select models."""
 
-    def __init__(self, registry: Optional[ModelRegistry] = None):
+    def __init__(self, registry: ModelRegistry | None = None):
         self.registry = registry or GLOBAL_MODEL_REGISTRY
 
     def select_route(
         self,
         prompt: str,
-        configured_providers: List[str],
+        configured_providers: list[str],
         health_manager: ProviderHealthManager,
         user_default_provider: str = "google_gemini",
-        user_default_model: str = "gemini-2.5-flash",
-        requirements: Optional[TaskRequirements] = None,
-        requested_model: Optional[str] = None,
-        auxiliary_models: Optional[Dict[str, str]] = None,
+        user_default_model: str = "gemini-3.5-flash",
+        requirements: TaskRequirements | None = None,
+        requested_model: str | None = None,
+        auxiliary_models: dict[str, str] | None = None,
     ) -> RoutingDecision:
         reqs = requirements or infer_task_requirements(prompt)
 
@@ -92,13 +95,13 @@ class RoutingPolicy:
                 inferred_prov = None
                 if ("/" in requested_model and not requested_model.startswith("models/")) and "openrouter" in configured_providers:
                     inferred_prov = "openrouter"
-                elif (requested_model.startswith("gemini") or requested_model.startswith("models/gemini")) and "google_gemini" in configured_providers:
+                elif (requested_model.startswith(("gemini", "models/gemini"))) and "google_gemini" in configured_providers:
                     inferred_prov = "google_gemini"
                 elif requested_model.startswith("claude") and "anthropic" in configured_providers:
                     inferred_prov = "anthropic"
                 elif requested_model.startswith("deepseek") and "deepseek" in configured_providers:
                     inferred_prov = "deepseek"
-                elif (requested_model.startswith("gpt-") or requested_model.startswith("o1") or requested_model.startswith("o3")) and "openai" in configured_providers:
+                elif (requested_model.startswith(("gpt-", "o1", "o3"))) and "openai" in configured_providers:
                     inferred_prov = "openai"
 
                 target_prov = inferred_prov or (user_default_provider if user_default_provider in configured_providers else (configured_providers[0] if configured_providers else "google_gemini"))
@@ -111,7 +114,7 @@ class RoutingPolicy:
                     )
 
         # Filter all models for configured providers that are currently healthy/available
-        available_models: List[ModelEntry] = []
+        available_models: list[ModelEntry] = []
         for p in configured_providers:
             if health_manager.is_provider_available(p):
                 available_models.extend(self.registry.get_models_for_provider(p))

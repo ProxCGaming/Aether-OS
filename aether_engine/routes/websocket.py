@@ -72,6 +72,17 @@ router = APIRouter()
 # arrives; a PLUGIN_APPROVAL_REJECTED pops (discards) the entry.
 pending_plugin_installs: dict[str, dict[str, Any]] = {}
 
+def should_attempt_task_fallback(*, attempt: int, saw_tool_activity: bool, has_factory: bool) -> bool:
+    """§6.4 gate for task-level fallback (Epic 5, E5-02).
+
+    A failed task may be rebuilt on another provider only on its
+    first attempt, only before any tool activity, and only when the
+    caller supplied a retry factory (the approval-resume path never
+    does — a resumed task has history).
+    """
+    return has_factory and attempt == 1 and not saw_tool_activity
+
+
 async def _execute_tool_in_worker(tool_name: str, args: dict[str, Any], task_class: str) -> Any:
     """Run an approved risky tool via the shared sandbox worker. Thin wrapper that injects engine_state context."""
     from aether_engine.workers.sandbox import execute_tool_in_worker
@@ -259,81 +270,132 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
         except Exception:  # Background decoration must never surface as a task error.
             logger.warning("Session title update failed", exc_info=True)
 
-    async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str, session_id: str | None = None):
+    async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str, session_id: str | None = None, *, routing_reason: str = "Default Routing", routing_capabilities: list | None = None, retry_factory=None):
+        """Stream one task's events to the client.
+
+        Epic 5, E5-03: the TASK_CREATED routing stamp carries the
+        routing decision's real reason + capabilities, not a
+        hard-coded "Default Routing".
+
+        Epic 5, E5-02 — task-level fallback, §6.4-shaped: when the
+        run fails with a retriable error BEFORE any tool activity
+        (no TOOL_ACTIVITY / TOOL_APPROVAL_REQUEST seen), a supplied
+        ``retry_factory`` may rebuild the task once on the top
+        fallback candidate; the switch is audited as
+        FALLBACK_TRIGGERED and the retry streams as the same task.
+        Once tools have run, or on a second failure, the failure
+        event is delivered as before. The resume path passes no
+        factory: a resumed task has history, so §6.4 forbids it.
+        """
         try:
-            fallback_attempted = False
-            primary_failed = False
-            failure_event = None
-            task_path: str | None = None
-            task_prompt: str | None = None
+            attempt = 0
+            current_reason = routing_reason
+            while True:
+                attempt += 1
+                primary_failed = False
+                failure_event = None
+                saw_tool_activity = False
+                task_path: str | None = None
+                task_prompt: str | None = None
 
-            async for ev in generator:
-                if ev.type == EventType.TASK_CREATED:
-                    task_path = ev.payload.get("path")
-                    task_prompt = ev.payload.get("prompt")
-                    ev.payload["routing"] = {
-                        "provider": p_name,
-                        "model": p_model,
-                        "reason": "Default Routing",
-                        "capabilities": [],
-                    }
-                    engine_state.audit_logger.log_task_transition(
-                        ev.payload.get("task_id", "unknown"),
-                        TaskState.PENDING,
-                        TaskState.RUNNING,
-                        ev.payload,
-                    )
-                elif ev.type in (EventType.TASK_COMPLETED, EventType.TASK_CANCELLED, EventType.TASK_FAILED, EventType.TASK_INTERRUPTED):
-                    to = {
-                        EventType.TASK_COMPLETED: TaskState.SUCCEEDED,
-                        EventType.TASK_CANCELLED: TaskState.CANCELLED,
-                        EventType.TASK_FAILED: TaskState.FAILED,
-                        EventType.TASK_INTERRUPTED: TaskState.PENDING_APPROVAL,
-                    }[ev.type]
-                    engine_state.audit_logger.log_task_transition(
-                        ev.payload.get("task_id", "unknown"),
-                        TaskState.RUNNING,
-                        to,
-                        ev.payload,
-                    )
+                async for ev in generator:
+                    if ev.type in (EventType.TOOL_ACTIVITY, EventType.TOOL_APPROVAL_REQUEST):
+                        saw_tool_activity = True
+                    if ev.type == EventType.TASK_CREATED:
+                        task_path = ev.payload.get("path")
+                        task_prompt = ev.payload.get("prompt")
+                        ev.payload["routing"] = {
+                            "provider": p_name,
+                            "model": p_model,
+                            "reason": current_reason,
+                            "capabilities": routing_capabilities or [],
+                        }
+                        engine_state.audit_logger.log_task_transition(
+                            ev.payload.get("task_id", "unknown"),
+                            TaskState.PENDING,
+                            TaskState.RUNNING,
+                            ev.payload,
+                        )
+                    elif ev.type in (EventType.TASK_COMPLETED, EventType.TASK_CANCELLED, EventType.TASK_FAILED, EventType.TASK_INTERRUPTED):
+                        to = {
+                            EventType.TASK_COMPLETED: TaskState.SUCCEEDED,
+                            EventType.TASK_CANCELLED: TaskState.CANCELLED,
+                            EventType.TASK_FAILED: TaskState.FAILED,
+                            EventType.TASK_INTERRUPTED: TaskState.PENDING_APPROVAL,
+                        }[ev.type]
+                        engine_state.audit_logger.log_task_transition(
+                            ev.payload.get("task_id", "unknown"),
+                            TaskState.RUNNING,
+                            to,
+                            ev.payload,
+                        )
 
-                if ev.type == EventType.TASK_FAILED and not fallback_attempted and ev.payload.get("retriable"):
-                    primary_failed = True
-                    failure_event = ev
-                    break
+                    if ev.type == EventType.TASK_FAILED and ev.payload.get("retriable"):
+                        primary_failed = True
+                        failure_event = ev
+                        break
 
-                if ev.type == EventType.TASK_COMPLETED:
-                    latency = ev.payload.get("latency_ms", 100.0)
-                    engine_state.health_manager.record_success(p_name, latency)
-                    if session_id:
-                        ev.payload["session_id"] = session_id
-                    if session_id and ev.payload.get("response"):
-                        # Save the final response from assistant with full thought history
-                        try:
-                            await asyncio.to_thread(session_store.add_message, session_id, "assistant", ev.payload["response"], ev.payload.get("thoughts"))
-                        except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not interrupt the task stream
-                            logger.error(f"Failed to save session message: {e}")
-                        asyncio.create_task(
-                            _title_session_in_background(session_id, p_name, p_model, ev.payload["response"]))
-                        if task_path == "fast_chat" and task_prompt:
-                            # Epic 4, E4-05: graph tasks learn in the
-                            # executor; fast chat learns here (parity).
-                            asyncio.create_task(_learn_fast_chat_in_background(
-                                ev.payload.get("task_id", "unknown"), task_prompt,
-                                ev.payload["response"], p_name, p_model))
+                    if ev.type == EventType.TASK_COMPLETED:
+                        latency = ev.payload.get("latency_ms", 100.0)
+                        engine_state.health_manager.record_success(p_name, latency)
+                        if session_id:
+                            ev.payload["session_id"] = session_id
+                        if session_id and ev.payload.get("response"):
+                            # Save the final response from assistant with full thought history
+                            try:
+                                await asyncio.to_thread(session_store.add_message, session_id, "assistant", ev.payload["response"], ev.payload.get("thoughts"))
+                            except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not interrupt the task stream
+                                logger.error(f"Failed to save session message: {e}")
+                            asyncio.create_task(
+                                _title_session_in_background(session_id, p_name, p_model, ev.payload["response"]))
+                            if task_path == "fast_chat" and task_prompt:
+                                # Epic 4, E4-05: graph tasks learn in the
+                                # executor; fast chat learns here (parity).
+                                asyncio.create_task(_learn_fast_chat_in_background(
+                                    ev.payload.get("task_id", "unknown"), task_prompt,
+                                    ev.payload["response"], p_name, p_model))
 
-                if ev.type == EventType.TOOL_APPROVAL_REQUEST:
-                    engine_state.audit_logger.log_event("APPROVAL_REQUESTED", {
-                        "tool_name": ev.payload.get("tool_name"),
-                        "args": ev.payload.get("args"),
-                        "task_id": ev.payload.get("task_id", "unknown"),
-                    })
+                    if ev.type == EventType.TOOL_APPROVAL_REQUEST:
+                        engine_state.audit_logger.log_event("APPROVAL_REQUESTED", {
+                            "tool_name": ev.payload.get("tool_name"),
+                            "args": ev.payload.get("args"),
+                            "task_id": ev.payload.get("task_id", "unknown"),
+                        })
 
-                await ws.send_text(ev.to_json())
+                    await ws.send_text(ev.to_json())
 
-            if primary_failed and failure_event:
+                if not (primary_failed and failure_event):
+                    return
+
                 err_msg = failure_event.payload.get("error", "Unknown error")
                 engine_state.health_manager.record_failure(p_name, err_msg, is_retriable=True)
+
+                # §6.4 gate: one retry, only before any tool ran,
+                # only when the caller supplied a factory.
+                if should_attempt_task_fallback(
+                        attempt=attempt, saw_tool_activity=saw_tool_activity,
+                        has_factory=retry_factory is not None):
+                    rebuilt = await retry_factory(
+                        p_name, p_model, failure_event.payload.get("task_id", "unknown"))
+                    if rebuilt is not None:
+                        generator, fallback_provider, fallback_model = rebuilt
+                        engine_state.audit_logger.log_event("FALLBACK_TRIGGERED", {
+                            "task_id": failure_event.payload.get("task_id", "unknown"),
+                            "failed_provider": p_name,
+                            "failed_model": p_model,
+                            "fallback_provider": fallback_provider,
+                            "fallback_model": fallback_model,
+                            "error": err_msg,
+                        })
+                        logger.warning(
+                            f"FALLBACK_TRIGGERED: {p_name}/{p_model} failed before any tool ran; "
+                            f"retrying on {fallback_provider}/{fallback_model}")
+                        current_reason = (
+                            f"Fallback: {p_name}/{p_model} failed before any tool ran; "
+                            f"retried on {fallback_provider}/{fallback_model}")
+                        p_name, p_model = fallback_provider, fallback_model
+                        continue
+
                 await ws.send_text(failure_event.to_json())
                 return
         except asyncio.CancelledError:
@@ -602,9 +664,84 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         plan_mode=bool(msg.payload.get("plan_mode")),
                     )
 
+                # Epic 5, E5-02: task-level fallback factory (§6.4).
+                # Rebuilds THIS task — same path, same registry and
+                # config — on the top healthy fallback candidate,
+                # reusing the failed task's id so the client sees one
+                # task. execute_task_generator only calls it when the
+                # failure was retriable and no tool activity occurred.
+                # Snapshot the per-message values the factory needs
+                # (also keeps the closure from binding loop variables).
+                _rebuild = {
+                    "prompt": prompt,
+                    "use_fast": intent is not None and intent.is_chat,
+                    "history": history if (intent is not None and intent.is_chat) else None,
+                    "tools": None if (intent is not None and intent.is_chat) else tools,
+                    "req_id": req_id,
+                    "session_id": session_id,
+                    "workspace_roots": workspace_roots,
+                    "disabled_nodes": engine_state.disabled_nodes,
+                    "agent_models": task_user_config.agent_models,
+                    "agent_tools": task_user_config.agent_tools,
+                    "user_config": task_user_config,
+                    "forced_agent": forced_agent,
+                    "active_skills": active_skills,
+                    "plan_mode": bool(msg.payload.get("plan_mode")),
+                }
+
+                async def _task_retry_factory(failed_provider, failed_model, failed_task_id, _ctx=_rebuild):
+                    from aether_engine.routing.fallback import get_fallback_candidates
+
+                    candidates = get_fallback_candidates(
+                        failed_provider,
+                        engine_state.configured_providers,
+                        engine_state.health_manager,
+                        registry=engine_state.model_registry,
+                    )
+                    if not candidates:
+                        return None
+                    entry = candidates[0]
+                    try:
+                        fallback_instance = _create_provider_instance(entry.provider, entry.id, secret_store)
+                    except Exception:
+                        # Provider construction can fail on config/key
+                        # errors; then there is no fallback to offer.
+                        logger.warning(f"Task fallback: could not build provider for {entry.provider}", exc_info=True)
+                        return None
+                    if _ctx["use_fast"]:
+                        gen = run_fast_chat(
+                            _ctx["prompt"], fallback_instance, _ctx["history"],
+                            request_id=_ctx["req_id"], session_id=_ctx["session_id"],
+                            task_id=failed_task_id)
+                    else:
+                        gen = run_langgraph_task(
+                            prompt=_ctx["prompt"],
+                            provider=fallback_instance,
+                            tools=_ctx["tools"],
+                            request_id=_ctx["req_id"],
+                            approval_handler=None,
+                            workspace_roots=_ctx["workspace_roots"],
+                            disabled_nodes=_ctx["disabled_nodes"],
+                            session_id=_ctx["session_id"],
+                            agent_models=_ctx["agent_models"],
+                            agent_tools=_ctx["agent_tools"],
+                            secret_store=secret_store,
+                            user_config=_ctx["user_config"],
+                            forced_agent=_ctx["forced_agent"],
+                            active_skills=_ctx["active_skills"],
+                            plan_mode=_ctx["plan_mode"],
+                            task_id=failed_task_id,
+                        )
+                    return gen, entry.provider, entry.id
+
                 task_session_id = session_id
                 task_runner = asyncio.create_task(
-                    execute_task_generator(task_generator, decision.provider, decision.model, req_id, session_id=session_id)
+                    execute_task_generator(
+                        task_generator, decision.provider, decision.model, req_id,
+                        session_id=session_id,
+                        routing_reason=decision.reason,
+                        routing_capabilities=decision.capabilities,
+                        retry_factory=_task_retry_factory)
                 )
 
             elif msg.type == EventType.CANCEL_TASK:
@@ -720,7 +857,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 await ws.send_text(Event(
                     type=EventType.PROVIDER_LIST_RESPONSE,
                     request_id=req_id,
-                    payload={"providers": providers, "default_provider": cfg.default_provider, "default_model": cfg.default_model},
+                    payload={"providers": providers, "default_provider": cfg.default_provider, "default_model": cfg.default_model, "health": engine_state.health_manager.get_all_statuses()},
                 ).to_json())
 
             elif msg.type in (EventType.PROVIDER_VALIDATE_REQUEST, EventType.SETTINGS_PROVIDER_VALIDATE_REQUEST):
