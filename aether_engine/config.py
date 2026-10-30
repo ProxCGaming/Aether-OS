@@ -105,6 +105,12 @@ class UserConfig:
         "custom": {"time_cap_seconds": 3600, "memory_cap_mb": 2048},
     })
     tool_policies: dict[str, str] = field(default_factory=dict)
+    # Epic 2, E2-06: ordered per-path policy rules refining tool_policies
+    # for specific calls. Shape per rule: {"prefix": str, "verdict":
+    # "Always Allow" | "Require Approval" | "Deny", "tools": [...]?,
+    # "risks": [...]?} — see tools/policy.py. Project-layer config may
+    # NOT set this (config_layers strips it with tool_policies).
+    path_rules: list[dict] = field(default_factory=list)
     workspace_roots: list[str] = field(default_factory=list)
     agent_models: dict[str, str] = field(default_factory=dict)
     agent_tools: dict[str, list[str]] = field(default_factory=dict)
@@ -173,6 +179,7 @@ class UserConfig:
             "custom_provider_types": self.custom_provider_types,
             "task_classes": self.task_classes,
             "tool_policies": self.tool_policies,
+            "path_rules": self.path_rules,
             "workspace_roots": self.workspace_roots,
             "agent_models": self.agent_models,
             "agent_tools": self.agent_tools,
@@ -254,6 +261,7 @@ class UserConfig:
                 "custom": {"time_cap_seconds": 3600, "memory_cap_mb": 2048},
             }),
             tool_policies=_as_dict(d.get("tool_policies")),
+            path_rules=[r for r in d.get("path_rules", []) if isinstance(r, dict)] if isinstance(d.get("path_rules"), list) else [],
             workspace_roots=d.get("workspace_roots") if isinstance(d.get("workspace_roots"), list) else [],
             agent_models=_as_dict(d.get("agent_models")),
             agent_tools=_as_list_dict(d.get("agent_tools")),

@@ -230,10 +230,16 @@ def create_web_tools() -> list[Tool]:
         except Exception as e:  # noqa: BLE001 — ddgs raises arbitrary network/HTTP errors; the failure is surfaced to the caller as the tool result
             return f"Search failed: {e}"
 
+    from aether_engine.tools.web_fetch import create_fetch_url_tool
+
     return [
         Tool(
             name="search_web",
-            description="Search the web for information using DuckDuckGo. Returns search results.",
+            description=(
+                "Search the web for information using DuckDuckGo. Returns search "
+                "results (titles, URLs, snippets) — use fetch_url to read a "
+                "result page in full."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -244,7 +250,8 @@ def create_web_tools() -> list[Tool]:
             },
             execute_fn=_search_web,
             risk=ToolRisk.READ_ONLY,
-        )
+        ),
+        create_fetch_url_tool(),
     ]
 
 
@@ -333,6 +340,7 @@ class ToolRegistry:
         policies: dict[str, str] | None = None,
         approved: bool = False,
         audit_logger: Any = None,
+        path_rules: list | None = None,
     ) -> Any:
         """Execute a tool through the full trust pipeline (Phase 9, A2).
 
@@ -357,8 +365,8 @@ class ToolRegistry:
         call_args = args or {}
         log = audit_logger or AuditLogger()
 
-        # ── Step 1: policy (ADR 0021) ──────────────────────────────────
-        policy = resolve_policy_by_name(name, policies or {}, self)
+        # ── Step 1: policy (ADR 0021; arg/path-aware since E2-06) ─────
+        policy = resolve_policy_by_name(name, policies or {}, self, args=call_args, path_rules=path_rules)
         if policy == "deny":
             log.log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": name, "reason": "User Deny", "via": "registry.execute"})
             raise ToolExecutionError(f"Tool '{name}' is blocked by policy (deny).")

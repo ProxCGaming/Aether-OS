@@ -13,10 +13,12 @@ REPLACES. An overlay value of None leaves the layer below untouched.
 Trust boundary: the project file lives inside a workspace, which may
 be a cloned repo the user did not author. It therefore may NOT touch
 the user's safety settings — ``tool_policies`` (a project must never
-loosen a Deny) and ``workspace_roots`` (a project must not redefine
-its own containment) are stripped from the project layer before the
-merge and the attempt is logged. The per-task overlay comes from the
-user's own client over their own socket and keeps full power.
+loosen a Deny), ``path_rules`` (Epic 2: a project must not relax the
+path rules that govern it), and ``workspace_roots`` (a project must
+not redefine its own containment) are stripped from the project layer
+before the merge and the attempt is logged. The per-task overlay
+comes from the user's own client over their own socket and keeps
+full power.
 """
 from __future__ import annotations
 
@@ -30,7 +32,7 @@ from aether_engine.config import UserConfig
 logger = logging.getLogger("aether_engine.config_layers")
 
 PROJECT_CONFIG_RELPATH = Path(".aether") / "config.json"
-PROJECT_FORBIDDEN_KEYS = frozenset({"tool_policies", "workspace_roots"})
+PROJECT_FORBIDDEN_KEYS = frozenset({"tool_policies", "path_rules", "workspace_roots"})
 
 
 def load_project_layer(workspace_root: str | None) -> dict[str, Any]:

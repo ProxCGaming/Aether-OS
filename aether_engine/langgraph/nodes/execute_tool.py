@@ -151,6 +151,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                 workspace_roots=workspace_roots,
                 task_class=task_class,
                 policies=user_config.tool_policies if user_config else {},
+                path_rules=user_config.path_rules if user_config else None,
                 approved=bool(pending.get("approved")),
                 audit_logger=audit_logger,
             )

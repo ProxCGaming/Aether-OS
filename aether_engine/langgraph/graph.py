@@ -62,7 +62,13 @@ def tool_router(state: AetherState, config=None) -> str:
     registry = configurable.get("tool_registry")
     user_config = configurable.get("user_config")
     policies = user_config.tool_policies if user_config else {}
-    policy = resolve_policy_by_name(pending.get("name"), policies, registry)
+    policy = resolve_policy_by_name(
+        pending.get("name"),
+        policies,
+        registry,
+        args=pending.get("args"),
+        path_rules=user_config.path_rules if user_config else None,
+    )
     if policy == "ask":
         return "pause_for_approval"
     return "execute_tool"
