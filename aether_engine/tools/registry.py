@@ -341,6 +341,7 @@ class ToolRegistry:
         approved: bool = False,
         audit_logger: Any = None,
         path_rules: list | None = None,
+        shell_extras: dict | None = None,
     ) -> Any:
         """Execute a tool through the full trust pipeline (Phase 9, A2).
 
@@ -366,7 +367,7 @@ class ToolRegistry:
         log = audit_logger or AuditLogger()
 
         # ── Step 1: policy (ADR 0021; arg/path-aware since E2-06) ─────
-        policy = resolve_policy_by_name(name, policies or {}, self, args=call_args, path_rules=path_rules)
+        policy = resolve_policy_by_name(name, policies or {}, self, args=call_args, path_rules=path_rules, shell_extras=shell_extras)
         if policy == "deny":
             log.log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": name, "reason": "User Deny", "via": "registry.execute"})
             raise ToolExecutionError(f"Tool '{name}' is blocked by policy (deny).")

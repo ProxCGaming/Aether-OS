@@ -152,6 +152,10 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                 task_class=task_class,
                 policies=user_config.tool_policies if user_config else {},
                 path_rules=user_config.path_rules if user_config else None,
+                shell_extras=(
+                    {"deny": user_config.extra_shell_deny_patterns, "ask": user_config.extra_shell_ask_patterns}
+                    if user_config else None
+                ),
                 approved=bool(pending.get("approved")),
                 audit_logger=audit_logger,
             )

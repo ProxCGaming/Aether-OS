@@ -94,6 +94,7 @@ def resolve_tool_policy(
     *,
     args: dict | None = None,
     path_rules: list | None = None,
+    shell_extras: dict | None = None,
 ) -> str:
     """
     Resolves the effective policy for a tool based on user settings and its risk.
@@ -105,7 +106,37 @@ def resolve_tool_policy(
     "writes under ~/projects are fine"), but it can never override an
     explicit per-tool Deny or Require Approval, and the sensitive-path
     floor can raise any allow back to ask.
+
+    Epic 2, E2-07: shell commands carry segment-wise safety rules on
+    top of everything else — a deny rule denies outright (no config
+    relaxes a fork bomb), an ask rule raises any allow to ask.
     """
+    shell_verdict = None
+    if tool.name == "execute_shell" and args:
+        from aether_engine.validation.shell_rules import evaluate_shell_command
+
+        extras = shell_extras or {}
+        shell_verdict = evaluate_shell_command(
+            str(args.get("command", "")),
+            extra_deny=extras.get("deny"),
+            extra_ask=extras.get("ask"),
+        )
+        if shell_verdict.verdict == "deny":
+            return "deny"
+
+    verdict = _resolve_base_verdict(tool, user_policies, args=args, path_rules=path_rules)
+    if shell_verdict is not None and shell_verdict.verdict == "ask" and verdict == "allow":
+        return "ask"
+    return verdict
+
+
+def _resolve_base_verdict(
+    tool: Tool,
+    user_policies: dict[str, str],
+    *,
+    args: dict | None = None,
+    path_rules: list | None = None,
+) -> str:
     user_setting = user_policies.get(tool.name)
 
     # 1. Deny is always honored
@@ -138,7 +169,7 @@ def resolve_tool_policy(
     return _apply_floor("allow", tool, args)
 
 
-def resolve_policy_by_name(tool_name: str, user_policies: dict[str, str], registry=None, *, args: dict | None = None, path_rules: list | None = None) -> str:
+def resolve_policy_by_name(tool_name: str, user_policies: dict[str, str], registry=None, *, args: dict | None = None, path_rules: list | None = None, shell_extras: dict | None = None) -> str:
     """
     Helper to resolve policy given just a tool name, looking up in registry or fallbacks.
     """
@@ -157,4 +188,4 @@ def resolve_policy_by_name(tool_name: str, user_policies: dict[str, str], regist
         risk = KNOWN_NON_REGISTRY_TOOLS[tool_name]
 
     dummy_tool = Tool(name=tool_name, description="", risk=risk)
-    return resolve_tool_policy(dummy_tool, user_policies, args=args, path_rules=path_rules)
+    return resolve_tool_policy(dummy_tool, user_policies, args=args, path_rules=path_rules, shell_extras=shell_extras)

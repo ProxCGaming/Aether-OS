@@ -96,6 +96,15 @@ def validate_tool_request(
         command = str(args.get("command", "")).strip()
         if not command:
             return ValidationResult(False, "Shell validation failed: empty command.")
+        # Epic 2, E2-07: segment-wise safety rules run before anything
+        # else — a deny verdict fails validation outright (the policy
+        # layer independently denies too; this is defence in depth for
+        # paths that reach execution without a fresh policy check).
+        from aether_engine.validation.shell_rules import evaluate_shell_command
+
+        shell_verdict = evaluate_shell_command(command)
+        if shell_verdict.verdict == "deny":
+            return ValidationResult(False, f"Shell validation failed: command blocked by safety rule '{shell_verdict.rule}'.")
         executable = command.split()[0]
         if executable in {"echo", "cd", "pwd", "ls", "dir"}:
             return ValidationResult(True, details={"executable": executable, "builtin": True})

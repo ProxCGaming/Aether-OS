@@ -68,6 +68,10 @@ def tool_router(state: AetherState, config=None) -> str:
         registry,
         args=pending.get("args"),
         path_rules=user_config.path_rules if user_config else None,
+        shell_extras=(
+            {"deny": user_config.extra_shell_deny_patterns, "ask": user_config.extra_shell_ask_patterns}
+            if user_config else None
+        ),
     )
     if policy == "ask":
         return "pause_for_approval"

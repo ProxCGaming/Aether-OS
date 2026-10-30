@@ -111,6 +111,10 @@ class UserConfig:
     # "risks": [...]?} — see tools/policy.py. Project-layer config may
     # NOT set this (config_layers strips it with tool_policies).
     path_rules: list[dict] = field(default_factory=list)
+    # Epic 2, E2-07: user regex patterns appended to the built-in shell
+    # safety rules (validation/shell_rules.py).
+    extra_shell_deny_patterns: list[str] = field(default_factory=list)
+    extra_shell_ask_patterns: list[str] = field(default_factory=list)
     workspace_roots: list[str] = field(default_factory=list)
     agent_models: dict[str, str] = field(default_factory=dict)
     agent_tools: dict[str, list[str]] = field(default_factory=dict)
@@ -180,6 +184,8 @@ class UserConfig:
             "task_classes": self.task_classes,
             "tool_policies": self.tool_policies,
             "path_rules": self.path_rules,
+            "extra_shell_deny_patterns": self.extra_shell_deny_patterns,
+            "extra_shell_ask_patterns": self.extra_shell_ask_patterns,
             "workspace_roots": self.workspace_roots,
             "agent_models": self.agent_models,
             "agent_tools": self.agent_tools,
@@ -262,6 +268,8 @@ class UserConfig:
             }),
             tool_policies=_as_dict(d.get("tool_policies")),
             path_rules=[r for r in d.get("path_rules", []) if isinstance(r, dict)] if isinstance(d.get("path_rules"), list) else [],
+            extra_shell_deny_patterns=[p for p in d.get("extra_shell_deny_patterns", []) if isinstance(p, str)] if isinstance(d.get("extra_shell_deny_patterns"), list) else [],
+            extra_shell_ask_patterns=[p for p in d.get("extra_shell_ask_patterns", []) if isinstance(p, str)] if isinstance(d.get("extra_shell_ask_patterns"), list) else [],
             workspace_roots=d.get("workspace_roots") if isinstance(d.get("workspace_roots"), list) else [],
             agent_models=_as_dict(d.get("agent_models")),
             agent_tools=_as_list_dict(d.get("agent_tools")),
