@@ -13,6 +13,7 @@ from aether_engine.langgraph.state import (
     blackboard_briefing,
     message_dicts,
 )
+from aether_engine.langgraph.structured import apply_output_schema
 
 logger = logging.getLogger("aether_engine.langgraph.coder")
 
@@ -151,11 +152,19 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
             }
         }
     
+    # E1-10: validate against the coder's output schema, if configured.
+    content, structured_entry = await apply_output_schema(
+        agent="coder", config=config, provider=provider,
+        messages=messages, content=content, node_name="coder")
+
     task_id = state.get("task_id", "default_task")
     artifact_path = save_artifact(task_id, "code", "coder_output.txt", content)
-    
-    return {
+
+    result = {
         "current_phase": "coding",
         "artifact_paths": {"coder_output": artifact_path},
         "messages": [{"role": "assistant", "content": content}]
     }
+    if structured_entry is not None:
+        result["structured_outputs"] = {"coder": structured_entry}
+    return result

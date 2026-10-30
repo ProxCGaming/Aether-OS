@@ -100,6 +100,11 @@ BLACKBOARD_LIST_CAP = 50
 BLACKBOARD_BRIEFING_MAX_CHARS = 1200
 
 
+def merge_mapping(left: dict | None, right: dict | None) -> dict:
+    """Key-wise merge for dict channels written per-agent (E1-10)."""
+    return {**(left or {}), **(right or {})}
+
+
 def merge_blackboard(left: dict | None, right: dict | None) -> dict:
     """Reducer for the blackboard channel (see the section rules above).
 
@@ -175,6 +180,12 @@ class AetherState(TypedDict):
     # per-section merge rules and blackboard_briefing for how it is
     # injected into prompts (bounded summary, never a raw dump).
     blackboard: Annotated[dict[str, Any], merge_blackboard]
+
+    # Structured outputs (Epic 1, E1-10): agent name -> parsed value
+    # validated against the agent's configured output schema (or
+    # {"error": ...} after a failed correction retry). Key-merged so
+    # specialists never erase each other's entries.
+    structured_outputs: Annotated[dict[str, Any], merge_mapping]
 
     # Plan mode (Epic 1, E1-09): when True, specialists only receive
     # READ_ONLY tools and execute_tool refuses anything riskier. Lives

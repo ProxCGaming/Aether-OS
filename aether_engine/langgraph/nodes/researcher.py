@@ -13,6 +13,7 @@ from aether_engine.langgraph.state import (
     blackboard_briefing,
     message_dicts,
 )
+from aether_engine.langgraph.structured import apply_output_schema
 
 logger = logging.getLogger("aether_engine.langgraph.researcher")
 
@@ -150,13 +151,21 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
             }
         }
     
+    # E1-10: validate against the researcher's output schema, if set.
+    content, structured_entry = await apply_output_schema(
+        agent="researcher", config=config, provider=provider,
+        messages=messages, content=content, node_name="researcher")
+
     task_id = state.get("task_id", "default_task")
     artifact_path = save_artifact(task_id, "research", "researcher_output.txt", content)
-    
+
     finding = " ".join((content or "").split())[:200]
-    return {
+    result = {
         "current_phase": "researching",
         "blackboard": {"findings": [finding]} if finding else {},  # E1-15: share the finding
         "artifact_paths": {"researcher_output": artifact_path},
         "messages": [{"role": "assistant", "content": content}]
     }
+    if structured_entry is not None:
+        result["structured_outputs"] = {"researcher": structured_entry}
+    return result

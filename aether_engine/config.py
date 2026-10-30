@@ -116,6 +116,10 @@ class UserConfig:
     # supervisor_model.supervisor_post_model_hook.
     supervisor_spawn_allowlist: list[str] | None = None
     supervisor_delegation_cap: int = 8
+    # Epic 1, E1-10: per-agent output schemas (agent name -> JSON-Schema
+    # dict). When set, the agent's final answer must validate against
+    # the schema; see aether_engine/langgraph/structured.py.
+    agent_output_schemas: dict[str, Any] = field(default_factory=dict)
     custom_slash_commands: dict[str, dict] = field(default_factory=dict)
     disable_fallbacks: bool = False
     fallback_chain: list[str] = field(default_factory=list)
@@ -171,6 +175,7 @@ class UserConfig:
             "agent_skills": self.agent_skills,
             "supervisor_spawn_allowlist": self.supervisor_spawn_allowlist,
             "supervisor_delegation_cap": self.supervisor_delegation_cap,
+            "agent_output_schemas": self.agent_output_schemas,
             "custom_slash_commands": self.custom_slash_commands,
             "disable_fallbacks": self.disable_fallbacks,
             "fallback_chain": self.fallback_chain,
@@ -250,6 +255,7 @@ class UserConfig:
             agent_skills=_as_list_dict(d.get("agent_skills")),
             supervisor_spawn_allowlist=_as_optional_str_list(d.get("supervisor_spawn_allowlist")),
             supervisor_delegation_cap=_as_int(d.get("supervisor_delegation_cap"), 8),
+            agent_output_schemas=_as_dict(d.get("agent_output_schemas")),
             custom_slash_commands=_as_dict(d.get("custom_slash_commands")),
             disable_fallbacks=d.get("disable_fallbacks", False),
             fallback_chain=d.get("fallback_chain", []),
