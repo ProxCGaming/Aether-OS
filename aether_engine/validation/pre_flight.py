@@ -2,26 +2,26 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
-def _is_path_in_roots(target_path: Path, roots: List[Path]) -> bool:
+def _is_path_in_roots(target_path: Path, roots: list[Path]) -> bool:
     try:
         resolved_target = target_path.resolve()
         return any(resolved_target.is_relative_to(root.resolve()) for root in roots)
-    except Exception:
+    except Exception:  # noqa: BLE001 — fail-closed boundary: any resolution error means "not contained", never an exception escaping a security check.
         return False
 @dataclass
 class ValidationResult:
     is_valid: bool
-    error: Optional[str] = None
-    details: Optional[Dict[str, Any]] = None
+    error: str | None = None
+    details: dict[str, Any] | None = None
 
 
 def validate_tool_request(
     tool_name: str, 
-    args: Optional[Dict[str, Any]] = None,
-    workspace_roots: Optional[List[str]] = None
+    args: dict[str, Any] | None = None,
+    workspace_roots: list[str] | None = None
 ) -> ValidationResult:
     args = args or {}
     
@@ -31,6 +31,15 @@ def validate_tool_request(
     else:
         roots = [Path.home() / "AetherWorkspace"]
 
+
+    if tool_name == "read_file":
+        # Epic 2, E2-01: reads obey the same containment as writes. The
+        # tool enforces it again in-process (defence in depth); this
+        # branch keeps the pipeline's verdict identical to the tool's.
+        path = Path(args.get("path", ""))
+        if not _is_path_in_roots(path, roots):
+            return ValidationResult(False, f"Read validation failed: path '{path}' is outside permitted workspace roots.")
+        return ValidationResult(True, details={"path": str(path)})
 
     if tool_name == "write_file":
         path = Path(args.get("path", ""))

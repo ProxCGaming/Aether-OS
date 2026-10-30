@@ -60,7 +60,7 @@ async def test_plan_mode_offers_only_read_only_tools(monkeypatch):
     provider = StubProvider("a plan")
     await planner_module.planner_node(_state(plan_mode=True), _config(provider, registry))
     names = {t["function"]["name"] for t in provider.seen_tools}
-    assert names == {"get_current_time", "search_web", "scratchpad_render"}
+    assert names == {"get_current_time", "search_web", "scratchpad_render", "read_file"}
 
 
 @pytest.mark.asyncio

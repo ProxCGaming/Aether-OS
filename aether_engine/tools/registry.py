@@ -38,6 +38,10 @@ class Tool:
     timeout_s: int = field(default=60)
     max_output_chars: int = field(default=20000)
     source: str = field(default="builtin")
+    # Epic 2: in-process tools that enforce path containment themselves
+    # opt in to receiving the run's workspace_roots as a keyword the
+    # model never sees (it is not in the input schema).
+    wants_workspace_roots: bool = field(default=False)
 
     def to_definition(self) -> dict[str, Any]:
         return {
@@ -175,9 +179,12 @@ def build_tool_registry(
     """
     registry = ToolRegistry()
     registry.register(create_current_time_tool())
+    from aether_engine.tools.filesystem import filesystem_read_tools
     from aether_engine.tools.scratchpad import create_scratchpad_tool
 
     registry.register(create_scratchpad_tool())
+    for tool in filesystem_read_tools():
+        registry.register(tool)
     if include_file_tools:
         for tool in create_file_tools():
             registry.register(tool)
@@ -187,6 +194,13 @@ def build_tool_registry(
     for tool in mcp_tools or []:
         registry.register(tool)
     return registry
+
+
+def _call_kwargs(tool: Tool, call_args: dict[str, Any], workspace_roots: list | None) -> dict[str, Any]:
+    """Model args plus engine-injected roots for tools that opt in."""
+    if tool.wants_workspace_roots:
+        return {**call_args, "workspace_roots": workspace_roots}
+    return call_args
 
 
 class ToolRegistry:
@@ -299,9 +313,9 @@ class ToolRegistry:
                     audit_logger=log,
                 )
             elif inspect.iscoroutinefunction(tool.execute_fn):
-                result = await tool.execute_fn(**call_args)
+                result = await tool.execute_fn(**_call_kwargs(tool, call_args, workspace_roots))
             else:
-                result = tool.execute_fn(**call_args)
+                result = tool.execute_fn(**_call_kwargs(tool, call_args, workspace_roots))
         except ToolExecutionError:
             raise
         except Exception as e:
