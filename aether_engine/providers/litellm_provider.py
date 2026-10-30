@@ -421,6 +421,25 @@ class LiteLLMProvider(BaseProvider):
             for fm in self.fallback_models
         ]
 
+        # Epic 5, E5-01 — the §6.4 gate on per-call fallback. Fallback
+        # is forbidden (the primary error raises instead) when:
+        # (a) tools have already executed in this task — the
+        #     conversation carries tool results, and switching models
+        #     mid-task after side effects is unsafe; or
+        # (b) this call already yielded output — a restarted stream
+        #     would duplicate text and repeat tool calls.
+        tools_already_executed = any(
+            isinstance(m, dict) and m.get("role") == "tool" for m in (messages or [])
+        )
+        yielded_any = False
+
+        def _fallback_blocked() -> str | None:
+            if tools_already_executed:
+                return "tools have already executed in this task (no mid-task model switch)"
+            if yielded_any:
+                return "this call already streamed output (a restart would duplicate it)"
+            return None
+
         last_error: Exception | None = None
         for model_idx, (current_model, current_api_key, current_base_url, current_provider) in enumerate(models_to_try):
             is_fallback = model_idx > 0
@@ -479,8 +498,10 @@ class LiteLLMProvider(BaseProvider):
                     # Emit text chunks as they arrive (thinking rides
                     # along on its own field, never inside the text)
                     if text or thinking:
+                        yielded_any = True
                         yield StreamChunk(text=text, thinking=thinking, finish_reason=finish_reason)
                     elif finish_reason and not accumulated_tool_calls:
+                        yielded_any = True
                         yield StreamChunk(finish_reason=finish_reason)
 
                     # When stream is done with tool calls, emit them all at once
@@ -496,6 +517,7 @@ class LiteLLMProvider(BaseProvider):
                                     call_id=call_id,
                                 )
                             )
+                        yielded_any = True
                         yield StreamChunk(
                             tool_calls=parsed_calls,
                             finish_reason=finish_reason,
@@ -537,16 +559,20 @@ class LiteLLMProvider(BaseProvider):
                 import re
                 is_model_not_found = any(re.search(pattern, err_str, re.IGNORECASE) for pattern in model_not_found_indicators)
                 last_error = e
-                if is_model_not_found and (model_idx < len(models_to_try) - 1):
+                if is_model_not_found and (model_idx < len(models_to_try) - 1) and _fallback_blocked() is None:
                     logger.warning(
                         f"Model '{current_model}' failed with retriable error: {e}. "
                         f"Trying next fallback..."
                     )
                     continue
+                if is_model_not_found and _fallback_blocked() is not None:
+                    logger.warning(f"Fallback blocked for model '{current_model}': {_fallback_blocked()}")
                 raise ProviderError(f"Bad request: {e}", retriable=is_model_not_found) from e
             except litellm.NotFoundError as e:
                 last_error = e
-                if model_idx < len(models_to_try) - 1:
+                if _fallback_blocked() is not None and model_idx < len(models_to_try) - 1:
+                    logger.warning(f"Fallback blocked for model '{current_model}': {_fallback_blocked()}")
+                if model_idx < len(models_to_try) - 1 and _fallback_blocked() is None:
                     logger.warning(
                         f"Model '{current_model}' failed with retriable error: {e}. "
                         f"Trying next fallback..."
@@ -558,6 +584,15 @@ class LiteLLMProvider(BaseProvider):
                     getattr(litellm, "MidStreamFallbackError", Exception)) as e:
                 # Retriable errors — try next fallback model if available
                 last_error = e
+                if _fallback_blocked() is not None and model_idx < len(models_to_try) - 1:
+                    logger.warning(f"Fallback blocked for model '{current_model}': {_fallback_blocked()}")
+                    blocked = _fallback_blocked()
+                    if isinstance(e, litellm.RateLimitError) or "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                        raise RateLimitError(f"Rate limit exceeded: {e} (fallback blocked: {blocked})") from e
+                    elif isinstance(e, litellm.Timeout):
+                        raise TimeoutError(f"Request timed out: {e} (fallback blocked: {blocked})") from e
+                    else:
+                        raise NetworkError(f"Network/service error: {e} (fallback blocked: {blocked})") from e
                 if is_fallback or model_idx < len(models_to_try) - 1:
                     logger.warning(
                         f"Model '{current_model}' failed with retriable error: {e}. "
@@ -576,7 +611,7 @@ class LiteLLMProvider(BaseProvider):
                 raise
             except Exception as e:
                 err_str = str(e)
-                if ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower()) and (is_fallback or model_idx < len(models_to_try) - 1):
+                if ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower()) and (is_fallback or model_idx < len(models_to_try) - 1) and _fallback_blocked() is None:
                     logger.warning(
                         f"Model '{current_model}' failed with rate limit/quota error: {e}. Trying next fallback..."
                     )
@@ -619,7 +654,7 @@ async def validate_api_key(
     # Pick a cheap model for the validation ping
     if not model:
         _default_models = {
-            "google_gemini": "gemini-2.0-flash",
+            "google_gemini": "gemini-3.5-flash",
             "openai": "gpt-4o-mini",
             "anthropic": "claude-3-5-haiku",
             "deepseek": "deepseek-chat",
