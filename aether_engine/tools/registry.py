@@ -1,8 +1,12 @@
 import inspect
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
+
+logger = logging.getLogger("aether_engine.tools.registry")
 
 
 class ToolRisk(Enum):
@@ -14,31 +18,28 @@ class ToolRisk(Enum):
 
 class ToolError(Exception):
     """Base exception for tool registry operations."""
-    pass
 
 
 class ToolNotFoundError(ToolError):
     """Raised when an unregistered tool name is requested or executed."""
-    pass
 
 
 class ToolExecutionError(ToolError):
     """Raised when a tool execution fails."""
-    pass
 
 
 @dataclass
 class Tool:
     name: str
     description: str
-    input_schema: Dict[str, Any] = field(default_factory=lambda: {"type": "object", "properties": {}})
+    input_schema: dict[str, Any] = field(default_factory=lambda: {"type": "object", "properties": {}})
     execute_fn: Callable[..., Any] = field(default=lambda **kw: None)
     risk: ToolRisk = field(default=ToolRisk.EXECUTE) # default to fail closed
     timeout_s: int = field(default=60)
     max_output_chars: int = field(default=20000)
     source: str = field(default="builtin")
 
-    def to_definition(self) -> Dict[str, Any]:
+    def to_definition(self) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -66,7 +67,7 @@ def create_current_time_tool() -> Tool:
     )
 
 
-def create_file_tools() -> List[Tool]:
+def create_file_tools() -> list[Tool]:
     def _write_file(path: str, content: str = "") -> str:
         from pathlib import Path
         Path(path).write_text(content, encoding="utf-8")
@@ -79,7 +80,7 @@ def create_file_tools() -> List[Tool]:
 
     def _execute_shell(command: str) -> str:
         import subprocess
-        completed = subprocess.run(command, shell=True, capture_output=True, text=True)
+        completed = subprocess.run(command, shell=True, capture_output=True, text=True, check=False)
         return f"exit={completed.returncode}\nstdout={completed.stdout}\nstderr={completed.stderr}"
 
     return [
@@ -122,7 +123,7 @@ def create_file_tools() -> List[Tool]:
     ]
 
 
-def create_web_tools() -> List[Tool]:
+def create_web_tools() -> list[Tool]:
     def _search_web(query: str, max_results: int = 5) -> str:
         from ddgs import DDGS
         try:
@@ -135,7 +136,7 @@ def create_web_tools() -> List[Tool]:
                 for r in results:
                     output.append(f"Title: {r.get('title')}\nURL: {r.get('href')}\nSnippet: {r.get('body')}\n")
                 return "\n".join(output)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — ddgs raises arbitrary network/HTTP errors; the failure is surfaced to the caller as the tool result
             return f"Search failed: {e}"
 
     return [
@@ -156,11 +157,40 @@ def create_web_tools() -> List[Tool]:
     ]
 
 
+def build_tool_registry(
+    mcp_tools: list[Tool] | None = None,
+    *,
+    include_file_tools: bool = True,
+    include_web_tools: bool = True,
+) -> "ToolRegistry":
+    """One place that builds the full registry (PRD Q3).
+
+    Built-ins + MCP tools, in one place, so the three registry
+    construction sites in ``routes/websocket.py`` (task start, approval
+    resume, tool list) can no longer drift apart. There is deliberately
+    no ``user_config`` parameter: in v1 all agents get all MCP tools
+    (PRD Q10), so per-agent filtering would be a dead parameter.
+    ``include_file_tools`` exists because task start only offers file
+    tools for coding tasks.
+    """
+    registry = ToolRegistry()
+    registry.register(create_current_time_tool())
+    if include_file_tools:
+        for tool in create_file_tools():
+            registry.register(tool)
+    if include_web_tools:
+        for tool in create_web_tools():
+            registry.register(tool)
+    for tool in mcp_tools or []:
+        registry.register(tool)
+    return registry
+
+
 class ToolRegistry:
     """Registry holding tool definitions and handling on-demand asynchronous tool executions."""
 
     def __init__(self):
-        self._tools: Dict[str, Tool] = {}
+        self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
@@ -174,17 +204,20 @@ class ToolRegistry:
             raise ToolNotFoundError(f"Tool '{name}' is not registered.")
         return self._tools[name]
 
-    def get_definitions(self) -> List[Dict[str, Any]]:
+    def get_tools(self) -> list[Tool]:
+        return list(self._tools.values())
+
+    def get_definitions(self) -> list[dict[str, Any]]:
         return [tool.to_definition() for tool in self._tools.values()]
 
     async def execute(
         self,
         name: str,
-        args: Optional[Dict[str, Any]] = None,
+        args: dict[str, Any] | None = None,
         *,
-        workspace_roots: Optional[list] = None,
+        workspace_roots: list | None = None,
         task_class: str = "standard",
-        policies: Optional[Dict[str, str]] = None,
+        policies: dict[str, str] | None = None,
         approved: bool = False,
         audit_logger: Any = None,
     ) -> Any:
@@ -230,6 +263,21 @@ class ToolRegistry:
 
         # ── Step 3: sandbox routing (ADR 0010) ─────────────────────────
         try:
+            if tool.source.startswith("mcp:"):
+                # MCP tools run in-process in the engine (PRD Q4): the
+                # worker hardcodes 3 builtin tools and cannot hold MCP
+                # sessions, so routing an MCP tool there would silently
+                # no-op. The MCP server itself is already isolated.
+                if inspect.iscoroutinefunction(tool.execute_fn):
+                    result = await tool.execute_fn(**call_args)
+                else:
+                    result = tool.execute_fn(**call_args)
+                if isinstance(result, str) and len(result) > tool.max_output_chars:
+                    result = (
+                        result[: tool.max_output_chars]
+                        + f"\n...[output truncated to {tool.max_output_chars} chars]"
+                    )
+                return result
             if tool.risk != ToolRisk.READ_ONLY:
                 from aether_engine.workers.sandbox import execute_tool_in_worker
                 result = await execute_tool_in_worker(
@@ -267,6 +315,6 @@ class ToolRegistry:
                     "risk": tool.risk.value,
                     "arg_keys": sorted(str(k) for k in call_args),
                 })
-            except Exception:
-                pass
+            except Exception:  # best-effort audit write: a logging failure must never fail a successful execution
+                logger.debug("Failed to write TOOL_EXECUTED audit event", exc_info=True)
         return result

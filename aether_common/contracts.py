@@ -1,7 +1,8 @@
+import json
+import time
 from dataclasses import dataclass, field
 from enum import Enum
-import json, time, uuid
-from typing import Any, Dict, Optional, Set
+from typing import Any
 
 SCHEMA_VERSION = 1
 
@@ -112,6 +113,23 @@ class EventType(str, Enum):
     MCP_SERVER_CONNECT_RESPONSE = "MCP_SERVER_CONNECT_RESPONSE"
     MCP_SERVER_DISCONNECT_REQUEST = "MCP_SERVER_DISCONNECT_REQUEST"
     MCP_SERVER_DISCONNECT_RESPONSE = "MCP_SERVER_DISCONNECT_RESPONSE"
+    MCP_SERVER_TEST_REQUEST = "MCP_SERVER_TEST_REQUEST"
+    MCP_SERVER_TEST_RESPONSE = "MCP_SERVER_TEST_RESPONSE"
+    MCP_SERVER_UPDATE_REQUEST = "MCP_SERVER_UPDATE_REQUEST"
+    MCP_SERVER_UPDATE_RESPONSE = "MCP_SERVER_UPDATE_RESPONSE"
+    # MCP resources (issue 006): list/read a server's resources; reading
+    # loads the content into the current chat as a context message.
+    MCP_RESOURCE_LIST_REQUEST = "MCP_RESOURCE_LIST_REQUEST"
+    MCP_RESOURCE_LIST_RESPONSE = "MCP_RESOURCE_LIST_RESPONSE"
+    MCP_RESOURCE_READ_REQUEST = "MCP_RESOURCE_READ_REQUEST"
+    MCP_RESOURCE_READ_RESPONSE = "MCP_RESOURCE_READ_RESPONSE"
+    # MCP prompts (issue 007): list a server's prompt templates; running
+    # one inserts its messages into the current chat, ready to send.
+    # Never auto-run on connect.
+    MCP_PROMPT_LIST_REQUEST = "MCP_PROMPT_LIST_REQUEST"
+    MCP_PROMPT_LIST_RESPONSE = "MCP_PROMPT_LIST_RESPONSE"
+    MCP_PROMPT_RUN_REQUEST = "MCP_PROMPT_RUN_REQUEST"
+    MCP_PROMPT_RUN_RESPONSE = "MCP_PROMPT_RUN_RESPONSE"
 
     # Plugins Management
     PLUGIN_LIST_REQUEST = "PLUGIN_LIST_REQUEST"
@@ -174,9 +192,9 @@ class TaskState(str, Enum):
     CANCELLED = "CANCELLED"
 
 
-TERMINAL_STATES: Set[TaskState] = {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED}
+TERMINAL_STATES: set[TaskState] = {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED}
 
-LEGAL_TRANSITIONS: Dict[TaskState, Set[TaskState]] = {
+LEGAL_TRANSITIONS: dict[TaskState, set[TaskState]] = {
     TaskState.PENDING:   {TaskState.RUNNING, TaskState.PRE_FLIGHT_CHECK, TaskState.CANCELLED},
     TaskState.PRE_FLIGHT_CHECK: {TaskState.RUNNING, TaskState.PENDING_APPROVAL, TaskState.FAILED, TaskState.CANCELLED},
     TaskState.PENDING_APPROVAL: {TaskState.RUNNING, TaskState.EXECUTING_WORKER, TaskState.FAILED, TaskState.CANCELLED},
@@ -198,11 +216,11 @@ def validate_transition(from_state: TaskState, to_state: TaskState) -> None:
 @dataclass
 class Event:
     type: EventType
-    payload: Dict[str, Any] = field(default_factory=dict)
+    payload: dict[str, Any] = field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
     ts: float = field(default_factory=time.time)
-    request_id: Optional[str] = None
-    event_id: Optional[str] = None
+    request_id: str | None = None
+    event_id: str | None = None
 
     def __post_init__(self):
         if self.event_id and not self.request_id:

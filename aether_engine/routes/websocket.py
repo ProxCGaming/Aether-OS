@@ -1,82 +1,52 @@
 import asyncio
-import json
 import logging
-import os
-import subprocess
-import sys
-from contextlib import asynccontextmanager
-import time
-from typing import Any, Dict, List, Optional, Set
+import re
 from pathlib import Path
-from pydantic import BaseModel
+from typing import Any
 
-from fastapi import APIRouter, FastAPI, Query, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
 
 from aether_common.auth import (
-    DEFAULT_TOKEN_PATH,
-    generate_token,
     verify_token,
-    write_token,
 )
 from aether_common.contracts import (
-    SCHEMA_VERSION,
     Event,
     EventType,
     InvalidEventPayloadError,
     SchemaVersionMismatchError,
     TaskState,
 )
-from aether_engine.audit import AuditLogger
 from aether_engine.config import (
     AUXILIARY_TASK_CLASSES,
-    CLOUD_PROVIDERS,
-    PROVIDER_MAP,
-    UserConfig,
-    load_config,
     save_config,
 )
-from aether_engine.models.local_models import OllamaManager
-from aether_engine.langgraph.executor import run_langgraph_task, resume_langgraph_task, get_pending_approvals
+from aether_engine.langgraph.executor import (
+    get_pending_approvals,
+    resume_langgraph_task,
+    run_langgraph_task,
+)
+from aether_engine.memory import session_store
+from aether_engine.orchestration.core import (
+    _build_provider_list_async,
+    _create_provider_instance,
+    _validate_provider_key,
+)
 from aether_engine.providers.discovery import fetch_available_models
-from aether_engine.providers.base import ProviderError
-from aether_engine.providers.litellm_provider import LiteLLMProvider, validate_api_key
-from aether_engine.routing.fallback import (
-    classify_provider_error,
-    get_fallback_candidates,
-    is_retriable_error,
-)
-from aether_engine.routing.health import (
-    GLOBAL_HEALTH_MANAGER,
-    ProviderHealthManager,
-    ProviderHealthState,
-)
 from aether_engine.routing.policy import (
-    GLOBAL_ROUTING_POLICY,
     RoutingDecision,
-    RoutingPolicy,
     infer_task_requirements,
 )
-from aether_engine.routing.registry import (
-    GLOBAL_MODEL_REGISTRY,
-    ModelEntry,
-    ModelRegistry,
-)
-from aether_engine.routing.startup import (
-    StartupValidationResult,
-    validate_startup_configuration,
-)
-from aether_engine.validation.diagnostics import run_environment_diagnostics
-from aether_engine.scheduler.capability_jobs import CapabilitySchedulerManager
 from aether_engine.secrets.dpapi import SecretDecryptionError
 from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
-from aether_engine.tools.registry import ToolRegistry, create_current_time_tool, create_file_tools, create_web_tools
-from aether_engine.routing.task_class_router import infer_task_class
-from aether_engine.workers.job_object import WorkerJobObject
-from aether_engine.memory import session_store
-
 from aether_engine.state import engine_state
-from aether_engine.orchestration.core import _build_provider_list_async, _build_provider_list, _validate_provider_key, _create_provider_instance
+from aether_engine.tools.registry import (
+    build_tool_registry,
+    create_current_time_tool,
+    create_file_tools,
+    create_web_tools,
+)
+from aether_engine.validation.diagnostics import run_environment_diagnostics
+
 logger = logging.getLogger("aether_engine.routes.websocket")
 
 # Phase 10.3, B1: the only task class with a real engine seam — see
@@ -95,9 +65,9 @@ router = APIRouter()
 # ({"source": ..., "manifest": {...}}) for one PLUGIN_INSTALL_REQUEST.
 # The install is only executed when the matching PLUGIN_APPROVAL_GRANTED
 # arrives; a PLUGIN_APPROVAL_REJECTED pops (discards) the entry.
-pending_plugin_installs: Dict[str, Dict[str, Any]] = {}
+pending_plugin_installs: dict[str, dict[str, Any]] = {}
 
-async def _execute_tool_in_worker(tool_name: str, args: Dict[str, Any], task_class: str) -> Any:
+async def _execute_tool_in_worker(tool_name: str, args: dict[str, Any], task_class: str) -> Any:
     """Run an approved risky tool via the shared sandbox worker. Thin wrapper that injects engine_state context."""
     from aether_engine.workers.sandbox import execute_tool_in_worker
     return await execute_tool_in_worker(
@@ -108,14 +78,62 @@ async def _execute_tool_in_worker(tool_name: str, args: Dict[str, Any], task_cla
         task_classes=engine_state.user_config.task_classes,
     )
 
-def _extract_token(ws: WebSocket, query_token: Optional[str]) -> Optional[str]:
+def _extract_token(ws: WebSocket, query_token: str | None) -> str | None:
     if query_token:
         return query_token
     auth = ws.headers.get("authorization", "")
     return auth[7:].strip() if auth.startswith("Bearer ") else None
 
+
+async def _run_mcp_prompt_into_chat(
+    name: str, prompt_name: str, arguments: Any, session_id: str | None
+) -> dict[str, Any]:
+    """Run MCP prompt *prompt_name* on server *name* and insert its
+    messages into a chat session (issue 007).
+
+    Shared by the MCP_PROMPT_RUN handler and the ``/mcp:`` slash
+    command, so the two entry points cannot drift apart. Returns
+    {"ok", "messages", "session_id", "error"}. Arguments are validated
+    by the client (dict of strings, never executed). If no session was
+    given (or it no longer exists), a session is created so the prompt
+    is never lost. A chat-save failure returns an error, never kills
+    the websocket.
+    """
+    from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
+    messages = []
+    if not name or not prompt_name:
+        return {"ok": False, "messages": [], "session_id": session_id,
+                "error": "Server name and prompt name are required."}
+    try:
+        messages = await GLOBAL_MCP_REGISTRY.get_prompt(name, prompt_name, arguments)
+    except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced to the caller as the error field
+        return {"ok": False, "messages": [], "session_id": session_id, "error": str(e)}
+    try:
+        if session_id:
+            sess = await asyncio.to_thread(session_store.get_session, session_id)
+            if sess is None:
+                session_id = None
+        if not session_id:
+            session_id = await asyncio.to_thread(
+                session_store.create_session, f"MCP prompt: {prompt_name}"
+            )
+        for msg in messages:
+            await asyncio.to_thread(
+                session_store.add_message, session_id, msg["role"], msg["content"]
+            )
+    except Exception as e:  # noqa: BLE001 — chat-persistence boundary: a save failure becomes an error response, never a dead websocket
+        logger.error(f"Failed to save MCP prompt to chat: {e}")
+        return {"ok": False, "messages": [], "session_id": session_id,
+                "error": f"Failed to save prompt to chat: {e}"}
+    engine_state.audit_logger.log_event("MCP_PROMPT_RUN", {
+        "server": name, "prompt": prompt_name, "session_id": session_id,
+        "message_count": len(messages),
+    })
+    return {"ok": True, "messages": messages, "session_id": session_id, "error": ""}
+
 @router.websocket("/ws/tasks")
-async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
+async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
     ip = ws.client.host if ws.client else "unknown"
     port = ws.client.port if ws.client else None
 
@@ -160,14 +178,14 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     "workspace_roots": engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")],
                 },
             ).to_json())
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — best-effort approval recovery on connect: failure must not block the socket
         logger.warning(f"Error fetching pending approvals: {e}")
 
-    task_runner: Optional[asyncio.Task] = None
-    active_downloads: Dict[str, asyncio.Task] = {}
+    task_runner: asyncio.Task | None = None
+    active_downloads: dict[str, asyncio.Task] = {}
     secret_store = SecretStore()
 
-    async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str, session_id: Optional[str] = None):
+    async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str, session_id: str | None = None):
         try:
             fallback_attempted = False
             primary_failed = False
@@ -215,7 +233,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         # Save the final response from assistant with full thought history
                         try:
                             await asyncio.to_thread(session_store.add_message, session_id, "assistant", ev.payload["response"], ev.payload.get("thoughts"))
-                        except Exception as e:
+                        except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not interrupt the task stream
                             logger.error(f"Failed to save session message: {e}")
 
                 if ev.type == EventType.TOOL_APPROVAL_REQUEST:
@@ -235,16 +253,16 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
         except asyncio.CancelledError:
             engine_state.audit_logger.log_event("TASK_CANCELLED", {"task_id": "unknown"})
             raise
-        except Exception as e:
-            logger.error(f"Task generator failed with exception: {e}", exc_info=True)
+        except Exception as e:  # task-generator boundary: any failure is converted into an ERROR event for the client
+            logger.exception("Task generator failed with exception")
             try:
                 await ws.send_text(Event(
                     type=EventType.ERROR,
                     request_id=req_id,
-                    payload={"error": f"Internal engine error: {str(e)}"}
+                    payload={"error": f"Internal engine error: {e!s}"}
                 ).to_json())
-            except Exception:
-                pass
+            except Exception:  # the socket is already broken; nothing further can be signalled
+                logger.debug("Could not send task error event to client", exc_info=True)
 
     try:
         while True:
@@ -288,8 +306,8 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                             request_id=req_id,
                             payload={"sessions": await asyncio.to_thread(session_store.list_sessions)}
                         ).to_json())
-                    except Exception:
-                        pass
+                    except Exception:  # best-effort notification: the session is already created; a failed send must not abort task start
+                        logger.debug("Could not send session create/list events to client", exc_info=True)
                 else:
                     sess_info = await asyncio.to_thread(session_store.get_session, session_id)
                     if sess_info and sess_info.get("title") in ("New Conversation", "New Chat") and not sess_info.get("messages"):
@@ -301,11 +319,33 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                                 request_id=req_id,
                                 payload={"sessions": await asyncio.to_thread(session_store.list_sessions)}
                             ).to_json())
-                        except Exception:
-                            pass
+                        except Exception:  # best-effort notification: a failed send must not abort task start
+                            logger.debug("Could not send session list event to client", exc_info=True)
+                # Issue 007: ``/mcp:<server>:<prompt>`` runs a prompt
+                # template into the chat instead of starting a graph task.
+                # No arguments in the slash form (use the MCP tab for
+                # prompts with arguments). The slash text itself is not
+                # saved as a user message — only the prompt's messages are.
+                _mcp_slash = re.match(r"^/mcp:([A-Za-z0-9_.\-]{1,100}):([A-Za-z0-9_.\-]+)$", prompt)
+                if _mcp_slash:
+                    _run = await _run_mcp_prompt_into_chat(
+                        _mcp_slash.group(1), _mcp_slash.group(2), None, session_id
+                    )
+                    await ws.send_text(Event(
+                        type=EventType.MCP_PROMPT_RUN_RESPONSE,
+                        request_id=req_id,
+                        payload={
+                            "success": _run["ok"], "name": _mcp_slash.group(1),
+                            "prompt": _mcp_slash.group(2),
+                            "messages": _run["messages"],
+                            "session_id": _run["session_id"], "error": _run["error"],
+                        },
+                    ).to_json())
+                    continue
+
                 try:
                     await asyncio.to_thread(session_store.add_message, session_id, "user", prompt)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not block the task
                     logger.error(f"Failed to save user message: {e}")
 
                 stored_providers = set(secret_store.list_providers())
@@ -346,18 +386,16 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     ).to_json())
                     continue
 
-                tools = ToolRegistry()
-                tools.register(create_current_time_tool())
-                
+                # One central builder (PRD Q3) — task start, approval resume
+                # and tool list used to build registries independently and
+                # had already drifted apart.
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
                 reqs = infer_task_requirements(prompt)
-                
-                # Only give file/shell tools if it's a coding task or explicitly requested
-                if reqs.wants_code or (requested_model is not None):
-                    for tool in create_file_tools():
-                        tools.register(tool)
-                # Always provide web search as a safe fallback
-                for tool in create_web_tools():
-                    tools.register(tool)
+                tools = build_tool_registry(
+                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
+                    include_file_tools=reqs.wants_code or (requested_model is not None),
+                )
 
                 workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
 
@@ -369,8 +407,10 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 active_skills = []
                 
                 if slash_cmd_str:
-                    from aether_engine.skills.slash_registry import GLOBAL_SLASH_REGISTRY
                     from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+                    from aether_engine.skills.slash_registry import (
+                        GLOBAL_SLASH_REGISTRY,
+                    )
                     
                     resolved = GLOBAL_SLASH_REGISTRY.resolve(slash_cmd_str)
                     
@@ -444,13 +484,18 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     provider_instance = _create_provider_instance(
                         engine_state.active_provider, engine_state.active_model, secret_store
                     )
-                except Exception:
+                except Exception:  # provider construction can fail on config/key errors; skipping the resume is the designed degradation
+                    logger.debug("Could not instantiate provider for approval resume", exc_info=True)
                     continue # Ignore if provider cannot be instantiated
 
-                tools = ToolRegistry()
-                tools.register(create_current_time_tool())
-                for tool in create_file_tools(): tools.register(tool)
-                for tool in create_web_tools(): tools.register(tool)
+                # Same central builder as task start (PRD Q3) — the resume
+                # path used to register all file tools unconditionally while
+                # task start gated them on coding tasks.
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
+                tools = build_tool_registry(
+                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
+                )
 
                 workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
 
@@ -626,7 +671,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         request_id=req_id,
                         payload=save_payload,
                     ).to_json())
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — handler boundary: any save failure is reported to the client in the response payload
                     await ws.send_text(Event(
                         type=EventType.PROVIDER_SAVE_RESPONSE,
                         request_id=req_id,
@@ -673,7 +718,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         request_id=req_id,
                         payload={"provider": pname, "api_key": decrypted_key, "success": True},
                     ).to_json())
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — handler boundary: any decrypt/load failure is reported to the client in the response payload
                     await ws.send_text(Event(
                         type=EventType.PROVIDER_REVEAL_KEY_RESPONSE,
                         request_id=req_id,
@@ -767,11 +812,11 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 if task_runner and not task_runner.done():
                     task_runner.cancel()
 
-                async def execute_local_download():
+                async def execute_local_download(model_name=model_name, destination_dir=dest_dir, request_id=req_id):
                     async for dl_ev in engine_state.ollama_manager.download_model_task(
                         model_name=model_name,
-                        destination_dir=dest_dir,
-                        request_id=req_id,
+                        destination_dir=destination_dir,
+                        request_id=request_id,
                     ):
                         await ws.send_text(dl_ev.to_json())
 
@@ -864,7 +909,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 else:
                     providers_to_refresh = list(providers_to_refresh)
 
-                refreshed_models: Dict[str, List[str]] = {}
+                refreshed_models: dict[str, list[str]] = {}
 
                 for pname in providers_to_refresh:
                     try:
@@ -906,7 +951,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                                 cfg.provider_excluded_models[pname] = disc.excluded
                                 engine_state.model_registry.update_provider_models(pname, disc.models)
                                 save_config(cfg)
-                    except Exception as ref_err:
+                    except Exception as ref_err:  # noqa: BLE001 — per-provider isolation: one provider's refresh failure must not abort the refresh for the rest
                         logger.error(f"Error during refresh models for {pname}: {ref_err}")
 
                 updated_providers = await _build_provider_list_async(secret_store)
@@ -933,9 +978,14 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
             # Tools, MCP, Plugins, Memory Events
             # -----------------------------------------------------------
             elif msg.type == EventType.TOOL_LIST_REQUEST:
-                from aether_engine.langgraph.nodes.supervisor import SUPERVISOR_MEMORY_TOOLS
+                from aether_engine.langgraph.nodes.supervisor import (
+                    SUPERVISOR_MEMORY_TOOLS,
+                )
                 from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                from aether_engine.tools.policy import resolve_policy_by_name, KNOWN_NON_REGISTRY_TOOLS
+                from aether_engine.tools.policy import (
+                    KNOWN_NON_REGISTRY_TOOLS,
+                    resolve_policy_by_name,
+                )
                 from aether_engine.tools.registry import ToolRisk
                 
                 def enrich_tool(d, name, risk):
@@ -948,25 +998,21 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                     d["policy"] = user_val or "Require Approval" # UI currently expects the raw setting in 'policy' too
                     return d
 
-                all_tools = [create_current_time_tool()] + create_file_tools() + create_web_tools()
+                all_tools = build_tool_registry(
+                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
+                ).get_tools()
                 defs = []
                 for t in all_tools:
                     d = t.to_definition()
                     defs.append(enrich_tool(d, t.name, t.risk))
-                
+
                 # Add Supervisor Memory Tools
                 for mt in SUPERVISOR_MEMORY_TOOLS:
                     d = mt.copy()
                     name = d["function"]["name"]
                     risk = KNOWN_NON_REGISTRY_TOOLS.get(name, ToolRisk.EXECUTE)
                     defs.append(enrich_tool(d, name, risk))
-                
-                # Add MCP Tools (scaffold)
-                for mt in GLOBAL_MCP_REGISTRY.get_mcp_tools():
-                    d = mt.copy()
-                    name = d["function"]["name"]
-                    defs.append(enrich_tool(d, name, ToolRisk.EXECUTE))
-                    
+
                 await ws.send_text(Event(
                     type=EventType.TOOL_LIST_RESPONSE,
                     request_id=req_id,
@@ -1015,9 +1061,9 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 response_payload = {"success": True, "tool_name": tool_name, "policy": policy}
                 
                 if tool_name and policy:
-                    from aether_engine.tools.registry import ToolRisk, ToolNotFoundError
-                    from aether_engine.tools.policy import KNOWN_NON_REGISTRY_TOOLS
                     from aether_engine.audit import AuditLogger
+                    from aether_engine.tools.policy import KNOWN_NON_REGISTRY_TOOLS
+                    from aether_engine.tools.registry import ToolRisk
                     
                     risk = ToolRisk.EXECUTE
                     try:
@@ -1027,9 +1073,9 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                             risk = t.risk
                         elif tool_name in KNOWN_NON_REGISTRY_TOOLS:
                             risk = KNOWN_NON_REGISTRY_TOOLS[tool_name]
-                    except Exception:
-                        pass
-                        
+                    except Exception:  # best-effort risk lookup: on failure the fail-closed EXECUTE default above stands
+                        logger.debug(f"Tool risk lookup failed for {tool_name}", exc_info=True)
+
                     if policy == "Always Allow" and risk != ToolRisk.READ_ONLY:
                         policy = "Require Approval"
                         response_payload["policy"] = policy
@@ -1047,11 +1093,14 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
 
             elif msg.type == EventType.MCP_SERVER_LIST_REQUEST:
                 from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                servers = GLOBAL_MCP_REGISTRY.list_servers()
+                servers = GLOBAL_MCP_REGISTRY.list_servers_with_status()
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_LIST_RESPONSE,
                     request_id=req_id,
-                    payload={"servers": servers},
+                    payload={
+                        "servers": servers,
+                        "config_error": getattr(GLOBAL_MCP_REGISTRY, "config_load_error", None),
+                    },
                 ).to_json())
 
             elif msg.type == EventType.CONFIG_GET_REQUEST:
@@ -1142,27 +1191,259 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_ADD_REQUEST:
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                from aether_engine.mcp.registry import (
+                    GLOBAL_MCP_REGISTRY,
+                    MCPConfigError,
+                    redact_mcp_config_for_ui,
+                )
                 name = msg.payload.get("name")
                 config = msg.payload.get("config", {})
+                ok, error = True, ""
                 if name and config:
-                    GLOBAL_MCP_REGISTRY.add_server(name, config)
+                    try:
+                        GLOBAL_MCP_REGISTRY.add_server(name, config)
+                    except MCPConfigError as e:
+                        ok, error = False, str(e)
+                else:
+                    ok, error = False, "Server name and config are required."
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_ADD_RESPONSE,
                     request_id=req_id,
-                    payload={"success": True, "name": name, "config": config},
+                    # S1: never echo header/env values back to the UI.
+                    payload={"success": ok, "name": name, "config": redact_mcp_config_for_ui(config), "error": error},
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_REMOVE_REQUEST:
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                from aether_engine.mcp.registry import (
+                    GLOBAL_MCP_REGISTRY,
+                    MCPConfigError,
+                )
                 name = msg.payload.get("name")
+                ok, error = True, ""
                 if name:
-                    GLOBAL_MCP_REGISTRY.remove_server(name)
+                    # Issue 011 (S5): wrap like ADD/UPDATE — remove_server
+                    # raises MCPConfigError via _save_config when the
+                    # config file failed to load (corrupt), and without
+                    # this the outer handler ends the websocket session
+                    # with no response. A failed remove answers
+                    # success:false + error; the session stays alive.
+                    try:
+                        # remove_server closes any live session inside the
+                        # removal (S5), awaited here in the session-owner task.
+                        await GLOBAL_MCP_REGISTRY.remove_server(name)
+                    except MCPConfigError as e:
+                        ok, error = False, str(e)
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_REMOVE_RESPONSE,
                     request_id=req_id,
-                    payload={"success": True, "name": name},
+                    payload={"success": ok, "name": name, "error": error},
                 ).to_json())
+
+            elif msg.type == EventType.MCP_SERVER_UPDATE_REQUEST:
+                from aether_engine.mcp.registry import (
+                    GLOBAL_MCP_REGISTRY,
+                    MCPConfigError,
+                )
+                name = msg.payload.get("name")
+                ok, error, config = True, "", None
+                if not name:
+                    ok, error = False, "Server name is required."
+                else:
+                    try:
+                        config = await GLOBAL_MCP_REGISTRY.update_server(
+                            name,
+                            auto_connect=msg.payload.get("auto_connect"),
+                            enabled=msg.payload.get("enabled"),
+                        )
+                    except MCPConfigError as e:
+                        ok, error = False, str(e)
+                await ws.send_text(Event(
+                    type=EventType.MCP_SERVER_UPDATE_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": ok, "name": name, "config": config, "error": error},
+                ).to_json())
+
+            elif msg.type == EventType.MCP_SERVER_CONNECT_REQUEST:
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                result = (
+                    await GLOBAL_MCP_REGISTRY.connect_server(name)
+                    if name
+                    else {"ok": False, "error": "Server name is required."}
+                )
+                server_status = GLOBAL_MCP_REGISTRY.get_server_status(name) if name else {}
+                await ws.send_text(Event(
+                    type=EventType.MCP_SERVER_CONNECT_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "success": result["ok"], "name": name, "error": result.get("error", ""),
+                        "status": server_status.get("status"), "tool_count": server_status.get("tool_count", 0),
+                    },
+                ).to_json())
+
+            elif msg.type == EventType.MCP_SERVER_DISCONNECT_REQUEST:
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                result = (
+                    await GLOBAL_MCP_REGISTRY.disconnect_server(name)
+                    if name
+                    else {"ok": False, "error": "Server name is required."}
+                )
+                server_status = GLOBAL_MCP_REGISTRY.get_server_status(name) if name else {}
+                await ws.send_text(Event(
+                    type=EventType.MCP_SERVER_DISCONNECT_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "success": result["ok"], "name": name, "error": result.get("error", ""),
+                        "status": server_status.get("status"), "tool_count": server_status.get("tool_count", 0),
+                    },
+                ).to_json())
+
+            elif msg.type == EventType.MCP_SERVER_TEST_REQUEST:
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                result = (
+                    await GLOBAL_MCP_REGISTRY.test_connection(name)
+                    if name
+                    else {"ok": False, "error": "Server name is required.", "tools": []}
+                )
+                await ws.send_text(Event(
+                    type=EventType.MCP_SERVER_TEST_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "success": result["ok"],
+                        "name": name,
+                        "error": result.get("error", ""),
+                        "tools": result.get("tools", []),
+                    },
+                ).to_json())
+
+            elif msg.type == EventType.MCP_RESOURCE_LIST_REQUEST:
+                # Issue 006: list a connected server's resources.
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                resources, ok, error = [], True, ""
+                if not name:
+                    ok, error = False, "Server name is required."
+                else:
+                    try:
+                        resources = await GLOBAL_MCP_REGISTRY.list_resources(name)
+                    except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced in the response payload
+                        ok, error = False, str(e)
+                await ws.send_text(Event(
+                    type=EventType.MCP_RESOURCE_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": ok, "name": name, "resources": resources, "error": error},
+                ).to_json())
+
+            elif msg.type == EventType.MCP_RESOURCE_READ_REQUEST:
+                # Issue 006: read a resource and load it into the current
+                # chat as a context message. Role "system": it is context,
+                # not something the user said — and the supervisor's
+                # get_current_chat_history briefing reads it back to the
+                # model on the next turn. If no session was given (or it
+                # no longer exists), create one so the resource is never
+                # lost. The UI also gets the message live in this response
+                # (App.jsx appends it) — the Settings panel alone cannot
+                # update the chat view.
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                uri = msg.payload.get("uri")
+                ok, error, content, session_id = True, "", "", msg.payload.get("session_id")
+                if not name or not uri:
+                    ok, error = False, "Server name and resource URI are required."
+                else:
+                    try:
+                        content = await GLOBAL_MCP_REGISTRY.read_resource(name, uri)
+                    except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced in the response payload
+                        ok, error = False, str(e)
+                message = ""
+                truncated = content.endswith("...[resource truncated to 20000 chars]")
+                if ok:
+                    # A chat-save failure must return an error, never kill
+                    # the websocket (an exception here used to take the
+                    # whole connection down with it).
+                    try:
+                        if session_id:
+                            sess = await asyncio.to_thread(session_store.get_session, session_id)
+                            if sess is None:
+                                session_id = None
+                        if not session_id:
+                            session_id = await asyncio.to_thread(
+                                session_store.create_session, f"MCP resource: {uri}"
+                            )
+                        message = f"[MCP resource from server '{name}': {uri}]\n{content}"
+                        await asyncio.to_thread(
+                            session_store.add_message, session_id, "system", message
+                        )
+                    except Exception as e:  # noqa: BLE001 — chat-persistence boundary: a save failure becomes an error response, never a dead websocket
+                        logger.error(f"Failed to save MCP resource to chat: {e}")
+                        ok, error = False, f"Failed to save resource to chat: {e}"
+                        message = ""
+                    if ok:
+                        engine_state.audit_logger.log_event("MCP_RESOURCE_READ", {
+                            "server": name, "uri": uri, "session_id": session_id,
+                            "truncated": truncated,
+                        })
+                await ws.send_text(Event(
+                    type=EventType.MCP_RESOURCE_READ_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "success": ok, "name": name, "uri": uri, "content": content,
+                        "message": message, "truncated": truncated,
+                        "session_id": session_id, "error": error,
+                    },
+                ).to_json())
+
+            elif msg.type == EventType.MCP_PROMPT_LIST_REQUEST:
+                # Issue 007: list a connected server's prompt templates.
+                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                name = msg.payload.get("name")
+                prompts, ok, error = [], True, ""
+                if not name:
+                    ok, error = False, "Server name is required."
+                else:
+                    try:
+                        prompts = await GLOBAL_MCP_REGISTRY.list_prompts(name)
+                    except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced in the response payload
+                        ok, error = False, str(e)
+                await ws.send_text(Event(
+                    type=EventType.MCP_PROMPT_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": ok, "name": name, "prompts": prompts, "error": error},
+                ).to_json())
+
+            elif msg.type == EventType.MCP_PROMPT_RUN_REQUEST:
+                # Issue 007: run a prompt template and insert its messages
+                # into the current chat (same pattern as resources in
+                # 006, but with the prompt's own roles). Never auto-run:
+                # only an explicit Run / slash command reaches here.
+                name = msg.payload.get("name")
+                prompt_name = msg.payload.get("prompt")
+                arguments = msg.payload.get("arguments")
+                if arguments is not None and not isinstance(arguments, dict):
+                    await ws.send_text(Event(
+                        type=EventType.MCP_PROMPT_RUN_RESPONSE,
+                        request_id=req_id,
+                        payload={
+                            "success": False, "name": name, "prompt": prompt_name,
+                            "messages": [], "session_id": msg.payload.get("session_id"),
+                            "error": "MCP prompt arguments must be an object of string values.",
+                        },
+                    ).to_json())
+                else:
+                    result = await _run_mcp_prompt_into_chat(
+                        name, prompt_name, arguments, msg.payload.get("session_id")
+                    )
+                    await ws.send_text(Event(
+                        type=EventType.MCP_PROMPT_RUN_RESPONSE,
+                        request_id=req_id,
+                        payload={
+                            "success": result["ok"], "name": name, "prompt": prompt_name,
+                            "messages": result["messages"],
+                            "session_id": result["session_id"], "error": result["error"],
+                        },
+                    ).to_json())
 
             elif msg.type == EventType.PLUGIN_LIST_REQUEST:
                 plugins_dict = engine_state.plugin_installer.get_all()
@@ -1186,7 +1467,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                             "plugin_details": data,
                         },
                     ).to_json())
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — handler boundary: any prepare failure is reported to the client in the response payload
                     await ws.send_text(Event(
                         type=EventType.PLUGIN_INSTALL_RESPONSE,
                         request_id=req_id,
@@ -1204,7 +1485,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                             request_id=req_id,
                             payload={"success": True},
                         ).to_json())
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 — handler boundary: any install failure is reported to the client in the response payload
                         await ws.send_text(Event(
                             type=EventType.PLUGIN_INSTALL_RESPONSE,
                             request_id=req_id,
@@ -1222,13 +1503,21 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
             elif msg.type == EventType.PLUGIN_UNINSTALL_REQUEST:
                 name = msg.payload.get("name")
                 try:
+                    # Disconnect the plugin's MCP servers first, in this
+                    # (session-owner) task — remove_server_sync inside
+                    # uninstall() cannot close a live session from a sync
+                    # caller (anyio cancel-scope rule, see registry.py).
+                    from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                    installed = engine_state.plugin_installer.get_all().get(name, {})
+                    for mcp_name in installed.get("installed_mcp", []):
+                        await GLOBAL_MCP_REGISTRY.disconnect_server(mcp_name)
                     engine_state.plugin_installer.uninstall(name)
                     await ws.send_text(Event(
                         type=EventType.PLUGIN_UNINSTALL_RESPONSE,
                         request_id=req_id,
                         payload={"success": True, "name": name},
                     ).to_json())
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — handler boundary: any uninstall failure is reported to the client in the response payload
                     await ws.send_text(Event(
                         type=EventType.PLUGIN_UNINSTALL_RESPONSE,
                         request_id=req_id,
@@ -1245,7 +1534,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                         request_id=req_id,
                         payload={"success": True, "name": name, "enabled": enabled},
                     ).to_json())
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — handler boundary: any toggle failure is reported to the client in the response payload
                     await ws.send_text(Event(
                         type=EventType.PLUGIN_TOGGLE_RESPONSE,
                         request_id=req_id,
@@ -1262,7 +1551,10 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.MEMORY_EPISODE_DELETE_REQUEST:
-                from aether_engine.memory.episodic import delete_episode, get_all_episodes
+                from aether_engine.memory.episodic import (
+                    delete_episode,
+                    get_all_episodes,
+                )
                 task_id = msg.payload.get("task_id")
                 if task_id:
                     delete_episode(task_id)
@@ -1292,7 +1584,10 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.MEMORY_FACT_DELETE_REQUEST:
-                from aether_engine.memory.knowledge_graph import delete_fact, get_all_facts
+                from aether_engine.memory.knowledge_graph import (
+                    delete_fact,
+                    get_all_facts,
+                )
                 fact_id = msg.payload.get("fact_id")
                 if fact_id:
                     delete_fact(fact_id)
@@ -1304,7 +1599,10 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.MEMORY_ENTITY_DELETE_REQUEST:
-                from aether_engine.memory.knowledge_graph import delete_entity, get_all_facts
+                from aether_engine.memory.knowledge_graph import (
+                    delete_entity,
+                    get_all_facts,
+                )
                 entity_name = msg.payload.get("entity_name")
                 if entity_name:
                     delete_entity(entity_name)
@@ -1334,8 +1632,8 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.SLASH_COMMAND_LIST_REQUEST:
-                from aether_engine.skills.slash_registry import GLOBAL_SLASH_REGISTRY
                 from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+                from aether_engine.skills.slash_registry import GLOBAL_SLASH_REGISTRY
                 commands = [c.to_dict() for c in GLOBAL_SLASH_REGISTRY.get_all()]
                 
                 # Combine dynamic skill commands
@@ -1420,7 +1718,7 @@ async def ws_tasks(ws: WebSocket, token: Optional[str] = Query(default=None)):
         if task_runner and not task_runner.done():
             task_runner.cancel()
         engine_state.audit_logger.log_event("CLIENT_DISCONNECTED", {"client_ip": ip})
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — top-level socket boundary: any session failure is logged and the task is cancelled, never propagated
         logger.error(f"WebSocket session error: {e}")
         if task_runner and not task_runner.done():
             task_runner.cancel()

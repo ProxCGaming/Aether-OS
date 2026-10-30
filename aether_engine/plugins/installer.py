@@ -1,13 +1,16 @@
 import hashlib
 import hmac
-import os
+import json
+import logging
 import re
 import shutil
-import stat
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Dict, Optional, Any
-from .manifest import parse_manifest, PluginManifest
+from typing import Any
+
+from .manifest import PluginManifest
+
+logger = logging.getLogger("aether_engine.plugins.installer")
 
 # Phase 10.2 B2 — plugin install trust boundary.
 #
@@ -58,21 +61,116 @@ from .manifest import parse_manifest, PluginManifest
 _MANIFEST_MEMBER = "manifest.json"
 
 
+def _read_mcp_config_file(source: Path, file_path: str) -> dict:
+    """Read one MCP server config JSON from a plugin package (zip or dir).
+
+    Raises ValueError with a named message when the file is missing,
+    is not valid JSON, or does not contain a JSON object. Never invents
+    a fallback config: a corrupt config is a validation failure, not a
+    dummy server.
+
+    Issue 011 (S4): *file_path* must stay inside the package. An
+    absolute path or any ``..`` segment is rejected outright, and in
+    the dir branch the resolved path must stay inside the resolved
+    package directory — a crafted manifest must not read an arbitrary
+    JSON file on disk as a server config (with an arbitrary
+    ``command``). The same guard runs before the zip branch, where a
+    ``..`` entry name would otherwise be looked up verbatim.
+    """
+    path = Path(file_path)
+    if path.is_absolute():
+        raise ValueError(
+            f"MCP server config file '{file_path}' must be inside the "
+            "plugin package: absolute paths are not allowed."
+        )
+    if ".." in path.parts:
+        raise ValueError(
+            f"MCP server config file '{file_path}' must be inside the "
+            "plugin package: '..' segments are not allowed."
+        )
+    raw: bytes
+    if source.is_file() and source.suffix == ".zip":
+        try:
+            with zipfile.ZipFile(source, "r") as z:
+                try:
+                    raw = z.read(file_path)
+                except KeyError:
+                    raise ValueError(
+                        f"MCP server config file '{file_path}' not found "
+                        "in plugin package."
+                    )
+        except zipfile.BadZipFile as e:
+            raise ValueError(f"Plugin package is not a valid zip file: {e}")
+    elif source.is_dir():
+        cfg_path = (source / file_path).resolve()
+        if not cfg_path.is_relative_to(source.resolve()):
+            raise ValueError(
+                f"MCP server config file '{file_path}' must be inside the "
+                "plugin package."
+            )
+        if not cfg_path.exists():
+            raise ValueError(
+                f"MCP server config file '{file_path}' not found "
+                "in plugin package."
+            )
+        raw = cfg_path.read_bytes()
+    else:
+        raise ValueError(f"Plugin source not found: {source}")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ValueError(
+            f"MCP server config file '{file_path}' is not valid JSON: {e}"
+        )
+    if not isinstance(data, dict):
+        raise ValueError(  # noqa: TRY004 — ValueError is the documented contract here; callers catch it
+            f"MCP server config file '{file_path}' must contain a JSON object."
+        )
+    return data
+
+
+def resolve_mcp_server_configs(source: Any, manifest: PluginManifest) -> list[tuple[str, dict]]:
+    """Load + validate every MCP server a manifest declares.
+
+    Validate first, add second: this returns the *normalised* configs
+    (same schema as issue 001, ``validate_mcp_server_config``) and
+    raises before the caller mutates anything — no file is copied, no
+    skill installed, no server added — when any entry is invalid.
+    Raises ValueError / MCPConfigError with a named message.
+    """
+    from aether_engine.mcp.registry import validate_mcp_server_config
+
+    src_path = Path(source)
+    resolved: list[tuple[str, dict]] = []
+    for mcp_def in manifest.mcp_servers:
+        if not mcp_def.file_path:
+            raise ValueError(
+                f"MCP server {mcp_def.name!r} declares no config file "
+                "(file_path): a plugin MCP server needs a JSON config "
+                "inside the package."
+            )
+        raw_config = _read_mcp_config_file(src_path, mcp_def.file_path)
+        resolved.append(
+            (mcp_def.name, validate_mcp_server_config(mcp_def.name, raw_config))
+        )
+    return resolved
+
+
 class PluginInstaller:
     def __init__(self, plugins_dir: Path, audit_logger=None):
         self.plugins_dir = plugins_dir
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
         self.registry_file = self.plugins_dir / "registry.json"
-        self._registry: Dict[str, Any] = self._load_registry()
-        self.pending_installs: Dict[str, dict] = {}
+        self._registry: dict[str, Any] = self._load_registry()
+        self.pending_installs: dict[str, dict] = {}
         self._audit_logger = audit_logger
 
-    def _load_registry(self) -> Dict[str, Any]:
+    def _load_registry(self) -> dict[str, Any]:
         if self.registry_file.exists():
             import json
             try:
                 return json.loads(self.registry_file.read_text())
-            except Exception:
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 return {}
         return {}
 
@@ -83,16 +181,16 @@ class PluginInstaller:
     # -- Phase 10.2 B2: refusal + zip validation -------------------------
 
     def _audit(self, action: str, plugin_name: str, reason: str,
-               source: Optional[str] = None) -> None:
+               source: str | None = None) -> None:
         if self._audit_logger is None:
             return
-        details: Dict[str, Any] = {"plugin_name": plugin_name, "reason": reason}
+        details: dict[str, Any] = {"plugin_name": plugin_name, "reason": reason}
         if source is not None:
             details["source"] = source
         self._audit_logger.log_event(action, details)
 
     def _refuse(self, reason: str, plugin_name: str = "unknown",
-                source: Optional[str] = None) -> None:
+                source: str | None = None) -> None:
         """Refuse an install: audit event (when a logger is wired) + raise.
 
         Raised BEFORE any write, so a refused install leaves the target
@@ -152,7 +250,7 @@ class PluginInstaller:
             for info in infos:
                 member = info.filename
                 try:
-                    path = self._check_member_path(member.rstrip("/"))
+                    self._check_member_path(member.rstrip("/"))
                 except ValueError as e:
                     self._refuse(str(e), manifest.name, src)
                 # Reject symlink / fifo / device entries: extractall would
@@ -259,6 +357,10 @@ class PluginInstaller:
             # approve it. install() re-validates (authoritative, before
             # extraction) in case the prepare data was tampered with.
             self._validate_zip_archive(src_path, manifest)
+        # Issue 008: fail fast, before the approval step — a manifest
+        # whose MCP servers do not validate is rejected here with the
+        # named error, not after the user approves the install.
+        resolve_mcp_server_configs(src_path, manifest)
         return {
             "source": source,
             "manifest": manifest.model_dump()
@@ -274,6 +376,14 @@ class PluginInstaller:
         # untouched and writes nothing anywhere.
         if source.is_file() and source.suffix == ".zip":
             self._validate_zip_archive(source, manifest)
+        # Issue 008: validate FIRST, before any mutation — before the
+        # backup move, before any file is copied, before any server is
+        # added. A bad manifest fails here with the named error and the
+        # previous install (if any) is left untouched.
+        try:
+            mcp_configs = resolve_mcp_server_configs(source, manifest)
+        except Exception as e:  # noqa: BLE001 — install boundary: any validation failure becomes the rollback RuntimeError
+            raise RuntimeError(f"Installation failed, rolled back. Error: {e}")
 
         target_dir = self.plugins_dir / plugin_name
 
@@ -321,22 +431,15 @@ class PluginInstaller:
             # 2. Record Tools (no global registry)
             for tool_def in manifest.tools:
                 installed_tools.append(tool_def.name)
-
-            # 3. Install MCP Servers
-            for mcp_def in manifest.mcp_servers:
-                config_dict = {}
-                if mcp_def.file_path:
-                    # Try to load config from JSON if provided
-                    cfg_path = self._contained_path(
-                        target_dir, mcp_def.file_path, "mcp file_path")
-                    if cfg_path.exists():
-                        import json
-                        try:
-                            config_dict = json.loads(cfg_path.read_text())
-                        except Exception:
-                            config_dict = {"command": "dummy"}
-                GLOBAL_MCP_REGISTRY.add_server(mcp_def.name, config_dict)
-                installed_mcp.append(mcp_def.name)
+                
+            # 3. Install MCP Servers — configs were already loaded and
+            # validated (issue 008) before any mutation above, so this
+            # only adds the pre-validated configs. No re-reading, no
+            # dummy fallback: a corrupt config can never become a
+            # silently installed server.
+            for mcp_name, config_dict in mcp_configs:
+                GLOBAL_MCP_REGISTRY.add_server(mcp_name, config_dict)
+                installed_mcp.append(mcp_name)
 
             self._registry[plugin_name] = {
                 "manifest": manifest.model_dump(),
@@ -350,7 +453,7 @@ class PluginInstaller:
             if backup and backup.exists():
                 shutil.rmtree(backup)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — rollback handler: must catch everything to restore the previous install
             # Atomic Rollback
             if target_dir.exists():
                 shutil.rmtree(target_dir)
@@ -361,7 +464,16 @@ class PluginInstaller:
                 if skill_dir.exists():
                     shutil.rmtree(skill_dir)
             for mcp_name in installed_mcp:
-                GLOBAL_MCP_REGISTRY.remove_server(mcp_name)
+                # Issue 011 (S6): a connected server refuses a sync
+                # remove — that refusal must not mask the install
+                # failure being rolled back, so it is best-effort here.
+                try:
+                    GLOBAL_MCP_REGISTRY.remove_server_sync(mcp_name)
+                except Exception as remove_err:  # noqa: BLE001 — best-effort rollback cleanup (issue 011 S6); must not mask the install failure
+                    logger.debug(
+                        "Rollback could not remove MCP server %s: %s",
+                        mcp_name, remove_err,
+                    )
 
             self._audit("PLUGIN_INSTALL_FAILED", plugin_name, str(e),
                         str(source))
@@ -376,7 +488,7 @@ class PluginInstaller:
         # Remove MCP
         from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
         for mcp_name in data.get("installed_mcp", []):
-            GLOBAL_MCP_REGISTRY.remove_server(mcp_name)
+            GLOBAL_MCP_REGISTRY.remove_server_sync(mcp_name)
 
         # Remove skills
         for skill_path_str in data.get("installed_skills", []):
@@ -397,11 +509,10 @@ class PluginInstaller:
             self._registry[plugin_name]["enabled"] = enabled
             self._save_registry()
 
-            data = self._registry[plugin_name]
             # Since toggle doesn't uninstall, if disabled we might want to unregister tools temporarily.
             # For now, toggling is just state update, and the engine logic should check enabled state.
         else:
             raise KeyError(f"Plugin not found: {plugin_name}")
 
-    def get_all(self) -> Dict[str, Any]:
+    def get_all(self) -> dict[str, Any]:
         return self._registry

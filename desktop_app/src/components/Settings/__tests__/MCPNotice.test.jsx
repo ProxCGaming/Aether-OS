@@ -6,6 +6,7 @@ import MCPNotice from '../MCPNotice';
 describe('MCPNotice', () => {
   it('renders correctly', () => {
     const { getByText } = render(<MCPNotice />);
-    expect(getByText(/display-only mode/i)).toBeInTheDocument();
+    expect(getByText(/only when their server is connected/i)).toBeInTheDocument();
+    expect(getByText(/not visible to the model/i)).toBeInTheDocument();
   });
 });
