@@ -209,41 +209,19 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
     )
 
     async def _learn_fast_chat_in_background(task_id: str, prompt: str, response_text: str, p_name: str, p_model: str):
-        """Epic 4, E4-05: fast-chat learn parity.
+        """Epic 4, E4-05: fast-chat learn parity — detached after
+        TASK_COMPLETED; the work itself lives in
+        fast_chat.learn_fast_chat_exchange (thin wrapper here: build
+        the chat's provider instance, then delegate)."""
+        from aether_engine.langgraph.fast_chat import learn_fast_chat_exchange
+        from aether_engine.orchestration.core import _create_provider_instance
 
-        Graph tasks learn on their completion path in the executor;
-        fast chat has no executor completion path, so its exchange is
-        learned here — detached after TASK_COMPLETED, through the
-        same facade, with the chat's own provider doing extraction
-        (the extractor's greeting/substance guards apply as usual).
-        Best-effort: any failure is logged and the chat is unaffected.
-        """
         try:
-            backend = backend_or_none(engine_state.user_config, context="fast-chat memory")
-            if backend is None:
-                return
-            from aether_engine.orchestration.core import _create_provider_instance
-
-            try:
-                provider = _create_provider_instance(p_name, p_model, secret_store)
-            except Exception:  # noqa: BLE001 — no provider instance: the episode above still records; only fact extraction is skipped
-                provider = None
-            await backend.record_episode(
-                task_id=task_id,
-                user_prompt=prompt,
-                task_summary=response_text[:200],
-                tags=["chat", "fast"],
-                outcome=response_text,
-            )
-            if provider is not None:
-                await backend.learn(
-                    provider=provider,
-                    user_prompt=prompt,
-                    assistant_response=response_text,
-                    task_id=task_id,
-                )
-        except Exception as e:  # noqa: BLE001 — background learn must never surface in the chat path
-            logger.warning(f"Fast-chat memory learn failed for {task_id}: {e}")
+            provider = _create_provider_instance(p_name, p_model, secret_store)
+        except Exception:  # noqa: BLE001 — no provider instance: the episode still records; only fact extraction is skipped
+            provider = None
+        await learn_fast_chat_exchange(
+            task_id, prompt, response_text, provider, engine_state.user_config)
 
     async def _title_session_in_background(session_id: str, p_name: str, p_model: str, response_text: str):
         """E1-08: give a still-default session title a model-written one.

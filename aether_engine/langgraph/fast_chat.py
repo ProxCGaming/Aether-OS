@@ -69,6 +69,47 @@ def load_session_history(
         return []
 
 
+async def learn_fast_chat_exchange(
+    task_id: str,
+    prompt: str,
+    response_text: str,
+    provider: BaseProvider | None,
+    user_config=None,
+) -> None:
+    """Epic 4, E4-05: learn a completed fast-chat exchange.
+
+    Graph tasks learn on the executor's completion path; fast chat
+    has no executor, so the websocket wrapper calls this in a
+    detached task after TASK_COMPLETED. Through the memory facade,
+    with the chat's own provider doing fact extraction when one is
+    available (the extractor's greeting/substance guards apply as
+    usual). Best-effort by contract: callers fire-and-forget, and
+    every failure is logged here, never raised into the chat path.
+    """
+    from aether_engine.memory.facade import backend_or_none
+
+    try:
+        backend = backend_or_none(user_config, context="fast-chat memory")
+        if backend is None:
+            return
+        await backend.record_episode(
+            task_id=task_id,
+            user_prompt=prompt,
+            task_summary=response_text[:200],
+            tags=["chat", "fast"],
+            outcome=response_text,
+        )
+        if provider is not None:
+            await backend.learn(
+                provider=provider,
+                user_prompt=prompt,
+                assistant_response=response_text,
+                task_id=task_id,
+            )
+    except Exception as e:  # noqa: BLE001 — background learn must never surface in the chat path
+        logger.warning(f"Fast-chat memory learn failed for {task_id}: {e}")
+
+
 async def run_fast_chat(
     prompt: str,
     provider: BaseProvider,
