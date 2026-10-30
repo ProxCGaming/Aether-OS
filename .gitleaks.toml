@@ -1,0 +1,17 @@
+# Gitleaks config for Aether-OS (issue 003).
+# Extends the Gitleaks defaults; the allowlist below exists only so the
+# pre-commit hook does not false-positive on test fixture placeholders.
+# NEVER allowlist a real key pattern here.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixture placeholders and test/example paths. Real key patterns must never be added."
+regexes = [
+  '''secret-123''',
+  '''<redacted>''',
+]
+paths = [
+  '''(?i)(^|/)(tests?|__tests__|fixtures?|examples?|testdata)(/|$)''',
+]
