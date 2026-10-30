@@ -73,6 +73,28 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
             "pending_tool_call": None
         }
 
+    # ── Plan-mode backstop (Epic 1, E1-09) ────────────────────────────
+    # Specialists in plan mode are never offered non-READ_ONLY tools,
+    # so a risky pending call here means forged or stale state. Refuse
+    # it centrally rather than trusting that every caller filtered.
+    if state.get("plan_mode") and registry:
+        try:
+            tool_def = registry.get_tool(tool_name)
+        except ToolNotFoundError:
+            tool_def = None
+        if tool_def is not None and tool_def.risk.value != "read_only":
+            error_msg = f"Error: Tool '{tool_name}' is not available in plan mode (read-only). Switch plan mode off to execute it."
+            logger.warning(f"Plan mode blocked {tool_name} (risk={tool_def.risk.value}).")
+            return {
+                "messages": [{
+                    "role": "tool",
+                    "name": tool_name,
+                    "content": error_msg,
+                    "tool_call_id": call_id,
+                }],
+                "pending_tool_call": None
+            }
+
     # ── Loop guard (Epic 1, E1-03) ────────────────────────────────────
     # Count consecutive identical calls (same tool, same arguments).
     # At the threshold, do not execute again: hand the specialist a

@@ -65,6 +65,11 @@ async def planner_node(state: AetherState, config: RunnableConfig) -> dict:
                 tools.append(disabled_t)
     else:
         tools = all_tools
+
+    # Plan mode (Epic 1, E1-09): only READ_ONLY tools are even offered.
+    if state.get("plan_mode") and registry:
+        keep = registry.read_only_names()
+        tools = [t for t in tools if t.get("function", {}).get("name") in keep]
     
     plan_text = state.get("plan", "")
     plan_info = f"\nCurrent Plan & Context:\n{plan_text}\n" if plan_text and plan_text != "No plan currently." else ""

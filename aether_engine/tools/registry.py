@@ -210,6 +210,15 @@ class ToolRegistry:
     def get_definitions(self) -> list[dict[str, Any]]:
         return [tool.to_definition() for tool in self._tools.values()]
 
+    def read_only_names(self) -> set[str]:
+        """Names of tools whose risk class is READ_ONLY (Epic 1, E1-09).
+
+        Plan mode filters specialist tool lists to exactly this set:
+        anything that can write, execute or destroy — including MCP
+        tools, which default to EXECUTE — is absent, not just refused.
+        """
+        return {tool.name for tool in self._tools.values() if tool.risk == ToolRisk.READ_ONLY}
+
     async def execute(
         self,
         name: str,

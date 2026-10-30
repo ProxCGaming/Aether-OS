@@ -461,6 +461,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         user_config=engine_state.user_config,
                         forced_agent=forced_agent,
                         active_skills=active_skills,
+                        plan_mode=bool(msg.payload.get("plan_mode")),
                     )
 
                 task_runner = asyncio.create_task(
