@@ -1248,20 +1248,33 @@ export default function DraggableChatWindow({
                       {msg.role === 'user' ? <User size={18} color="#fff" /> : <Bot size={18} color="#a78bfa" />}
                     </div>
                     <div className={`chat-bubble ${msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-agent'} msg-container`} style={{ position: 'relative' }}>
-                      {msg.role === 'user' && (
-                        <button 
-                          className="msg-edit-btn" 
-                          title="Edit and resend"
-                          onClick={() => {
-                            if (onEditMessage) onEditMessage(msg, i);
-                            setInput(msg.content);
-                            if (textareaRef.current) {
-                              textareaRef.current.focus();
-                            }
-                          }}
-                        >
-                          <Edit2 size={12} />
-                        </button>
+                      {msg.role === 'user' && (
+                        <button
+                          type="button"
+                          className="msg-edit-btn"
+                          title="Edit and resend"
+                          aria-label="Edit and resend this message"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (onEditMessage) onEditMessage(msg, i);
+                            const text = typeof msg.content === 'string' ? msg.content : '';
+                            setInput(text);
+                            // Focus after React applies the new input
+                            // value, and put the caret at the end so the
+                            // user can keep typing immediately.
+                            requestAnimationFrame(() => {
+                              const ta = textareaRef.current;
+                              if (ta) {
+                                ta.focus();
+                                const end = ta.value.length;
+                                try { ta.setSelectionRange(end, end); } catch (err) {}
+                              }
+                            });
+                          }}
+                        >
+                          <Edit2 size={12} />
+                        </button>
                       )}
                       {(msg.role === 'agent' || msg.role === 'assistant') && (
                         <ThinkingAccordion 

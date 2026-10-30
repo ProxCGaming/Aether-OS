@@ -1,10 +1,12 @@
-import sqlite3
-import uuid
-import time
 import json
 import logging
-from typing import List, Dict, Any, Optional
+import re
+import sqlite3
+import time
+import uuid
 from pathlib import Path
+from typing import Any
+
 from aether_engine.audit import AuditLogger
 from aether_engine.config import UserConfig, load_config
 
@@ -14,6 +16,11 @@ _audit_logger = AuditLogger()
 # Database path is ~/.aether/memory.db
 DB_PATH = Path.home() / ".aether" / "memory.db"
 
+# Init guard holding the DB_PATH the tables were created in (False
+# before the first init). Keying it to the path means a changed
+# DB_PATH re-initialises instead of serving "no such table" errors
+# from a stale flag — tests patch DB_PATH per case, and several test
+# modules historically had to reset this flag by hand to avoid that.
 _initialized = False
 
 def _get_conn() -> sqlite3.Connection:
@@ -25,7 +32,7 @@ def _get_conn() -> sqlite3.Connection:
 
 def init_db() -> None:
     global _initialized
-    if _initialized:
+    if _initialized == DB_PATH:
         return
     with _get_conn() as conn:
         conn.execute("""
@@ -53,16 +60,16 @@ def init_db() -> None:
         except sqlite3.OperationalError:
             pass
         conn.commit()
-    _initialized = True
+    _initialized = DB_PATH
 
-def list_sessions() -> List[Dict[str, Any]]:
+def list_sessions() -> list[dict[str, Any]]:
     init_db()
     with _get_conn() as conn:
         cur = conn.cursor()
         cur.execute("SELECT * FROM sessions ORDER BY updated_at DESC")
         return [dict(row) for row in cur.fetchall()]
 
-def get_session(session_id: str) -> Optional[Dict[str, Any]]:
+def get_session(session_id: str) -> dict[str, Any] | None:
     init_db()
     with _get_conn() as conn:
         cur = conn.cursor()
@@ -71,7 +78,10 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
         if not session_row:
             return None
         
-        cur.execute("SELECT * FROM session_messages WHERE session_id = ? ORDER BY timestamp ASC", (session_id,))
+        # rowid breaks timestamp ties: timestamps have 1-second
+        # resolution, so same-second turns (a fast user/assistant pair)
+        # would otherwise come back in whatever order SQLite pleases.
+        cur.execute("SELECT * FROM session_messages WHERE session_id = ? ORDER BY timestamp ASC, rowid ASC", (session_id,))
         raw_messages = [dict(row) for row in cur.fetchall()]
         messages = []
         for m in raw_messages:
@@ -80,7 +90,7 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
                 if isinstance(th, str):
                     try:
                         m["thoughts"] = json.loads(th)
-                    except Exception:
+                    except (ValueError, TypeError):
                         m["thoughts"] = []
                 elif isinstance(th, list):
                     m["thoughts"] = th
@@ -106,31 +116,49 @@ def create_session(title: str = "New Chat") -> str:
         conn.commit()
     return session_id
 
-def add_message(session_id: str, role: str, content: str, thoughts: Optional[Any] = None) -> None:
+# Client-supplied message ids (edit-and-resend hardening): the UI
+# generates the id for a user message and sends it with START_TASK, so
+# the rendered message and the stored row share one identity and a
+# later edit can address the exact row. Only plain id shapes are
+# accepted; anything else falls back to a fresh UUID.
+_CLIENT_MESSAGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$")
+
+
+def add_message(session_id: str, role: str, content: str, thoughts: Any = None, message_id: str | None = None) -> str:
     init_db()
-    msg_id = str(uuid.uuid4())
+    msg_id = message_id if (isinstance(message_id, str) and _CLIENT_MESSAGE_ID.match(message_id)) else str(uuid.uuid4())
     now = int(time.time())
     if thoughts is not None:
         if isinstance(thoughts, str):
             try:
                 json.loads(thoughts)
                 thoughts_json = thoughts
-            except Exception:
+            except (ValueError, TypeError):
                 thoughts_json = json.dumps(thoughts)
         else:
             thoughts_json = json.dumps(thoughts)
     else:
         thoughts_json = None
     with _get_conn() as conn:
-        conn.execute(
-            "INSERT INTO session_messages (id, session_id, role, content, thoughts, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-            (msg_id, session_id, role, content, thoughts_json, now)
-        )
+        try:
+            conn.execute(
+                "INSERT INTO session_messages (id, session_id, role, content, thoughts, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                (msg_id, session_id, role, content, thoughts_json, now)
+            )
+        except sqlite3.IntegrityError:
+            # A re-delivered packet can carry the same client id twice;
+            # the message must still be stored, under a fresh UUID.
+            msg_id = str(uuid.uuid4())
+            conn.execute(
+                "INSERT INTO session_messages (id, session_id, role, content, thoughts, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                (msg_id, session_id, role, content, thoughts_json, now)
+            )
         conn.execute(
             "UPDATE sessions SET updated_at = ? WHERE id = ?",
             (now, session_id)
         )
         conn.commit()
+    return msg_id
 
 def delete_session(session_id: str) -> bool:
     init_db()
@@ -156,32 +184,82 @@ def truncate_session(session_id: str, message_id: str) -> bool:
     init_db()
     with _get_conn() as conn:
         cur = conn.cursor()
+        # The rowid subquery is scoped to this session: an id that only
+        # exists in another session must never truncate this one.
         cur.execute(
-            "DELETE FROM session_messages WHERE session_id = ? AND rowid >= (SELECT rowid FROM session_messages WHERE id = ?)",
-            (session_id, message_id)
+            "DELETE FROM session_messages WHERE session_id = ? AND rowid >= (SELECT rowid FROM session_messages WHERE id = ? AND session_id = ?)",
+            (session_id, message_id, session_id)
         )
         conn.commit()
         return cur.rowcount > 0
 
-def truncate_session_by_content(session_id: str, role: str, content: str) -> bool:
+def truncate_session_by_content(session_id: str, role: str, content: str, occurrence: int | None = None) -> bool:
+    """Truncate at a message identified by role + content.
+
+    Fallback for messages whose UI id is not a stored row id. With
+    *occurrence* (0-based, counted in stored order) the exact duplicate
+    the user clicked is the cut point — the legacy behaviour without it
+    picks the most recent match, which silently desyncs the UI from
+    the store when the same text was sent more than once.
+    """
     init_db()
     with _get_conn() as conn:
         cur = conn.cursor()
-        # Find the most recent message matching this content and role
+        if occurrence is None:
+            cur.execute(
+                "SELECT rowid FROM session_messages WHERE session_id = ? AND role = ? AND content = ? ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+                (session_id, role, content)
+            )
+            row = cur.fetchone()
+            if not row:
+                return False
+            cut_rowid = row["rowid"]
+        else:
+            cur.execute(
+                "SELECT rowid FROM session_messages WHERE session_id = ? AND role = ? AND content = ? ORDER BY rowid ASC",
+                (session_id, role, content)
+            )
+            rows = cur.fetchall()
+            if occurrence < 0 or occurrence >= len(rows):
+                return False
+            cut_rowid = rows[occurrence]["rowid"]
         cur.execute(
-            "SELECT id FROM session_messages WHERE session_id = ? AND role = ? AND content = ? ORDER BY timestamp DESC, rowid DESC LIMIT 1", 
-            (session_id, role, content)
-        )
-        row = cur.fetchone()
-        if not row:
-            return False
-        msg_id = row["id"]
-        cur.execute(
-            "DELETE FROM session_messages WHERE session_id = ? AND rowid >= (SELECT rowid FROM session_messages WHERE id = ?)",
-            (session_id, msg_id)
+            "DELETE FROM session_messages WHERE session_id = ? AND rowid >= ?",
+            (session_id, cut_rowid)
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+def get_chat_history(session_id: str, current_prompt: str | None = None, *, limit: int = 20, max_chars: int = 24_000) -> list[dict[str, str]]:
+    """Model-facing history for a session: user/assistant turns only.
+
+    Shared by the fast-chat runner and the graph executor (which seeds
+    a fresh checkpoint thread from it, e.g. after an edit invalidated
+    the old thread). A trailing user message identical to
+    *current_prompt* is the just-saved current turn and is excluded —
+    callers append the prompt themselves. Bounded by message count and
+    total characters, most recent turns kept.
+    """
+    sess = get_session(session_id)
+    if not sess:
+        return []
+    history: list[dict[str, str]] = []
+    for msg in sess.get("messages", []):
+        role = msg.get("role")
+        content = (msg.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        history.append({"role": role, "content": content})
+    if current_prompt:
+        target = current_prompt.strip()
+        if history and history[-1]["role"] == "user" and history[-1]["content"] == target:
+            history.pop()
+    history = history[-limit:]
+    total = sum(len(m["content"]) for m in history)
+    while total > max_chars and len(history) > 1:
+        total -= len(history.pop(0)["content"])
+    return history
 
 # ---------------------------------------------------------------------------
 # Phase 10.3 A1: retention / pruning. Before this, sessions had no pruning,
@@ -197,10 +275,10 @@ def truncate_session_by_content(session_id: str, role: str, content: str) -> boo
 # so a long-lived but active chat is not pruned.
 # ---------------------------------------------------------------------------
 
-def prune_sessions(retention_days: Optional[int] = None,
-                   max_sessions: Optional[int] = None,
-                   *, config: Optional[UserConfig] = None,
-                   now: Optional[int] = None) -> Dict[str, int]:
+def prune_sessions(retention_days: int | None = None,
+                   max_sessions: int | None = None,
+                   *, config: UserConfig | None = None,
+                   now: int | None = None) -> dict[str, int]:
     """Prune sessions by age (on updated_at), then by count (oldest first).
 
     Returns counts and logs them to the audit log (SESSIONS_PRUNED).

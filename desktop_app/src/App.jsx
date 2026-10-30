@@ -639,9 +639,17 @@ function AppContent() {
   }, [isConnected, wsRef]);
 
   const handleSendMessage = (text) => {
+    // One stable id for this message, shared by the rendered bubble and
+    // the stored row (the engine saves it under this id), so a later
+    // edit-and-resend addresses the exact message — never a content
+    // lookalike. Falls back to a timestamp+random id where randomUUID
+    // is unavailable.
+    const messageId = (window.crypto && typeof window.crypto.randomUUID === 'function')
+      ? window.crypto.randomUUID()
+      : `msg-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
     setChatMessages(prev => [
-      ...prev, 
-      { role: 'user', content: text, isFinal: true },
+      ...prev,
+      { id: messageId, role: 'user', content: text, isFinal: true },
       { role: 'agent', content: '', thoughts: [], isFinal: false }
     ]);
     setIsThinking(true);
@@ -649,10 +657,11 @@ function AppContent() {
       wsRef.current.send(JSON.stringify({
         type: 'START_TASK',
         schema_version: 1,
-        request_id: Date.now().toString(),
+        request_id: messageId,
         payload: {
           prompt: text,
-          session_id: activeSession
+          session_id: activeSession,
+          message_id: messageId
         }
       }));
     } else {
@@ -785,37 +794,70 @@ function AppContent() {
   };
 
   const handleEditMessage = (msg, index) => {
+    // Only user messages are editable, and only with real text content.
+    if (!msg || msg.role !== 'user') return;
+    const content = typeof msg.content === 'string' ? msg.content : '';
+
     // 1. Cancel any running task first so ghost progress doesn't stream in
     if (isThinking) {
       handleStopTask();
     }
 
-    // 2. Tell the engine to wipe this message + everything after it from the DB
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    // 2. Tell the engine to wipe this message + everything after it.
+    //    Sent through the socket facade unconditionally: the facade
+    //    queues while offline and flushes in order on reconnect, so the
+    //    truncate is never silently dropped (the old readyState check
+    //    threw it away whenever the socket was mid-reconnect). The
+    //    occurrence tells the engine WHICH identical message was
+    //    clicked when the id isn't a stored row id.
+    const sessionId = activeSessionRef.current;
+    let occurrence = 0;
+    if (Number.isInteger(index) && index > 0) {
+      occurrence = chatMessages
+        .slice(0, index)
+        .filter(m => m.role === 'user' && m.content === content)
+        .length;
+    }
+    if (sessionId && wsRef.current && wsRef.current.send) {
       wsRef.current.send(JSON.stringify({
         type: 'SESSION_TRUNCATE_REQUEST',
         schema_version: 1,
         request_id: Date.now().toString(),
         payload: {
-          session_id: activeSession,
-          message_id: msg.id,
-          content: msg.content,
-          role: msg.role
+          session_id: sessionId,
+          message_id: msg.id || null,
+          content,
+          role: 'user',
+          occurrence
         }
       }));
     }
 
-    // 3. Prune the local chat messages from the edited message onward
+    // 3. Prune the local chat from the edited message onward. Resolve
+    //    the row defensively — rendered index first (it is the row the
+    //    user clicked), then the shared id, then the occurrence-aware
+    //    content match. If none resolve, leave the list untouched
+    //    rather than cutting the wrong branch.
     setChatMessages(prev => {
-      let idx = index;
-      if (idx === undefined || idx < 0 || idx >= prev.length || (msg.id && prev[idx].id !== msg.id)) {
-        idx = prev.findIndex(m => (m.id && msg.id && m.id === msg.id) || (!m.id && !msg.id && m.content === msg.content && m.role === msg.role));
+      let idx = -1;
+      if (Number.isInteger(index) && prev[index]
+          && prev[index].role === 'user' && prev[index].content === content) {
+        idx = index;
       }
-      
-      if (idx !== -1) {
-        return prev.slice(0, idx);
+      if (idx === -1 && msg.id) {
+        idx = prev.findIndex(m => m.id === msg.id);
       }
-      return prev;
+      if (idx === -1) {
+        let seen = -1;
+        idx = prev.findIndex(m => {
+          if (m.role === 'user' && m.content === content) {
+            seen += 1;
+            return seen === occurrence;
+          }
+          return false;
+        });
+      }
+      return idx === -1 ? prev : prev.slice(0, idx);
     });
   };
 

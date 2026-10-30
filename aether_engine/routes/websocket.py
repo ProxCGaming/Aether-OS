@@ -20,6 +20,7 @@ from aether_engine.config import (
     AUXILIARY_TASK_CLASSES,
     save_config,
 )
+from aether_engine.langgraph.checkpointer import delete_thread_checkpoints
 from aether_engine.langgraph.executor import (
     get_pending_approvals,
     resume_langgraph_task,
@@ -346,7 +347,12 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     continue
 
                 try:
-                    await asyncio.to_thread(session_store.add_message, session_id, "user", prompt)
+                    # The UI's client-generated id becomes the row id, so
+                    # the rendered message and the stored message share
+                    # one identity (edit-and-resend addresses the row).
+                    await asyncio.to_thread(
+                        session_store.add_message, session_id, "user", prompt,
+                        None, msg.payload.get("message_id"))
                 except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not block the task
                     logger.error(f"Failed to save user message: {e}")
 
@@ -810,12 +816,34 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 msg_id = msg.payload.get("message_id")
                 content = msg.payload.get("content")
                 role = msg.payload.get("role", "user")
+                try:
+                    occurrence = int(msg.payload["occurrence"]) if msg.payload.get("occurrence") is not None else None
+                except (TypeError, ValueError):
+                    occurrence = None
                 truncated = False
                 if sess_id:
                     if msg_id:
                         truncated = await asyncio.to_thread(session_store.truncate_session, sess_id, msg_id)
-                    elif content:
-                        truncated = await asyncio.to_thread(session_store.truncate_session_by_content, sess_id, role, content)
+                    if not truncated and content:
+                        # The UI id is not always a stored row id (MCP
+                        # prompt messages, transferred chats): fall back
+                        # to the occurrence-aware content match instead
+                        # of silently truncating nothing.
+                        truncated = await asyncio.to_thread(
+                            session_store.truncate_session_by_content,
+                            sess_id, role, content, occurrence=occurrence)
+                if truncated and sess_id:
+                    # Invalidate the graph thread (keyed by session id):
+                    # without this the next run keeps reasoning over the
+                    # deleted branch. Best-effort — the store is already
+                    # correct, and the executor re-seeds a fresh thread
+                    # from the retained history.
+                    try:
+                        await delete_thread_checkpoints(sess_id)
+                    except Exception:  # checkpoint cleanup must not fail the truncate response.
+                        logger.warning(
+                            f"Could not delete checkpoints for truncated session {sess_id}",
+                            exc_info=True)
                 await ws.send_text(Event(
                     type=EventType.SESSION_TRUNCATE_RESPONSE,
                     request_id=req_id,

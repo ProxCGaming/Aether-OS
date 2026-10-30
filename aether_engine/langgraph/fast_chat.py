@@ -59,31 +59,14 @@ def load_session_history(
     if not session_id:
         return []
     try:
-        sess = session_store.get_session(session_id)
+        # The shaping lives in the session store (shared with the graph
+        # executor's fresh-thread seeding); this wrapper only keeps the
+        # best-effort contract: a broken store yields no history.
+        return session_store.get_chat_history(
+            session_id, current_prompt, limit=limit, max_chars=_HISTORY_MAX_CHARS)
     except Exception:  # History is best-effort; a broken store must not break the chat turn.
         logger.debug("Fast chat: session history unavailable", exc_info=True)
         return []
-    if not sess:
-        return []
-
-    history: list[dict[str, Any]] = []
-    for msg in sess.get("messages", []):
-        role = msg.get("role")
-        content = (msg.get("content") or "").strip()
-        if role not in ("user", "assistant") or not content:
-            continue
-        history.append({"role": role, "content": content})
-
-    if current_prompt:
-        target = current_prompt.strip()
-        if history and history[-1]["role"] == "user" and history[-1]["content"] == target:
-            history.pop()
-
-    history = history[-limit:]
-    total = sum(len(m["content"]) for m in history)
-    while total > _HISTORY_MAX_CHARS and len(history) > 1:
-        total -= len(history.pop(0)["content"])
-    return history
 
 
 async def run_fast_chat(
