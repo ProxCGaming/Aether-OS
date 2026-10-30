@@ -111,6 +111,12 @@ class UserConfig:
     # "risks": [...]?} — see tools/policy.py. Project-layer config may
     # NOT set this (config_layers strips it with tool_policies).
     path_rules: list[dict] = field(default_factory=list)
+    # Epic 3, E3-02: per-MCP-tool risk classification,
+    # {"server__tool": "read_only" | "write" | "execute" |
+    # "destructive"}. Empty = every MCP tool keeps its EXECUTE
+    # default (approval-required). Applied in
+    # MCPRegistry.get_mcp_tools at registry-build time.
+    mcp_tool_risk_overrides: dict[str, str] = field(default_factory=dict)
     # Epic 2, E2-07: user regex patterns appended to the built-in shell
     # safety rules (validation/shell_rules.py).
     extra_shell_deny_patterns: list[str] = field(default_factory=list)
@@ -196,6 +202,7 @@ class UserConfig:
             "task_classes": self.task_classes,
             "tool_policies": self.tool_policies,
             "path_rules": self.path_rules,
+            "mcp_tool_risk_overrides": dict(self.mcp_tool_risk_overrides),
             "extra_shell_deny_patterns": self.extra_shell_deny_patterns,
             "extra_shell_ask_patterns": self.extra_shell_ask_patterns,
             "approval_mode": self.approval_mode,
@@ -283,6 +290,7 @@ class UserConfig:
             }),
             tool_policies=_as_dict(d.get("tool_policies")),
             path_rules=[r for r in d.get("path_rules", []) if isinstance(r, dict)] if isinstance(d.get("path_rules"), list) else [],
+            mcp_tool_risk_overrides=_clean_mcp_risk_overrides(d.get("mcp_tool_risk_overrides")),
             extra_shell_deny_patterns=[p for p in d.get("extra_shell_deny_patterns", []) if isinstance(p, str)] if isinstance(d.get("extra_shell_deny_patterns"), list) else [],
             extra_shell_ask_patterns=[p for p in d.get("extra_shell_ask_patterns", []) if isinstance(p, str)] if isinstance(d.get("extra_shell_ask_patterns"), list) else [],
             approval_mode=d.get("approval_mode") if d.get("approval_mode") in ("ask", "write") else "ask",
@@ -315,6 +323,18 @@ class UserConfig:
             compaction_trigger_chars=_as_int(d.get("compaction_trigger_chars"), 24000),
             compaction_keep_recent=_as_int(d.get("compaction_keep_recent"), 12),
         )
+
+
+def _clean_mcp_risk_overrides(value) -> dict[str, str]:
+    """Epic 3, E3-02: keep only {"server__tool": valid-risk} entries."""
+    if not isinstance(value, dict):
+        return {}
+    valid = {"read_only", "write", "execute", "destructive"}
+    return {
+        str(k): str(v)
+        for k, v in value.items()
+        if isinstance(k, str) and "__" in k and str(v) in valid
+    }
 
 
 def load_config(path: Path | None = None) -> UserConfig:

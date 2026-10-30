@@ -542,7 +542,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
 
                     reqs = infer_task_requirements(prompt)
                     tools = build_tool_registry(
-                        mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
+                        mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
                         include_file_tools=reqs.wants_code or (requested_model is not None),
                     )
 
@@ -630,7 +630,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
 
                 tools = build_tool_registry(
-                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
+                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
                 )
 
                 # Epic 2, E2-09: a scoped approval ("this file" / "this
@@ -1236,7 +1236,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     return d
 
                 all_tools = build_tool_registry(
-                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
+                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
                 ).get_tools()
                 defs = []
                 for t in all_tools:

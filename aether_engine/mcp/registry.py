@@ -560,17 +560,42 @@ class MCPRegistry:
         holder["tool"] = tool
         return tool
 
-    def get_mcp_tools(self, filter_node: str | None = None) -> list[Tool]:
+    def get_mcp_tools(self, filter_node: str | None = None, *, risk_overrides: dict | None = None) -> list[Tool]:
         """
         Returns converted MCP tools for connected servers (cached at
         connect time). Empty until a server is connected — honestly, not
         scaffolded. ``filter_node`` is accepted for the old call sites;
         all agents get all MCP tools in v1 (PRD Q10), so it is ignored.
+
+        Epic 3, E3-02: ``risk_overrides`` (UserConfig
+        ``mcp_tool_risk_overrides``) maps ``server__tool`` to a risk
+        value; matching tools are returned as copies with the
+        overridden risk so every downstream consumer — policy, plan
+        mode, the tool list — sees the user's classification instead
+        of the EXECUTE default. Unknown names and invalid risk values
+        are ignored with a log line.
         """
         tools: list[Tool] = []
         for server_tools in self._tools_cache.values():
             tools.extend(server_tools)
-        return tools
+        if not risk_overrides:
+            return tools
+        import dataclasses
+
+        overridden: list[Tool] = []
+        for tool in tools:
+            raw = risk_overrides.get(tool.name)
+            if raw is None:
+                overridden.append(tool)
+                continue
+            try:
+                risk = ToolRisk(str(raw))
+            except ValueError:
+                logger.warning("Ignoring invalid MCP risk override for %s: %r", tool.name, raw)
+                overridden.append(tool)
+                continue
+            overridden.append(dataclasses.replace(tool, risk=risk) if risk != tool.risk else tool)
+        return overridden
 
 
 GLOBAL_MCP_REGISTRY = MCPRegistry()
