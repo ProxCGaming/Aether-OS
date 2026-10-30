@@ -55,7 +55,7 @@ DEFAULT_AUDIT_LOG_PATH = Path("logs/audit.log")
 # Tools the worker is allowed to execute. Anything else is refused —
 # an unknown tool must never report a false success (the old code
 # returned {"status": "noop"} for unknown tools).
-ALLOWED_TOOLS = frozenset({"execute_shell", "write_file", "delete_file"})
+ALLOWED_TOOLS = frozenset({"execute_shell", "write_file", "delete_file", "edit_file", "create_directory"})
 
 
 async def run_worker(task_payload: dict):
@@ -82,7 +82,9 @@ async def run_worker(task_payload: dict):
         content = args.get("content", "")
         if not path:
             raise ValueError("File path is required")
-        Path(path).write_text(content, encoding="utf-8")
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)  # E2-04/D3: implicit parents
+        target.write_text(content, encoding="utf-8")
         return {"path": path, "written": True}
 
     if tool_name == "delete_file":
@@ -91,6 +93,44 @@ async def run_worker(task_payload: dict):
             raise ValueError("File path is required")
         Path(path).unlink(missing_ok=True)
         return {"path": path, "deleted": True}
+
+    if tool_name == "edit_file":
+        # Epic 2, E2-03: same aether_common contract the engine's
+        # in-process implementation uses — hash check, unique anchors,
+        # all-or-nothing, atomic write. Failures raise, so the worker
+        # reports a real error and nothing is written.
+        from aether_common.text_edit import (
+            apply_text_edits,
+            atomic_write_bytes,
+            content_hash,
+        )
+
+        path = args.get("path")
+        edits = args.get("edits") or []
+        expected_hash = args.get("expected_hash") or ""
+        if not path:
+            raise ValueError("File path is required")
+        target = Path(path)
+        if not target.is_file():
+            raise ValueError(f"edit_file failed: '{path}' does not exist or is not a file.")
+        data = target.read_bytes()
+        actual = content_hash(data)
+        if expected_hash and actual != expected_hash:
+            raise ValueError(
+                f"edit_file failed: '{path}' changed since it was read "
+                f"(expected sha256 {expected_hash[:12]}…, found {actual[:12]}…). Re-read the file."
+            )
+        new_text = apply_text_edits(data.decode("utf-8"), edits)
+        atomic_write_bytes(path, new_text.encode("utf-8"))
+        return {"path": path, "edited": True, "edits_applied": len(edits)}
+
+    if tool_name == "create_directory":
+        # Epic 2, E2-04: parents=True — one call creates the whole chain.
+        path = args.get("path")
+        if not path:
+            raise ValueError("Directory path is required")
+        Path(path).mkdir(parents=True, exist_ok=True)
+        return {"path": path, "created": True}
 
     raise ValueError(f"Unknown tool: {tool_name!r}")
 
@@ -102,7 +142,7 @@ def _audit_event(action: str, details: dict) -> None:
         with open(DEFAULT_AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps({"type": "ENGINE_EVENT", "ts": time.time(),
                                 "action": action, "details": details}) + "\n")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 — deliberate: audit writes are best-effort in the worker; a logging failure must never change an execution outcome.
         pass
 
 

@@ -41,14 +41,45 @@ def validate_tool_request(
             return ValidationResult(False, f"Read validation failed: path '{path}' is outside permitted workspace roots.")
         return ValidationResult(True, details={"path": str(path)})
 
+    if tool_name in {"find_files", "search_text"}:
+        # Epic 2, E2-02: find/search obey the same containment for their
+        # optional `path` arg (a file or directory); pattern/query-only
+        # calls search the roots themselves and have nothing to check.
+        # The tools enforce containment again in-process.
+        raw_path = args.get("path")
+        if raw_path:
+            path = Path(raw_path)
+            if not _is_path_in_roots(path, roots):
+                return ValidationResult(False, f"Search validation failed: path '{path}' is outside permitted workspace roots.")
+            return ValidationResult(True, details={"path": str(path)})
+        return ValidationResult(True, details={"tool_name": tool_name})
+
     if tool_name == "write_file":
         path = Path(args.get("path", ""))
         if not _is_path_in_roots(path, roots):
             return ValidationResult(False, f"Write validation failed: path '{path}' is outside permitted workspace roots.")
-        if not path.parent.exists():
-            return ValidationResult(False, "Write validation failed: parent directory does not exist.")
-        if not os.access(path.parent, os.W_OK):
+        # Epic 2, E2-04 (D3): missing parents are created by the tool, so
+        # writability is judged at the nearest EXISTING ancestor — which
+        # containment already proved is inside a root.
+        ancestor = path.parent
+        while not ancestor.exists() and ancestor != ancestor.parent:
+            ancestor = ancestor.parent
+        if not os.access(ancestor, os.W_OK):
             return ValidationResult(False, "Write validation failed: parent directory is not writable.")
+        return ValidationResult(True, details={"path": str(path)})
+
+    if tool_name == "edit_file":
+        path = Path(args.get("path", ""))
+        if not _is_path_in_roots(path, roots):
+            return ValidationResult(False, f"Edit validation failed: path '{path}' is outside permitted workspace roots.")
+        if not path.is_file():
+            return ValidationResult(False, "Edit validation failed: target file does not exist.")
+        return ValidationResult(True, details={"path": str(path)})
+
+    if tool_name == "create_directory":
+        path = Path(args.get("path", ""))
+        if not _is_path_in_roots(path, roots):
+            return ValidationResult(False, f"Create-directory validation failed: path '{path}' is outside permitted workspace roots.")
         return ValidationResult(True, details={"path": str(path)})
 
     if tool_name == "delete_file":

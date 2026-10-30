@@ -360,6 +360,7 @@ async def run_langgraph_task(
                                     "task_id": task_id,
                                     "approval_key": thread_id,
                                     "task_class": intr_val.get("task_class"),
+"preview": intr_val.get("preview"),
                                     "workspace_roots": workspace_roots or [],
                                 },
                             )
@@ -691,6 +692,7 @@ async def resume_langgraph_task(
                                         "task_id": task_id,
                                         "approval_key": thread_id,
                                         "task_class": intr_val.get("task_class"),
+"preview": intr_val.get("preview"),
                                         "workspace_roots": workspace_roots or [],
                                     },
                                 )
@@ -889,7 +891,8 @@ async def get_pending_approvals() -> list[dict[str, Any]]:
                                 "task_id": state.values.get("task_id", t_id),
                                 "tool_name": intr_val.get("tool_name"),
                                 "args": intr_val.get("args"),
-                                "task_class": intr_val.get("task_class", "standard")
+                                "task_class": intr_val.get("task_class", "standard"),
+                                "preview": intr_val.get("preview")
                             })
                             break
             except Exception as e:  # noqa: BLE001 — per-thread scan isolation: one unreadable thread is logged and must not abort the approvals listing
