@@ -244,25 +244,38 @@ class AetherSupervisorModel(BaseChatModel):
 
         memory_calls = [tc for tc in tool_calls if tc.name in MEMORY_TOOL_NAMES]
         transfer_calls = [tc for tc in tool_calls if tc.name.startswith(HANDOFF_PREFIX)]
+        # Epic 3, E3-01 (issue 012 diagnosability): calls that are
+        # neither memory nor handoff are NOT the supervisor's to run —
+        # it is offered only memory + handoff tools, and real tool work
+        # belongs to specialists through the central pipeline. They are
+        # still dropped, but never silently: the names are logged and
+        # recorded on the decision (delegation_log) so a vanished tool
+        # call is diagnosable instead of a mystery.
+        dropped_calls = [
+            tc.name for tc in tool_calls if tc not in memory_calls and tc not in transfer_calls
+        ]
+        if dropped_calls:
+            logger.warning(
+                "Supervisor emitted non-supervisor tool calls, dropped (delegate to a specialist instead): %s",
+                dropped_calls,
+            )
 
         if transfer_calls:
             target = transfer_calls[0].name[len(HANDOFF_PREFIX):]
             decision = {"next": target, "reason": (content or "").strip(), "briefing": ""}
+            if dropped_calls:
+                decision["dropped_tool_calls"] = dropped_calls
             if target not in available:
                 # Routing clamps to END, exactly like the old node; the
                 # attempted decision is still what gets logged (hook).
                 return _end_result(decision["reason"], decision=decision)
             return _handoff_result(target, decision, memory_calls)
 
-        if tool_calls and not memory_calls:
-            # The provider invented tools the supervisor does not have;
-            # drop them and read the reply as a text decision.
-            tool_calls = []
-
         if memory_calls:
             message = AIMessage(
                 content=content or "",
                 tool_calls=[_langchain_tool_call(tc) for tc in memory_calls],
+                additional_kwargs={"aether_dropped_tool_calls": dropped_calls} if dropped_calls else {},
             )
             return ChatResult(generations=[ChatGeneration(message=message)])
 
@@ -273,6 +286,8 @@ class AetherSupervisorModel(BaseChatModel):
                 "reason": f"Failed to parse supervisor decision: {(content or '')[:100]}",
                 "briefing": "",
             }
+        if dropped_calls:
+            decision["dropped_tool_calls"] = dropped_calls
         next_node = decision.get("next", "END")
         if next_node != "END" and next_node in available:
             return _handoff_result(next_node, decision)
