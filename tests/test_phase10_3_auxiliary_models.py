@@ -68,7 +68,7 @@ class TestAcceptedTaskSet:
         # to consult it — never widen the accepted set alone. "vision"
         # is consulted by routing/policy.py; "compression" by
         # langgraph/compaction.py (Epic 1, E1-06 — the summariser).
-        assert AUXILIARY_TASK_CLASSES == frozenset({"vision", "compression"})
+        assert AUXILIARY_TASK_CLASSES == frozenset({"vision", "compression", "advisor"})
 
     def test_placebo_tasks_are_not_in_accepted_set(self):
         for task in PLACEBO_TASKS:
