@@ -1,13 +1,70 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification, globalShortcut, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const WebSocket = require('ws');
+const { createWindowStateStore } = require('./electron/windowState.cjs');
+const { shouldNotify, notificationContent } = require('./electron/notify.cjs');
 
 const isDev = process.env.NODE_ENV === 'development';
 
 let mainWindow = null;
 let floatingChatWindow = null;
 let wsClient = null;
+let tray = null;
+let windowStateStore = null;
+let saveBoundsTimer = null;
+
+// Epic 6, E6-01: single instance — a second launch focuses the
+// running window instead of starting a duplicate app/engine link.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+}
+app.on('second-instance', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (!mainWindow.isVisible()) mainWindow.show();
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
+
+function getWindowStateStore() {
+  if (!windowStateStore) {
+    windowStateStore = createWindowStateStore({
+      filePath: path.join(app.getPath('userData'), 'window-state.json'),
+      fs,
+    });
+  }
+  return windowStateStore;
+}
+
+function scheduleSaveBounds() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (saveBoundsTimer) clearTimeout(saveBoundsTimer);
+  saveBoundsTimer = setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      getWindowStateStore().save(mainWindow.getBounds());
+    }
+  }, 400);
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (!mainWindow.isVisible()) mainWindow.show();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
+}
+
+function toggleMainWindow() {
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused()) {
+    mainWindow.hide();
+  } else {
+    showMainWindow();
+  }
+}
 
 function getToken() {
   try {
@@ -44,6 +101,23 @@ function connectEngine() {
   wsClient.on('message', (data) => {
     const msgStr = data.toString();
     broadcastEngineMessage(msgStr);
+    // Epic 6, E6-01: OS notifications for task completion /
+    // approval-needed, only when the user is not looking at the app
+    // (decision logic in electron/notify.cjs, unit-tested).
+    try {
+      const visible = !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
+      const focused = !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused());
+      if (shouldNotify(msgStr, { windowVisible: visible, windowFocused: focused }) && Notification.isSupported()) {
+        const content = notificationContent(msgStr);
+        if (content) {
+          const note = new Notification(content);
+          note.on('click', showMainWindow);
+          note.show();
+        }
+      }
+    } catch {
+      // Notifications are best-effort; never break message flow.
+    }
   });
 
   wsClient.on('close', () => {
@@ -68,9 +142,11 @@ function broadcastEngineMessage(msg) {
 }
 
 function createWindow() {
+  const bounds = getWindowStateStore().load();
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
+    width: bounds.width,
+    height: bounds.height,
+    ...(bounds.x !== undefined ? { x: bounds.x, y: bounds.y } : {}),
     titleBarStyle: 'hidden',
     transparent: true,
     vibrancy: 'ultra-dark', // macOS
@@ -88,9 +164,30 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, 'dist/index.html'));
   }
   
+  mainWindow.on('resize', scheduleSaveBounds);
+  mainWindow.on('move', scheduleSaveBounds);
+  mainWindow.on('close', () => {
+    if (saveBoundsTimer) clearTimeout(saveBoundsTimer);
+    getWindowStateStore().save(mainWindow.getBounds());
+  });
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+}
+
+function createTray() {
+  if (tray) return;
+  // Placeholder icon until packaging ships a real one (Epic 10);
+  // the menu + tooltip carry the function.
+  tray = new Tray(nativeImage.createEmpty());
+  tray.setToolTip('Aether-OS');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Show Aether-OS', click: showMainWindow },
+    { label: 'Hide', click: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide(); } },
+    { type: 'separator' },
+    { label: 'Quit', click: () => app.quit() },
+  ]));
+  tray.on('click', toggleMainWindow);
 }
 
 function createFloatingChat(sessionId) {
@@ -128,14 +225,26 @@ function createFloatingChat(sessionId) {
 }
 
 app.whenReady().then(() => {
+  if (!gotSingleInstanceLock) return;
   createWindow();
   connectEngine();
+  createTray();
+  // Epic 6, E6-01: global summon hotkey (Alt+Space toggles the window).
+  try {
+    globalShortcut.register('Alt+Space', toggleMainWindow);
+  } catch (err) {
+    console.error('Failed to register summon hotkey:', err);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     }
   });
+});
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
 });
 
 app.on('window-all-closed', () => {
