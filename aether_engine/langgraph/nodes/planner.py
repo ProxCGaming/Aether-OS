@@ -31,6 +31,12 @@ async def planner_node(state: AetherState, config: RunnableConfig) -> dict:
     secret_store = config.get("configurable", {}).get("secret_store")
     
     agent_model_override = agent_models.get("planner")
+    # E1-13 prewalk: for prewalk-enabled agents the per-agent model is
+    # the EXECUTION model — until the first write/execute tool lands,
+    # the agent plans on the run's (strong) provider instead.
+    _uc = config.get("configurable", {}).get("user_config")
+    if agent_model_override and "planner" in (getattr(_uc, "prewalk_agents", None) or []) and not state.get("write_tool_used"):
+        agent_model_override = None
     if agent_model_override and agent_model_override != "inherit" and secret_store:
         try:
             parts = agent_model_override.split(":", 1)

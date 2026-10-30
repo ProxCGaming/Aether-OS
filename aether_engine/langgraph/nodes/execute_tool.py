@@ -126,6 +126,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
             "tool_call_repeats": 0,
         }
 
+    executed_write = False
     if not registry:
         result_text = f"Error: No tool registry provided to graph. Cannot execute {tool_name}."
     else:
@@ -148,6 +149,12 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                 audit_logger=audit_logger,
             )
             result_text = json.dumps(result) if not isinstance(result, str) else (result or f"Tool {tool_name} completed.")
+            # E1-13 prewalk marker: only a tool that actually executed
+            # counts, and only if it can change something.
+            try:
+                executed_write = registry.get_tool(tool_name).risk.value != "read_only"
+            except Exception:  # noqa: BLE001 — unknown tool metadata must not fail the run; it just doesn't flip the prewalk switch.
+                executed_write = False
         except ToolNotFoundError:
             result_text = f"Error: Tool {tool_name} not found in registry."
         except ToolExecutionError as e:
@@ -179,9 +186,12 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     }
 
     # Clear pending_tool_call and add the message
-    return {
+    update = {
         "pending_tool_call": None,
         "messages": [tool_message],
         "tool_call_signature": signature,
         "tool_call_repeats": repeats,
     }
+    if executed_write:
+        update["write_tool_used"] = True
+    return update

@@ -171,6 +171,12 @@ class AetherState(TypedDict):
     tool_call_signature: str | None
     tool_call_repeats: int
 
+    # Prewalk (Epic 1, E1-13): set by execute_tool once a non-READ_ONLY
+    # tool has actually executed; prewalk-enabled specialists plan on
+    # the run provider until this flips, then switch to their per-agent
+    # (execution) model.
+    write_tool_used: bool
+
     # Structured log entries for delegation decisions (echo-collapsed
     # like messages: the supervisor agent returns the full log).
     delegation_log: Annotated[list[dict[str, Any]], collapse_subgraph_echo]

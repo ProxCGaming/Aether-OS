@@ -120,6 +120,10 @@ class UserConfig:
     # dict). When set, the agent's final answer must validate against
     # the schema; see aether_engine/langgraph/structured.py.
     agent_output_schemas: dict[str, Any] = field(default_factory=dict)
+    # Epic 1, E1-13: agents opted into prewalk — they plan on the run
+    # provider and switch to their agent_models entry (the execution
+    # model) at the first executed write/execute tool.
+    prewalk_agents: list[str] = field(default_factory=list)
     custom_slash_commands: dict[str, dict] = field(default_factory=dict)
     disable_fallbacks: bool = False
     fallback_chain: list[str] = field(default_factory=list)
@@ -176,6 +180,7 @@ class UserConfig:
             "supervisor_spawn_allowlist": self.supervisor_spawn_allowlist,
             "supervisor_delegation_cap": self.supervisor_delegation_cap,
             "agent_output_schemas": self.agent_output_schemas,
+            "prewalk_agents": self.prewalk_agents,
             "custom_slash_commands": self.custom_slash_commands,
             "disable_fallbacks": self.disable_fallbacks,
             "fallback_chain": self.fallback_chain,
@@ -256,6 +261,7 @@ class UserConfig:
             supervisor_spawn_allowlist=_as_optional_str_list(d.get("supervisor_spawn_allowlist")),
             supervisor_delegation_cap=_as_int(d.get("supervisor_delegation_cap"), 8),
             agent_output_schemas=_as_dict(d.get("agent_output_schemas")),
+            prewalk_agents=d.get("prewalk_agents") if isinstance(d.get("prewalk_agents"), list) else [],
             custom_slash_commands=_as_dict(d.get("custom_slash_commands")),
             disable_fallbacks=d.get("disable_fallbacks", False),
             fallback_chain=d.get("fallback_chain", []),

@@ -142,6 +142,7 @@ async def run_langgraph_task(
             "active_specialist": None,
             "blackboard": {},
             "structured_outputs": {},
+            "write_tool_used": False,
             "plan_mode": bool(kwargs.get("plan_mode")),
             "delegation_log": [],
             "task_id": task_id,
