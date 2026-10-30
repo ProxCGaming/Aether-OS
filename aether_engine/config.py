@@ -86,7 +86,9 @@ LOCAL_MODELS = [
 @dataclass
 class UserConfig:
     default_provider: str = "google_gemini"
-    default_model: str = "gemini-2.0-flash"
+    # Epic 6: fresh installs and resets default to the verified
+    # working model (see ADR 0033 / the Epic 5 registry fix).
+    default_model: str = "gemini-3.5-flash"
     window_width: int = 420
     window_height: int = 680
     provider_models: dict[str, list[str]] = field(default_factory=dict)
@@ -160,6 +162,9 @@ class UserConfig:
     prewalk_agents: list[str] = field(default_factory=list)
     custom_slash_commands: dict[str, dict] = field(default_factory=dict)
     disable_fallbacks: bool = False
+    # Epic 6, E6-02: set once the first-run onboarding flow has been
+    # completed or skipped; persisted so the overlay shows once.
+    onboarding_completed: bool = False
     fallback_chain: list[str] = field(default_factory=list)
     # Phase 9: per-task-class auxiliary model overrides, task -> "provider:::model" or "auto"
     auxiliary_models: dict[str, str] = field(default_factory=dict)
@@ -225,6 +230,7 @@ class UserConfig:
             "prewalk_agents": self.prewalk_agents,
             "custom_slash_commands": self.custom_slash_commands,
             "disable_fallbacks": self.disable_fallbacks,
+            "onboarding_completed": self.onboarding_completed,
             "fallback_chain": self.fallback_chain,
             "auxiliary_models": self.auxiliary_models,
             "reasoning_effort": self.reasoning_effort,
@@ -314,6 +320,7 @@ class UserConfig:
             prewalk_agents=d.get("prewalk_agents") if isinstance(d.get("prewalk_agents"), list) else [],
             custom_slash_commands=_as_dict(d.get("custom_slash_commands")),
             disable_fallbacks=d.get("disable_fallbacks", False),
+            onboarding_completed=d.get("onboarding_completed", False),
             fallback_chain=d.get("fallback_chain", []),
             # Phase 10.3 B1: drop stale auxiliary overrides for task classes
             # with no engine call site (old config files may still carry

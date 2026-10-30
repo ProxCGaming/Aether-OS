@@ -32,7 +32,8 @@ from aether_engine.config import UserConfig
 logger = logging.getLogger("aether_engine.config_layers")
 
 PROJECT_CONFIG_RELPATH = Path(".aether") / "config.json"
-PROJECT_FORBIDDEN_KEYS = frozenset({"tool_policies", "path_rules", "workspace_roots", "mcp_tool_risk_overrides", "memory_backend"})
+PROJECT_FORBIDDEN_KEYS = frozenset({"tool_policies", "path_rules", "workspace_roots", "mcp_tool_risk_overrides",
+    "onboarding_completed", "memory_backend"})
 
 
 def load_project_layer(workspace_root: str | None) -> dict[str, Any]:

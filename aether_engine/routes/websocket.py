@@ -18,6 +18,7 @@ from aether_common.contracts import (
 )
 from aether_engine.config import (
     AUXILIARY_TASK_CLASSES,
+    UserConfig,
     save_config,
 )
 from aether_engine.langgraph.checkpointer import delete_thread_checkpoints
@@ -1528,11 +1529,28 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 config_data = msg.payload.get("config", {})
                 if "disable_fallbacks" in config_data:
                     engine_state.user_config.disable_fallbacks = config_data["disable_fallbacks"]
+                if "onboarding_completed" in config_data:
+                    engine_state.user_config.onboarding_completed = bool(config_data["onboarding_completed"])
                 if "fallback_chain" in config_data:
                     engine_state.user_config.fallback_chain = config_data["fallback_chain"]
                 save_config(engine_state.user_config)
                 await ws.send_text(Event(
                     type=EventType.CONFIG_UPDATE_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": True, "config": engine_state.user_config.to_dict()},
+                ).to_json())
+
+            elif msg.type == EventType.CONFIG_RESET_REQUEST:
+                # Epic 6, E6-06: reset-to-defaults that really resets —
+                # the user config is replaced with a fresh default
+                # UserConfig and saved. API keys live in the secret
+                # store (not the config) and files on disk are never
+                # touched; the UI confirm says exactly that.
+                engine_state.user_config = UserConfig()
+                save_config(engine_state.user_config)
+                engine_state.audit_logger.log_event("CONFIG_RESET", {})
+                await ws.send_text(Event(
+                    type=EventType.CONFIG_RESET_RESPONSE,
                     request_id=req_id,
                     payload={"success": True, "config": engine_state.user_config.to_dict()},
                 ).to_json())
@@ -2125,12 +2143,17 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
             elif msg.type == EventType.WORKSPACE_LIST_REQUEST:
                 roots = engine_state.user_config.workspace_roots or []
                 workspaces = []
-                for r in roots:
+                for idx, r in enumerate(roots):
                     p = Path(r)
                     workspaces.append({
                         "path": r,
                         "name": p.name,
                         "is_indexed": False,  # No real indexing backend yet
+                        # Epic 6, E6-04: the first root is the active
+                        # workspace; `exists` drives the missing-folder
+                        # state in the Projects view.
+                        "is_active": idx == 0,
+                        "exists": p.is_dir(),
                     })
                 await ws.send_text(Event(
                     type=EventType.WORKSPACE_LIST_RESPONSE,
@@ -2173,6 +2196,30 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 else:
                     await ws.send_text(Event(
                         type=EventType.WORKSPACE_REMOVE_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": False, "error": "Path not found"},
+                    ).to_json())
+
+            elif msg.type == EventType.WORKSPACE_SET_ACTIVE_REQUEST:
+                # Epic 6, E6-04: the active workspace is the first
+                # root (containment, skills, and task defaults all
+                # key off roots[0]); activating = move to front.
+                ws_path = msg.payload.get("path", "").strip()
+                roots = engine_state.user_config.workspace_roots
+                if ws_path in roots:
+                    roots.remove(ws_path)
+                    roots.insert(0, ws_path)
+                    save_config(engine_state.user_config)
+                    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+                    GLOBAL_SKILL_MANAGER.update_workspace_roots(roots)
+                    await ws.send_text(Event(
+                        type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": True, "path": ws_path},
+                    ).to_json())
+                else:
+                    await ws.send_text(Event(
+                        type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
                         request_id=req_id,
                         payload={"success": False, "error": "Path not found"},
                     ).to_json())
