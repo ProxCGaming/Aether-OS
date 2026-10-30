@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Key, Cpu, Settings as SettingsIcon, Monitor, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock } from 'lucide-react';
+import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock } from 'lucide-react';
 import Dropdown from './Dropdown';
 import LocalModelsTab from './LocalModelsTab';
 import './chat.css';
@@ -7,7 +7,7 @@ import ProviderSettings from './components/Settings/ProviderSettings';
 import MemoryManagement from './components/Settings/MemoryManagement';
 import DiagnosticsPanel from './components/Settings/DiagnosticsPanel';
 
-export default function SettingsPanel({ wsRef, providers = {}, localModels = [], defaultModel = '' }) {
+export default function SettingsPanel({ wsRef, providers = [], localModels = [] }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
   const [modelTab, setModelTab] = useState('cloud'); // 'cloud' or 'local'
   const [keys, setKeys] = useState({});
@@ -288,21 +288,17 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   }, [activeMenu, wsRef]);
 
   useEffect(() => {
-    // Initialize local state with backend keys
-    const initKeys = {};
+    // Initialize local state with backend keys.
+    // Phase 10.1 C1: we never receive the actual API key for security, and
+    // keys are never mirrored to localStorage — the password field always
+    // starts empty; the user re-enters a key to change it. Configured state
+    // comes from the engine's has_key, never from a stored key.
     const initBaseUrls = {};
     if (Array.isArray(providers)) {
       providers.forEach(p => {
-        // We don't receive the actual API key for security, so we leave it empty.
-        // But we can pre-fill it from localStorage if the user previously entered it!
-        const savedLocalKey = localStorage.getItem(`aether_saved_key_${p.name}`);
-        if (savedLocalKey) {
-          initKeys[p.name] = savedLocalKey;
-        }
         initBaseUrls[p.name] = p.base_url || '';
       });
     }
-    setKeys(prev => ({...initKeys, ...prev}));
     setBaseUrls(prev => ({...initBaseUrls, ...prev}));
   }, [providers]);
 
@@ -324,9 +320,9 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
     setValidationState(prev => ({ ...prev, [providerName]: 'saving' }));
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const apiKeyToSave = keys[providerName] || '';
-      if (apiKeyToSave) {
-        localStorage.setItem(`aether_saved_key_${finalProviderName}`, apiKeyToSave);
-      }
+      // Phase 10.1 C1: keys are NEVER mirrored to localStorage (or any other
+      // renderer storage). The engine's secure secret store is the only
+      // destination — the key goes out via PROVIDER_SAVE_REQUEST only.
       wsRef.current.send(JSON.stringify({
         type: 'PROVIDER_SAVE_REQUEST',
         schema_version: 1,
@@ -379,7 +375,6 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   // LOCAL_MODEL_DOWNLOAD_START with destination_dir.
 
   const menuItems = [
-    { id: 'General', icon: <Monitor size={18} />, label: 'General' },
     { id: 'Providers', icon: <Key size={18} />, label: 'API Providers' },
     { id: 'Models', icon: <Cpu size={18} />, label: 'Models & Tasks' },
     { id: 'Agents', icon: <Network size={18} />, label: 'Agents' },
@@ -442,21 +437,12 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
       {/* Settings Content Area */}
       <div style={{ flex: 1, overflowY: 'auto', paddingRight: '16px', paddingBottom: '80px' }} className="chat-scroll">
         
-        {activeMenu === 'General' && (
-          <div style={{ color: '#f0f0f5' }}>
-            <h2 style={{ fontSize: '24px', marginBottom: '24px', fontWeight: 500 }}>General Settings</h2>
-            <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '16px', padding: '24px' }}>
-               <h3 style={{ marginBottom: '16px', fontSize: '16px' }}>Appearance</h3>
-               <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '16px' }}>Customize the look and feel of Aether-OS.</p>
-               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(0,0,0,0.2)', padding: '6px', borderRadius: '16px', width: 'fit-content' }}>
-                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'default')} className="ios-glass" style={{ padding: '8px 20px', color: '#fff', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>Default</button>
-                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'system')} className="ios-glass" style={{ padding: '8px 20px', color: '#9090a0', background: 'transparent', border: '1px solid transparent', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>System Default</button>
-                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'light')} className="ios-glass" style={{ padding: '8px 20px', color: '#9090a0', background: 'transparent', border: '1px solid transparent', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>Light</button>
-                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'dark')} className="ios-glass" style={{ padding: '8px 20px', color: '#9090a0', background: 'transparent', border: '1px solid transparent', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>Dark</button>
-               </div>
-            </div>
-          </div>
-        )}
+        {/* Phase 10.3 C2: the General / Appearance section was removed.
+            Its theme buttons only set `data-theme` on <html> — no CSS rule
+            ever read it, nothing persisted the choice, and the app's colours
+            are hardcoded dark inline styles, so a real light theme would
+            need a full re-theme, not a toggle. A control that looks
+            functional must be functional, or it must go — this one went. */}
 
         {activeMenu === 'Providers' && (
           <ProviderSettings providers={providers} />
@@ -621,7 +607,15 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
             )}
 
             {modelTab === 'local' && (
-               <LocalModelsTab wsRef={wsRef} localModels={localModels} />
+               <LocalModelsTab
+                 wsRef={wsRef}
+                 localModels={localModels}
+                 // Phase 10.3 C2: the active model lives on the providers
+                 // array (the provider flagged is_default); LocalModelsTab
+                 // needs it to show which downloaded model is Active.
+                 defaultProvider={(Array.isArray(providers) ? providers : []).find(p => p.is_default)?.name || ''}
+                 defaultModel={(Array.isArray(providers) ? providers : []).find(p => p.is_default)?.default_model || ''}
+               />
             )}
           </div>
         )}
@@ -718,10 +712,21 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                     badge = <span style={{ fontSize: '11px', background: 'rgba(239, 68, 68, 0.2)', color: '#f87171', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><Lock size={10} /> Risky</span>;
                   }
 
-                  const defaultLabel = tool.effective_policy === 'allow' ? 'Always Allow (default)' : 'Require Approval (default)';
-                  
+                  // Phase 10.3 C2: the old 'default' option is gone. It was
+                  // un-sendable — the handler returned early on it, and no
+                  // engine message exists to clear a stored override (TOOL_POLICY_SET_REQUEST only stores;
+                  // policy_is_default means "no entry in tool_policies", and
+                  // there is no reset event in the contracts). So the
+                  // dropdown now lists only the three policies it can
+                  // actually send, and when the tool is at its default the
+                  // dropdown shows the *effective* policy the engine
+                  // resolves for it, with a note that no override is set.
+                  const effectivePolicyValue =
+                    tool.effective_policy === 'allow' ? 'Always Allow'
+                    : tool.effective_policy === 'deny' ? 'Deny'
+                    : 'Require Approval';
+
                   const options = [
-                    { value: 'default_unset', label: defaultLabel },
                     { value: 'Always Allow', label: 'Always Allow', disabled: !tool.always_allow_permitted },
                     { value: 'Require Approval', label: 'Require Approval' },
                     { value: 'Deny', label: 'Deny' }
@@ -735,15 +740,17 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                           {badge}
                         </h4>
                         <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>{tool.function.description}</p>
+                        {tool.policy_is_default && (
+                           <p style={{ fontSize: '11px', color: '#9090a0', marginTop: '4px' }}>Default policy — no override set. Pick one to override it.</p>
+                        )}
                         {!tool.always_allow_permitted && (
                            <p style={{ fontSize: '11px', color: '#fbbf24', marginTop: '4px' }}>Always Allow is disabled for risky tools.</p>
                         )}
                       </div>
                       <div>
                         <Dropdown 
-                          value={tool.policy_is_default ? 'default_unset' : tool.policy}
+                          value={tool.policy_is_default ? effectivePolicyValue : tool.policy}
                           onChange={(val) => {
-                            if (val === 'default_unset') return;
                             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                               wsRef.current.send(JSON.stringify({
                                 type: 'TOOL_POLICY_SET_REQUEST',

@@ -1,21 +1,34 @@
-"""LangGraph node: execute a pending tool call with pre-flight validation and sandbox routing.
+"""LangGraph node: execute a pending tool call via the single trust pipeline.
 
-Safe tools (read_file, web_search, get_current_time, summarize) run in-process via the registry.
-Risky tools (write_file, delete_file, execute_shell) are validated via pre_flight.py then
-executed in an isolated aether_worker subprocess via the shared sandbox module.
+Phase 10.2, C1: this node is a thin adapter over ``ToolRegistry.execute()``
+— the Phase 9 hardened pipeline (policy → pre-flight → sandbox, ADR 0021 /
+ADR 0009 / ADR 0010). The node used to duplicate that enforcement inline
+(policy check, ``validate_tool_request``, direct ``execute_tool_in_worker``
+call with no audit logger), so fixes to the audited pipeline never reached
+production traffic and the live path produced no worker audit events.
+That duplication is deleted: every production tool execution now goes
+through ``ToolRegistry.execute()`` and produces the same audit events
+(``TOOL_BLOCKED_BY_POLICY``, ``WORKER_EXECUTION_COMPLETED`` /
+``WORKER_EXECUTION_TERMINATED`` / ``WORKER_EXECUTION_TIMEOUT`` /
+``WORKER_EXECUTION_REFUSED``).
+
+What the node still owns (not enforcement, so not duplicated):
+  * the per-specialist tool allow-list (``agent_tools``) — role scoping
+    the registry knows nothing about;
+  * translating ``ToolRegistry`` exceptions back into the tool-message
+    shape (``{"role": "tool", "content": ...}``) the graph expects,
+    preserving the exact denial/approval/validation wording callers
+    already assert on.
 
 See ADR 0009 (fail-closed, pre-flight), ADR 0010 (workspace restriction), ADR 0011 §2 (preservation).
 """
 import json
-import asyncio
 import logging
 from typing import Dict, Any
 
 from langchain_core.runnables import RunnableConfig
 from aether_engine.langgraph.state import AetherState
-from aether_engine.tools.registry import ToolExecutionError, ToolNotFoundError, ToolRisk
-from aether_engine.validation.pre_flight import validate_tool_request
-from aether_engine.tools.policy import resolve_policy_by_name
+from aether_engine.tools.registry import ToolExecutionError, ToolNotFoundError
 
 logger = logging.getLogger("aether_engine.langgraph.nodes.execute_tool")
 
@@ -23,10 +36,11 @@ logger = logging.getLogger("aether_engine.langgraph.nodes.execute_tool")
 async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     """Executes a tool call pending in the state using the provided ToolRegistry.
 
-    Before dispatching any tool:
-      1. Runs ``validate_tool_request()`` and rejects if validation fails (ADR 0009 fail-closed).
-      2. For risky tools, routes through ``execute_tool_in_worker()`` (aether_worker subprocess).
-      3. For safe tools, calls ``tool.execute_fn()`` directly.
+    Dispatches through ``ToolRegistry.execute()`` — the single pipeline:
+      1. Policy check (ADR 0021) — ``deny`` / unapproved ``ask`` fail closed.
+      2. Pre-flight validation (ADR 0009 §2) — failures fail closed.
+      3. Sandbox routing (ADR 0010) — non-READ_ONLY tools run in the
+         ``aether_worker`` subprocess; READ_ONLY tools run in-process.
     """
     pending = state.get("pending_tool_call")
     if not pending:
@@ -41,7 +55,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     registry = configurable.get("tool_registry")
     workspace_roots = configurable.get("workspace_roots", [])
     task_class = configurable.get("task_class", "standard")
-    
+
     # Check if tool is allowed for the active specialist
     active_agent = state.get("active_specialist")
     agent_tools = configurable.get("agent_tools", {})
@@ -64,59 +78,46 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     if not registry:
         result_text = f"Error: No tool registry provided to graph. Cannot execute {tool_name}."
     else:
-        # Layer 1 & 3: Check policy
+        # Single pipeline (Phase 10.2, C1): policy → pre-flight → sandbox,
+        # with the worker audit events, all inside ToolRegistry.execute().
+        # The registry raises on denial / validation failure; translate
+        # those back into the tool-message wording this node has always
+        # returned so callers see the same denial/approval/validation
+        # strings as before the unification.
         user_config = configurable.get("user_config")
-        policy = resolve_policy_by_name(tool_name, user_config.tool_policies if user_config else {}, registry)
-        
-        if policy == "deny":
-            error_msg = f"Error: Tool '{tool_name}' is blocked by user policy (Deny)."
-            logger.warning(error_msg)
-            from aether_engine.audit import AuditLogger
-            AuditLogger().log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": tool_name, "agent": active_agent, "reason": "User Deny"})
-            return {
-                "messages": [{"role": "tool", "name": tool_name, "content": error_msg, "tool_call_id": call_id}],
-                "pending_tool_call": None
-            }
-        
-        if policy == "ask" and not pending.get("approved"):
-            error_msg = f"Error: Tool '{tool_name}' requires approval but was bypassed."
-            logger.warning(error_msg)
-            from aether_engine.audit import AuditLogger
-            AuditLogger().log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": tool_name, "agent": active_agent, "reason": "Bypassed Approval"})
-            return {
-                "messages": [{"role": "tool", "name": tool_name, "content": error_msg, "tool_call_id": call_id}],
-                "pending_tool_call": None
-            }
-
-        # ── Step 1: Pre-flight validation (ADR 0009 §2) ──────────────────
-        validation = validate_tool_request(tool_name, args, workspace_roots=workspace_roots)
-        if not validation.is_valid:
-            logger.warning(f"Pre-flight validation failed for {tool_name}: {validation.error}")
-            result_text = f"Validation failed: {validation.error}"
-        else:
-            try:
-                tool = registry.get_tool(tool_name)
-                if tool.risk != ToolRisk.READ_ONLY:
-                    # ── Step 2a: Risky tools → sandbox worker subprocess ──
-                    logger.info(f"Routing risky tool {tool_name} through sandbox worker (task_class={task_class})")
-                    from aether_engine.workers.sandbox import execute_tool_in_worker
-                    result = await execute_tool_in_worker(
-                        tool_name=tool_name,
-                        args=args,
-                        task_class=task_class,
-                    )
-                    result_text = json.dumps(result) if not isinstance(result, str) else (result or f"Tool {tool_name} completed.")
-                else:
-                    # ── Step 2b: Safe tools → direct in-process execution ──
-                    logger.info(f"Executing safe tool {tool_name} with args {args}")
-                    result = await tool.execute_fn(**args) if asyncio.iscoroutinefunction(tool.execute_fn) else tool.execute_fn(**args)
-                    result_text = json.dumps(result) if not isinstance(result, str) else result
-
-            except ToolNotFoundError:
-                result_text = f"Error: Tool {tool_name} not found in registry."
-            except Exception as e:
+        audit_logger = configurable.get("audit_logger")
+        try:
+            result = await registry.execute(
+                tool_name,
+                args,
+                workspace_roots=workspace_roots,
+                task_class=task_class,
+                policies=user_config.tool_policies if user_config else {},
+                approved=bool(pending.get("approved")),
+                audit_logger=audit_logger,
+            )
+            result_text = json.dumps(result) if not isinstance(result, str) else (result or f"Tool {tool_name} completed.")
+        except ToolNotFoundError:
+            result_text = f"Error: Tool {tool_name} not found in registry."
+        except ToolExecutionError as e:
+            msg = str(e)
+            if "blocked by policy (deny)" in msg:
+                result_text = f"Error: Tool '{tool_name}' is blocked by user policy (Deny)."
+                logger.warning(result_text)
+            elif "requires approval (policy=ask)" in msg:
+                result_text = f"Error: Tool '{tool_name}' requires approval but was bypassed."
+                logger.warning(result_text)
+            elif msg.startswith("Pre-flight validation failed"):
+                # Registry message: "Pre-flight validation failed for '<name>': <error>"
+                detail = msg.split(": ", 1)[-1] if ": " in msg else msg
+                result_text = f"Validation failed: {detail}"
+                logger.warning(f"Pre-flight validation failed for {tool_name}: {detail}")
+            else:
                 logger.error(f"Error executing {tool_name}: {e}")
                 result_text = f"Error executing tool {tool_name}: {e}"
+        except Exception as e:
+            logger.error(f"Error executing {tool_name}: {e}")
+            result_text = f"Error executing tool {tool_name}: {e}"
 
     tool_message = {
         "role": "tool",

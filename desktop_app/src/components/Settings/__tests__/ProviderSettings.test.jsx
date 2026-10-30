@@ -219,3 +219,78 @@ describe('ProviderSettings discovery v2 (excluded models + real errors)', () => 
     expect(screen.getByText(/no response/)).toBeInTheDocument();
   });
 });
+
+describe('ProviderSettings key storage (Phase 10.1 C1)', () => {
+  let mockSendMessage;
+  let mockWsRef;
+  let setItemSpy;
+
+  beforeEach(() => {
+    mockSendMessage = jest.fn();
+    mockWsRef = {
+      current: {
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
+        readyState: 1,
+        send: jest.fn(),
+      },
+    };
+    useAetherSocket.mockReturnValue({
+      wsRef: mockWsRef,
+      sendMessage: mockSendMessage,
+    });
+    localStorage.clear();
+    // Spy on the prototype: jsdom's Storage methods are non-writable own
+    // properties, so jest.spyOn(window.localStorage, 'setItem') and direct
+    // assignment silently fail to intercept (verified by probe).
+    setItemSpy = jest.spyOn(Storage.prototype, 'setItem');
+  });
+
+  afterEach(() => {
+    setItemSpy.mockRestore();
+    localStorage.clear();
+  });
+
+  test('saving a provider key performs no localStorage.setItem call with a key-like value', () => {
+    const mockProviders = [
+      { name: 'openai', display_name: 'OpenAI', has_key: false },
+    ];
+
+    render(<ProviderSettings providers={mockProviders} />);
+    fireEvent.click(screen.getByText('OpenAI'));
+
+    const input = screen.getByPlaceholderText(/Enter OpenAI API Key/i);
+    fireEvent.change(input, { target: { value: 'sk-test-secret-key-123' } });
+    fireEvent.click(screen.getByText('Save Configuration'));
+
+    // The key goes to the engine only, via PROVIDER_SAVE_REQUEST.
+    expect(mockSendMessage).toHaveBeenCalledWith('PROVIDER_SAVE_REQUEST', expect.objectContaining({
+      payload: expect.objectContaining({
+        provider: 'openai',
+        api_key: 'sk-test-secret-key-123',
+      }),
+    }));
+
+    // No localStorage write may carry the key, and no aether_saved_key_* entry may exist.
+    const keyLikeCalls = setItemSpy.mock.calls.filter(
+      ([k, v]) => k.startsWith('aether_saved_key_') || v === 'sk-test-secret-key-123'
+    );
+    expect(keyLikeCalls).toEqual([]);
+    expect(localStorage.getItem('aether_saved_key_openai')).toBeNull();
+  });
+
+  test('password field starts empty even if a stale aether_saved_key_* entry exists', () => {
+    localStorage.setItem('aether_saved_key_openai', 'sk-stale-key');
+    const mockProviders = [
+      { name: 'openai', display_name: 'OpenAI', has_key: true },
+    ];
+
+    render(<ProviderSettings providers={mockProviders} />);
+    fireEvent.click(screen.getByText('OpenAI'));
+
+    const input = screen.getByPlaceholderText(/API Key/i);
+    expect(input.value).toBe('');
+    // Configured state comes from the engine's has_key, never from a stored key.
+    expect(screen.getByText('Configured')).toBeInTheDocument();
+  });
+});

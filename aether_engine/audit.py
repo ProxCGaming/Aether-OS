@@ -1,9 +1,86 @@
-import json, time
+import json, re, time
 from pathlib import Path
 from typing import Any, Dict, Optional
 from aether_common.contracts import TaskState
 
 DEFAULT_AUDIT_LOG_PATH = Path("logs/audit.log")
+
+# Phase 10.2, C2: the audit log is plaintext and world-readable by default
+# (critical/07 M2/M5), so no secret value and no full tool payload may ever
+# reach it. Redaction is centralised here, in _append — every log_* method
+# funnels through it, so callers that still pass full args/payloads (e.g.
+# websocket.py APPROVAL_REQUESTED / TASK_TRANSITION) are sanitised without
+# touching each call site. This is NOT a rebuild of the audit log: no
+# hashing, rotation, fsync, locking or sequencing is added here — that is a
+# follow-up (critical/07 M3); see the C2 report.
+_REDACTED = "[REDACTED]"
+
+# Dict keys whose *value* is a secret (matched on the normalised key:
+# lower-cased, '-' -> '_'). "author" must NOT match: bare "auth" is not a
+# substring here, only token-bearing forms are.
+_SENSITIVE_KEY_PARTS = (
+    "api_key", "apikey", "secret", "token", "password", "passwd",
+    "credential", "private_key", "access_key", "bearer", "session_key",
+)
+
+# Dict keys whose value is a payload, not metadata: never log the value,
+# only the shape (which fields were present). "content" (file contents)
+# and "command" (shell text) are dropped entirely — even a shape summary
+# of file contents is meaningless and a command can embed a secret.
+_PAYLOAD_KEYS = frozenset({"args", "payload", "manifest"})
+
+# Bare-string secret patterns, for a secret passed as a plain value rather
+# than under a sensitive key (e.g. inside a list). Deliberately narrow:
+# well-known key prefixes only, so ordinary log text is untouched.
+_SECRET_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"xox[baprs]-[A-Za-z0-9\-]{8,}"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+)
+
+
+def _is_sensitive_key(key: str) -> bool:
+    norm = str(key).lower().replace("-", "_")
+    if norm == "key" or norm.endswith("_key"):
+        return True
+    return any(part in norm for part in _SENSITIVE_KEY_PARTS)
+
+
+def _scrub_string(value: str) -> str:
+    scrubbed = value
+    for pattern in _SECRET_PATTERNS:
+        scrubbed = pattern.sub(_REDACTED, scrubbed)
+    return scrubbed
+
+
+def _redact(value: Any, key: Optional[str] = None) -> Any:
+    """Return a log-safe copy of *value*.
+
+    - A value under a sensitive key, or under "content"/"command", becomes
+      "[REDACTED]" — the key value (api_key, token, file content, shell
+      command) never reaches the log.
+    - A value under a payload key ("args"/"payload"/"manifest") becomes
+      {"keys": [...]} — the caller learns which fields were present, never
+      their values, so a full tool payload is never logged.
+    - Anything else is recursed into (dicts/lists) or pattern-scrubbed
+      (strings). Non-string scalars pass through unchanged.
+    """
+    if isinstance(value, dict):
+        if key in _PAYLOAD_KEYS:
+            return {"keys": sorted(str(k) for k in value)}
+        return {k: _redact(v, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact(v) for v in value]
+    if isinstance(value, str):
+        if key is not None and (_is_sensitive_key(key) or key in ("content", "command")):
+            return _REDACTED
+        if key in _PAYLOAD_KEYS:
+            return _REDACTED
+        return _scrub_string(value)
+    return value
 
 
 class AuditLogger:
@@ -13,7 +90,7 @@ class AuditLogger:
 
     def _append(self, record: Dict[str, Any]) -> None:
         with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+            f.write(json.dumps(_redact(record)) + "\n")
 
     def log_connection(self, success: bool, ip: str = "unknown",
                        port: Optional[int] = None, reason: str = "") -> None:

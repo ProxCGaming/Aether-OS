@@ -122,3 +122,104 @@ describe('SettingsPanel auxiliary models (Phase 9 UI honesty)', () => {
     expect(reset.payload.model).toBe('auto');
   });
 });
+
+// Phase 10.3 C2: the theme buttons are gone. They only set `data-theme` on
+// <html> — no CSS rule ever read it, nothing persisted the choice, and the
+// app's colours are hardcoded dark inline styles, so no theme ever changed.
+describe('SettingsPanel theme controls removed (Phase 10.3 C2)', () => {
+  it('has no General menu and no theme buttons', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    expect(screen.queryByText('General')).not.toBeInTheDocument();
+    expect(screen.queryByText('Appearance')).not.toBeInTheDocument();
+    for (const label of ['Default', 'System Default', 'Light', 'Dark']) {
+      expect(screen.queryByRole('button', { name: label })).not.toBeInTheDocument();
+    }
+  });
+
+  it('no theme code remains in the SettingsPanel source', () => {
+    // The component must not set data-theme anywhere (comments aside, the
+    // setter call itself must be gone).
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SettingsPanel.jsx'), 'utf8');
+    expect(source).not.toContain("setAttribute('data-theme'");
+    expect(source).not.toContain('setAttribute("data-theme"');
+  });
+});
+
+// Phase 10.3 C2: the tool-policy dropdown used to offer a "default" option
+// it refused to send (the handler returned early on it, and no engine
+// message can clear a stored override). The option is gone; a tool at its
+// default now shows the effective policy the engine resolves, with a note
+// that no override is set — and every remaining option sends for real.
+describe('SettingsPanel tool policy dropdown (Phase 10.3 C2)', () => {
+  const readOnlyToolAtDefault = {
+    function: { name: 'read_file', description: 'Read a file.' },
+    risk: 'read_only',
+    always_allow_permitted: true,
+    effective_policy: 'allow',
+    policy_is_default: true,
+    policy: 'Require Approval', // what the engine sends as `policy` at default
+  };
+
+  it('shows the effective policy for a tool at default, with a no-override note', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Tools'));
+    feedTools(getHandler, [readOnlyToolAtDefault]);
+
+    // The dropdown displays the effective policy (Always Allow), not a
+    // placeholder, and says plainly that this is the default.
+    expect(screen.getByRole('button', { name: 'Always Allow' })).toBeInTheDocument();
+    expect(screen.getByText('Default policy — no override set. Pick one to override it.')).toBeInTheDocument();
+  });
+
+  it('offers only the three sendable policies — no default option — and sends the pick', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Tools'));
+    feedTools(getHandler, [readOnlyToolAtDefault]);
+
+    // Open the dropdown: the menu must list exactly the real policies.
+    fireEvent.click(screen.getByRole('button', { name: 'Always Allow' }));
+    expect(screen.queryByText(/\(default\)/)).not.toBeInTheDocument();
+    expect(screen.getByText('Require Approval')).toBeInTheDocument();
+    expect(screen.getByText('Deny')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Require Approval'));
+
+    const sent = wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
+    const set = sent.filter(m => m.type === 'TOOL_POLICY_SET_REQUEST');
+    expect(set).toHaveLength(1);
+    expect(set[0].payload).toEqual({ tool_name: 'read_file', policy: 'Require Approval' });
+  });
+
+  it('shows the stored policy (and no default note) for a tool with an explicit override', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Tools'));
+    feedTools(getHandler, [{
+      function: { name: 'read_file', description: 'Read a file.' },
+      risk: 'read_only',
+      always_allow_permitted: true,
+      effective_policy: 'deny',
+      policy_is_default: false,
+      policy: 'Deny',
+    }]);
+
+    expect(screen.getByRole('button', { name: 'Deny' })).toBeInTheDocument();
+    expect(screen.queryByText(/no override set/)).not.toBeInTheDocument();
+  });
+
+  it('no un-sendable default option remains in the SettingsPanel source', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SettingsPanel.jsx'), 'utf8');
+    expect(source).not.toContain('default_unset');
+  });
+});

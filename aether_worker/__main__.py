@@ -1,16 +1,69 @@
+"""aether_worker entrypoint: executes one risky tool call in a subprocess.
+
+Trust boundary (Phase 10.2, A1 — ADR 0003 threat model: other local
+processes / malicious scripts running as the same user are in scope):
+the worker accepts payloads ONLY over an authenticated channel. Before
+any dispatch it verifies the per-session engine token — the same token
+the engine uses for ``/ws/tasks`` — supplied by the engine via the
+``AETHER_WORKER_TOKEN`` environment variable and compared in constant
+time against ``.run/engine.token``.
+
+Why token auth (Option 2) instead of re-enforcing policy/pre-flight/
+workspace inside the worker (Option 1): the worker has no access to
+the user's policies, workspace roots, or approval state, so the engine
+would have to pass ``approved``/policy/roots inside the argv payload —
+and any direct invoker could set those same plaintext fields in their
+own payload, making the "approval" self-asserted and forgeable. Option 1
+therefore cannot distinguish an engine-approved call from an attacker's,
+and its shell pre-flight is only an existence check anyway. The token
+is passed via the environment, never argv, so it does not appear in
+``ps`` output (cf. the argv-leak note in the Phase 10 audit).
+
+What this does NOT protect against: a same-user process that can read
+``.run/engine.token`` can present the token — the same trust basis as
+the ``/ws/tasks`` channel itself. True privilege separation (running
+the worker as a different/low-privilege user) is out of scope here.
+
+Refusals are fail-closed: unauthenticated, unknown-tool, and malformed
+payloads exit non-zero, execute nothing, and are recorded in the audit
+log (``WORKER_AUTH_REFUSED`` / ``WORKER_EXECUTION_REFUSED``). No token
+value or tool argument is ever written to the audit log.
+
+Note on the audit call: the worker deliberately does NOT import
+``aether_engine.audit.AuditLogger`` — importing the ``aether_engine``
+package runs its ``__init__`` which imports the whole FastAPI app
+(and LiteLLM, which attempts a remote fetch on import), adding ~6s
+and a network attempt to every worker spawn. The worker therefore
+appends the audit JSONL record directly, in the exact record shape
+``AuditLogger.log_event`` produces; if that shape changes, update both.
+"""
 import argparse
 import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
-from aether_common.auth import read_token
+from aether_common.auth import read_token, verify_token
+
+WORKER_TOKEN_ENV = "AETHER_WORKER_TOKEN"
+
+# Same default path and record shape as aether_engine.audit.AuditLogger.
+DEFAULT_AUDIT_LOG_PATH = Path("logs/audit.log")
+
+# Tools the worker is allowed to execute. Anything else is refused —
+# an unknown tool must never report a false success (the old code
+# returned {"status": "noop"} for unknown tools).
+ALLOWED_TOOLS = frozenset({"execute_shell", "write_file", "delete_file"})
 
 
 async def run_worker(task_payload: dict):
     tool_name = task_payload.get("tool_name")
     args = task_payload.get("args", {})
+
+    if tool_name not in ALLOWED_TOOLS:
+        raise ValueError(f"Unknown tool: {tool_name!r}")
 
     if tool_name == "execute_shell":
         command = args.get("command")
@@ -39,18 +92,67 @@ async def run_worker(task_payload: dict):
         Path(path).unlink(missing_ok=True)
         return {"path": path, "deleted": True}
 
-    return {"status": "noop"}
+    raise ValueError(f"Unknown tool: {tool_name!r}")
 
 
-async def main():
+def _audit_event(action: str, details: dict) -> None:
+    """Append one audit record in AuditLogger.log_event's exact shape."""
+    try:
+        DEFAULT_AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(DEFAULT_AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "ENGINE_EVENT", "ts": time.time(),
+                                "action": action, "details": details}) + "\n")
+    except Exception:
+        pass
+
+
+def _refuse(action: str, tool_name, reason: str) -> int:
+    """Record a refusal in the audit log (best-effort) and exit non-zero.
+
+    The refusal itself never depends on audit success: a broken audit
+    log must not turn a refused execution into an allowed one.
+    """
+    _audit_event(action, {"tool": tool_name, "reason": reason})
+    print(json.dumps({"status": "refused", "reason": reason}), file=sys.stderr)
+    return 1
+
+
+async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--payload", required=True)
     args = parser.parse_args()
 
-    payload = json.loads(args.payload)
-    result = await run_worker(payload)
+    try:
+        payload = json.loads(args.payload)
+    except json.JSONDecodeError as e:
+        print(f"Invalid payload JSON: {e}", file=sys.stderr)
+        return 1
+    if not isinstance(payload, dict):
+        print("Invalid payload: expected a JSON object", file=sys.stderr)
+        return 1
+
+    # Tool name is audit metadata only — never log args (they may hold
+    # file contents, shell commands, or secrets).
+    tool_name = payload.get("tool_name")
+
+    # ── Authenticate BEFORE any dispatch (ADR 0003 token, Option 2) ──
+    provided = os.environ.get(WORKER_TOKEN_ENV, "")
+    try:
+        expected = read_token()
+    except (FileNotFoundError, ValueError) as e:
+        return _refuse("WORKER_AUTH_REFUSED", tool_name,
+                       f"token_file_unavailable: {e}")
+    if not verify_token(provided, expected):
+        return _refuse("WORKER_AUTH_REFUSED", tool_name,
+                       "missing_token" if not provided else "invalid_token")
+
+    try:
+        result = await run_worker(payload)
+    except ValueError as e:
+        return _refuse("WORKER_EXECUTION_REFUSED", tool_name, str(e))
     print(json.dumps(result))
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

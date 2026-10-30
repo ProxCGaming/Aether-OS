@@ -1,6 +1,8 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
+import fs from 'fs';
+import path from 'path';
 import App from '../App';
 
 // The 3D force graph needs WebGL; replace with a stub for jsdom.
@@ -46,5 +48,181 @@ describe('App', () => {
     const { container } = render(<App />);
     expect(screen.getByTestId('force-graph-stub')).toBeInTheDocument();
     expect(container.textContent).not.toMatch(/amb_\d+/);
+  });
+});
+
+// Phase 10.3 C1: App must use the single SocketContext facade — no second
+// mock wsRef, no second onEngineMessage subscription, no local dedup hack —
+// and providers must be an array everywhere so MODEL_DEFAULT_CHANGED works.
+describe('App socket facade and providers (Phase 10.3 C1)', () => {
+  let engineListeners;
+  let electronAPI;
+
+  beforeEach(() => {
+    engineListeners = [];
+    electronAPI = {
+      sendEngineMessage: jest.fn(),
+      onEngineMessage: jest.fn((cb) => {
+        engineListeners.push(cb);
+        return () => {
+          const idx = engineListeners.indexOf(cb);
+          if (idx !== -1) engineListeners.splice(idx, 1);
+        };
+      }),
+      getWsStatus: jest.fn(() => Promise.resolve(false)),
+      getMemoryUsage: jest.fn(() => Promise.resolve(128)),
+      onChatDetached: jest.fn(() => jest.fn()),
+      onChatAttached: jest.fn(() => jest.fn()),
+    };
+    window.electronAPI = electronAPI;
+  });
+
+  afterEach(() => {
+    delete window.electronAPI;
+  });
+
+  const emitEngineMessage = (obj) => {
+    const raw = typeof obj === 'string' ? obj : JSON.stringify(obj);
+    act(() => {
+      [...engineListeners].forEach((cb) => cb(raw));
+    });
+  };
+
+  const flushPromises = async () => {
+    await act(async () => {});
+  };
+
+  const openaiProvider = (overrides = {}) => ({
+    name: 'openai',
+    display_name: 'OpenAI',
+    has_key: true,
+    models: ['gpt-4'],
+    is_default: true,
+    default_model: 'gpt-4',
+    ...overrides,
+  });
+
+  const anthropicProvider = (overrides = {}) => ({
+    name: 'anthropic',
+    display_name: 'Anthropic',
+    has_key: true,
+    models: ['claude-sonnet-4'],
+    is_default: false,
+    default_model: '',
+    ...overrides,
+  });
+
+  it('does not build its own engine-message facade (no direct subscription, no local dedup hack)', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'App.jsx'), 'utf8');
+    // No actual subscription call (comments may name the API, code must not call it).
+    expect(source).not.toMatch(/electronAPI\.onEngineMessage/);
+    expect(source).not.toContain('lastRawIpcData');
+    expect(source).not.toContain('lastRawIpcTime');
+  });
+
+  it('MODEL_DEFAULT_CHANGED updates the default model in the chat model picker', async () => {
+    render(<App />);
+    await flushPromises();
+
+    emitEngineMessage({
+      type: 'PROVIDER_LIST_RESPONSE',
+      payload: { providers: [openaiProvider(), anthropicProvider()] },
+    });
+    expect(screen.getByText('gpt-4')).toBeInTheDocument();
+
+    emitEngineMessage({
+      type: 'MODEL_DEFAULT_CHANGED',
+      payload: { provider: 'anthropic', model: 'claude-sonnet-4' },
+    });
+
+    expect(screen.getByText('claude-sonnet-4')).toBeInTheDocument();
+    expect(screen.queryByText('gpt-4')).not.toBeInTheDocument();
+  });
+
+  it('normalises a provider list that arrives as an object into an array, so MODEL_DEFAULT_CHANGED works on it', async () => {
+    render(<App />);
+    await flushPromises();
+
+    // The defect shape: providers stored as an object. Children expect an
+    // array, and MODEL_DEFAULT_CHANGED silently no-ops on a non-array.
+    emitEngineMessage({
+      type: 'PROVIDER_LIST_RESPONSE',
+      payload: {
+        providers: {
+          openai: openaiProvider(),
+          anthropic: anthropicProvider(),
+        },
+      },
+    });
+    expect(screen.getByText('gpt-4')).toBeInTheDocument();
+
+    emitEngineMessage({
+      type: 'MODEL_DEFAULT_CHANGED',
+      payload: { provider: 'anthropic', model: 'claude-sonnet-4' },
+    });
+
+    expect(screen.getByText('claude-sonnet-4')).toBeInTheDocument();
+    expect(screen.queryByText('gpt-4')).not.toBeInTheDocument();
+  });
+
+  it('queues a model change made while offline and sends it on reconnect', async () => {
+    render(<App />);
+    await flushPromises();
+
+    emitEngineMessage({
+      type: 'PROVIDER_LIST_RESPONSE',
+      payload: { providers: [openaiProvider(), anthropicProvider()] },
+    });
+    expect(screen.getByText('gpt-4')).toBeInTheDocument();
+
+    // Open the model picker and choose the Anthropic model.
+    fireEvent.click(screen.getByText('gpt-4'));
+    fireEvent.click(screen.getByText('claude-sonnet-4'));
+
+    // Offline: the request must be queued by the single facade, not dropped
+    // and not sent into the void.
+    expect(electronAPI.sendEngineMessage).not.toHaveBeenCalled();
+
+    emitEngineMessage({ type: '_ws_status', status: 'connected' });
+    await flushPromises();
+
+    expect(electronAPI.sendEngineMessage).toHaveBeenCalled();
+    const firstSent = JSON.parse(electronAPI.sendEngineMessage.mock.calls[0][0]);
+    expect(firstSent.type).toBe('MODEL_SET_DEFAULT');
+    expect(firstSent.payload).toEqual({ provider: 'anthropic', model: 'claude-sonnet-4' });
+  });
+});
+
+// Phase 10.3 C2: App.jsx carried dead state — `messages`, `input`,
+// `defaultModel` (setters never called, values never read; the live chat
+// state is `chatMessages` / `initialInput`) and `graphData` (a useState
+// wrapper around a static constant, setter never called). The dead state
+// is gone; the decorative graph still renders from the module constant.
+describe('App dead state removed (Phase 10.3 C2)', () => {
+  it('App.jsx declares none of the dead state variables', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'App.jsx'), 'utf8');
+    expect(source).not.toContain('const [messages, setMessages]');
+    expect(source).not.toContain('const [input, setInput]');
+    expect(source).not.toContain('const [defaultModel, setDefaultModel]');
+    expect(source).not.toContain('const [graphData, setGraphData]');
+    // No setter calls remain either.
+    expect(source).not.toContain('setMessages(');
+    expect(source).not.toContain('setDefaultModel(');
+    expect(source).not.toContain('setGraphData(');
+  });
+
+  it('the decorative graph still renders from the static constant', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'App.jsx'), 'utf8');
+    expect(source).toContain('graphData={initGraphData}');
+    const { container } = render(<App />);
+    expect(screen.getByTestId('force-graph-stub')).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/amb_\d+/);
+  });
+
+  it('SettingsPanel no longer takes the dead defaultModel prop', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SettingsPanel.jsx'), 'utf8');
+    expect(source).not.toMatch(/defaultModel\s*=\s*''/);
+    const appSource = fs.readFileSync(path.join(process.cwd(), 'src', 'App.jsx'), 'utf8');
+    expect(appSource).not.toContain('defaultModel={defaultModel}');
   });
 });

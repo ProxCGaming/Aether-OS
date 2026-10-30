@@ -17,6 +17,7 @@ logs/
 *.sqlite
 *.sqlite3
 *.db
+pytest_output.txt
 
 # Caches
 .pytest_cache/

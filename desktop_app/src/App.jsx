@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { SocketProvider } from './contexts/SocketContext';
+import { SocketProvider, useAetherSocket } from './contexts/SocketContext';
 import ForceGraph3D from 'react-force-graph-3d';
 import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
@@ -26,23 +26,24 @@ const initGraphData = {
   ]
 };
 
-// Module-level IPC event deduplicator to drop identical packets fired by multiple listeners
-let lastRawIpcData = null;
-let lastRawIpcTime = 0;
-
 function AppContent() {
-  const [graphData, setGraphData] = useState(initGraphData);
-  const [input, setInput] = useState('');
-  const [messages, setMessages] = useState([]);
+  // Phase 10.3 C1: the engine-message facade lives in SocketContext, not
+  // here. AppContent consumes its wsRef/isConnected; it builds no mock of
+  // its own and subscribes to nothing directly.
+  const { wsRef, isConnected } = useAetherSocket();
+
   const [status, setStatus] = useState('Initializing');
   const [isThinking, setIsThinking] = useState(false);
   const [chatMessages, setChatMessages] = useState([]);
   const [isChatDetached, setIsChatDetached] = useState(false);
   
   // Settings State
-  const [providers, setProviders] = useState({});
+  // Phase 10.3 C1: providers is an ARRAY everywhere (the engine sends a
+  // list; see PROVIDER_LIST_RESPONSE below). Children (DraggableChatWindow,
+  // SettingsPanel, ProviderSettings) all expect [], and MODEL_DEFAULT_CHANGED
+  // maps over it — it silently no-op'd while this was the initial {}.
+  const [providers, setProviders] = useState([]);
   const [localModels, setLocalModels] = useState([]);
-  const [defaultModel, setDefaultModel] = useState('');
 
   // Dashboard State (real data, not hardcoded)
   const [activeTaskIds, setActiveTaskIds] = useState(new Set());
@@ -89,125 +90,19 @@ function AppContent() {
     }
   }, [isFloating, chatMessages]);
 
-  const wsRef = useRef(null);
   const graphRef = useRef();
   const pendingSessionSwitchRef = useRef(null);
   const sessionCacheRef = useRef({});
   const activeTaskSessionRef = useRef(null);
 
+  // Phase 10.3 C1: subscribe to engine messages through the single
+  // SocketContext facade (wsRef). No mock wsRef, no direct onEngineMessage
+  // subscription, no local dedup — all of that lives in the facade now.
+  // Connection state (isConnected) also comes from the facade; see the
+  // transition effect below.
   useEffect(() => {
-    const unsubscribers = [];
-    async function initConnection() {
-      // In the new architecture, the main process handles the WebSocket.
-      // We just mock wsRef so existing code can call wsRef.current.send()
-      const wsListeners = new Map();
-
-      wsRef.current = {
-        readyState: 1, // Simulate WebSocket.OPEN
-        send: (data) => {
-          if (window.electronAPI && window.electronAPI.sendEngineMessage) {
-            window.electronAPI.sendEngineMessage(data);
-          }
-        },
-        addEventListener: (event, handler) => {
-          if (event === 'message' && window.electronAPI && window.electronAPI.onEngineMessage) {
-            const cleanup = window.electronAPI.onEngineMessage((data) => {
-              handler({ data });
-            });
-            wsListeners.set(handler, cleanup);
-          }
-        },
-        removeEventListener: (event, handler) => {
-          if (event === 'message' && wsListeners.has(handler)) {
-            const cleanup = wsListeners.get(handler);
-            if (typeof cleanup === 'function') cleanup();
-            wsListeners.delete(handler);
-          }
-        }
-      };
-
-      // Check initial status
-      if (window.electronAPI && window.electronAPI.getWsStatus) {
-        const isConnected = await window.electronAPI.getWsStatus();
-        if (isConnected) {
-          setStatus('Online');
-          wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
-          wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
-          wsRef.current.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
-          wsRef.current.send(JSON.stringify({ type: 'PLUGIN_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
-          wsRef.current.send(JSON.stringify({ type: 'SLASH_COMMAND_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
-        }
-      }
-
-      if (window.electronAPI && window.electronAPI.onEngineMessage) {
-        unsubscribers.push(window.electronAPI.onEngineMessage((data) => {
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.type === '_ws_status') {
-              if (parsed.status === 'connected') {
-                setStatus('Online');
-                wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
-                wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
-                wsRef.current.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
-                wsRef.current.send(JSON.stringify({ type: 'PLUGIN_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
-                wsRef.current.send(JSON.stringify({ type: 'SLASH_COMMAND_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
-              } else {
-                setStatus('Offline / Engine Disconnected');
-                // If the engine crashes or drops connection, forcefully terminate any pending tasks so the UI doesn't hang spinning forever.
-                setIsThinking(false);
-                setChatMessages(prev => {
-                  let newMessages = [...prev];
-                  const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
-                  if (lastAgentIdx !== -1) {
-                    const last = newMessages[lastAgentIdx];
-                    newMessages[lastAgentIdx] = { 
-                      ...last, 
-                      content: last.content ? `${last.content}\n\n**Error**: Connection lost (Engine crashed).` : "**Error**: Connection lost (Engine crashed).", 
-                      isFinal: true,
-                      hasError: true
-                    };
-                    return newMessages;
-                  }
-                  return prev;
-                });
-              }
-              return;
-            }
-            // Route standard messages to handleMessage
-            handleMessage({ data });
-          } catch (e) {
-            console.error(e);
-          }
-        }));
-      }
-
-      if (window.electronAPI && window.electronAPI.onChatDetached) {
-        unsubscribers.push(window.electronAPI.onChatDetached(() => setIsChatDetached(true)));
-      }
-      
-      if (window.electronAPI && window.electronAPI.onChatAttached) {
-        unsubscribers.push(window.electronAPI.onChatAttached(() => {
-          setIsChatDetached(false);
-          try {
-            const transferData = localStorage.getItem('floating_transfer_state');
-            if (transferData) {
-              const parsed = JSON.parse(transferData);
-              if (parsed.messages) setChatMessages(parsed.messages);
-            }
-          } catch (e) {}
-        }));
-      }
-
-      const handleMessage = (event) => {
-        const now = Date.now();
-        if (event.data && event.data === lastRawIpcData && (now - lastRawIpcTime) < 150) {
-          // Drop identical duplicate packet dispatched by multiple listeners in the same tick
-          return;
-        }
-        lastRawIpcData = event.data;
-        lastRawIpcTime = now;
-
-        const data = JSON.parse(event.data);
+    const handleMessage = (event) => {
+      const data = JSON.parse(event.data);
         if (data.type === 'hello') {
           setStatus(`Online / ${data.payload.active_model || 'Agent'}`);
         } else if (data.type === 'START_TASK' || data.type === 'TASK_STARTED') {
@@ -568,7 +463,13 @@ function AppContent() {
             return next;
           });
         } else if (data.type === 'PROVIDER_LIST_RESPONSE') {
-          setProviders(data.payload.providers || {});
+          // Phase 10.3 C1: providers is an ARRAY everywhere. The engine
+          // sends a list; an object payload is normalised via Object.values
+          // and a missing one becomes []. Never store an object here — the
+          // old `|| {}` fallback is what made MODEL_DEFAULT_CHANGED below
+          // silently no-op (its Array.isArray guard bailed out).
+          const list = data.payload.providers;
+          setProviders(Array.isArray(list) ? list : (list && typeof list === 'object' ? Object.values(list) : []));
         } else if (data.type === 'PROVIDER_REMOVE_RESPONSE' || data.type === 'PROVIDER_SAVE_RESPONSE') {
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
@@ -613,11 +514,33 @@ function AppContent() {
             }
           });
         }
-      };
+    };
 
-      };
-    
-    initConnection();
+    // Single subscription, via the facade. Registered synchronously so the
+    // effect cleanup (StrictMode double-mount included) always removes it —
+    // the old async initConnection leaked the first subscription, which is
+    // what the deleted dedup hack was papering over.
+    if (wsRef.current) {
+      wsRef.current.addEventListener('message', handleMessage);
+    }
+
+    const unsubscribers = [];
+    if (window.electronAPI && window.electronAPI.onChatDetached) {
+      unsubscribers.push(window.electronAPI.onChatDetached(() => setIsChatDetached(true)));
+    }
+
+    if (window.electronAPI && window.electronAPI.onChatAttached) {
+      unsubscribers.push(window.electronAPI.onChatAttached(() => {
+        setIsChatDetached(false);
+        try {
+          const transferData = localStorage.getItem('floating_transfer_state');
+          if (transferData) {
+            const parsed = JSON.parse(transferData);
+            if (parsed.messages) setChatMessages(parsed.messages);
+          }
+        } catch (e) {}
+      }));
+    }
 
     // Poll Electron process memory usage every 5s for Dashboard
     const memoryPoll = setInterval(async () => {
@@ -640,11 +563,53 @@ function AppContent() {
     // it must not fabricate the appearance of a populated knowledge graph.
     return () => {
       clearInterval(memoryPoll);
+      if (wsRef.current) {
+        wsRef.current.removeEventListener('message', handleMessage);
+      }
       unsubscribers.forEach(unsub => {
         if (typeof unsub === 'function') unsub();
       });
     };
   }, []);
+
+  // Phase 10.3 C1: connection transitions come from the facade's
+  // isConnected (driven by its _ws_status listener and getWsStatus), which
+  // replaces the _ws_status branch of App's old direct subscription. On
+  // connect, (re-)request the lists the UI needs; on disconnect, stop any
+  // spinner and surface the drop in chat.
+  const wasConnectedRef = useRef(false);
+  useEffect(() => {
+    if (isConnected && !wasConnectedRef.current) {
+      setStatus('Online');
+      if (wsRef.current) {
+        wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+        wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+        wsRef.current.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+        wsRef.current.send(JSON.stringify({ type: 'PLUGIN_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+        wsRef.current.send(JSON.stringify({ type: 'SLASH_COMMAND_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+      }
+    } else if (!isConnected && wasConnectedRef.current) {
+      setStatus('Offline / Engine Disconnected');
+      // If the engine crashes or drops connection, forcefully terminate any pending tasks so the UI doesn't hang spinning forever.
+      setIsThinking(false);
+      setChatMessages(prev => {
+        let newMessages = [...prev];
+        const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
+        if (lastAgentIdx !== -1) {
+          const last = newMessages[lastAgentIdx];
+          newMessages[lastAgentIdx] = {
+            ...last,
+            content: last.content ? `${last.content}\n\n**Error**: Connection lost (Engine crashed).` : "**Error**: Connection lost (Engine crashed).",
+            isFinal: true,
+            hasError: true
+          };
+          return newMessages;
+        }
+        return prev;
+      });
+    }
+    wasConnectedRef.current = isConnected;
+  }, [isConnected, wsRef]);
 
   const handleSendMessage = (text) => {
     setChatMessages(prev => [
@@ -1021,7 +986,6 @@ function AppContent() {
                    wsRef={wsRef} 
                    providers={providers}
                    localModels={localModels}
-                   defaultModel={defaultModel}
                  />
                </div>
             )}
@@ -1041,7 +1005,7 @@ function AppContent() {
         <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1 }}>
           <ForceGraph3D
             ref={graphRef}
-            graphData={graphData}
+            graphData={initGraphData}
             backgroundColor="#05050f"
             nodeColor={node => {
               if (node.group === 1) return '#ec4899'; // AETHER-OS root

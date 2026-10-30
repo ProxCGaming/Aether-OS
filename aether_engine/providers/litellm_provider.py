@@ -22,8 +22,14 @@ from aether_engine.providers.base import (
     TimeoutError,
     ToolCall,
 )
+from aether_engine.providers.discovery import DISCOVERY_TIMEOUT
 
 logger = logging.getLogger("aether_engine.providers.litellm_provider")
+
+# Bounded timeout for the validation ping (Phase 10.1, B1). Same value as
+# DISCOVERY_TIMEOUT: the ping is the same class of operation as a model-list
+# fetch (one short request to a provider endpoint), so it gets the same bound.
+VALIDATION_TIMEOUT = DISCOVERY_TIMEOUT
 
 # Suppress litellm's noisy debug logs in production
 litellm.suppress_debug_info = True
@@ -586,11 +592,21 @@ async def validate_api_key(
     api_key: str,
     model: str = "",
     base_url: Optional[str] = None,
+    timeout: float = VALIDATION_TIMEOUT,
 ) -> Dict[str, Any]:
     """Validate a provider API key by making a minimal completion call.
 
     Returns dict with 'status' ('connected', 'invalid_key', 'network_error')
-    and 'message' explaining the result.
+    and 'message' explaining the result. On a timeout the result carries the
+    DiscoveryResult-style error shape: status 'network_error' with a 'code'
+    of None (transport-level failure — no HTTP response was received, same
+    convention as DiscoveryError) and a message naming the bound. A timeout
+    is never reported as a success.
+
+    ``timeout`` bounds the ping in seconds (default VALIDATION_TIMEOUT, 10s,
+    matching DISCOVERY_TIMEOUT). It is enforced twice: passed to LiteLLM so
+    the underlying HTTP client enforces it, and via ``asyncio.wait_for`` so
+    the bound holds even if LiteLLM drops or ignores the kwarg for a provider.
     """
     import time
 
@@ -616,6 +632,7 @@ async def validate_api_key(
         "messages": [{"role": "user", "content": "ping"}],
         "max_tokens": 5,
         "api_key": effective_api_key,
+        "timeout": timeout,
         "extra_headers": {"User-Agent": "Cline/1.0.0"}
     }
 
@@ -625,7 +642,10 @@ async def validate_api_key(
 
     start = time.time()
     try:
-        resp = await litellm.acompletion(**kwargs)
+        # wait_for is the backstop: LiteLLM honours `timeout` for most
+        # providers, but a stalled provider must not block validation
+        # indefinitely if the kwarg is dropped anywhere along the path.
+        resp = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=timeout)
         latency = (time.time() - start) * 1000.0
         return {
             "status": "connected",
@@ -642,8 +662,21 @@ async def validate_api_key(
             "message": "API key is valid (rate limited).",
             "latency_ms": round(latency, 2),
         }
+    except (asyncio.TimeoutError, litellm.Timeout):
+        # Phase 10.1, B1: a stalled provider previously blocked validation
+        # indefinitely (no timeout anywhere on this call). Return a real
+        # error in the DiscoveryResult shape — code None means no HTTP
+        # response was received, exactly like DiscoveryError — never a
+        # silent success and never an empty success.
+        latency = (time.time() - start) * 1000.0
+        return {
+            "status": "network_error",
+            "message": f"Validation timed out after {timeout}s: provider did not respond.",
+            "code": None,
+            "latency_ms": round(latency, 2),
+        }
     except Exception as e:
-        return {"status": "network_error", "message": f"Validation failed: {e}"}
+        return {"status": "network_error", "message": f"Validation failed: {e}", "code": None}
 
 
 # ---------------------------------------------------------------------------

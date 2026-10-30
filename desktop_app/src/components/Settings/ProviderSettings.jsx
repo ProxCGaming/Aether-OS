@@ -79,10 +79,9 @@ export default function ProviderSettings({ providers = [] }) {
     setValidationState(prev => ({ ...prev, [providerName]: 'saving' }));
     
     const apiKeyToSave = keys[providerName] || '';
-    if (apiKeyToSave) {
-      localStorage.setItem(`aether_saved_key_${finalProviderName}`, apiKeyToSave);
-    }
-
+    // Phase 10.1 C1: keys are NEVER mirrored to localStorage (or any other
+    // renderer storage). The engine's secure secret store is the only
+    // destination — the key goes out via PROVIDER_SAVE_REQUEST only.
     sendMessage('PROVIDER_SAVE_REQUEST', {
       schema_version: 1,
       request_id: Date.now().toString(),

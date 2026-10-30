@@ -88,7 +88,7 @@ class EngineState:
         self.scheduler_manager = CapabilitySchedulerManager()
         self.ollama_manager = OllamaManager()
         from aether_engine.plugins.installer import PluginInstaller
-        self.plugin_installer = PluginInstaller(Path.home() / ".aether" / "plugins")
+        self.plugin_installer = PluginInstaller(Path.home() / ".aether" / "plugins", audit_logger=self.audit_logger)
         self.active_provider: str = "google_gemini"
         self.active_model: str = "gemini-2.5-flash"
         self.configured_providers: List[str] = []

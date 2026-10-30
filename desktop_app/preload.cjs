@@ -5,7 +5,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   minimizeWindow: () => ipcRenderer.invoke('minimize-window'),
   maximizeWindow: () => ipcRenderer.invoke('maximize-window'),
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
-  getAuthToken: () => ipcRenderer.invoke('get-auth-token'),
   getWsStatus: () => ipcRenderer.invoke('get-ws-status'),
   getMemoryUsage: () => ipcRenderer.invoke('get-memory-usage'),
   showOpenDialog: (options) => ipcRenderer.invoke('show-open-dialog', options),
