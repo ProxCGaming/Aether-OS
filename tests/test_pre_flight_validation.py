@@ -1,4 +1,3 @@
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,13 +14,20 @@ class TestPreFlightValidation(unittest.TestCase):
         self.assertFalse(result.is_valid)
         self.assertIn("does not exist", result.error)
 
-    def test_write_file_validation_requires_existing_parent(self):
+    def test_write_file_validation_allows_missing_parent_inside_roots(self):
+        # Epic 2, E2-04 (decision D3) supersedes the old pin: write_file
+        # creates missing parents implicitly, so pre-flight judges
+        # writability at the nearest EXISTING ancestor instead of
+        # requiring the parent to exist. Containment is unchanged.
         with tempfile.TemporaryDirectory() as tmp_dir:
             target = Path(tmp_dir) / "child" / "notes.txt"
             result = validate_tool_request("write_file", {"path": str(target)}, workspace_roots=[tmp_dir])
+            self.assertTrue(result.is_valid)
 
-        self.assertFalse(result.is_valid)
-        self.assertIn("parent directory", result.error)
+            outside = Path(tmp_dir).parent / "outside" / "notes.txt"
+            denied = validate_tool_request("write_file", {"path": str(outside)}, workspace_roots=[tmp_dir])
+            self.assertFalse(denied.is_valid)
+            self.assertIn("outside permitted workspace roots", denied.error)
 
     def test_execute_shell_validation_requires_executable_in_path(self):
         result = validate_tool_request("execute_shell", {"command": "echo hi"})
