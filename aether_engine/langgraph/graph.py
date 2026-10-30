@@ -72,6 +72,7 @@ def tool_router(state: AetherState, config=None) -> str:
             {"deny": user_config.extra_shell_deny_patterns, "ask": user_config.extra_shell_ask_patterns}
             if user_config else None
         ),
+        approval_mode=user_config.approval_mode if user_config else "ask",
     )
     if policy == "ask":
         return "pause_for_approval"

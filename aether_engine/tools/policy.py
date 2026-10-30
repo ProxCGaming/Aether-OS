@@ -95,6 +95,7 @@ def resolve_tool_policy(
     args: dict | None = None,
     path_rules: list | None = None,
     shell_extras: dict | None = None,
+    approval_mode: str = "ask",
 ) -> str:
     """
     Resolves the effective policy for a tool based on user settings and its risk.
@@ -124,7 +125,7 @@ def resolve_tool_policy(
         if shell_verdict.verdict == "deny":
             return "deny"
 
-    verdict = _resolve_base_verdict(tool, user_policies, args=args, path_rules=path_rules)
+    verdict = _resolve_base_verdict(tool, user_policies, args=args, path_rules=path_rules, approval_mode=approval_mode)
     if shell_verdict is not None and shell_verdict.verdict == "ask" and verdict == "allow":
         return "ask"
     return verdict
@@ -136,6 +137,7 @@ def _resolve_base_verdict(
     *,
     args: dict | None = None,
     path_rules: list | None = None,
+    approval_mode: str = "ask",
 ) -> str:
     user_setting = user_policies.get(tool.name)
 
@@ -156,8 +158,13 @@ def _resolve_base_verdict(
     if user_setting == "Require Approval":
         return "ask"
 
-    # 4. If risk is not read_only, 'Always Allow' is ignored, and it always defaults to ask
+    # 4. If risk is not read_only, 'Always Allow' is ignored, and it defaults to ask.
+    #    E2-08: approval_mode "write" relaxes exactly this DEFAULT for
+    #    WRITE-risk tools (explicit asks above are untouched, path-rule
+    #    asks returned earlier, and the floor still applies).
     if tool.risk != ToolRisk.READ_ONLY:
+        if approval_mode == "write" and tool.risk == ToolRisk.WRITE:
+            return _apply_floor("allow", tool, args)
         return "ask"
 
     # 5. If read_only, and 'Always Allow', we allow it
@@ -169,7 +176,7 @@ def _resolve_base_verdict(
     return _apply_floor("allow", tool, args)
 
 
-def resolve_policy_by_name(tool_name: str, user_policies: dict[str, str], registry=None, *, args: dict | None = None, path_rules: list | None = None, shell_extras: dict | None = None) -> str:
+def resolve_policy_by_name(tool_name: str, user_policies: dict[str, str], registry=None, *, args: dict | None = None, path_rules: list | None = None, shell_extras: dict | None = None, approval_mode: str = "ask") -> str:
     """
     Helper to resolve policy given just a tool name, looking up in registry or fallbacks.
     """
@@ -188,4 +195,4 @@ def resolve_policy_by_name(tool_name: str, user_policies: dict[str, str], regist
         risk = KNOWN_NON_REGISTRY_TOOLS[tool_name]
 
     dummy_tool = Tool(name=tool_name, description="", risk=risk)
-    return resolve_tool_policy(dummy_tool, user_policies, args=args, path_rules=path_rules, shell_extras=shell_extras)
+    return resolve_tool_policy(dummy_tool, user_policies, args=args, path_rules=path_rules, shell_extras=shell_extras, approval_mode=approval_mode)
