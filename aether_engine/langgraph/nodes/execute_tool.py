@@ -27,8 +27,14 @@ import logging
 
 from langchain_core.runnables import RunnableConfig
 
+from aether_common.contracts import Event, EventType
+from aether_engine.event_bus import event_bus
 from aether_engine.langgraph.state import TOOL_LOOP_GUARD_THRESHOLD, AetherState
 from aether_engine.tools.registry import ToolExecutionError, ToolNotFoundError
+from aether_engine.tools.scratchpad import (
+    SCRATCHPAD_TOOL_NAME,
+    scratchpad_event_payload,
+)
 
 logger = logging.getLogger("aether_engine.langgraph.nodes.execute_tool")
 
@@ -155,6 +161,15 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                 executed_write = registry.get_tool(tool_name).risk.value != "read_only"
             except Exception:  # noqa: BLE001 — unknown tool metadata must not fail the run; it just doesn't flip the prewalk switch.
                 executed_write = False
+            # E1-17: publish scratchpad renders for the UI panel
+            # (sanitised in scratchpad_event_payload; display-only).
+            if tool_name == SCRATCHPAD_TOOL_NAME:
+                payload = scratchpad_event_payload(args, active_agent)
+                task_id = state.get("task_id")
+                if payload and task_id:
+                    payload["task_id"] = task_id
+                    event_bus.publish(task_id, Event(
+                        type=EventType.SCRATCHPAD, request_id="", payload=payload))
         except ToolNotFoundError:
             result_text = f"Error: Tool {tool_name} not found in registry."
         except ToolExecutionError as e:

@@ -105,6 +105,8 @@ class EventType(str, Enum):
     SESSION_TITLE_UPDATED = "SESSION_TITLE_UPDATED"
     # Epic 1, E1-16: model thinking, streamed apart from the answer
     THINKING = "THINKING"
+    # Epic 1, E1-17: agent scratchpad content for the display-only panel
+    SCRATCHPAD = "SCRATCHPAD"
 
     # Tools Management
     TOOL_LIST_REQUEST = "TOOL_LIST_REQUEST"

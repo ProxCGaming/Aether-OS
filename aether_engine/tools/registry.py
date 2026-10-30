@@ -175,6 +175,9 @@ def build_tool_registry(
     """
     registry = ToolRegistry()
     registry.register(create_current_time_tool())
+    from aether_engine.tools.scratchpad import create_scratchpad_tool
+
+    registry.register(create_scratchpad_tool())
     if include_file_tools:
         for tool in create_file_tools():
             registry.register(tool)
