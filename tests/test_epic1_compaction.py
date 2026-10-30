@@ -256,7 +256,7 @@ def test_compaction_config_defaults_and_user_config_round_trip():
     # override, while still pruning genuinely seam-less tasks.
     restored = UserConfig.from_dict({
         **cfg.to_dict(),
-        "auxiliary_models": {"compression": "p:::m", "title": "x:::y"},
+        "auxiliary_models": {"compression": "p:::m", "web": "x:::y"},
     })
     assert restored.compaction_trigger_messages == 7
     assert restored.compaction_keep_recent == 3

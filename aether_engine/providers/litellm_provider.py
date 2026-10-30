@@ -668,7 +668,7 @@ async def validate_api_key(
             "message": "API key is valid (rate limited).",
             "latency_ms": round(latency, 2),
         }
-    except (TimeoutError, litellm.Timeout):
+    except (asyncio.TimeoutError, litellm.Timeout):  # noqa: UP041 — qualified on purpose: bare TimeoutError in this module is the domain error imported from providers.base, not the builtin asyncio raises.
         # Phase 10.1, B1: a stalled provider previously blocked validation
         # indefinitely (no timeout anywhere on this call). Return a real
         # error in the DiscoveryResult shape — code None means no HTTP

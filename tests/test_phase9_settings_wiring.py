@@ -11,7 +11,7 @@ from aether_common.contracts import EventType
 from aether_engine.config import UserConfig
 from aether_engine.routing.health import ProviderHealthManager
 from aether_engine.routing.policy import RoutingPolicy, TaskRequirements
-from aether_engine.routing.registry import ModelRegistry, ModelEntry
+from aether_engine.routing.registry import ModelEntry, ModelRegistry
 
 
 @pytest.fixture
@@ -37,9 +37,12 @@ class TestAuxiliaryModelContract:
         cfg.auxiliary_models = {"vision": "openai:::gpt-4o", "title": "google_gemini:::gemini-2.0-flash"}
         cfg.reasoning_effort = "high"
         restored = UserConfig.from_dict(cfg.to_dict())
-        # Phase 10.3 B1: "title" has no engine call site, so from_dict drops
-        # stale placebo overrides on load; only "vision" survives.
-        assert restored.auxiliary_models == {"vision": "openai:::gpt-4o"}
+        # Phase 10.3 B1 dropped seam-less overrides on load; Epic 1 (E1-08)
+        # gave "title" a real engine seam (session_titles), so both survive.
+        assert restored.auxiliary_models == {
+            "vision": "openai:::gpt-4o",
+            "title": "google_gemini:::gemini-2.0-flash",
+        }
         assert restored.reasoning_effort == "high"
 
     def test_config_defaults_sane(self):
@@ -122,13 +125,14 @@ class TestSettingsWebSocketHandlers:
     @pytest.fixture
     def ws_client(self, tmp_path):
         from starlette.testclient import TestClient
+
         from aether_engine.app import app, engine_state
 
         token_file = tmp_path / "engine.token"
         audit_file = tmp_path / "audit.log"
         engine_state.token_path = token_file
         engine_state.audit_logger.log_path = audit_file
-        token = engine_state.initialize_auth()
+        engine_state.initialize_auth()
 
         # initialize() replaces user_config and recomputes configured_providers,
         # so snapshot/mutate only after it runs.
@@ -159,8 +163,8 @@ class TestSettingsWebSocketHandlers:
         return Event.from_json(ws.receive_text())
 
     def test_auxiliary_model_set_roundtrip(self, ws_client):
-        from aether_engine.config import save_config, load_config
         from aether_engine import config as config_module
+        from aether_engine.config import load_config
 
         ws, engine_state = ws_client
         resp = self._roundtrip(ws, EventType.AUXILIARY_MODEL_SET_REQUEST,
@@ -188,7 +192,7 @@ class TestSettingsWebSocketHandlers:
         assert resp.payload["success"] is False
 
     def test_auxiliary_model_auto_clears_override(self, ws_client):
-        ws, engine_state = ws_client
+        ws, _engine_state = ws_client
         resp = self._roundtrip(ws, EventType.AUXILIARY_MODEL_SET_REQUEST,
                               {"task": "vision", "provider": "openai", "model": "gpt-4o"})
         assert resp.payload["success"] is True
@@ -199,24 +203,24 @@ class TestSettingsWebSocketHandlers:
         assert "vision" not in resp.payload["auxiliary_models"]
 
     def test_auxiliary_model_rejects_task_with_no_engine_seam(self, ws_client):
-        # Phase 10.3, B1: the six helper tasks (web, compression, skills,
-        # approval, mcp, title) have no engine call site — routing/policy.py
-        # reads only "vision". They must be rejected, not accepted and then
-        # silently ignored. A stale entry for one of them (e.g. from a config
-        # file written before Phase 10.3) is pruned so the echoed dict never
-        # advertises an override the engine will not honor.
+        # Phase 10.3, B1: helper tasks with no engine call site must be
+        # rejected, not accepted and then silently ignored, and a stale
+        # entry for one is pruned so the echoed dict never advertises an
+        # override the engine will not honor. Epic 1 gave compression,
+        # advisor and title real seams; "web" remains seam-less and is the
+        # probe here.
         ws, engine_state = ws_client
-        engine_state.user_config.auxiliary_models["title"] = "openai:::gpt-4o"
+        engine_state.user_config.auxiliary_models["web"] = "openai:::gpt-4o"
         resp = self._roundtrip(ws, EventType.AUXILIARY_MODEL_SET_REQUEST,
-                              {"task": "title", "provider": "", "model": "auto"})
+                              {"task": "web", "provider": "", "model": "auto"})
         assert resp.payload["success"] is False
-        assert "title" in resp.payload["error"]
-        assert "title" not in resp.payload["auxiliary_models"]
-        assert "title" not in engine_state.user_config.auxiliary_models
+        assert "web" in resp.payload["error"]
+        assert "web" not in resp.payload["auxiliary_models"]
+        assert "web" not in engine_state.user_config.auxiliary_models
 
     def test_reasoning_effort_set_roundtrip(self, ws_client):
-        from aether_engine.config import load_config
         from aether_engine import config as config_module
+        from aether_engine.config import load_config
 
         ws, engine_state = ws_client
         resp = self._roundtrip(ws, EventType.REASONING_EFFORT_SET_REQUEST, {"effort": "high"})
