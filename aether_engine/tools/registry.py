@@ -216,19 +216,17 @@ def create_file_tools() -> list[Tool]:
 
 def create_web_tools() -> list[Tool]:
     def _search_web(query: str, max_results: int = 5) -> str:
-        from ddgs import DDGS
-        try:
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=max_results))
-                if not results:
-                    return "No results found."
-                
-                output = []
-                for r in results:
-                    output.append(f"Title: {r.get('title')}\nURL: {r.get('href')}\nSnippet: {r.get('body')}\n")
-                return "\n".join(output)
-        except Exception as e:  # noqa: BLE001 — ddgs raises arbitrary network/HTTP errors; the failure is surfaced to the caller as the tool result
-            return f"Search failed: {e}"
+        # Epic 2, E2-10: dispatch through the provider seam (ddgs by
+        # default, or the user's configured keyed provider).
+        from aether_engine.tools.web_search import (
+            current_search_config,
+            search_web_dispatch,
+        )
+
+        provider, fallback = current_search_config()
+        return search_web_dispatch(
+            query, max_results=max_results, provider=provider, fallback_to_ddgs=fallback
+        )
 
     from aether_engine.tools.web_fetch import create_fetch_url_tool
 
@@ -236,7 +234,7 @@ def create_web_tools() -> list[Tool]:
         Tool(
             name="search_web",
             description=(
-                "Search the web for information using DuckDuckGo. Returns search "
+                "Search the web for information. Returns search "
                 "results (titles, URLs, snippets) — use fetch_url to read a "
                 "result page in full."
             ),

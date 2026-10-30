@@ -56,11 +56,20 @@ def _config(provider, registry):
 @pytest.mark.asyncio
 async def test_plan_mode_offers_only_read_only_tools(monkeypatch):
     monkeypatch.setattr(planner_module, "save_artifact", lambda *a, **k: "/tmp/p.txt")
-    registry = build_tool_registry()  # builtins: time(RO), file write/delete/shell, web search(RO), scratchpad(RO)
+    registry = build_tool_registry()  # builtins: time(RO), file write/delete/shell, web search+fetch(RO), scratchpad(RO), fs read suite(RO)
     provider = StubProvider("a plan")
     await planner_module.planner_node(_state(plan_mode=True), _config(provider, registry))
     names = {t["function"]["name"] for t in provider.seen_tools}
-    assert names == {"get_current_time", "search_web", "scratchpad_render", "read_file"}
+    assert names == {
+        "fetch_url",
+        "find_files",
+        "get_current_time",
+        "project_tree",
+        "read_file",
+        "scratchpad_render",
+        "search_text",
+        "search_web",
+    }
 
 
 @pytest.mark.asyncio

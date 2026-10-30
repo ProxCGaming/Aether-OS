@@ -115,6 +115,12 @@ class UserConfig:
     # safety rules (validation/shell_rules.py).
     extra_shell_deny_patterns: list[str] = field(default_factory=list)
     extra_shell_ask_patterns: list[str] = field(default_factory=list)
+    # Epic 2, E2-10: web search provider seam — "ddgs" (no key) or a
+    # keyed provider (exa/brave/tavily/firecrawl; keys live in the
+    # secret store under the provider's name). Fallback to ddgs on a
+    # keyed provider's failure happens ONLY when explicitly enabled.
+    search_provider: str = "ddgs"
+    search_fallback_to_ddgs: bool = False
     # Epic 2, E2-08: approval mode. "ask" = today's behaviour (every
     # non-read-only call asks unless a path rule allows it). "write" =
     # WRITE-risk calls are auto-allowed like reads; EXECUTE and
@@ -193,6 +199,8 @@ class UserConfig:
             "extra_shell_deny_patterns": self.extra_shell_deny_patterns,
             "extra_shell_ask_patterns": self.extra_shell_ask_patterns,
             "approval_mode": self.approval_mode,
+            "search_provider": self.search_provider,
+            "search_fallback_to_ddgs": self.search_fallback_to_ddgs,
             "workspace_roots": self.workspace_roots,
             "agent_models": self.agent_models,
             "agent_tools": self.agent_tools,
@@ -278,6 +286,8 @@ class UserConfig:
             extra_shell_deny_patterns=[p for p in d.get("extra_shell_deny_patterns", []) if isinstance(p, str)] if isinstance(d.get("extra_shell_deny_patterns"), list) else [],
             extra_shell_ask_patterns=[p for p in d.get("extra_shell_ask_patterns", []) if isinstance(p, str)] if isinstance(d.get("extra_shell_ask_patterns"), list) else [],
             approval_mode=d.get("approval_mode") if d.get("approval_mode") in ("ask", "write") else "ask",
+            search_provider=d.get("search_provider") if d.get("search_provider") in ("ddgs", "exa", "brave", "tavily", "firecrawl") else "ddgs",
+            search_fallback_to_ddgs=bool(d.get("search_fallback_to_ddgs", False)),
             workspace_roots=d.get("workspace_roots") if isinstance(d.get("workspace_roots"), list) else [],
             agent_models=_as_dict(d.get("agent_models")),
             agent_tools=_as_list_dict(d.get("agent_tools")),
