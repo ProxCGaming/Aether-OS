@@ -15,6 +15,10 @@ Re-verified in the current code (branch phase-10-3-correctness):
                   snippets as text; no LLM extraction call.
     compression — no summarisation/compaction LLM call anywhere; only
                   string truncation (prompt[:30], response[:200]).
+                  (Update, Epic 1 E1-06: compaction now exists —
+                  langgraph/compaction.py resolves this override for its
+                  summariser, so "compression" has a real seam and is
+                  accepted again; the remaining five are still placebo.)
     skills      — skills/manager.py matches manifests by keyword score;
                   skills are prompt text run by the main model.
     approval    — LangGraph native interrupt (langgraph/nodes/pause.py),
@@ -38,10 +42,12 @@ from aether_common.contracts import Event, EventType
 from aether_engine.routes.websocket import AUXILIARY_TASK_CLASSES
 from aether_engine.routing.health import ProviderHealthManager
 from aether_engine.routing.policy import RoutingPolicy, TaskRequirements
-from aether_engine.routing.registry import ModelRegistry, ModelEntry
+from aether_engine.routing.registry import ModelEntry, ModelRegistry
 
-# The six task classes with no engine call site (see module docstring).
-PLACEBO_TASKS = ["web", "compression", "skills", "approval", "mcp", "title"]
+# The task classes with no engine call site (see module docstring).
+# "compression" left this list in Epic 1 (E1-06): compaction gave it a
+# real call site in langgraph/compaction.py.
+PLACEBO_TASKS = ["web", "skills", "approval", "mcp", "title"]
 
 
 @pytest.fixture
@@ -56,11 +62,13 @@ def mock_registry():
 
 
 class TestAcceptedTaskSet:
-    def test_only_vision_has_an_engine_seam(self):
+    def test_only_seamed_tasks_have_engine_call_sites(self):
         # Single source of truth for what the handler accepts. If a task
-        # class gains a real call site, add it here AND wire the routing
-        # policy to consult it — never widen the accepted set alone.
-        assert AUXILIARY_TASK_CLASSES == frozenset({"vision"})
+        # class gains a real call site, add it here AND wire the engine
+        # to consult it — never widen the accepted set alone. "vision"
+        # is consulted by routing/policy.py; "compression" by
+        # langgraph/compaction.py (Epic 1, E1-06 — the summariser).
+        assert AUXILIARY_TASK_CLASSES == frozenset({"vision", "compression"})
 
     def test_placebo_tasks_are_not_in_accepted_set(self):
         for task in PLACEBO_TASKS:
@@ -73,14 +81,14 @@ class TestRoutingIgnoresPlaceboOverrides:
         # if no overrides existed: the policy reads only "vision".
         policy = RoutingPolicy(mock_registry)
         health = ProviderHealthManager()
-        kwargs = dict(
-            prompt="describe this image",
-            configured_providers=["google_gemini", "openai"],
-            health_manager=health,
-            user_default_provider="google_gemini",
-            user_default_model="gemini-2.0-flash",
-            requirements=TaskRequirements(has_images=True),
-        )
+        kwargs = {
+            "prompt": "describe this image",
+            "configured_providers": ["google_gemini", "openai"],
+            "health_manager": health,
+            "user_default_provider": "google_gemini",
+            "user_default_model": "gemini-2.0-flash",
+            "requirements": TaskRequirements(has_images=True),
+        }
         placebo = {task: "openai:::gpt-4o" for task in PLACEBO_TASKS}
         with_placebo = policy.select_route(auxiliary_models=placebo, **kwargs)
         without = policy.select_route(auxiliary_models={}, **kwargs)
@@ -112,6 +120,7 @@ class TestWebSocketRejectsPlaceboTasks:
     @pytest.fixture
     def ws_client(self, tmp_path):
         from starlette.testclient import TestClient
+
         from aether_engine.app import app, engine_state
 
         token_file = tmp_path / "engine.token"
@@ -171,8 +180,8 @@ class TestWebSocketRejectsPlaceboTasks:
         # A config file written before Phase 10.3 may still carry placebo
         # overrides. The first aux-model request must drop them (and persist
         # the cleaned dict) instead of echoing them back as live settings.
-        from aether_engine.config import load_config
         from aether_engine import config as config_module
+        from aether_engine.config import load_config
 
         ws, engine_state = ws_client
         for task in PLACEBO_TASKS:

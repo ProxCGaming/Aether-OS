@@ -176,6 +176,22 @@ class AetherState(TypedDict):
     # injected into prompts (bounded summary, never a raw dump).
     blackboard: Annotated[dict[str, Any], merge_blackboard]
 
+    # Plan mode (Epic 1, E1-09): when True, specialists only receive
+    # READ_ONLY tools and execute_tool refuses anything riskier. Lives
+    # in state (not just config) so it survives the approval pause via
+    # the checkpointer with no resume-time threading.
+    plan_mode: bool
+
+    # Conversation compaction (Epic 1, E1-06): a summary of the older
+    # turns of this thread's history, and how many channel messages it
+    # covers. The messages channel itself is NEVER rewritten by
+    # compaction — models see summary + tail through
+    # compaction.model_facing_messages, and the full history stays in
+    # the checkpoint. The marker makes compaction incremental: the
+    # next round folds only messages beyond it.
+    context_summary: str | None
+    context_summary_upto: int
+
     # Session and task identifiers
     task_id: str | None
     session_id: str | None

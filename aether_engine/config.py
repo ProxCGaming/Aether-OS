@@ -2,15 +2,17 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # Phase 10.3 B1: the only auxiliary task classes with a real engine seam.
-# routing/policy.py reads only "vision"; the other six helper tasks
-# (web, compression, skills, approval, mcp, title) have no engine call
-# site, so an override for them would be a placebo. Single source of
-# truth — routes/websocket.py imports this; UserConfig.from_dict filters
-# stale entries from old config files against it on load.
-AUXILIARY_TASK_CLASSES = frozenset({"vision"})
+# routing/policy.py reads "vision"; langgraph/compaction.py reads
+# "compression" (the conversation summariser — seam added by Epic 1,
+# E1-06). The other four helper tasks (web, skills, approval, mcp,
+# title) have no engine call site, so an override for them would be a
+# placebo. Single source of truth — routes/websocket.py imports this;
+# UserConfig.from_dict filters stale entries from old config files
+# against it on load.
+AUXILIARY_TASK_CLASSES = frozenset({"vision", "compression"})
 
 CONFIG_PATH = Path.home() / ".aether" / "config.json"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
@@ -23,12 +25,12 @@ class ProviderInfo:
     name: str
     display_name: str
     key_url: str
-    models: List[str] = field(default_factory=list)
+    models: list[str] = field(default_factory=list)
     icon: str = "◆"
     supports_custom_url: bool = False
 
 
-CLOUD_PROVIDERS: List[ProviderInfo] = [
+CLOUD_PROVIDERS: list[ProviderInfo] = [
     ProviderInfo(
         name="google_gemini", display_name="Google Gemini",
         key_url="https://aistudio.google.com/apikey",
@@ -68,7 +70,7 @@ CLOUD_PROVIDERS: List[ProviderInfo] = [
     ),
 ]
 
-PROVIDER_MAP: Dict[str, ProviderInfo] = {p.name: p for p in CLOUD_PROVIDERS}
+PROVIDER_MAP: dict[str, ProviderInfo] = {p.name: p for p in CLOUD_PROVIDERS}
 
 LOCAL_MODELS = [
     {"name": "Qwen 3 8B", "size": "4.9 GB", "badges": ["Fast", "Code"]},
@@ -87,31 +89,31 @@ class UserConfig:
     default_model: str = "gemini-2.0-flash"
     window_width: int = 420
     window_height: int = 680
-    provider_models: Dict[str, List[str]] = field(default_factory=dict)
+    provider_models: dict[str, list[str]] = field(default_factory=dict)
     # Models the provider returned but the discovery filter rejected
     # (non-chat: embeddings, image, audio...), as {"id", "kind"} dicts.
     # Shown in the provider card "View all" expander; never in chat selectors.
-    provider_excluded_models: Dict[str, List[Dict[str, str]]] = field(default_factory=dict)
-    custom_base_urls: Dict[str, str] = field(default_factory=dict)
-    custom_provider_names: Dict[str, str] = field(default_factory=dict)
-    custom_provider_types: Dict[str, str] = field(default_factory=dict)
-    task_classes: Dict[str, Dict[str, int]] = field(default_factory=lambda: {
+    provider_excluded_models: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    custom_base_urls: dict[str, str] = field(default_factory=dict)
+    custom_provider_names: dict[str, str] = field(default_factory=dict)
+    custom_provider_types: dict[str, str] = field(default_factory=dict)
+    task_classes: dict[str, dict[str, int]] = field(default_factory=lambda: {
         "instant": {"time_cap_seconds": 30, "memory_cap_mb": 256},
         "quick": {"time_cap_seconds": 300, "memory_cap_mb": 1024},
         "standard": {"time_cap_seconds": 1800, "memory_cap_mb": 4096},
         "heavy": {"time_cap_seconds": 14400, "memory_cap_mb": 8192},
         "custom": {"time_cap_seconds": 3600, "memory_cap_mb": 2048},
     })
-    tool_policies: Dict[str, str] = field(default_factory=dict)
-    workspace_roots: List[str] = field(default_factory=list)
-    agent_models: Dict[str, str] = field(default_factory=dict)
-    agent_tools: Dict[str, List[str]] = field(default_factory=dict)
-    agent_skills: Dict[str, List[str]] = field(default_factory=dict)
-    custom_slash_commands: Dict[str, dict] = field(default_factory=dict)
+    tool_policies: dict[str, str] = field(default_factory=dict)
+    workspace_roots: list[str] = field(default_factory=list)
+    agent_models: dict[str, str] = field(default_factory=dict)
+    agent_tools: dict[str, list[str]] = field(default_factory=dict)
+    agent_skills: dict[str, list[str]] = field(default_factory=dict)
+    custom_slash_commands: dict[str, dict] = field(default_factory=dict)
     disable_fallbacks: bool = False
-    fallback_chain: List[str] = field(default_factory=list)
+    fallback_chain: list[str] = field(default_factory=list)
     # Phase 9: per-task-class auxiliary model overrides, task -> "provider:::model" or "auto"
-    auxiliary_models: Dict[str, str] = field(default_factory=dict)
+    auxiliary_models: dict[str, str] = field(default_factory=dict)
     # Phase 9: reasoning effort for reasoning-capable models ("standard" | "medium" | "high")
     reasoning_effort: str = "standard"
     # Phase 10.3 A1: memory retention. Age caps are in days; count caps are
@@ -135,8 +137,15 @@ class UserConfig:
     kg_max_facts: int = 5000
     session_retention_days: int = 180
     session_max_sessions: int = 200
+    # Epic 1, E1-06: conversation compaction thresholds. When a thread's
+    # model-facing history exceeds either bound, the older turns are
+    # folded into a summary (see langgraph/compaction.py); the most
+    # recent compaction_keep_recent messages always stay verbatim.
+    compaction_trigger_messages: int = 40
+    compaction_trigger_chars: int = 24000
+    compaction_keep_recent: int = 12
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "default_provider": self.default_provider,
             "default_model": self.default_model,
@@ -165,20 +174,23 @@ class UserConfig:
             "kg_max_facts": self.kg_max_facts,
             "session_retention_days": self.session_retention_days,
             "session_max_sessions": self.session_max_sessions,
+            "compaction_trigger_messages": self.compaction_trigger_messages,
+            "compaction_trigger_chars": self.compaction_trigger_chars,
+            "compaction_keep_recent": self.compaction_keep_recent,
         }
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "UserConfig":
+    def from_dict(cls, d: dict[str, Any]) -> "UserConfig":
         def_model = d.get("default_model", "gemini-2.0-flash") or "gemini-2.0-flash"
         if "2.5" in def_model:
             def_model = "gemini-2.0-flash"
 
-        def _as_dict(value: Any) -> Dict[str, Any]:
+        def _as_dict(value: Any) -> dict[str, Any]:
             # Older/corrupted config files may contain null for these maps,
             # which would otherwise crash every save/remove/list operation.
             return value if isinstance(value, dict) else {}
             
-        def _as_list_dict(value: Any) -> Dict[str, List[str]]:
+        def _as_list_dict(value: Any) -> dict[str, list[str]]:
             return value if isinstance(value, dict) else {}
 
         def _as_int(value: Any, default: int) -> int:
@@ -224,7 +236,7 @@ class UserConfig:
             fallback_chain=d.get("fallback_chain", []),
             # Phase 10.3 B1: drop stale auxiliary overrides for task classes
             # with no engine call site (old config files may still carry
-            # web/compression/skills/approval/mcp/title); only AUXILIARY_TASK_CLASSES survive a load.
+            # web/skills/approval/mcp/title); only AUXILIARY_TASK_CLASSES survive a load.
             auxiliary_models={k: v for k, v in _as_dict(d.get("auxiliary_models")).items() if k in AUXILIARY_TASK_CLASSES},
             reasoning_effort=d.get("reasoning_effort") or "standard",
             episodic_retention_days=_as_int(d.get("episodic_retention_days"), 90),
@@ -234,20 +246,23 @@ class UserConfig:
             kg_max_facts=_as_int(d.get("kg_max_facts"), 5000),
             session_retention_days=_as_int(d.get("session_retention_days"), 180),
             session_max_sessions=_as_int(d.get("session_max_sessions"), 200),
+            compaction_trigger_messages=_as_int(d.get("compaction_trigger_messages"), 40),
+            compaction_trigger_chars=_as_int(d.get("compaction_trigger_chars"), 24000),
+            compaction_keep_recent=_as_int(d.get("compaction_keep_recent"), 12),
         )
 
 
-def load_config(path: Optional[Path] = None) -> UserConfig:
+def load_config(path: Path | None = None) -> UserConfig:
     p = path or CONFIG_PATH
     if p.exists():
         try:
             return UserConfig.from_dict(json.loads(p.read_text("utf-8")))
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 — a corrupt config file must never stop the engine starting; defaults are the designed fallback.
             pass
     return UserConfig()
 
 
-def save_config(cfg: UserConfig, path: Optional[Path] = None) -> None:
+def save_config(cfg: UserConfig, path: Path | None = None) -> None:
     p = path or CONFIG_PATH
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(cfg.to_dict(), indent=2), encoding="utf-8")

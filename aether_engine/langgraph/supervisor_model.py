@@ -43,6 +43,10 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.config import get_config
 from pydantic import Field
 
+from aether_engine.langgraph.compaction import (
+    context_summary_section,
+    model_facing_messages,
+)
 from aether_engine.langgraph.nodes.supervisor import (
     MEMORY_TOOL_NAMES,
     _available_specialists,
@@ -296,7 +300,13 @@ def supervisor_routing_prompt(state: dict) -> list:
     board = blackboard_briefing(state)
     if board:
         text += f"\n\nShared team blackboard (written by all agents in this task):\n{board}"
-    return [SystemMessage(content=text), *list(state.get("messages", []))]
+    summary_section = context_summary_section(state)
+    if summary_section:
+        text += f"\n\n{summary_section}"
+    # E1-06: the routing model sees the compacted view (summary above +
+    # verbatim tail), never the folded middle turns. The state channel
+    # itself keeps the full history.
+    return [SystemMessage(content=text), *model_facing_messages(state)]
 
 
 def supervisor_post_model_hook(state: dict) -> dict:

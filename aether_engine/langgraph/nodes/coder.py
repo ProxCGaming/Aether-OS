@@ -4,6 +4,10 @@ import logging
 from langchain_core.runnables import RunnableConfig
 
 from aether_engine.artifacts.manager import save_artifact
+from aether_engine.langgraph.compaction import (
+    context_summary_section,
+    model_facing_messages,
+)
 from aether_engine.langgraph.state import (
     AetherState,
     blackboard_briefing,
@@ -85,7 +89,10 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
     board = blackboard_briefing(state)
     if board:
         system_prompt += f"\n\nShared team blackboard (written by all agents in this task):\n{board}"
-    state_messages = message_dicts(state.get("messages", []))
+    summary_section = context_summary_section(state)
+    if summary_section:
+        system_prompt += f"\n\n{summary_section}"
+    state_messages = model_facing_messages(state)
     if not any(isinstance(m, dict) and m.get("role") == "user" for m in state_messages):
         orig = state.get("original_prompt") or "Please proceed with writing, testing, or debugging the code based on the current state."
         state_messages.insert(0, {"role": "user", "content": orig})

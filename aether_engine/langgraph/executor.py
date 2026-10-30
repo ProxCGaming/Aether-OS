@@ -30,7 +30,13 @@ from aether_common.contracts import (
 )
 from aether_engine.event_bus import event_bus
 from aether_engine.langgraph.checkpointer import DEFAULT_CHECKPOINT_DB
-from aether_engine.memory import episodic, knowledge_graph
+from aether_engine.langgraph.compaction import (
+    compact_history,
+    compaction_config_from,
+    make_provider_summariser,
+    resolve_summariser_provider,
+)
+from aether_engine.memory import episodic, knowledge_graph, session_store
 from aether_engine.providers.base import (
     BaseProvider,
     NetworkError,
@@ -129,12 +135,77 @@ async def run_langgraph_task(
             "pending_tool_call": None,
             "active_specialist": None,
             "blackboard": {},
+            "plan_mode": bool(kwargs.get("plan_mode")),
             "delegation_log": [],
             "task_id": task_id,
             "session_id": session_id,
             "context_briefing": None,
             "active_skills": kwargs.get("active_skills", []),
         }
+
+        # ── Conversation compaction (Epic 1, E1-06) ──────────────────
+        # Fold this thread's older turns into context_summary before
+        # the run starts, so every model in the run sees the summary +
+        # the recent verbatim tail (via compaction.model_facing_messages)
+        # instead of an unbounded history. The checkpoint's messages are
+        # NOT rewritten — the full history stays stored and visible;
+        # only the two summary fields are written, and only when a new
+        # fold actually happened. Compaction is best-effort: any failure
+        # logs and the run proceeds with the uncompacted history.
+        try:
+            prior_snapshot = await graph.aget_state(config)
+            prior_values = prior_snapshot.values or {}
+        except Exception:  # noqa: BLE001 — a fresh or unreadable thread has no history to compact; real checkpointer failures surface in the run itself.
+            prior_values = {}
+        if not prior_values.get("messages") and session_id:
+            # Fresh thread (new session, lost checkpoint DB, or the
+            # thread was invalidated by an edit-and-resend truncation):
+            # seed the run from the session store's retained history so
+            # the conversation continues from what the user can see —
+            # never from a deleted branch, never from nothing when the
+            # store still holds the earlier turns.
+            try:
+                seeded_history = await asyncio.to_thread(
+                    session_store.get_chat_history, session_id, prompt)
+            except Exception:  # noqa: BLE001 — seeding is best-effort; the run proceeds with the prompt alone.
+                seeded_history = []
+            if seeded_history:
+                initial_state["messages"] = [
+                    *seeded_history,
+                    {"role": "user", "content": prompt},
+                ]
+        if prior_values.get("messages"):
+            compacted = None
+            try:
+                summariser_provider = resolve_summariser_provider(
+                    kwargs.get("user_config"), kwargs.get("secret_store"), provider)
+                compacted = await compact_history(
+                    prior_values["messages"],
+                    prior_values.get("context_summary"),
+                    int(prior_values.get("context_summary_upto") or 0),
+                    make_provider_summariser(summariser_provider),
+                    compaction_config_from(kwargs.get("user_config")),
+                )
+            except Exception as comp_err:  # noqa: BLE001 — best-effort by design (see block comment above).
+                logger.warning(
+                    f"Compaction failed for thread {thread_id}; "
+                    f"continuing with the uncompacted history: {comp_err}")
+            if compacted is not None:
+                new_summary, new_upto = compacted
+                initial_state["context_summary"] = new_summary
+                initial_state["context_summary_upto"] = new_upto
+                try:
+                    from aether_engine.audit import AuditLogger
+
+                    AuditLogger().log_event("CONTEXT_COMPACTED", {
+                        "task_id": task_id,
+                        "session_id": session_id,
+                        "summary_upto": new_upto,
+                    })
+                except Exception:
+                    # Audit is best-effort and must not fail the run
+                    # (same doctrine as the registry's TOOL_EXECUTED).
+                    logger.debug("CONTEXT_COMPACTED audit write failed", exc_info=True)
 
         start_time = time.time()
         elapsed_ms = 0.0
