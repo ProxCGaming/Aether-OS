@@ -1,9 +1,13 @@
 import json
+import logging
+
 from langchain_core.runnables import RunnableConfig
-from aether_engine.langgraph.state import AetherState
+
 from aether_engine.artifacts.manager import save_artifact
-from aether_engine.providers.litellm_provider import LiteLLMProvider
-from aether_engine.providers.base import StreamChunk, ToolCall
+from aether_engine.langgraph.state import AetherState, message_dicts
+
+logger = logging.getLogger("aether_engine.langgraph.coder")
+
 
 async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
     """
@@ -25,8 +29,8 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
                 p_name, m_name = parts
                 from aether_engine.orchestration.core import _create_provider_instance
                 provider = _create_provider_instance(p_name, m_name, secret_store)
-        except Exception:
-            pass  # fallback to global provider if override fails
+        except Exception as e:  # noqa: BLE001 — an unusable per-agent model override falls back to the graph provider.
+            logger.warning(f"Coder agent_models override {agent_model_override!r} unusable, using default provider: {e}")
             
     if not provider or not hasattr(provider, "call_stream"):
         raise RuntimeError("Valid provider not found in graph config")
@@ -38,7 +42,7 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
     if allowed_tools is not None and isinstance(allowed_tools, list):
         import copy
         used_tools = set()
-        for msg in state.get("messages", []):
+        for msg in message_dicts(state.get("messages", [])):
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 for tc in msg.get("tool_calls"):
                     if isinstance(tc, dict):
@@ -50,7 +54,7 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
                 tools.append(t)
             elif t_name in used_tools:
                 disabled_t = copy.deepcopy(t)
-                disabled_t["function"]["description"] = f"DO NOT USE THIS TOOL. IT IS CURRENTLY DISABLED FOR YOUR ROLE."
+                disabled_t["function"]["description"] = "DO NOT USE THIS TOOL. IT IS CURRENTLY DISABLED FOR YOUR ROLE."
                 tools.append(disabled_t)
     else:
         tools = all_tools
@@ -71,7 +75,10 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
     skill_text = "\n".join(skill_sections)
     
     system_prompt = f"You are a Coder agent. Write, test, and debug code based on the current plan and context.\n{plan_info}{skill_text}"
-    state_messages = list(state.get("messages", []))
+    briefing = (state.get("context_briefing") or "").strip()
+    if briefing:
+        system_prompt += f"\n\nMemory briefing from the supervisor (facts retrieved from long-term memory):\n{briefing}"
+    state_messages = message_dicts(state.get("messages", []))
     if not any(isinstance(m, dict) and m.get("role") == "user" for m in state_messages):
         orig = state.get("original_prompt") or "Please proceed with writing, testing, or debugging the code based on the current state."
         state_messages.insert(0, {"role": "user", "content": orig})

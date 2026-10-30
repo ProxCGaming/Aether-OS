@@ -139,6 +139,10 @@ async def run_langgraph_task(
         elapsed_ms = 0.0
         full_response_parts: list[str] = []
         interrupted = False
+        # Subgraph/supervisor updates carry the full echoed message and
+        # delegation history; these counters keep event emission delta-only.
+        messages_seen = 0
+        delegation_seen = 0
         thinking_log = []
         accumulated_thoughts = []
 
@@ -222,7 +226,10 @@ async def run_langgraph_task(
                             break
                     if not isinstance(state_update, dict):
                         continue
-                    if node_name == "supervisor" and "delegation_log" in state_update:
+                    if node_name == "supervisor" and isinstance(state_update.get("messages"), list):
+                        messages_seen = max(messages_seen, len(state_update["messages"]))
+                    if node_name == "supervisor" and len(state_update.get("delegation_log") or []) > delegation_seen:
+                        delegation_seen = len(state_update["delegation_log"])
                         log_entry = state_update["delegation_log"][-1]
                         decision = log_entry.get("decision", {})
                         next_step = decision.get("next", "UNKNOWN")
@@ -261,7 +268,9 @@ async def run_langgraph_task(
                             },
                         ))
                     elif "messages" in state_update and isinstance(state_update["messages"], list):
-                        for msg in state_update["messages"]:
+                        new_messages = state_update["messages"][messages_seen:]
+                        messages_seen = len(state_update["messages"])
+                        for msg in new_messages:
                             if msg.get("role") == "assistant":
                                 if msg.get("content"):
                                     full_response_parts.append(msg["content"])
@@ -352,13 +361,6 @@ async def run_langgraph_task(
                                     },
                                 ))
                     
-                    # Check if it was executing a tool
-                    if node_name == "execute_tool":
-                        current_state_obj = await graph.aget_state(config)
-                        current_state = current_state_obj.values
-                        messages = current_state.get("messages", [])
-                        if messages and messages[-1].get("role") == "tool":
-                            pass # Handled above
                 if interrupted:
                     break
 
@@ -445,8 +447,17 @@ async def resume_langgraph_task(
     tools: ToolRegistry | None = None,
     workspace_roots: list[str] | None = None,
     disabled_nodes: set | None = None,
+    agent_models: dict[str, str] | None = None,
+    agent_tools: dict[str, list[str]] | None = None,
+    **kwargs,
 ) -> AsyncGenerator[Event, None]:
-    """Resume an interrupted LangGraph task and yield remaining events."""
+    """Resume an interrupted LangGraph task and yield remaining events.
+
+    Carries the same run configuration as ``run_langgraph_task``
+    (per-agent models/tools, user config, secret store, forced agent):
+    the resumed specialists and the supervisor's routing model resolve
+    their providers from it exactly as they did before the pause.
+    """
     db_path = DEFAULT_CHECKPOINT_DB
     async with AsyncSqliteSaver.from_conn_string(str(db_path)) as saver:
         await saver.setup()
@@ -457,11 +468,18 @@ async def resume_langgraph_task(
             "configurable": {
                 "thread_id": thread_id,
                 "tool_registry": tools,
+                "approval_handler": kwargs.get("approval_handler"),
                 "request_id": thread_id,
                 "workspace_roots": workspace_roots or [],
                 "task_class": "standard",
                 "provider": provider,
                 "disabled_nodes": disabled_nodes or set(),
+                "session_id": kwargs.get("session_id"),
+                "agent_models": agent_models or {},
+                "agent_tools": agent_tools or {},
+                "secret_store": kwargs.get("secret_store"),
+                "user_config": kwargs.get("user_config"),
+                "forced_agent": kwargs.get("forced_agent"),
             }
         }
         
@@ -469,11 +487,17 @@ async def resume_langgraph_task(
         elapsed_ms = 0.0
         full_response_parts: list[str] = []
         interrupted = False
+        messages_seen = 0
+        delegation_seen = 0
         task_id = "unknown"
         
         try:
             state_obj = await graph.aget_state(config)
             task_id = state_obj.values.get("task_id", thread_id)
+            # History from before the pause is already emitted; only
+            # post-resume additions count as new output.
+            messages_seen = len(state_obj.values.get("messages") or [])
+            delegation_seen = len(state_obj.values.get("delegation_log") or [])
             
             async for event in graph.astream(Command(resume=approved), config=config, stream_mode="updates"):
                 for node_name, state_update in event.items():
@@ -496,7 +520,10 @@ async def resume_langgraph_task(
                             break
                     if not isinstance(state_update, dict):
                         continue
-                    if node_name == "supervisor" and "delegation_log" in state_update:
+                    if node_name == "supervisor" and isinstance(state_update.get("messages"), list):
+                        messages_seen = max(messages_seen, len(state_update["messages"]))
+                    if node_name == "supervisor" and len(state_update.get("delegation_log") or []) > delegation_seen:
+                        delegation_seen = len(state_update["delegation_log"])
                         log_entry = state_update["delegation_log"][-1]
                         decision = log_entry.get("decision", {})
                         next_step = decision.get("next", "UNKNOWN")
@@ -513,7 +540,9 @@ async def resume_langgraph_task(
                             },
                         )
                     elif "messages" in state_update and isinstance(state_update["messages"], list):
-                        for msg in state_update["messages"]:
+                        new_messages = state_update["messages"][messages_seen:]
+                        messages_seen = len(state_update["messages"])
+                        for msg in new_messages:
                             if msg.get("role") == "assistant" and msg.get("content"):
                                 full_response_parts.append(msg["content"])
                                 yield Event(

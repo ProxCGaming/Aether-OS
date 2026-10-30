@@ -507,6 +507,10 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     tools=tools,
                     workspace_roots=workspace_roots,
                     disabled_nodes=engine_state.disabled_nodes,
+                    agent_models=engine_state.user_config.agent_models,
+                    agent_tools=engine_state.user_config.agent_tools,
+                    secret_store=secret_store,
+                    user_config=engine_state.user_config,
                 )
 
                 if task_runner and not task_runner.done():

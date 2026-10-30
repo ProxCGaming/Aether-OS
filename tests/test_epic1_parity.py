@@ -1,12 +1,12 @@
 """Epic 1 parity characterisation tests.
 
-These tests pin the CURRENT orchestration behaviour of the hand-written
-supervisor graph (supervisor -> specialists -> tool pipeline) so that a
-migration to LangGraph's prebuilt ``create_supervisor()`` — with Aether's
-Phase 9 approval pause, tool-policy gating and memory briefing kept as a
-wrapper — can be proven safe: the migrated implementation must keep
-every test here green, and any deliberate behaviour change must show up
-as a diff in this file.
+These tests pin the orchestration behaviour of the supervisor graph
+(supervisor -> specialists -> tool pipeline) so that the migration to
+LangGraph's prebuilt ``create_supervisor()`` — with Aether's Phase 9
+approval pause, tool-policy gating and memory briefing kept as a
+wrapper — is proven safe: the migrated implementation (E1-02, ADR 0027)
+keeps every test here green, and any deliberate behaviour change must
+show up as a diff in this file.
 
 Behaviour pinned, all against today's code with scripted stub providers
 (no real provider calls, no network):
@@ -28,10 +28,12 @@ Behaviour pinned, all against today's code with scripted stub providers
    checkpointer instance on the same DB sees the finished state with
    the tool result in the messages and no pending tool call.
 
-Known gap, pinned as xfail (NOT faked): the supervisor stores the
-memory briefing in ``state["context_briefing"]``, but no specialist
-node reads that key, so today the briefing never reaches a specialist's
-model input. See ``test_specialist_prompt_includes_memory_briefing``.
+Former gap, fixed by the E1-02 migration (30 Oct 2026, ADR 0027): the
+supervisor stores the memory briefing in ``state["context_briefing"]``
+and, since the migration, every specialist node injects it into its
+system prompt. This suite originally pinned the gap as a strict xfail;
+``test_specialist_prompt_includes_memory_briefing`` now passes and
+guards the fix.
 """
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -373,14 +375,6 @@ async def test_supervisor_briefing_stored_in_state(memory_env):
     assert result["context_briefing"] == MemoryToolProvider.BRIEFING
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="GAP in today's code: the supervisor stores the briefing in "
-           "state['context_briefing'], but planner/researcher/coder never "
-           "read that key, so the briefing never reaches a specialist's "
-           "model input. Pinned as xfail so the Epic 1 migration must "
-           "acknowledge the change when it preserves-or-fixes this.",
-)
 @pytest.mark.asyncio
 async def test_specialist_prompt_includes_memory_briefing(monkeypatch):
     """Desired parity behaviour: a specialist's model input includes
