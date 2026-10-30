@@ -291,6 +291,13 @@ def supervisor_routing_prompt(state: dict) -> list:
     except Exception:  # noqa: BLE001 — prompt building must not fail the run; all specialists are offered when config is unavailable.
         config = {}
     available = _available_specialists(config)
+    # E1-11: don't even offer specialists the spawn policy would deny
+    # (the post-model hook still enforces it for native tool calls).
+    _allowlist = getattr(
+        (config.get("configurable", {}) or {}).get("user_config"),
+        "supervisor_spawn_allowlist", None)
+    if _allowlist is not None:
+        available = [a for a in available if a in _allowlist]
     text = _supervisor_system_prompt(
         state.get("original_prompt", "None"),
         state.get("plan", "No plan yet."),
@@ -307,6 +314,71 @@ def supervisor_routing_prompt(state: dict) -> list:
     # verbatim tail), never the folded middle turns. The state channel
     # itself keeps the full history.
     return [SystemMessage(content=text), *model_facing_messages(state)]
+
+
+def _spawn_policy_denial(state: dict, target: str, config: dict | None = None) -> dict | None:
+    """Spawn policy (Epic 1, E1-11): a denial update, or None to allow.
+
+    Enforced at the last moment before a handoff would execute. On a
+    denial the pending message's transfer call is stripped (same
+    message id, so it replaces in place) and an explanation with no
+    tool calls is appended, which ends the supervisor's turn: the
+    delegation never happens, the denial is logged, and the reason
+    becomes the run's final message instead of a silent drop.
+    """
+    if config is None:
+        try:
+            config = get_config()
+        except Exception:  # noqa: BLE001 — policy must never break routing when config is unavailable.
+            return None
+    user_config = (config.get("configurable", {}) or {}).get("user_config")
+    if user_config is None:
+        return None
+    allowlist = getattr(user_config, "supervisor_spawn_allowlist", None)
+    cap = getattr(user_config, "supervisor_delegation_cap", 8)
+    reason = None
+    if allowlist is not None and target not in allowlist:
+        reason = f"'{target}' is not in the supervisor spawn allow-list ({', '.join(allowlist) or 'empty'})"
+    elif isinstance(cap, int) and cap >= 0:
+        dict_messages = message_dicts(state.get("messages", []))
+        last_user = max(
+            (i for i, m in enumerate(dict_messages) if m.get("role") == "user"),
+            default=-1,
+        )
+        delegations = 0
+        for msg in dict_messages[last_user + 1:]:
+            for tc in msg.get("tool_calls") or []:
+                if (tc.get("function", {}).get("name") or "").startswith(HANDOFF_PREFIX):
+                    delegations += 1
+        # The count includes the pending handoff (the last message).
+        if delegations > cap:
+            reason = f"the delegation cap for one turn ({cap}) is reached"
+    if reason is None:
+        return None
+    messages = state.get("messages", [])
+    last = messages[-1] if messages else None
+    # A SINGLE replacement message, never a batch: multi-message writes
+    # to this channel are normalised to plain dicts by the parent
+    # state's reducer, which the supervisor agent's internal tool
+    # routing cannot read (state.py, collapse_subgraph_echo). With the
+    # transfer stripped, the agent ends its turn and the explanation
+    # becomes the final message; the executor surfaces denied decisions
+    # from the delegation log as the task's response text.
+    explanation = (
+        f"Delegation to {target} was blocked by the spawn policy: {reason}. "
+        "No specialist was started. Adjust supervisor_spawn_allowlist / "
+        "supervisor_delegation_cap in the config, or ask for the work to be "
+        "handled another way."
+    )
+    stripped = AIMessage(content=explanation, id=getattr(last, "id", None))
+    return {
+        "messages": [stripped],
+        "delegation_log": [
+            {"agent": "supervisor", "timestamp": time.time(),
+             "decision": {"next": target, "denied": True, "reason": reason, "briefing": ""}}
+        ],
+        "active_specialist": None,
+    }
 
 
 def supervisor_post_model_hook(state: dict) -> dict:
@@ -328,6 +400,9 @@ def supervisor_post_model_hook(state: dict) -> dict:
 
     if handoffs:
         target = handoffs[0]["name"][len(HANDOFF_PREFIX):]
+        denial = _spawn_policy_denial(state, target)
+        if denial is not None:
+            return denial
         if decision is None:
             # Native-tool routing: the briefing is what memory tools
             # returned since the last user message; the reason is the

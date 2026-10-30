@@ -309,10 +309,13 @@ async def run_langgraph_task(
                         briefing = decision.get("briefing", "")
                         updated_plan = state_update.get("plan", "")
                         
-                        text_delta = f"\n\n[Supervisor] -> Delegating to {next_step.upper()}\nReason: {reason}"
-                        if briefing:
-                            text_delta += f"\nBriefing: {briefing}"
-                        text_delta += "\n\n"
+                        if decision.get("denied"):
+                            text_delta = f"\n\n[Supervisor] -> Delegation to {next_step.upper()} BLOCKED by spawn policy\nReason: {reason}\n\n"
+                        else:
+                            text_delta = f"\n\n[Supervisor] -> Delegating to {next_step.upper()}\nReason: {reason}"
+                            if briefing:
+                                text_delta += f"\nBriefing: {briefing}"
+                            text_delta += "\n\n"
                         
                         thinking_log.append(text_delta.strip())
                         
@@ -323,7 +326,7 @@ async def run_langgraph_task(
                                 "task_id": task_id,
                                 "from_node": "supervisor",
                                 "to_node": next_step.lower(),
-                                "action": "delegation",
+                                "action": "delegation_denied" if decision.get("denied") else "delegation",
                                 "reason": reason,
                                 "briefing": briefing,
                                 "input_payload": {
@@ -339,6 +342,23 @@ async def run_langgraph_task(
                                 "timestamp": int(time.time()),
                             },
                         ))
+                        if decision.get("denied"):
+                            # E1-11: no specialist runs for a denied
+                            # delegation, so the explanation IS the
+                            # task's response — emit it as one.
+                            denial_text = f"Delegation to {next_step} was blocked by the spawn policy: {reason}"
+                            full_response_parts.append(denial_text)
+                            yield emit_event(Event(
+                                type=EventType.TASK_PROGRESS,
+                                request_id=request_id,
+                                payload={
+                                    "task_id": task_id,
+                                    "text_delta": denial_text,
+                                    "full_text": denial_text,
+                                    "turn": 0,
+                                    "node": "assistant",
+                                },
+                            ))
                     elif "messages" in state_update and isinstance(state_update["messages"], list):
                         new_messages = state_update["messages"][messages_seen:]
                         messages_seen = len(state_update["messages"])

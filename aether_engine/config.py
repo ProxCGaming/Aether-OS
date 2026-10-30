@@ -109,6 +109,13 @@ class UserConfig:
     agent_models: dict[str, str] = field(default_factory=dict)
     agent_tools: dict[str, list[str]] = field(default_factory=dict)
     agent_skills: dict[str, list[str]] = field(default_factory=dict)
+    # Epic 1, E1-11: supervisor spawn policy. The allow-list names the
+    # specialists the supervisor may delegate to (None = all of them);
+    # the delegation cap bounds handoffs per user turn (the graph
+    # recursion limit still bounds total steps). Enforced in
+    # supervisor_model.supervisor_post_model_hook.
+    supervisor_spawn_allowlist: list[str] | None = None
+    supervisor_delegation_cap: int = 8
     custom_slash_commands: dict[str, dict] = field(default_factory=dict)
     disable_fallbacks: bool = False
     fallback_chain: list[str] = field(default_factory=list)
@@ -162,6 +169,8 @@ class UserConfig:
             "agent_models": self.agent_models,
             "agent_tools": self.agent_tools,
             "agent_skills": self.agent_skills,
+            "supervisor_spawn_allowlist": self.supervisor_spawn_allowlist,
+            "supervisor_delegation_cap": self.supervisor_delegation_cap,
             "custom_slash_commands": self.custom_slash_commands,
             "disable_fallbacks": self.disable_fallbacks,
             "fallback_chain": self.fallback_chain,
@@ -192,6 +201,14 @@ class UserConfig:
             
         def _as_list_dict(value: Any) -> dict[str, list[str]]:
             return value if isinstance(value, dict) else {}
+
+        def _as_optional_str_list(value: Any) -> list[str] | None:
+            # Spawn allow-list (E1-11): only a real list of names counts;
+            # anything else (missing, null, corrupt) means "no
+            # restriction" rather than "allow nothing".
+            if isinstance(value, list):
+                return [str(v) for v in value]
+            return None
 
         def _as_int(value: Any, default: int) -> int:
             # A corrupt retention value must not nuke the whole config
@@ -231,6 +248,8 @@ class UserConfig:
             agent_models=_as_dict(d.get("agent_models")),
             agent_tools=_as_list_dict(d.get("agent_tools")),
             agent_skills=_as_list_dict(d.get("agent_skills")),
+            supervisor_spawn_allowlist=_as_optional_str_list(d.get("supervisor_spawn_allowlist")),
+            supervisor_delegation_cap=_as_int(d.get("supervisor_delegation_cap"), 8),
             custom_slash_commands=_as_dict(d.get("custom_slash_commands")),
             disable_fallbacks=d.get("disable_fallbacks", False),
             fallback_chain=d.get("fallback_chain", []),
