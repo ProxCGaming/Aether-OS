@@ -343,6 +343,7 @@ class ToolRegistry:
         path_rules: list | None = None,
         shell_extras: dict | None = None,
         approval_mode: str = "ask",
+        approval_cache: Any = None,
     ) -> Any:
         """Execute a tool through the full trust pipeline (Phase 9, A2).
 
@@ -369,6 +370,17 @@ class ToolRegistry:
 
         # ── Step 1: policy (ADR 0021; arg/path-aware since E2-06) ─────
         policy = resolve_policy_by_name(name, policies or {}, self, args=call_args, path_rules=path_rules, shell_extras=shell_extras, approval_mode=approval_mode)
+        # E2-09: a stored approval grant turns this call's "ask" into
+        # "allow" — never a "deny", never a floored path (the cache
+        # itself refuses those), and the hit is audited with its grant.
+        if policy == "ask" and not approved and approval_cache is not None:
+            grant = approval_cache.covering_grant(risk=tool.risk.value, args=call_args)
+            if grant is not None:
+                policy = "allow"
+                try:
+                    log.log_event("APPROVAL_CACHE_HIT", {"tool_name": name, "grant_id": grant["id"], "prefix": grant["prefix"]})
+                except Exception:  # best-effort audit, as with TOOL_EXECUTED below
+                    logger.debug("Failed to write APPROVAL_CACHE_HIT audit event", exc_info=True)
         if policy == "deny":
             log.log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": name, "reason": "User Deny", "via": "registry.execute"})
             raise ToolExecutionError(f"Tool '{name}' is blocked by policy (deny).")

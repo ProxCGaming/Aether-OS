@@ -15,8 +15,12 @@ included); the supervisor's memory tools run through the same audited
 execution path as before. See ``supervisor_model.py``.
 """
 
+import logging
+
 from langgraph.graph import END, START, StateGraph
 from langgraph_supervisor import create_supervisor
+
+logger = logging.getLogger("aether_engine.langgraph.graph")
 
 from aether_engine.langgraph.nodes.coder import coder_node
 from aether_engine.langgraph.nodes.execute_tool import execute_tool_node
@@ -75,6 +79,18 @@ def tool_router(state: AetherState, config=None) -> str:
         approval_mode=user_config.approval_mode if user_config else "ask",
     )
     if policy == "ask":
+        # E2-09: a stored approval grant skips the pause (registry.execute
+        # re-checks the same cache before running, so the two sites agree).
+        if registry is not None:
+            from aether_engine.tools.approval_cache import get_default_cache
+
+            try:
+                tool = registry.get_tool(pending.get("name"))
+                if get_default_cache().covering_grant(risk=tool.risk.value, args=pending.get("args")) is not None:
+                    return "execute_tool"
+            except Exception:
+                # A cache failure must degrade to the normal pause, never break routing.
+                logger.debug("Approval-cache check failed in tool_router", exc_info=True)
         return "pause_for_approval"
     return "execute_tool"
 

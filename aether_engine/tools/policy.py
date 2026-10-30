@@ -31,13 +31,10 @@ def _system_prefixes() -> list[Path]:
 
 
 def _candidate_paths(args: dict | None) -> list[Path]:
-    """Resolved paths a call would touch, from its arguments."""
-    if not args:
-        return []
-    raw = args.get("path")
-    if isinstance(raw, str) and raw:
-        return [Path(raw).expanduser().resolve()]
-    return []
+    """Resolved paths a call would touch (shared: tools.paths)."""
+    from aether_engine.tools.paths import candidate_paths
+
+    return candidate_paths(args)
 
 
 def _apply_floor(verdict: str, tool: Tool, args: dict | None) -> str:

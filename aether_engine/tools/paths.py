@@ -47,6 +47,20 @@ def resolve_contained(path_str: str, workspace_roots: list | None) -> Path:
     )
 
 
+def candidate_paths(args: dict | None) -> list[Path]:
+    """Resolved paths a tool call would touch, from its arguments.
+
+    Shared by policy (E2-06 floor + path rules) and the approval cache
+    (E2-09 grant matching) so every layer judges the same paths.
+    """
+    if not args:
+        return []
+    raw = args.get("path")
+    if isinstance(raw, str) and raw:
+        return [Path(raw).expanduser().resolve()]
+    return []
+
+
 def content_hash(data: bytes) -> str:
     """Full sha256 of the exact bytes — the anchor edits present (E2-03)."""
     return hashlib.sha256(data).hexdigest()

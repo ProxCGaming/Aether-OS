@@ -30,6 +30,7 @@ from langchain_core.runnables import RunnableConfig
 from aether_common.contracts import Event, EventType
 from aether_engine.event_bus import event_bus
 from aether_engine.langgraph.state import TOOL_LOOP_GUARD_THRESHOLD, AetherState
+from aether_engine.tools.approval_cache import get_default_cache
 from aether_engine.tools.registry import ToolExecutionError, ToolNotFoundError
 from aether_engine.tools.scratchpad import (
     SCRATCHPAD_TOOL_NAME,
@@ -157,6 +158,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                     if user_config else None
                 ),
                 approval_mode=user_config.approval_mode if user_config else "ask",
+                approval_cache=get_default_cache(),
                 approved=bool(pending.get("approved")),
                 audit_logger=audit_logger,
             )

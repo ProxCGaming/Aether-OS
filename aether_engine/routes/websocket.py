@@ -619,6 +619,33 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(),
                 )
 
+                # Epic 2, E2-09: a scoped approval ("this file" / "this
+                # folder") becomes a stored grant before the resume, so
+                # the NEXT matching call is covered. Best-effort by
+                # design: a grant-recording failure must never block
+                # the approval the user just gave.
+                grant_scope = msg.payload.get("scope") if is_approved else None
+                if grant_scope in ("file", "folder"):
+                    try:
+                        from aether_engine.tools.approval_cache import get_default_cache
+                        from aether_engine.tools.paths import candidate_paths
+
+                        pending = await get_pending_approvals()
+                        match = next((p for p in pending if p.get("thread_id") == approval_key), None)
+                        if match:
+                            paths = candidate_paths(match.get("args"))
+                            if paths:
+                                prefix = paths[0] if grant_scope == "file" else paths[0].parent
+                                risk = tools.get_tool(match["tool_name"]).risk.value
+                                grant_id = get_default_cache().grant(str(prefix), risk, tool_name=match["tool_name"])
+                                engine_state.audit_logger.log_event(
+                                    "APPROVAL_GRANT_CREATED",
+                                    {"grant_id": grant_id, "tool_name": match["tool_name"], "prefix": str(prefix), "ceiling": risk, "scope": grant_scope},
+                                )
+                    except Exception:
+                        # Grant recording is best-effort beside an approval already given.
+                        logger.debug("Failed to record scoped approval grant", exc_info=True)
+
                 workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
 
                 # Pass the approved decision back into LangGraph
@@ -964,6 +991,31 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     type=EventType.SESSION_SEARCH_RESPONSE,
                     request_id=req_id,
                     payload={"query": query, "results": results},
+                ).to_json())
+
+            elif msg.type == EventType.APPROVAL_GRANTS_REQUEST:
+                from aether_engine.tools.approval_cache import get_default_cache
+
+                grants = await asyncio.to_thread(get_default_cache().list_grants)
+                await ws.send_text(Event(
+                    type=EventType.APPROVAL_GRANTS_RESPONSE,
+                    request_id=req_id,
+                    payload={"grants": grants},
+                ).to_json())
+
+            elif msg.type == EventType.APPROVAL_GRANT_REVOKE_REQUEST:
+                from aether_engine.tools.approval_cache import get_default_cache
+
+                grant_id = msg.payload.get("id")
+                cache = get_default_cache()
+                revoked = bool(grant_id) and await asyncio.to_thread(cache.revoke, int(grant_id))
+                if revoked:
+                    engine_state.audit_logger.log_event("APPROVAL_GRANT_REVOKED", {"grant_id": grant_id})
+                grants = await asyncio.to_thread(cache.list_grants)
+                await ws.send_text(Event(
+                    type=EventType.APPROVAL_GRANT_REVOKE_RESPONSE,
+                    request_id=req_id,
+                    payload={"id": grant_id, "revoked": revoked, "grants": grants},
                 ).to_json())
 
             # -----------------------------------------------------------
