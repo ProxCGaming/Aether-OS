@@ -1,17 +1,20 @@
-from typing import Literal, Any, Optional
+from typing import Literal
+
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import END, START, StateGraph
+
 try:
     from langgraph.config import get_config
 except ImportError:
     get_config = None  # older langgraph versions
 
-from aether_engine.langgraph.state import AetherState
-from aether_engine.langgraph.nodes.supervisor import supervisor_node
-from aether_engine.langgraph.nodes.researcher import researcher_node
-from aether_engine.langgraph.nodes.planner import planner_node
 from aether_engine.langgraph.nodes.coder import coder_node
+from aether_engine.langgraph.nodes.planner import planner_node
+from aether_engine.langgraph.nodes.researcher import researcher_node
+from aether_engine.langgraph.nodes.supervisor import supervisor_node
+from aether_engine.langgraph.state import AetherState
 from aether_engine.tools.policy import resolve_policy_by_name
+
 
 def supervisor_router(state: AetherState) -> Literal["researcher", "planner", "coder", "__end__"]:
     # The supervisor node sets 'next' in the state or we pull it from delegation_log
@@ -37,8 +40,10 @@ def tool_router(state: AetherState, config: RunnableConfig | None = None) -> Lit
     if not configurable and get_config is not None:
         try:
             configurable = get_config().get("configurable", {})
-        except Exception:
-            pass
+        except RuntimeError:
+            # get_config() raises outside a graph run; the explicit
+            # config above already won, so an empty fallback is correct.
+            configurable = {}
             
     user_config = configurable.get("user_config")
     registry = configurable.get("tool_registry")
@@ -96,9 +101,16 @@ def create_graph():
     # Pause node goes to execute tool after un-paused
     workflow.add_edge("pause_for_approval", "execute_tool")
     
-    # Set recursion limit to 25 to prevent unbounded loops
-    # This is set during compile or run time
     return workflow
+
+
+# Hard bound on graph steps per run (Epic 1, E1-03): applied by the
+# executor on every run/resume config. Before this constant existed the
+# limit was claimed in a comment but never actually set anywhere, so a
+# supervisor<->specialist ping-pong could loop until the provider or the
+# user gave up.
+GRAPH_RECURSION_LIMIT = 25
+
 
 def compile_graph(checkpointer=None):
     workflow = create_graph()

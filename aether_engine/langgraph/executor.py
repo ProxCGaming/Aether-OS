@@ -1,14 +1,16 @@
 import asyncio
 import logging
-import uuid
 import time
-from typing import Any, AsyncGenerator, Dict, List, Optional
+import uuid
+from collections.abc import AsyncGenerator
+from typing import Any
 
 try:
     from langchain_core.runnables import RunnableConfig
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
     from langgraph.types import Command
-    from aether_engine.langgraph.graph import compile_graph
+
+    from aether_engine.langgraph.graph import GRAPH_RECURSION_LIMIT, compile_graph
     from aether_engine.langgraph.state import AetherState
     _LANGGRAPH_AVAILABLE = True
 except ImportError:
@@ -17,7 +19,8 @@ except ImportError:
     compile_graph = None  # type: ignore
     AetherState = Any  # type: ignore
     _LANGGRAPH_AVAILABLE = False
-import aiosqlite
+
+import json
 
 from aether_common.contracts import (
     Event,
@@ -25,20 +28,17 @@ from aether_common.contracts import (
     TaskState,
     validate_transition,
 )
+from aether_engine.event_bus import event_bus
+from aether_engine.langgraph.checkpointer import DEFAULT_CHECKPOINT_DB
+from aether_engine.memory import episodic, knowledge_graph
 from aether_engine.providers.base import (
     BaseProvider,
+    NetworkError,
     ProviderError,
     RateLimitError,
     TimeoutError,
-    NetworkError,
 )
 from aether_engine.tools.registry import ToolRegistry
-from aether_engine.providers.litellm_provider import LiteLLMProvider
-from aether_engine.memory import episodic
-from aether_engine.memory import knowledge_graph
-from aether_engine.event_bus import event_bus
-from aether_engine.langgraph.checkpointer import DEFAULT_CHECKPOINT_DB
-import json
 
 logger = logging.getLogger("aether_engine.langgraph.executor")
 
@@ -63,16 +63,16 @@ def _is_retriable_error(exc: Exception) -> bool:
 async def run_langgraph_task(
     prompt: str,
     provider: BaseProvider,
-    tools: Optional[ToolRegistry] = None,
-    task_id: Optional[str] = None,
-    request_id: Optional[str] = None,
+    tools: ToolRegistry | None = None,
+    task_id: str | None = None,
+    request_id: str | None = None,
     max_turns: int = 25,
-    approval_handler: Optional[Any] = None,
-    workspace_roots: Optional[List[str]] = None,
-    disabled_nodes: Optional[set] = None,
-    session_id: Optional[str] = None,
-    agent_models: Optional[Dict[str, str]] = None,
-    agent_tools: Optional[Dict[str, List[str]]] = None,
+    approval_handler: Any | None = None,
+    workspace_roots: list[str] | None = None,
+    disabled_nodes: set | None = None,
+    session_id: str | None = None,
+    agent_models: dict[str, str] | None = None,
+    agent_tools: dict[str, list[str]] | None = None,
     **kwargs,
 ) -> AsyncGenerator[Event, None]:
     """Execute a task prompt using the LangGraph multi-agent workflow."""
@@ -100,6 +100,7 @@ async def run_langgraph_task(
         # Use session_id as the thread_id so chat memory persists across turns (ADR 0011)
         thread_id = session_id or request_id or str(uuid.uuid4())
         config = {
+            "recursion_limit": GRAPH_RECURSION_LIMIT,
             "configurable": {
                 "thread_id": thread_id,
                 "tool_registry": tools,
@@ -175,7 +176,7 @@ async def run_langgraph_task(
                 async for evt in graph.astream(initial_state, config=config, stream_mode="updates"):
                     await event_queue.put(("graph", evt))
                 await event_queue.put(("graph_done", None))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — graph-run boundary: any astream failure is forwarded to the consumer, which re-raises and logs it
                 await event_queue.put(("graph_error", e))
 
         runner_task = asyncio.create_task(_graph_runner())
@@ -281,7 +282,7 @@ async def run_langgraph_task(
                                         args_str = tc.get("function", {}).get("arguments", "{}")
                                         try:
                                             tool_args = json.loads(args_str) if args_str else {}
-                                        except Exception:
+                                        except (TypeError, ValueError):
                                             tool_args = {}
                                             
                                         thinking_log.append(f"[TOOL] {tool_name}({args_str}) -> pending")
@@ -330,7 +331,7 @@ async def run_langgraph_task(
                                 current_state_obj = await graph.aget_state(config)
                                 dest_node = current_state_obj.values.get("active_specialist") or "planner"
                                 
-                                is_failed = isinstance(tool_result, str) and (tool_result.startswith("Error") or tool_result.startswith("Validation failed"))
+                                is_failed = isinstance(tool_result, str) and tool_result.startswith(("Error", "Validation failed"))
                                 status_str = "failed" if is_failed else "completed"
                                 
                                 thinking_log.append(f"[TOOL] {tool_name}({json.dumps(tool_args)}) -> {status_str}")
@@ -395,7 +396,7 @@ async def run_langgraph_task(
                             outcome=full_response,
                             thinking_log=thinking_log_str,
                         )
-                    except Exception as db_err:
+                    except Exception as db_err:  # noqa: BLE001 — best-effort episode store: a memory/DB failure is logged and must not fail the completed task
                         logger.error(f"Failed to store episode in DB for {task_id}: {db_err}")
                     # Phase 10.1 A3: extract knowledge-graph facts on the
                     # normal completion path too, with the same inputs as the
@@ -409,9 +410,9 @@ async def run_langgraph_task(
                             assistant_response=full_response,
                             task_id=task_id,
                         )
-                    except Exception as mem_e:
+                    except Exception as mem_e:  # noqa: BLE001 — best-effort fact extraction (provider + DB): failure is logged and must not fail the completed task
                         logger.warning(f"Memory storage failed: {mem_e}")
-                        
+
                 yield Event(
                     type=EventType.TASK_COMPLETED,
                     request_id=request_id,
@@ -427,7 +428,7 @@ async def run_langgraph_task(
         except Exception as e:
             logger.exception("LangGraph task failed")
             elapsed_ms = round((time.time() - start_time) * 1000, 2) if 'start_time' in locals() else 0.0
-            logger.error(f"Graph execution failed for task {task_id}: {e}", exc_info=True)
+            logger.exception(f"Graph execution failed for task {task_id}")
             yield Event(
                 type=EventType.TASK_FAILED,
                 request_id=request_id,
@@ -441,9 +442,9 @@ async def resume_langgraph_task(
     thread_id: str,
     approved: bool,
     provider: BaseProvider,
-    tools: Optional[ToolRegistry] = None,
-    workspace_roots: Optional[List[str]] = None,
-    disabled_nodes: Optional[set] = None,
+    tools: ToolRegistry | None = None,
+    workspace_roots: list[str] | None = None,
+    disabled_nodes: set | None = None,
 ) -> AsyncGenerator[Event, None]:
     """Resume an interrupted LangGraph task and yield remaining events."""
     db_path = DEFAULT_CHECKPOINT_DB
@@ -452,6 +453,7 @@ async def resume_langgraph_task(
         graph = compile_graph(checkpointer=saver)
         
         config = {
+            "recursion_limit": GRAPH_RECURSION_LIMIT,
             "configurable": {
                 "thread_id": thread_id,
                 "tool_registry": tools,
@@ -568,9 +570,9 @@ async def resume_langgraph_task(
                         assistant_response=full_response,
                         task_id=task_id
                     )
-                except Exception as mem_e:
+                except Exception as mem_e:  # noqa: BLE001 — best-effort memory store on the resume path: failure is logged and must not fail the completed task
                     logger.warning(f"Memory storage failed: {mem_e}")
-                    
+
                 yield Event(
                     type=EventType.TASK_COMPLETED,
                     request_id=thread_id,
@@ -583,7 +585,7 @@ async def resume_langgraph_task(
                     },
                 )
         except Exception as e:
-            logger.exception(f"LangGraph task failed during resume with error: {e}")
+            logger.exception("LangGraph task failed during resume")
             elapsed_ms = round((time.time() - start_time) * 1000, 2)
             retriable = _is_retriable_error(e)
             yield Event(
@@ -598,7 +600,7 @@ async def resume_langgraph_task(
                 },
             )
 
-async def get_pending_approvals() -> List[Dict[str, Any]]:
+async def get_pending_approvals() -> list[dict[str, Any]]:
     """Query the checkpointer for threads blocked on an approval request."""
     db_path = DEFAULT_CHECKPOINT_DB
     pending = []
@@ -615,9 +617,11 @@ async def get_pending_approvals() -> List[Dict[str, Any]]:
         # AsyncSqliteSaver doesn't expose a list_threads natively in 1.0.1 in a simple way.
         # But we can query the sqlite DB directly.
         import aiosqlite
-        async with aiosqlite.connect(db_path) as db:
-            async with db.execute("SELECT DISTINCT thread_id FROM checkpoints") as cursor:
-                threads = [row[0] async for row in cursor]
+        async with (
+            aiosqlite.connect(db_path) as db,
+            db.execute("SELECT DISTINCT thread_id FROM checkpoints") as cursor,
+        ):
+            threads = [row[0] async for row in cursor]
                 
         for t_id in threads:
             try:
@@ -635,7 +639,7 @@ async def get_pending_approvals() -> List[Dict[str, Any]]:
                                 "task_class": intr_val.get("task_class", "standard")
                             })
                             break
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — per-thread scan isolation: one unreadable thread is logged and must not abort the approvals listing
                 logger.warning(f"Error checking thread {t_id}: {e}")
                 
     return pending

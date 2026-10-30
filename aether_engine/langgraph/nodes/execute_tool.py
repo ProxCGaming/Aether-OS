@@ -24,10 +24,10 @@ See ADR 0009 (fail-closed, pre-flight), ADR 0010 (workspace restriction), ADR 00
 """
 import json
 import logging
-from typing import Dict, Any
 
 from langchain_core.runnables import RunnableConfig
-from aether_engine.langgraph.state import AetherState
+
+from aether_engine.langgraph.state import TOOL_LOOP_GUARD_THRESHOLD, AetherState
 from aether_engine.tools.registry import ToolExecutionError, ToolNotFoundError
 
 logger = logging.getLogger("aether_engine.langgraph.nodes.execute_tool")
@@ -59,21 +59,50 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     # Check if tool is allowed for the active specialist
     active_agent = state.get("active_specialist")
     agent_tools = configurable.get("agent_tools", {})
-    if active_agent and active_agent in agent_tools:
-        allowed_tools = agent_tools[active_agent]
-        if allowed_tools is not None and isinstance(allowed_tools, list):
-            if tool_name not in allowed_tools:
-                error_msg = f"Error: Tool '{tool_name}' is currently disabled for your agent role. You are not allowed to execute it."
-                logger.warning(f"Agent '{active_agent}' attempted to use disabled tool '{tool_name}'.")
-                return {
-                    "messages": [{
-                        "role": "tool",
-                        "name": tool_name,
-                        "content": error_msg,
-                        "tool_call_id": call_id,
-                    }],
-                    "pending_tool_call": None
-                }
+    allowed_tools = agent_tools.get(active_agent) if active_agent else None
+    if isinstance(allowed_tools, list) and tool_name not in allowed_tools:
+        error_msg = f"Error: Tool '{tool_name}' is currently disabled for your agent role. You are not allowed to execute it."
+        logger.warning(f"Agent '{active_agent}' attempted to use disabled tool '{tool_name}'.")
+        return {
+            "messages": [{
+                "role": "tool",
+                "name": tool_name,
+                "content": error_msg,
+                "tool_call_id": call_id,
+            }],
+            "pending_tool_call": None
+        }
+
+    # ── Loop guard (Epic 1, E1-03) ────────────────────────────────────
+    # Count consecutive identical calls (same tool, same arguments).
+    # At the threshold, do not execute again: hand the specialist a
+    # corrective steer as the tool result and reset the counter, so a
+    # stuck retry loop stops burning tokens. The graph recursion limit
+    # remains the hard bound behind this.
+    signature = f"{tool_name}:{json.dumps(args, sort_keys=True, default=str)}"
+    if state.get("tool_call_signature") == signature:
+        repeats = (state.get("tool_call_repeats") or 0) + 1
+    else:
+        repeats = 1
+    if repeats >= TOOL_LOOP_GUARD_THRESHOLD:
+        steer = (
+            f"Loop guard: you have called '{tool_name}' with identical arguments "
+            f"{repeats} times in a row and it has been stopped. Do not retry the "
+            "same call. Change your approach: use different arguments, a different "
+            "tool, or explain to the user what is blocking you."
+        )
+        logger.warning(f"Loop guard triggered for {tool_name} after {repeats} identical calls.")
+        return {
+            "messages": [{
+                "role": "tool",
+                "name": tool_name,
+                "content": steer,
+                "tool_call_id": call_id,
+            }],
+            "pending_tool_call": None,
+            "tool_call_signature": None,
+            "tool_call_repeats": 0,
+        }
 
     if not registry:
         result_text = f"Error: No tool registry provided to graph. Cannot execute {tool_name}."
@@ -115,7 +144,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
             else:
                 logger.error(f"Error executing {tool_name}: {e}")
                 result_text = f"Error executing tool {tool_name}: {e}"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — deliberate boundary: any registry failure becomes a tool message, never a crashed graph run; the error is logged and surfaced verbatim above.
             logger.error(f"Error executing {tool_name}: {e}")
             result_text = f"Error executing tool {tool_name}: {e}"
 
@@ -130,5 +159,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     # Clear pending_tool_call and add the message
     return {
         "pending_tool_call": None,
-        "messages": [tool_message]
+        "messages": [tool_message],
+        "tool_call_signature": signature,
+        "tool_call_repeats": repeats,
     }
