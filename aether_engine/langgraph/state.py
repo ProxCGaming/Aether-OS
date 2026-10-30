@@ -87,6 +87,66 @@ def collapse_subgraph_echo(left: list, right: list) -> list:
     return left + right
 
 
+# ── Shared blackboard (Epic 1, E1-15) ────────────────────────────────
+# The agents' common working state, carried in the graph state itself
+# (owner's choice: LangGraph state, not a parallel store) and persisted
+# by the checkpointer across pause/resume/crash. Sections:
+#   plan           — str, overwritten by whoever plans last
+#   findings       — list[str], append-merged (research results, facts)
+#   decisions      — list[str], append-merged (delegation/commitments)
+#   open_questions — list[str], overwritten (a question leaves the list
+#                    by being answered, so append semantics cannot work)
+BLACKBOARD_LIST_CAP = 50
+BLACKBOARD_BRIEFING_MAX_CHARS = 1200
+
+
+def merge_blackboard(left: dict | None, right: dict | None) -> dict:
+    """Reducer for the blackboard channel (see the section rules above).
+
+    Subgraph outputs echo the full current value back (the same shape
+    collapse_subgraph_echo handles for lists): when an incoming list
+    starts with the whole current list, it IS the new value, not an
+    append — otherwise every delegation would duplicate every entry.
+    """
+    merged: dict[str, Any] = dict(left or {})
+    for key, value in (right or {}).items():
+        if key in ("findings", "decisions") and isinstance(value, list):
+            current = list(merged.get(key) or [])
+            incoming = list(value)
+            if current and len(incoming) >= len(current) and incoming[: len(current)] == current:
+                merged[key] = incoming[-BLACKBOARD_LIST_CAP:]
+            else:
+                merged[key] = (current + incoming)[-BLACKBOARD_LIST_CAP:]
+        else:
+            merged[key] = value
+    return merged
+
+
+def blackboard_briefing(state: dict, *, max_chars: int = BLACKBOARD_BRIEFING_MAX_CHARS) -> str:
+    """Render the blackboard as a bounded prompt section.
+
+    The optimisation the owner asked for: agents never receive the raw
+    blackboard, only this summary — plan excerpt, the most recent
+    findings/decisions, and open questions — hard-capped at max_chars
+    regardless of how much the board holds.
+    """
+    board = (state or {}).get("blackboard") or {}
+    parts: list[str] = []
+    plan = (board.get("plan") or "").strip()
+    if plan:
+        parts.append(f"Plan: {plan[:300]}")
+    for key, label in (("findings", "Findings"), ("decisions", "Decisions")):
+        entries = [str(e).strip() for e in (board.get(key) or []) if str(e).strip()]
+        if entries:
+            recent = entries[-5:]
+            parts.append(f"{label} (latest {len(recent)} of {len(entries)}): " + " | ".join(recent))
+    questions = [str(q).strip() for q in (board.get("open_questions") or []) if str(q).strip()]
+    if questions:
+        parts.append("Open questions: " + " | ".join(questions[-5:]))
+    text = "\n".join(parts)
+    return text[:max_chars]
+
+
 class AetherState(TypedDict):
     original_prompt: str
 
@@ -109,6 +169,12 @@ class AetherState(TypedDict):
     # Structured log entries for delegation decisions (echo-collapsed
     # like messages: the supervisor agent returns the full log).
     delegation_log: Annotated[list[dict[str, Any]], collapse_subgraph_echo]
+
+    # Shared agent blackboard (Epic 1, E1-15): every agent reads and
+    # writes it through state updates; see merge_blackboard for the
+    # per-section merge rules and blackboard_briefing for how it is
+    # injected into prompts (bounded summary, never a raw dump).
+    blackboard: Annotated[dict[str, Any], merge_blackboard]
 
     # Session and task identifiers
     task_id: str | None

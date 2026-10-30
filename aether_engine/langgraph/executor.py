@@ -128,6 +128,7 @@ async def run_langgraph_task(
             "tool_results_summary": {},
             "pending_tool_call": None,
             "active_specialist": None,
+            "blackboard": {},
             "delegation_log": [],
             "task_id": task_id,
             "session_id": session_id,

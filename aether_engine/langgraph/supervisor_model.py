@@ -50,7 +50,7 @@ from aether_engine.langgraph.nodes.supervisor import (
     _resolve_supervisor_provider,
     _supervisor_system_prompt,
 )
-from aether_engine.langgraph.state import message_dicts
+from aether_engine.langgraph.state import blackboard_briefing, message_dicts
 from aether_engine.tools.policy import resolve_policy_by_name
 
 logger = logging.getLogger("aether_engine.langgraph.supervisor_model")
@@ -293,6 +293,9 @@ def supervisor_routing_prompt(state: dict) -> list:
         available,
         tool_mode=True,
     )
+    board = blackboard_briefing(state)
+    if board:
+        text += f"\n\nShared team blackboard (written by all agents in this task):\n{board}"
     return [SystemMessage(content=text), *list(state.get("messages", []))]
 
 

@@ -4,7 +4,11 @@ import logging
 from langchain_core.runnables import RunnableConfig
 
 from aether_engine.artifacts.manager import save_artifact
-from aether_engine.langgraph.state import AetherState, message_dicts
+from aether_engine.langgraph.state import (
+    AetherState,
+    blackboard_briefing,
+    message_dicts,
+)
 
 logger = logging.getLogger("aether_engine.langgraph.planner")
 
@@ -80,6 +84,9 @@ async def planner_node(state: AetherState, config: RunnableConfig) -> dict:
     briefing = (state.get("context_briefing") or "").strip()
     if briefing:
         system_prompt += f"\n\nMemory briefing from the supervisor (facts retrieved from long-term memory):\n{briefing}"
+    board = blackboard_briefing(state)
+    if board:
+        system_prompt += f"\n\nShared team blackboard (written by all agents in this task):\n{board}"
     state_messages = message_dicts(state.get("messages", []))
     if not any(isinstance(m, dict) and m.get("role") == "user" for m in state_messages):
         orig = state.get("original_prompt") or "Please proceed with breaking goals into structured steps and updating the plan."
@@ -140,6 +147,7 @@ async def planner_node(state: AetherState, config: RunnableConfig) -> dict:
     return {
         "current_phase": "planning",
         "plan": content,  # Overwrites existing plan
+        "blackboard": {"plan": content},  # E1-15: share the plan on the blackboard
         "artifact_paths": {"planner_output": artifact_path},
         "messages": [{"role": "assistant", "content": content}]
     }

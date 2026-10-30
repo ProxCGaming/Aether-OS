@@ -4,7 +4,11 @@ import logging
 from langchain_core.runnables import RunnableConfig
 
 from aether_engine.artifacts.manager import save_artifact
-from aether_engine.langgraph.state import AetherState, message_dicts
+from aether_engine.langgraph.state import (
+    AetherState,
+    blackboard_briefing,
+    message_dicts,
+)
 
 logger = logging.getLogger("aether_engine.langgraph.researcher")
 
@@ -77,6 +81,9 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
     briefing = (state.get("context_briefing") or "").strip()
     if briefing:
         system_prompt += f"\n\nMemory briefing from the supervisor (facts retrieved from long-term memory):\n{briefing}"
+    board = blackboard_briefing(state)
+    if board:
+        system_prompt += f"\n\nShared team blackboard (written by all agents in this task):\n{board}"
     state_messages = message_dicts(state.get("messages", []))
     if not any(isinstance(m, dict) and m.get("role") == "user" for m in state_messages):
         orig = state.get("original_prompt") or "Please proceed with gathering information and synthesizing findings based on the current state."
@@ -134,8 +141,10 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
     task_id = state.get("task_id", "default_task")
     artifact_path = save_artifact(task_id, "research", "researcher_output.txt", content)
     
+    finding = " ".join((content or "").split())[:200]
     return {
         "current_phase": "researching",
+        "blackboard": {"findings": [finding]} if finding else {},  # E1-15: share the finding
         "artifact_paths": {"researcher_output": artifact_path},
         "messages": [{"role": "assistant", "content": content}]
     }
