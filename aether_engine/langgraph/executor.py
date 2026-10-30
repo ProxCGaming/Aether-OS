@@ -132,6 +132,20 @@ async def run_langgraph_task(
             }
         }
         
+        # Epic 7, E7-04: skill auto-match — previously match_skills
+        # had no caller, so skills activated only via slash commands
+        # or per-agent attachment. Keyword matches against the prompt
+        # join the explicitly activated set (deduped, manager-capped).
+        effective_skills = list(kwargs.get("active_skills", []))
+        try:
+            from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+
+            for match in GLOBAL_SKILL_MANAGER.match_skills(prompt, "supervisor"):
+                if match.name not in effective_skills:
+                    effective_skills.append(match.name)
+        except Exception:  # skill matching must never break a task start
+            logger.debug("Skill auto-match failed", exc_info=True)
+
         initial_state = {
             "original_prompt": prompt,
             "messages": [{"role": "user", "content": prompt}],
@@ -149,7 +163,7 @@ async def run_langgraph_task(
             "task_id": task_id,
             "session_id": session_id,
             "context_briefing": None,
-            "active_skills": kwargs.get("active_skills", []),
+            "active_skills": effective_skills,
         }
 
         # ── Conversation compaction (Epic 1, E1-06) ──────────────────

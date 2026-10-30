@@ -2113,6 +2113,30 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     payload={"skills": skills},
                 ).to_json())
 
+            elif msg.type == EventType.SKILL_TOGGLE_REQUEST:
+                # Epic 7, E7-03: enable/disable a skill. Disabled
+                # skills leave the manager's index at once — the
+                # agent's available set (list/match/slash/load) no
+                # longer contains them; Settings still lists them
+                # with enabled=False so they can be re-enabled.
+                from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+
+                skill_name = (msg.payload.get("name") or "").strip()
+                want_enabled = bool(msg.payload.get("enabled", True))
+                known = any(s.name == skill_name for s in GLOBAL_SKILL_MANAGER.list_all())
+                if known:
+                    GLOBAL_SKILL_MANAGER.set_disabled(skill_name, not want_enabled)
+                await ws.send_text(Event(
+                    type=EventType.SKILL_TOGGLE_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "success": known,
+                        "name": skill_name,
+                        "enabled": want_enabled if known else False,
+                        "skills": [s.__dict__ for s in GLOBAL_SKILL_MANAGER.list_all()],
+                    },
+                ).to_json())
+
             elif msg.type == EventType.SLASH_COMMAND_LIST_REQUEST:
                 from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
                 from aether_engine.skills.slash_registry import GLOBAL_SLASH_REGISTRY

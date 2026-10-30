@@ -1,7 +1,7 @@
 import logging
-from pathlib import Path
-from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 from aether_engine.skills.manifest import SkillManifest
 
@@ -16,34 +16,97 @@ class SkillMatch:
 @dataclass
 class RequirementCheck:
     met: bool
-    missing_tools: List[str]
+    missing_tools: list[str]
     reason: str
 
 @dataclass
 class SkillSummary:
     name: str
     description: str
-    slash_commands: List[str]
-    required_tools: List[str]
+    slash_commands: list[str]
+    required_tools: list[str]
     auto_match: bool
     source: str
+    # Epic 7, E7-03: disabled skills remain visible in Settings (so
+    # they can be re-enabled) but vanish from every agent-facing path.
+    enabled: bool = True
 
 
 class SkillManager:
     """Central service for skill discovery, matching, and injection."""
     
-    def __init__(self, global_dir: Optional[Path] = None, workspace_dirs: Optional[List[Path]] = None):
+    def __init__(self, global_dir: Path | None = None, workspace_dirs: list[Path] | None = None):
         self.global_dir = global_dir or (Path.home() / ".aether" / "skills")
         self.workspace_dirs = workspace_dirs or []
         
         self.global_dir.mkdir(parents=True, exist_ok=True)
-        self._index: Dict[str, SkillManifest] = {}
-        self._content_cache: Dict[str, str] = {}
-        self._slash_map: Dict[str, str] = {}
-        self._skill_paths: Dict[str, Path] = {} # Maps skill name to the directory it was loaded from
+        self._disabled: set = self._load_disabled()
+        self._index: dict[str, SkillManifest] = {}
+        self._content_cache: dict[str, str] = {}
+        self._slash_map: dict[str, str] = {}
+        self._skill_paths: dict[str, Path] = {} # Maps skill name to the directory it was loaded from
         self._rebuild_index()
     
-    def update_workspace_roots(self, roots: List[str]):
+    # -- Epic 7, E7-03: enable / disable ----------------------------
+
+    @property
+    def _disabled_file(self) -> Path:
+        return self.global_dir / "disabled.json"
+
+    def _load_disabled(self) -> set:
+        try:
+            import json
+
+            data = json.loads(self._disabled_file.read_text(encoding="utf-8"))
+            return set(data) if isinstance(data, list) else set()
+        except Exception:  # noqa: BLE001 — missing/corrupt file = nothing disabled (best-effort state load)
+            return set()
+
+    def _save_disabled(self) -> None:
+        import json
+
+        self._disabled_file.write_text(
+            json.dumps(sorted(self._disabled), indent=2), encoding="utf-8")
+
+    def is_enabled(self, name: str) -> bool:
+        return name not in self._disabled
+
+    def set_disabled(self, name: str, disabled: bool) -> None:
+        """Disable/enable a skill and rebuild the index.
+
+        Disabled skills are excluded from the index itself, so every
+        consumer (list for agents, slash resolution, auto-match,
+        content load) stops seeing them at once.
+        """
+        if disabled:
+            self._disabled.add(name)
+        else:
+            self._disabled.discard(name)
+        self._save_disabled()
+        self._content_cache.pop(name, None)
+        self._rebuild_index()
+
+    def refresh(self) -> None:
+        """Rebuild the index (e.g. after plugin skill dirs moved)."""
+        self._content_cache.clear()
+        self._rebuild_index()
+
+    def catalogue(self, limit: int = 12) -> str:
+        """Bounded summary catalog for the supervisor prompt.
+
+        Stage-1 progressive disclosure: names + one-line descriptions
+        + slash commands only — never skill bodies. Empty string when
+        no skills are enabled.
+        """
+        lines = []
+        for m in list(self._index.values())[:limit]:
+            slash = f" (slash: {', '.join(m.trigger.slash_commands)})" if m.trigger.slash_commands else ""
+            lines.append(f"- {m.name}: {m.description}{slash}")
+        if not lines:
+            return ""
+        return "\nAvailable skills (summaries only — full instructions load when a skill is activated):\n" + "\n".join(lines)
+
+    def update_workspace_roots(self, roots: list[str]):
         new_dirs = []
         for r in roots:
             p = Path(r) / ".agents" / "skills"
@@ -58,6 +121,7 @@ class SkillManager:
         self._index.clear()
         self._slash_map.clear()
         self._skill_paths.clear()
+        self._all_manifests: dict[str, SkillManifest] = {}
         
         # Priority: Global < Workspace 1 < Workspace 2 ...
         dirs_to_scan = [self.global_dir] + self.workspace_dirs
@@ -82,7 +146,7 @@ class SkillManager:
                         try:
                             manifest = SkillManifest.from_skill_md(md_path)
                             break
-                        except Exception as e:
+                        except Exception as e:  # noqa: BLE001 — one bad skill file must not break discovery; it is logged and skipped
                             logger.warning(f"Failed to parse SKILL.md at {md_path}: {e}")
                 
                 if not manifest:
@@ -90,24 +154,27 @@ class SkillManager:
                     if manifest_path.exists():
                         try:
                             manifest = SkillManifest.from_file(manifest_path)
-                        except Exception as e:
+                        except Exception as e:  # noqa: BLE001 — one bad manifest must not break discovery; it is logged and skipped
                             logger.warning(f"Failed to load manifest.json at {manifest_path}: {e}")
                 
                 if manifest:
                     if manifest.name != skill_dir.name:
                         logger.warning(f"Skill name mismatch: {manifest.name} != {skill_dir.name}")
-                        
+
+                    self._all_manifests[manifest.name] = manifest
+                    if manifest.name in self._disabled:
+                        continue  # E7-03: disabled = invisible to agents
                     self._index[manifest.name] = manifest
                     self._skill_paths[manifest.name] = skill_dir
                     for cmd in manifest.trigger.slash_commands:
                         self._slash_map[cmd] = manifest.name
     
-    def resolve_slash_command(self, command: str) -> Optional[SkillManifest]:
+    def resolve_slash_command(self, command: str) -> SkillManifest | None:
         """Resolve a slash command to its skill manifest."""
         skill_name = self._slash_map.get(command)
         return self._index.get(skill_name) if skill_name else None
     
-    def match_skills(self, prompt: str, agent_id: str, limit: int = 2) -> List[SkillMatch]:
+    def match_skills(self, prompt: str, agent_id: str, limit: int = 2) -> list[SkillMatch]:
         """Auto-match skills to a prompt for a given agent. 
         Returns top matches sorted by relevance score."""
         matches = []
@@ -168,7 +235,7 @@ class SkillManager:
         self._content_cache[skill_name] = content
         return content
     
-    def check_requirements(self, skill_name: str, agent_tools: List[str]) -> RequirementCheck:
+    def check_requirements(self, skill_name: str, agent_tools: list[str]) -> RequirementCheck:
         """Verify the agent has the tools this skill needs."""
         manifest = self._index.get(skill_name)
         if not manifest:
@@ -181,14 +248,19 @@ class SkillManager:
             reason=f"Missing tools: {missing}" if missing else "All requirements met"
         )
     
-    def get_attached_skills(self, agent_id: str, config: Optional[Any] = None) -> List[str]:
+    def get_attached_skills(self, agent_id: str, config: Any | None = None) -> list[str]:
         """Return skills permanently attached to an agent (from config)."""
         if config and hasattr(config, 'agent_skills') and agent_id in config.agent_skills:
             return config.agent_skills[agent_id]
         return []
     
-    def list_all(self) -> List[SkillSummary]:
-        """Return summaries of all indexed skills (for UI listing)."""
+    def list_all(self) -> list[SkillSummary]:
+        """Return summaries of ALL skills (for UI listing).
+
+        Includes disabled skills with ``enabled=False`` so Settings
+        can offer re-enabling; agent-facing paths use the index,
+        which already excludes them.
+        """
         return [
             SkillSummary(
                 name=m.name,
@@ -196,12 +268,13 @@ class SkillManager:
                 slash_commands=m.trigger.slash_commands,
                 required_tools=m.requirements.tools,
                 auto_match=m.trigger.auto_match,
-                source=m.source.type
+                source=m.source.type,
+                enabled=m.name not in self._disabled,
             )
-            for m in self._index.values()
+            for m in getattr(self, "_all_manifests", self._index).values()
         ]
     
-    def list_skill_scripts(self, skill_name: str) -> List[Path]:
+    def list_skill_scripts(self, skill_name: str) -> list[Path]:
         """List executable scripts bundled with a skill (scripts/ directory)."""
         skill_dir = self._skill_paths.get(skill_name)
         if not skill_dir:

@@ -293,7 +293,17 @@ def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: 
             "   - 'reason': a concise description of the operational goal for the specialist\n"
             "   - 'briefing': ONLY facts retrieved from memory tools (empty string if no tool was called)"
         )
+    # Epic 7, E7-04: stage-1 skill disclosure — the supervisor sees
+    # the summary catalog (never bodies) so it can route with skill
+    # awareness; full instructions load only for activated skills.
+    try:
+        from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+
+        skill_catalog = GLOBAL_SKILL_MANAGER.catalogue()
+    except Exception:  # noqa: BLE001 — a broken skills dir must never break routing
+        skill_catalog = ""
     return (
+        f"{skill_catalog}\n"
         f"You are the Supervisor agent. Your task is to delegate the user's request to one of the specialists: "
         f"{options_str}, or 'END' if the task is complete.\n"
         f"User Request: {original_prompt}\n"
