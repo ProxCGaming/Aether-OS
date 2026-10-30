@@ -32,6 +32,21 @@ async def lifespan(_app: FastAPI):
     except Exception as e:  # noqa: BLE001 — startup boundary: MCP auto-connect is best-effort and must never block engine startup
         logger.warning(f"MCP auto-connect failed to start: {e}")
 
+    # Epic 4, E4-04: backfill embeddings for episodes stored while
+    # the embedding model was unavailable. Detached and bounded —
+    # startup never waits on it, and failures are audit-logged by
+    # the episodic store itself. Native backend only: external
+    # backends own their embedding story.
+    try:
+        if (engine_state.user_config.memory_backend or "native") == "native":
+            import asyncio
+
+            from aether_engine.memory.episodic import backfill_episodic_embeddings
+
+            asyncio.create_task(backfill_episodic_embeddings(limit=200))
+    except Exception as e:  # noqa: BLE001 — startup boundary: backfill is best-effort and must never block engine startup
+        logger.warning(f"Episodic embedding backfill failed to start: {e}")
+
     # Run background model discovery for configured providers on startup
     secret_store = SecretStore()
     stored = set(secret_store.list_providers())

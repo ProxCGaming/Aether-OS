@@ -42,7 +42,8 @@ from aether_engine.langgraph.steering import (
     has_pending_steers,
     steer_message_dicts,
 )
-from aether_engine.memory import episodic, knowledge_graph, session_store
+from aether_engine.memory import session_store
+from aether_engine.memory.facade import backend_or_none
 from aether_engine.providers.base import (
     BaseProvider,
     NetworkError,
@@ -548,34 +549,41 @@ async def run_langgraph_task(
                 elapsed_ms = round((time.time() - start_time) * 1000, 2)
                 full_response = "\n".join(full_response_parts).strip()
                 
-                # Save the episode memory asynchronously if finished
+                # Save the episode memory asynchronously if finished.
+                # Epic 4, E4-01: through the memory facade — the
+                # configured backend (native by default) decides where
+                # episodes and facts live; an unavailable backend is
+                # logged by backend_or_none and skips memory for this
+                # completion instead of failing the task.
                 if full_response:
-                    try:
-                        thinking_log_str = "\n".join(thinking_log)
-                        await episodic.store_episode(
-                            task_id=task_id,
-                            user_prompt=prompt,
-                            task_summary=full_response[:200],  # using response snippet as summary
-                            tags=["task", "completed"],
-                            outcome=full_response,
-                            thinking_log=thinking_log_str,
-                        )
-                    except Exception as db_err:  # noqa: BLE001 — best-effort episode store: a memory/DB failure is logged and must not fail the completed task
-                        logger.error(f"Failed to store episode in DB for {task_id}: {db_err}")
-                    # Phase 10.1 A3: extract knowledge-graph facts on the
-                    # normal completion path too, with the same inputs as the
-                    # resumed path (provider, task prompt, full response,
-                    # task id). Previously this ran only on resume, so a task
-                    # completing normally left no facts in the graph.
-                    try:
-                        await knowledge_graph.extract_and_store_facts(
-                            provider=provider,
-                            user_prompt=prompt,
-                            assistant_response=full_response,
-                            task_id=task_id,
-                        )
-                    except Exception as mem_e:  # noqa: BLE001 — best-effort fact extraction (provider + DB): failure is logged and must not fail the completed task
-                        logger.warning(f"Memory storage failed: {mem_e}")
+                    memory_backend = backend_or_none(kwargs.get("user_config"), context="task completion memory")
+                    if memory_backend is not None:
+                        try:
+                            thinking_log_str = "\n".join(thinking_log)
+                            await memory_backend.record_episode(
+                                task_id=task_id,
+                                user_prompt=prompt,
+                                task_summary=full_response[:200],  # using response snippet as summary
+                                tags=["task", "completed"],
+                                outcome=full_response,
+                                thinking_log=thinking_log_str,
+                            )
+                        except Exception as db_err:  # noqa: BLE001 — best-effort episode store: a memory/DB failure is logged and must not fail the completed task
+                            logger.error(f"Failed to store episode in DB for {task_id}: {db_err}")
+                        # Phase 10.1 A3: extract knowledge-graph facts on the
+                        # normal completion path too, with the same inputs as the
+                        # resumed path (provider, task prompt, full response,
+                        # task id). Previously this ran only on resume, so a task
+                        # completing normally left no facts in the graph.
+                        try:
+                            await memory_backend.learn(
+                                provider=provider,
+                                user_prompt=prompt,
+                                assistant_response=full_response,
+                                task_id=task_id,
+                            )
+                        except Exception as mem_e:  # noqa: BLE001 — best-effort fact extraction (provider + DB): failure is logged and must not fail the completed task
+                            logger.warning(f"Memory storage failed: {mem_e}")
 
                 yield Event(
                     type=EventType.TASK_COMPLETED,
@@ -817,16 +825,20 @@ async def resume_langgraph_task(
                 full_response = "\\n".join(full_response_parts).strip()
                 
                 orig_prompt = state_obj.values.get("original_prompt", "")
-                try:
-                    await episodic.store_episode(task_id, orig_prompt, full_response, ["task", "completed", "resumed"], TaskState.SUCCEEDED.value)
-                    await knowledge_graph.extract_and_store_facts(
-                        provider=provider,
-                        user_prompt=orig_prompt,
-                        assistant_response=full_response,
-                        task_id=task_id
-                    )
-                except Exception as mem_e:  # noqa: BLE001 — best-effort memory store on the resume path: failure is logged and must not fail the completed task
-                    logger.warning(f"Memory storage failed: {mem_e}")
+                # Epic 4, E4-01: same facade path as fresh completions.
+                memory_backend = backend_or_none(
+                    config["configurable"].get("user_config"), context="resumed task memory")
+                if memory_backend is not None:
+                    try:
+                        await memory_backend.record_episode(task_id, orig_prompt, full_response, ["task", "completed", "resumed"], TaskState.SUCCEEDED.value)
+                        await memory_backend.learn(
+                            provider=provider,
+                            user_prompt=orig_prompt,
+                            assistant_response=full_response,
+                            task_id=task_id
+                        )
+                    except Exception as mem_e:  # noqa: BLE001 — best-effort memory store on the resume path: failure is logged and must not fail the completed task
+                        logger.warning(f"Memory storage failed: {mem_e}")
 
                 yield Event(
                     type=EventType.TASK_COMPLETED,

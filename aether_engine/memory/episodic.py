@@ -1,13 +1,14 @@
 import asyncio
-import sqlite3
-import time
-import uuid
+import logging
 import math
 import pickle
-import logging
-from typing import List, Dict, Any, Optional
+import sqlite3
+import time
 from pathlib import Path
+from typing import Any
+
 import litellm
+
 from aether_engine.audit import AuditLogger
 from aether_engine.config import UserConfig, load_config
 
@@ -89,8 +90,8 @@ def init_embeddings_db() -> None:
         """)
         conn.commit()
 
-async def _embed_text(text: str, task_id: Optional[str] = None,
-                    context: str = "store") -> Optional[List[float]]:
+async def _embed_text(text: str, task_id: str | None = None,
+                    context: str = "store") -> list[float] | None:
     """Embed ``text`` via Ollama. Returns ``None`` on failure — but never
     silently: every failure is logged distinctly (model, error, episode id)
     to the audit log and the module logger. No retry/backfill here
@@ -105,15 +106,15 @@ async def _embed_text(text: str, task_id: Optional[str] = None,
             timeout=EMBEDDING_TIMEOUT_SECONDS
         )
         return response.data[0]["embedding"]
-    except asyncio.TimeoutError as e:
+    except TimeoutError as e:
         _log_embedding_failure(e, task_id, context)
         return None
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — embedding is best-effort: any failure means "not embedded", never a raised error
         _log_embedding_failure(e, task_id, context)
         return None
 
 
-def _log_embedding_failure(error: Exception, task_id: Optional[str],
+def _log_embedding_failure(error: Exception, task_id: str | None,
                            context: str) -> None:
     """Log one embedding failure distinctly: model, error, episode id.
 
@@ -132,10 +133,45 @@ def _log_embedding_failure(error: Exception, task_id: Optional[str],
     logger.warning(
         "EPISODIC_EMBEDDING_FAILED task_id=%s model=%s error_type=%s error=%s",
         task_id, EMBEDDING_MODEL, type(error).__name__, error,
-        exc_info=True,
+        exc_info=True,  # noqa: LOG014 — this helper is only ever called from except handlers; exc_info captures the active exception
     )
+    # Epic 4, E4-04: the most recent failure is part of embedding
+    # health, surfaced by embedding_stats() in Diagnostics.
+    global _LAST_EMBEDDING_FAILURE
+    _LAST_EMBEDDING_FAILURE = {
+        "task_id": task_id,
+        "model": EMBEDDING_MODEL,
+        "error_type": type(error).__name__,
+        "error": str(error) or repr(error),
+        "at": int(time.time()),
+    }
 
-def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+
+_LAST_EMBEDDING_FAILURE: dict[str, Any] | None = None
+
+
+def embedding_stats() -> dict[str, Any]:
+    """Epic 4, E4-04: embedding health for Diagnostics — how many
+    episodes exist, how many carry an embedding, how many are
+    pending backfill, and the most recent failure this process saw.
+    """
+    init_episodic_db()
+    init_embeddings_db()
+    with _get_conn() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM episodic_memory").fetchone()[0]
+    with _get_conn(EMBEDDINGS_DB_PATH) as conn:
+        embedded = conn.execute(
+            "SELECT COUNT(*) FROM episodic_embeddings WHERE embedding IS NOT NULL"
+        ).fetchone()[0]
+    return {
+        "episodes": int(total),
+        "embedded": int(embedded),
+        "pending": int(total) - int(embedded),
+        "model": EMBEDDING_MODEL,
+        "last_failure": _LAST_EMBEDDING_FAILURE,
+    }
+
+def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
     dot = sum(a * b for a, b in zip(vec1, vec2))
     norm_a = math.sqrt(sum(a * a for a in vec1))
     norm_b = math.sqrt(sum(b * b for b in vec2))
@@ -143,7 +179,7 @@ def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
         return 0.0
     return dot / (norm_a * norm_b)
 
-async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags: List[str], outcome: str, thinking_log: str = None) -> None:
+async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags: list[str], outcome: str, thinking_log: str | None = None) -> None:
     init_episodic_db()
     init_embeddings_db()
     now = int(time.time())
@@ -200,9 +236,9 @@ async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags:
     })
 
 async def query_episodes(query: str, limit: int = 5,
-                       *, similarity_threshold: Optional[float] = None,
+                       *, similarity_threshold: float | None = None,
                        backfill_limit: int = DEFAULT_QUERY_BACKFILL_LIMIT,
-                       config: Optional[UserConfig] = None) -> List[Dict[str, Any]]:
+                       config: UserConfig | None = None) -> list[dict[str, Any]]:
     """Hybrid BM25 + semantic retrieval, merged with RRF.
 
     Phase 10.3 A2: the semantic leg is thresholded — an episode whose
@@ -314,8 +350,8 @@ async def query_episodes(query: str, limit: int = 5,
         return results
 
 
-def _resolve_similarity_threshold(similarity_threshold: Optional[float],
-                                  config: Optional[UserConfig]) -> float:
+def _resolve_similarity_threshold(similarity_threshold: float | None,
+                                  config: UserConfig | None) -> float:
     """Explicit arg wins, then UserConfig, then the module default."""
     if similarity_threshold is not None:
         return float(similarity_threshold)
@@ -324,7 +360,7 @@ def _resolve_similarity_threshold(similarity_threshold: Optional[float],
                          EPISODIC_SIMILARITY_THRESHOLD))
 
 
-def dedupe_episodic_rows() -> Dict[str, Any]:
+def dedupe_episodic_rows() -> dict[str, Any]:
     """One-time migration: collapse duplicate episodic_memory rows.
 
     The old ``store_episode`` used a plain INSERT into the FTS5 table,
@@ -357,7 +393,7 @@ def dedupe_episodic_rows() -> Dict[str, Any]:
                 )
                 removed += 1
         conn.commit()
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "task_ids_deduped": len(dup_ids),
         "rows_removed": removed,
     }
@@ -382,9 +418,9 @@ def _ensure_episodic_deduped() -> None:
     dedupe_episodic_rows()
 
 
-async def backfill_episodic_embeddings(limit: Optional[int] = None,
-                                       *, config: Optional[UserConfig] = None
-                                       ) -> Dict[str, Any]:
+async def backfill_episodic_embeddings(limit: int | None = None,
+                                       *, config: UserConfig | None = None
+                                       ) -> dict[str, Any]:
     """Embed episodes stored unembedded and write their embeddings.
 
     The Phase 10.1 marker for "stored unembedded" is absence from
@@ -418,7 +454,7 @@ async def backfill_episodic_embeddings(limit: Optional[int] = None,
         missing = missing[:limit]
 
     backfilled = 0
-    failed_ids: List[str] = []
+    failed_ids: list[str] = []
     for r in missing:
         embedding = await _embed_text(
             r["task_summary"], task_id=r["task_id"], context="backfill"
@@ -435,7 +471,7 @@ async def backfill_episodic_embeddings(limit: Optional[int] = None,
         else:
             failed_ids.append(r["task_id"])
 
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "backfilled": backfilled,
         "failed": len(failed_ids),
         "failed_task_ids": failed_ids,
@@ -446,7 +482,7 @@ async def backfill_episodic_embeddings(limit: Optional[int] = None,
     logger.info("EPISODIC_EMBEDDINGS_BACKFILLED %s", result)
     return result
 
-def get_all_episodes(limit: int = 50) -> List[Dict[str, Any]]:
+def get_all_episodes(limit: int = 50) -> list[dict[str, Any]]:
     init_episodic_db()
     with _get_conn() as conn:
         cur = conn.cursor()
@@ -492,7 +528,7 @@ def clear_all_episodes() -> bool:
 # <= 0 disables pruning on that axis.
 # ---------------------------------------------------------------------------
 
-def _delete_episode_rows(task_ids: List[str]) -> Dict[str, int]:
+def _delete_episode_rows(task_ids: list[str]) -> dict[str, int]:
     """Delete the FTS, thinking, and embedding rows for ``task_ids``.
 
     An episode is three rows in two DBs; they are always deleted together
@@ -516,10 +552,10 @@ def _delete_episode_rows(task_ids: List[str]) -> Dict[str, int]:
         e_conn.commit()
     return counts
 
-def prune_episodes(retention_days: Optional[int] = None,
-                   max_episodes: Optional[int] = None,
-                   *, config: Optional[UserConfig] = None,
-                   now: Optional[int] = None) -> Dict[str, int]:
+def prune_episodes(retention_days: int | None = None,
+                   max_episodes: int | None = None,
+                   *, config: UserConfig | None = None,
+                   now: int | None = None) -> dict[str, int]:
     """Prune episodic memory by age, then by count (oldest first).
 
     Age: episodes with ``timestamp`` older than ``retention_days`` are
@@ -540,7 +576,7 @@ def prune_episodes(retention_days: Optional[int] = None,
     init_episodic_db()
     init_embeddings_db()
 
-    pruned_ids: List[str] = []
+    pruned_ids: list[str] = []
     if retention_days and retention_days > 0:
         cutoff = now - int(retention_days) * 86400
         with _get_conn() as conn:

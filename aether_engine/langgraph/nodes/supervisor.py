@@ -10,7 +10,8 @@ from aether_common.contracts import Event, EventType
 from aether_engine.audit import AuditLogger
 from aether_engine.event_bus import event_bus
 from aether_engine.langgraph.state import AetherState, message_dicts
-from aether_engine.memory import episodic, knowledge_graph, session_store
+from aether_engine.memory import session_store
+from aether_engine.memory.facade import backend_or_none
 from aether_engine.providers.base import ToolCall
 from aether_engine.tools.policy import resolve_policy_by_name
 
@@ -82,7 +83,14 @@ SUPERVISOR_MEMORY_TOOLS = [
 ]
 
 
-async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id: str | None, original_prompt: str, task_id: str) -> str:
+# Epic 4, E4-07: memory-tool results feed the supervisor's context;
+# cap them so a large store cannot flood the briefing. Individual
+# lines are already short (facts are one-liners, episode outcomes
+# truncate at 160 chars) — this is the overall budget.
+MEMORY_TOOL_RESULT_MAX_CHARS = 2000
+
+
+async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id: str | None, original_prompt: str, task_id: str, user_config=None) -> str:
     try:
         if task_id:
             event_bus.publish(task_id, Event(
@@ -119,27 +127,39 @@ async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id
                         result_str = "\n".join(formatted[-limit:])
 
         elif tool_name == "search_knowledge_graph":
-            query = args.get("query", "")
-            facts = knowledge_graph.search_facts(query, limit=5)
-            if not facts:
-                facts = knowledge_graph.get_all_facts(limit=5)
-            if not facts:
-                result_str = "No matching facts found in knowledge graph."
+            # Epic 4, E4-01: through the facade (configured backend).
+            backend = backend_or_none(user_config, context="supervisor memory tool")
+            if backend is None:
+                result_str = "Memory is unavailable: the configured memory backend cannot run here (see engine log)."
             else:
-                lines = [f"- {f.get('entity_name', 'Entity')} ({f.get('entity_type', 'Fact')}): {f.get('fact_text', '')}" for f in facts]
-                result_str = "\n".join(lines)
+                query = args.get("query", "")
+                facts = backend.search_facts(query, limit=5)
+                if not facts:
+                    facts = backend.list_facts(limit=5)
+                if not facts:
+                    result_str = "No matching facts found in knowledge graph."
+                else:
+                    lines = [f"- {f.get('entity_name', 'Entity')} ({f.get('entity_type', 'Fact')}): {f.get('fact_text', '')}" for f in facts]
+                    result_str = "\n".join(lines)
 
         elif tool_name == "search_past_episodes":
-            query = args.get("query", original_prompt)
-            episodes = await episodic.query_episodes(query, limit=3)
-            if not episodes:
-                result_str = "No past episodes found matching query."
+            backend = backend_or_none(user_config, context="supervisor memory tool")
+            if backend is None:
+                result_str = "Memory is unavailable: the configured memory backend cannot run here (see engine log)."
             else:
-                lines = []
-                for ep in episodes:
-                    resp_trunc = ep.get('outcome', '')[:160].replace('\n', ' ')
-                    lines.append(f"- Past Task: '{ep.get('user_prompt', '')}' -> Outcome: '{resp_trunc}...'")
-                result_str = "\n".join(lines)
+                query = args.get("query", original_prompt)
+                episodes = await backend.search_episodes(query, limit=3)
+                if not episodes:
+                    result_str = "No past episodes found matching query."
+                else:
+                    lines = []
+                    for ep in episodes:
+                        resp_trunc = ep.get('outcome', '')[:160].replace('\n', ' ')
+                        lines.append(f"- Past Task: '{ep.get('user_prompt', '')}' -> Outcome: '{resp_trunc}...'")
+                    result_str = "\n".join(lines)
+
+        if len(result_str) > MEMORY_TOOL_RESULT_MAX_CHARS:
+            result_str = result_str[:MEMORY_TOOL_RESULT_MAX_CHARS] + "\n...[memory result truncated to budget]"
 
         _audit_logger.log_event("SUPERVISOR_MEMORY_TOOL_CALLED", {
             "tool_name": tool_name,
@@ -326,6 +346,7 @@ async def get_current_chat_history(limit: int = 6, *, runtime: ToolRuntime) -> s
     return await _execute_supervisor_memory_tool(
         "get_current_chat_history", {"limit": limit},
         state.get("session_id"), state.get("original_prompt", ""), state.get("task_id") or "",
+        user_config=runtime.config.get("configurable", {}).get("user_config"),
     )
 
 
@@ -339,6 +360,7 @@ async def search_knowledge_graph(query: str, *, runtime: ToolRuntime) -> str:
     return await _execute_supervisor_memory_tool(
         "search_knowledge_graph", {"query": query},
         state.get("session_id"), state.get("original_prompt", ""), state.get("task_id") or "",
+        user_config=runtime.config.get("configurable", {}).get("user_config"),
     )
 
 
@@ -352,6 +374,7 @@ async def search_past_episodes(query: str, *, runtime: ToolRuntime) -> str:
     return await _execute_supervisor_memory_tool(
         "search_past_episodes", {"query": query},
         state.get("session_id"), state.get("original_prompt", ""), state.get("task_id") or "",
+        user_config=runtime.config.get("configurable", {}).get("user_config"),
     )
 
 

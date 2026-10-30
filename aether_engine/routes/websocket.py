@@ -29,6 +29,7 @@ from aether_engine.langgraph.executor import (
 from aether_engine.langgraph.fast_chat import load_session_history, run_fast_chat
 from aether_engine.langgraph.steering import enqueue_steer
 from aether_engine.memory import session_store
+from aether_engine.memory.facade import backend_or_none
 from aether_engine.orchestration.core import (
     _build_provider_list_async,
     _create_provider_instance,
@@ -207,6 +208,43 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
         lambda: (engine_state.user_config.search_provider, engine_state.user_config.search_fallback_to_ddgs)
     )
 
+    async def _learn_fast_chat_in_background(task_id: str, prompt: str, response_text: str, p_name: str, p_model: str):
+        """Epic 4, E4-05: fast-chat learn parity.
+
+        Graph tasks learn on their completion path in the executor;
+        fast chat has no executor completion path, so its exchange is
+        learned here — detached after TASK_COMPLETED, through the
+        same facade, with the chat's own provider doing extraction
+        (the extractor's greeting/substance guards apply as usual).
+        Best-effort: any failure is logged and the chat is unaffected.
+        """
+        try:
+            backend = backend_or_none(engine_state.user_config, context="fast-chat memory")
+            if backend is None:
+                return
+            from aether_engine.orchestration.core import _create_provider_instance
+
+            try:
+                provider = _create_provider_instance(p_name, p_model, secret_store)
+            except Exception:  # noqa: BLE001 — no provider instance: the episode above still records; only fact extraction is skipped
+                provider = None
+            await backend.record_episode(
+                task_id=task_id,
+                user_prompt=prompt,
+                task_summary=response_text[:200],
+                tags=["chat", "fast"],
+                outcome=response_text,
+            )
+            if provider is not None:
+                await backend.learn(
+                    provider=provider,
+                    user_prompt=prompt,
+                    assistant_response=response_text,
+                    task_id=task_id,
+                )
+        except Exception as e:  # noqa: BLE001 — background learn must never surface in the chat path
+            logger.warning(f"Fast-chat memory learn failed for {task_id}: {e}")
+
     async def _title_session_in_background(session_id: str, p_name: str, p_model: str, response_text: str):
         """E1-08: give a still-default session title a model-written one.
 
@@ -248,9 +286,13 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
             fallback_attempted = False
             primary_failed = False
             failure_event = None
+            task_path: str | None = None
+            task_prompt: str | None = None
 
             async for ev in generator:
                 if ev.type == EventType.TASK_CREATED:
+                    task_path = ev.payload.get("path")
+                    task_prompt = ev.payload.get("prompt")
                     ev.payload["routing"] = {
                         "provider": p_name,
                         "model": p_model,
@@ -295,6 +337,12 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                             logger.error(f"Failed to save session message: {e}")
                         asyncio.create_task(
                             _title_session_in_background(session_id, p_name, p_model, ev.payload["response"]))
+                        if task_path == "fast_chat" and task_prompt:
+                            # Epic 4, E4-05: graph tasks learn in the
+                            # executor; fast chat learns here (parity).
+                            asyncio.create_task(_learn_fast_chat_in_background(
+                                ev.payload.get("task_id", "unknown"), task_prompt,
+                                ev.payload["response"], p_name, p_model))
 
                 if ev.type == EventType.TOOL_APPROVAL_REQUEST:
                     engine_state.audit_logger.log_event("APPROVAL_REQUESTED", {
@@ -1793,23 +1841,29 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     ).to_json())
 
             elif msg.type == EventType.MEMORY_EPISODES_REQUEST:
-                from aether_engine.memory.episodic import get_all_episodes
-                episodes = get_all_episodes(limit=msg.payload.get("limit", 50))
+                # Epic 4, E4-01/E4-04: through the facade; the payload
+                # also carries embedding health for Diagnostics.
+                backend = backend_or_none(engine_state.user_config, context="memory episodes list")
+                if backend is None:
+                    payload = {"episodes": [], "error": "The configured memory backend is unavailable (see engine log)."}
+                else:
+                    payload = {
+                        "episodes": backend.list_episodes(limit=msg.payload.get("limit", 50)),
+                        "backend": backend.name,
+                        "embedding_stats": backend.embedding_stats(),
+                    }
                 await ws.send_text(Event(
                     type=EventType.MEMORY_EPISODES_RESPONSE,
                     request_id=req_id,
-                    payload={"episodes": episodes},
+                    payload=payload,
                 ).to_json())
 
             elif msg.type == EventType.MEMORY_EPISODE_DELETE_REQUEST:
-                from aether_engine.memory.episodic import (
-                    delete_episode,
-                    get_all_episodes,
-                )
+                backend = backend_or_none(engine_state.user_config, context="memory episode delete")
                 task_id = msg.payload.get("task_id")
-                if task_id:
-                    delete_episode(task_id)
-                episodes = get_all_episodes(limit=msg.payload.get("limit", 50))
+                if task_id and backend is not None:
+                    backend.delete_episode(task_id)
+                episodes = backend.list_episodes(limit=msg.payload.get("limit", 50)) if backend is not None else []
                 await ws.send_text(Event(
                     type=EventType.MEMORY_EPISODE_DELETE_RESPONSE,
                     request_id=req_id,
@@ -1817,8 +1871,9 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.MEMORY_EPISODES_CLEAR_REQUEST:
-                from aether_engine.memory.episodic import clear_all_episodes
-                clear_all_episodes()
+                backend = backend_or_none(engine_state.user_config, context="memory episodes clear")
+                if backend is not None:
+                    backend.clear_episodes()
                 await ws.send_text(Event(
                     type=EventType.MEMORY_EPISODES_CLEAR_RESPONSE,
                     request_id=req_id,
@@ -1826,8 +1881,11 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 ).to_json())
             
             elif msg.type == EventType.MEMORY_GRAPH_REQUEST:
-                from aether_engine.memory.knowledge_graph import get_all_facts
-                facts = get_all_facts(limit=msg.payload.get("limit", 100))
+                backend = backend_or_none(engine_state.user_config, context="memory graph list")
+                facts = backend.list_facts(
+                    limit=msg.payload.get("limit", 100),
+                    include_history=bool(msg.payload.get("include_history")),
+                ) if backend is not None else []
                 await ws.send_text(Event(
                     type=EventType.MEMORY_GRAPH_RESPONSE,
                     request_id=req_id,
@@ -1835,14 +1893,11 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.MEMORY_FACT_DELETE_REQUEST:
-                from aether_engine.memory.knowledge_graph import (
-                    delete_fact,
-                    get_all_facts,
-                )
+                backend = backend_or_none(engine_state.user_config, context="memory fact delete")
                 fact_id = msg.payload.get("fact_id")
-                if fact_id:
-                    delete_fact(fact_id)
-                facts = get_all_facts(limit=msg.payload.get("limit", 100))
+                if fact_id and backend is not None:
+                    backend.delete_fact(fact_id)
+                facts = backend.list_facts(limit=msg.payload.get("limit", 100)) if backend is not None else []
                 await ws.send_text(Event(
                     type=EventType.MEMORY_FACT_DELETE_RESPONSE,
                     request_id=req_id,
@@ -1850,14 +1905,11 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.MEMORY_ENTITY_DELETE_REQUEST:
-                from aether_engine.memory.knowledge_graph import (
-                    delete_entity,
-                    get_all_facts,
-                )
+                backend = backend_or_none(engine_state.user_config, context="memory entity delete")
                 entity_name = msg.payload.get("entity_name")
-                if entity_name:
-                    delete_entity(entity_name)
-                facts = get_all_facts(limit=msg.payload.get("limit", 100))
+                if entity_name and backend is not None:
+                    backend.delete_entity(entity_name)
+                facts = backend.list_facts(limit=msg.payload.get("limit", 100)) if backend is not None else []
                 await ws.send_text(Event(
                     type=EventType.MEMORY_ENTITY_DELETE_RESPONSE,
                     request_id=req_id,
@@ -1865,12 +1917,48 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 ).to_json())
 
             elif msg.type == EventType.MEMORY_GRAPH_CLEAR_REQUEST:
-                from aether_engine.memory.knowledge_graph import clear_all_facts
-                clear_all_facts()
+                backend = backend_or_none(engine_state.user_config, context="memory graph clear")
+                if backend is not None:
+                    backend.clear_facts()
                 await ws.send_text(Event(
                     type=EventType.MEMORY_GRAPH_CLEAR_RESPONSE,
                     request_id=req_id,
                     payload={"success": True, "facts": []},
+                ).to_json())
+
+            elif msg.type == EventType.MEMORY_FACT_UPDATE_REQUEST:
+                # Epic 4, E4-03: edit one fact's text via the facade.
+                backend = backend_or_none(engine_state.user_config, context="memory fact update")
+                fact_id = msg.payload.get("fact_id")
+                success = bool(
+                    backend is not None and fact_id
+                    and backend.update_fact(fact_id, msg.payload.get("fact_text", ""))
+                )
+                facts = backend.list_facts(
+                    limit=msg.payload.get("limit", 100),
+                    include_history=bool(msg.payload.get("include_history")),
+                ) if backend is not None else []
+                await ws.send_text(Event(
+                    type=EventType.MEMORY_FACT_UPDATE_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": success, "fact_id": fact_id, "facts": facts},
+                ).to_json())
+
+            elif msg.type == EventType.MEMORY_EXPORT_REQUEST:
+                # Epic 4, E4-03: the full memory as JSON (facts incl.
+                # superseded history + episodes) for the UI to save.
+                backend = backend_or_none(engine_state.user_config, context="memory export")
+                if backend is None:
+                    payload = {"success": False, "error": "The configured memory backend is unavailable (see engine log)."}
+                else:
+                    try:
+                        payload = {"success": True, "export": backend.export()}
+                    except Exception as e:  # noqa: BLE001 — export failure must surface, not crash the handler
+                        payload = {"success": False, "error": str(e)}
+                await ws.send_text(Event(
+                    type=EventType.MEMORY_EXPORT_RESPONSE,
+                    request_id=req_id,
+                    payload=payload,
                 ).to_json())
 
             elif msg.type == EventType.SKILL_LIST_REQUEST:
