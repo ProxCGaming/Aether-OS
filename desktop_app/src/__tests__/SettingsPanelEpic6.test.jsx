@@ -54,3 +54,33 @@ describe('SettingsPanel (Epic 6, E6-06)', () => {
     expect(screen.getByText('Settings were reset to defaults.')).toBeInTheDocument();
   });
 });
+
+describe('SettingsPanel skills toggle (Epic 7, E7-03)', () => {
+  it('sends SKILL_TOGGLE_REQUEST and reflects the refreshed list', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+    fireEvent.click(screen.getByText('Skills'));
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'SKILL_LIST_RESPONSE',
+          payload: { skills: [{ name: 'alpha', description: 'A skill', source: 'local', slash_commands: ['/alpha'], required_tools: [], enabled: true }] },
+        }),
+      });
+    });
+    fireEvent.click(screen.getByText('Disable skill'));
+    const sent = wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
+    const toggle = sent.find((m) => m.type === 'SKILL_TOGGLE_REQUEST');
+    expect(toggle.payload).toEqual({ name: 'alpha', enabled: false });
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'SKILL_TOGGLE_RESPONSE',
+          payload: { success: true, skills: [{ name: 'alpha', description: 'A skill', source: 'local', slash_commands: ['/alpha'], required_tools: [], enabled: false }] },
+        }),
+      });
+    });
+    expect(screen.getByText('Enable skill')).toBeInTheDocument();
+    expect(screen.getByText(/Disabled — hidden from agents/)).toBeInTheDocument();
+  });
+});

@@ -215,6 +215,8 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
         } else if (data.type === 'PLUGIN_LIST_RESPONSE') {
           const p = data.payload.plugins;
           setPlugins(Array.isArray(p) ? p : Object.values(p || {}));
+        } else if (data.type === 'SKILL_TOGGLE_RESPONSE') {
+          if (data.payload.skills) setSkills(data.payload.skills);
         } else if (data.type === 'SKILL_LIST_RESPONSE') {
           setSkills(data.payload.skills || []);
         } else if (data.type === 'PLUGIN_INSTALL_RESPONSE' || data.type === 'PLUGIN_UNINSTALL_RESPONSE' || data.type === 'PLUGIN_TOGGLE_RESPONSE') {
@@ -938,6 +940,26 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                         <span style={{ fontSize: '12px', background: 'rgba(251, 191, 36, 0.15)', color: '#fbbf24', padding: '4px 8px', borderRadius: '6px' }}>
                           {skill.required_tools.length} Tools Required
                         </span>
+                      )}
+                    </div>
+                    <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <button
+                        onClick={() => {
+                          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                            wsRef.current.send(JSON.stringify({
+                              type: 'SKILL_TOGGLE_REQUEST',
+                              schema_version: 1,
+                              request_id: Date.now().toString(),
+                              payload: { name: skill.name, enabled: skill.enabled === false }
+                            }));
+                          }
+                        }}
+                        style={{ background: skill.enabled === false ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.12)', color: skill.enabled === false ? '#10b981' : '#f87171', border: '1px solid rgba(255,255,255,0.12)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px' }}
+                      >
+                        {skill.enabled === false ? 'Enable skill' : 'Disable skill'}
+                      </button>
+                      {skill.enabled === false && (
+                        <span style={{ fontSize: '12px', color: '#9090a0' }}>Disabled — hidden from agents</span>
                       )}
                     </div>
                   </div>
