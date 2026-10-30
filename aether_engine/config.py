@@ -12,7 +12,7 @@ from typing import Any
 # placebo. Single source of truth — routes/websocket.py imports this;
 # UserConfig.from_dict filters stale entries from old config files
 # against it on load.
-AUXILIARY_TASK_CLASSES = frozenset({"vision", "compression", "advisor"})
+AUXILIARY_TASK_CLASSES = frozenset({"vision", "compression", "advisor", "title"})
 
 CONFIG_PATH = Path.home() / ".aether" / "config.json"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"

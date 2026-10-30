@@ -193,6 +193,42 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
     active_downloads: dict[str, asyncio.Task] = {}
     secret_store = SecretStore()
 
+    async def _title_session_in_background(session_id: str, p_name: str, p_model: str, response_text: str):
+        """E1-08: give a still-default session title a model-written one.
+
+        Runs detached after a task completes; every failure simply
+        keeps the existing title.
+        """
+        try:
+            from aether_engine.orchestration.core import _create_provider_instance
+            from aether_engine.session_titles import (
+                generate_session_title,
+                is_default_title,
+                resolve_title_provider,
+            )
+
+            session = await asyncio.to_thread(session_store.get_session, session_id)
+            if not session:
+                return
+            messages = session.get("messages") or []
+            first_user = next((m.get("content") for m in messages if m.get("role") == "user"), None)
+            if not first_user or not is_default_title(session.get("title"), first_user):
+                return
+            try:
+                fallback = _create_provider_instance(p_name, p_model, secret_store)
+            except Exception:  # noqa: BLE001 — no provider instance, no title.
+                return
+            provider = resolve_title_provider(engine_state.user_config, secret_store, fallback)
+            title = await generate_session_title(provider, first_user, response_text)
+            if title and await asyncio.to_thread(session_store.update_session_title, session_id, title):
+                await ws.send_text(Event(
+                    type=EventType.SESSION_TITLE_UPDATED,
+                    request_id="title",
+                    payload={"session_id": session_id, "title": title},
+                ).to_json())
+        except Exception:  # Background decoration must never surface as a task error.
+            logger.warning("Session title update failed", exc_info=True)
+
     async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str, session_id: str | None = None):
         try:
             fallback_attempted = False
@@ -243,6 +279,8 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                             await asyncio.to_thread(session_store.add_message, session_id, "assistant", ev.payload["response"], ev.payload.get("thoughts"))
                         except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not interrupt the task stream
                             logger.error(f"Failed to save session message: {e}")
+                        asyncio.create_task(
+                            _title_session_in_background(session_id, p_name, p_model, ev.payload["response"]))
 
                 if ev.type == EventType.TOOL_APPROVAL_REQUEST:
                     engine_state.audit_logger.log_event("APPROVAL_REQUESTED", {
@@ -904,6 +942,28 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     type=EventType.SESSION_TRUNCATE_RESPONSE,
                     request_id=req_id,
                     payload={"session_id": sess_id, "truncated": truncated},
+                ).to_json())
+
+            elif msg.type == EventType.SESSION_RENAME_REQUEST:
+                sess_id = msg.payload.get("session_id")
+                new_title = (msg.payload.get("title") or "").strip()
+                renamed = False
+                if sess_id and new_title:
+                    renamed = await asyncio.to_thread(
+                        session_store.update_session_title, sess_id, new_title[:120])
+                await ws.send_text(Event(
+                    type=EventType.SESSION_RENAME_RESPONSE,
+                    request_id=req_id,
+                    payload={"session_id": sess_id, "title": new_title, "renamed": renamed},
+                ).to_json())
+
+            elif msg.type == EventType.SESSION_SEARCH_REQUEST:
+                query = msg.payload.get("query", "")
+                results = await asyncio.to_thread(session_store.search_sessions, query)
+                await ws.send_text(Event(
+                    type=EventType.SESSION_SEARCH_RESPONSE,
+                    request_id=req_id,
+                    payload={"query": query, "results": results},
                 ).to_json())
 
             # -----------------------------------------------------------

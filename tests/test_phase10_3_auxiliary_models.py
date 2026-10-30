@@ -27,6 +27,10 @@ Re-verified in the current code (branch phase-10-3-correctness):
                   with no client (MCP implementation is out of scope).
     title       — session titles are prompt[:30] + "..." (websocket.py);
                   no LLM call.
+                  (Update, Epic 1 E1-08: model-written titles now exist —
+                  session_titles.py resolves this override for its
+                  generator, so "title" has a real seam and is accepted
+                  again; the remaining four are still placebo.)
   Wiring a setting for a task class with no auxiliary call site would be
   meaningless, so per B1 the fix is removal at the contract: the handler now
   accepts only "vision", rejects the other six with a clear error, and
@@ -46,8 +50,9 @@ from aether_engine.routing.registry import ModelEntry, ModelRegistry
 
 # The task classes with no engine call site (see module docstring).
 # "compression" left this list in Epic 1 (E1-06): compaction gave it a
-# real call site in langgraph/compaction.py.
-PLACEBO_TASKS = ["web", "skills", "approval", "mcp", "title"]
+# real call site in langgraph/compaction.py. "title" left it in E1-08:
+# session_titles.py generates model-written titles with it.
+PLACEBO_TASKS = ["web", "skills", "approval", "mcp"]
 
 
 @pytest.fixture
@@ -68,7 +73,7 @@ class TestAcceptedTaskSet:
         # to consult it — never widen the accepted set alone. "vision"
         # is consulted by routing/policy.py; "compression" by
         # langgraph/compaction.py (Epic 1, E1-06 — the summariser).
-        assert AUXILIARY_TASK_CLASSES == frozenset({"vision", "compression", "advisor"})
+        assert AUXILIARY_TASK_CLASSES == frozenset({"vision", "compression", "advisor", "title"})
 
     def test_placebo_tasks_are_not_in_accepted_set(self):
         for task in PLACEBO_TASKS:

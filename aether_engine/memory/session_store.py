@@ -180,6 +180,41 @@ def update_session_title(session_id: str, title: str) -> bool:
         conn.commit()
         return cur.rowcount > 0
 
+def search_sessions(query: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Sessions whose title or message content matches ``query``.
+
+    Each result carries a short snippet of the first matching message
+    (empty when only the title matched). Case-insensitive substring
+    match, most recently updated first.
+    """
+    init_db()
+    q = (query or "").strip()
+    if not q:
+        return []
+    like = f"%{q}%"
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT s.id, s.title, s.updated_at,
+                   (SELECT substr(m.content, 1, 140) FROM session_messages m
+                     WHERE m.session_id = s.id AND m.content LIKE ?
+                     ORDER BY m.timestamp ASC, m.rowid ASC LIMIT 1) AS snippet
+            FROM sessions s
+            WHERE s.title LIKE ?
+               OR EXISTS (SELECT 1 FROM session_messages m2
+                          WHERE m2.session_id = s.id AND m2.content LIKE ?)
+            ORDER BY s.updated_at DESC
+            LIMIT ?
+            """,
+            (like, like, like, int(limit)),
+        )
+        return [
+            {"id": r[0], "title": r[1], "updated_at": r[2], "snippet": r[3] or ""}
+            for r in cur.fetchall()
+        ]
+
+
 def truncate_session(session_id: str, message_id: str) -> bool:
     init_db()
     with _get_conn() as conn:
