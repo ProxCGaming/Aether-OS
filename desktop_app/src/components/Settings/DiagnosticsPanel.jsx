@@ -491,6 +491,25 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
                    <div>
                      <h3 style={{ fontSize: '16px', marginBottom: '4px' }}>{agent.name}</h3>
                      <p style={{ color: '#9090a0', fontSize: '13px' }}>{agent.description}</p>
+                     {/* Epic 1, E1-05: the EFFECTIVE model — the agent's
+                         own override when set, otherwise the global
+                         default it inherits. */}
+                     <p data-testid={`effective-model-${agent.id}`} style={{ color: '#a78bfa', fontSize: '12px', marginTop: '6px', fontFamily: 'monospace' }}>
+                       {(() => {
+                         const override = agent.model && agent.model !== 'inherit' ? agent.model : null;
+                         if (override) {
+                           const sep = override.indexOf(':');
+                           const prov = sep === -1 ? '' : override.slice(0, sep);
+                           const model = sep === -1 ? override : override.slice(sep + 1);
+                           const provLabel = (providers || []).find(p => p.name === prov)?.display_name || prov;
+                           return prov ? `Effective model: ${model} (${provLabel})` : `Effective model: ${model}`;
+                         }
+                         const def = (providers || []).find(p => p.is_default);
+                         return def
+                           ? `Effective model: Inherits ${def.display_name || def.name} / ${def.default_model}`
+                           : 'Effective model: Inherits global default';
+                       })()}
+                     </p>
                    </div>
                  </div>
                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>

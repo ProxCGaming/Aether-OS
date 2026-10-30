@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { SocketProvider, useAetherSocket } from './contexts/SocketContext';
 import ForceGraph3D from 'react-force-graph-3d';
-import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu } from 'lucide-react';
+import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu, Pencil } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
 import SettingsPanel from './SettingsPanel';
 import Dashboard from './Dashboard';
@@ -25,6 +25,32 @@ const initGraphData = {
     { source: 'SYSTEM_STATE', target: 'LOG_INIT' }
   ]
 };
+
+// Epic 1, E1-16: THINKING deltas accumulate into a message's thoughts
+// array — consecutive deltas from the same node merge into one entry,
+// preserving arrival order. Reasoning lives ONLY in thoughts; it is
+// never written into a message's content.
+function appendThoughtDelta(thoughts, node, delta) {
+  const next = [...(thoughts || [])];
+  if (next.length > 0 && next[next.length - 1].node === node && typeof next[next.length - 1].text === 'string') {
+    next[next.length - 1] = { ...next[next.length - 1], text: next[next.length - 1].text + delta };
+  } else {
+    next.push({ node, text: delta });
+  }
+  return next;
+}
+
+// Append buffered thought entries onto existing thoughts, merging the
+// seam entry when both sides end/start with the same node.
+function mergeThoughtEntries(base, extra) {
+  let merged = [...(base || [])];
+  for (const entry of extra || []) {
+    if (entry && typeof entry.text === 'string') {
+      merged = appendThoughtDelta(merged, entry.node, entry.text);
+    }
+  }
+  return merged;
+}
 
 function AppContent() {
   // Phase 10.3 C1: the engine-message facade lives in SocketContext, not
@@ -55,6 +81,26 @@ function AppContent() {
   const initialSession = params.get('session');
 
   const [sessions, setSessions] = useState([]);
+  // Epic 1 UI batch: per-session plan mode (E1-09 UI). Keyed by session
+  // id; the '__pending' key holds the choice made before the first
+  // session exists and is adopted by the session when it is created.
+  const [planModeBySession, setPlanModeBySession] = useState({});
+  // Epic 1, E1-17: latest scratchpad per session ({kind, content,
+  // agent}), keyed like planModeBySession ('__pending' before the
+  // first session exists, adopted on SESSION_CREATE_RESPONSE).
+  const [scratchpadBySession, setScratchpadBySession] = useState({});
+  // Epic 1, E1-16: THINKING deltas that arrive before a streaming
+  // agent bubble exists are buffered per session key here and flushed
+  // into the bubble's thoughts when it appears (TASK_STARTED /
+  // TASK_COMPLETED), so reasoning is never dropped.
+  const pendingThinkingRef = useRef({});
+  // Epic 1 UI batch (E1-08): session search + inline rename state.
+  const [sessionSearchQuery, setSessionSearchQuery] = useState('');
+  const [sessionSearchResults, setSessionSearchResults] = useState(null);
+  const sessionSearchTimerRef = useRef(null);
+  const sessionSearchQueryRef = useRef('');
+  const [editingSessionId, setEditingSessionId] = useState(null);
+  const [editingSessionTitle, setEditingSessionTitle] = useState('');
   const [activeSession, setActiveSession] = useState(initialSession || null);
   const activeSessionRef = useRef(initialSession || null);
   useEffect(() => { activeSessionRef.current = activeSession; }, [activeSession]);
@@ -113,8 +159,27 @@ function AppContent() {
           activeTaskSessionRef.current = data.payload?.session_id || activeSessionRef.current;
           setIsThinking(true);
           setChatMessages(prev => {
-            if (prev.findLastIndex(m => m.role === 'agent' && !m.isFinal) === -1) {
-              return [...prev, { role: 'agent', content: '', thoughts: [], isFinal: false }];
+            // E1-16: flush any THINKING deltas buffered before this
+            // bubble existed into its thoughts. Deltas that arrived
+            // before the task (and its session id) was known sit
+            // under '__pending', so fall back to that key.
+            const thinkKey = data.payload?.session_id || activeSessionRef.current || '__pending';
+            let buffered = pendingThinkingRef.current[thinkKey] || [];
+            if (!buffered.length && thinkKey !== '__pending') {
+              buffered = pendingThinkingRef.current.__pending || [];
+              if (buffered.length) delete pendingThinkingRef.current.__pending;
+            }
+            const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
+            if (lastAgentIdx === -1) {
+              if (buffered.length) delete pendingThinkingRef.current[thinkKey];
+              return [...prev, { role: 'agent', content: '', thoughts: buffered, isFinal: false }];
+            }
+            if (buffered.length) {
+              delete pendingThinkingRef.current[thinkKey];
+              const newMessages = [...prev];
+              const last = newMessages[lastAgentIdx];
+              newMessages[lastAgentIdx] = { ...last, thoughts: mergeThoughtEntries(last.thoughts || [], buffered) };
+              return newMessages;
             }
             return prev;
           });
@@ -129,6 +194,56 @@ function AppContent() {
             Object.keys(sessionCacheRef.current).forEach((sid) => {
               sessionCacheRef.current[sid] = clearQueued(sessionCacheRef.current[sid]);
             });
+          }
+        } else if (data.type === 'THINKING') {
+          // Epic 1, E1-16: model reasoning streams into the streaming
+          // bubble's thoughts ONLY — never into content, never into
+          // the persisted answer body. If no bubble is streaming yet,
+          // the delta is buffered per session and flushed when the
+          // bubble appears (TASK_STARTED) or finalises (TASK_COMPLETED).
+          const thinkDelta = data.payload?.text_delta;
+          if (typeof thinkDelta === 'string' && thinkDelta.length > 0) {
+            const thinkNode = data.payload?.node || 'thinking';
+            const targetSession = activeTaskSessionRef.current || activeSessionRef.current;
+            const bufferKey = targetSession || '__pending';
+            const applyThinking = (list) => {
+              const idx = list.findLastIndex(m => m.role === 'agent' && !m.isFinal);
+              if (idx === -1) return null;
+              const newList = [...list];
+              const last = newList[idx];
+              newList[idx] = { ...last, thoughts: appendThoughtDelta(last.thoughts || [], thinkNode, thinkDelta) };
+              return newList;
+            };
+            if (targetSession && targetSession !== activeSessionRef.current) {
+              const cached = sessionCacheRef.current[targetSession] || [];
+              const updated = applyThinking(cached);
+              if (updated) {
+                sessionCacheRef.current[targetSession] = updated;
+              } else {
+                pendingThinkingRef.current[bufferKey] = appendThoughtDelta(pendingThinkingRef.current[bufferKey] || [], thinkNode, thinkDelta);
+              }
+            } else {
+              setChatMessages(prev => {
+                const updated = applyThinking(prev);
+                if (updated) return updated;
+                pendingThinkingRef.current[bufferKey] = appendThoughtDelta(pendingThinkingRef.current[bufferKey] || [], thinkNode, thinkDelta);
+                return prev;
+              });
+            }
+          }
+        } else if (data.type === 'SCRATCHPAD') {
+          // Epic 1, E1-17: display-only scratchpad (diagram/sketch/
+          // notes) from the engine. Keep only the latest per session;
+          // the panel in DraggableChatWindow renders it.
+          const padContent = data.payload?.content;
+          if (typeof padContent === 'string' && padContent.length > 0) {
+            const padSession = data.payload?.session_id || activeTaskSessionRef.current || activeSessionRef.current || '__pending';
+            const padEntry = {
+              kind: data.payload?.kind || 'text',
+              content: padContent,
+              agent: data.payload?.agent || null,
+            };
+            setScratchpadBySession(prev => ({ ...prev, [padSession]: padEntry }));
           }
         } else if (data.type === 'TASK_PROGRESS') {
           let delta = data.payload.text_delta;
@@ -299,7 +414,14 @@ function AppContent() {
             }
           }
           let result = data.payload.response || data.payload.result || data.payload.output;
-          
+
+          // E1-16: THINKING deltas still buffered (no streaming bubble
+          // ever appeared) join the final message's thoughts here —
+          // reasoning is preserved, and still kept out of content.
+          const completionKey = activeTaskSessionRef.current || data.payload?.session_id || activeSessionRef.current || '__pending';
+          const bufferedThoughts = pendingThinkingRef.current[completionKey] || [];
+          if (bufferedThoughts.length) delete pendingThinkingRef.current[completionKey];
+
           const updateCompletedMessages = (prev) => {
             let newMessages = [...prev];
             const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
@@ -307,7 +429,8 @@ function AppContent() {
             if (lastAgentIdx !== -1) {
               const last = newMessages[lastAgentIdx];
               const finalContent = (result !== undefined && result !== null) ? (typeof result !== 'string' ? JSON.stringify(result, null, 2) : result) : last.content;
-              const finalThoughts = (last.thoughts && last.thoughts.length > 0) ? last.thoughts : (data.payload.thoughts || []);
+              const baseThoughts = (last.thoughts && last.thoughts.length > 0) ? last.thoughts : (data.payload.thoughts || []);
+              const finalThoughts = bufferedThoughts.length ? mergeThoughtEntries(baseThoughts, bufferedThoughts) : baseThoughts;
               
               newMessages[lastAgentIdx] = { ...last, content: finalContent, thoughts: finalThoughts, isFinal: true };
               return newMessages.map((m, i) => 
@@ -317,7 +440,8 @@ function AppContent() {
               const veryLast = newMessages[newMessages.length - 1];
               if (veryLast && veryLast.role === 'agent' && veryLast.isFinal) return newMessages;
               const finalContent = (result !== undefined && result !== null) ? (typeof result !== 'string' ? JSON.stringify(result, null, 2) : result) : '';
-              return [...newMessages, { role: 'agent', content: finalContent, thoughts: data.payload.thoughts || [], isFinal: true }];
+              const createdThoughts = bufferedThoughts.length ? mergeThoughtEntries(data.payload.thoughts || [], bufferedThoughts) : (data.payload.thoughts || []);
+              return [...newMessages, { role: 'agent', content: finalContent, thoughts: createdThoughts, isFinal: true }];
             }
           };
           
@@ -362,6 +486,24 @@ function AppContent() {
             sessionCacheRef.current[activeTaskSessionRef.current] = updateFailedMessages(cached);
           } else {
             setChatMessages(updateFailedMessages);
+          }
+        } else if (data.type === 'SESSION_RENAME_RESPONSE') {
+          // Epic 1 UI batch (E1-08): the engine confirms renames; only
+          // a confirmed rename changes the local list.
+          if (data.payload?.renamed && data.payload.session_id) {
+            setSessions(prev => prev.map(s => s.id === data.payload.session_id ? { ...s, title: data.payload.title } : s));
+          }
+        } else if (data.type === 'SESSION_TITLE_UPDATED') {
+          // Epic 1 UI batch (E1-08): the engine wrote a model title for
+          // a session after a task completed — reflect it in the list.
+          if (data.payload?.session_id && data.payload.title) {
+            setSessions(prev => prev.map(s => s.id === data.payload.session_id ? { ...s, title: data.payload.title } : s));
+          }
+        } else if (data.type === 'SESSION_SEARCH_RESPONSE') {
+          // Epic 1 UI batch (E1-08): ignore stale answers for a query
+          // the user has already replaced or cleared.
+          if (data.payload && data.payload.query === sessionSearchQueryRef.current) {
+            setSessionSearchResults(Array.isArray(data.payload.results) ? data.payload.results : []);
           }
         } else if (data.type === 'SESSION_LIST_RESPONSE') {
           setSessions(data.payload.sessions || []);
@@ -480,6 +622,21 @@ function AppContent() {
         } else if (data.type === 'SESSION_CREATE_RESPONSE') {
           const newId = data.payload.session_id;
           setActiveSession(newId);
+          // A plan-mode choice made before the session existed (the
+          // '__pending' key) is adopted by the new session.
+          setPlanModeBySession(prev => {
+            if (!prev.__pending) return prev;
+            const next = { ...prev, [newId]: prev.__pending };
+            delete next.__pending;
+            return next;
+          });
+          // Same adoption for a scratchpad that arrived pre-session.
+          setScratchpadBySession(prev => {
+            if (!prev.__pending) return prev;
+            const next = { ...prev, [newId]: prev.__pending };
+            delete next.__pending;
+            return next;
+          });
           if (!data.payload?.preserve_messages) {
             setChatMessages([]);
           }
@@ -663,6 +820,9 @@ function AppContent() {
     // instead of replacing it — the bubble is flagged queued until the
     // engine answers STEERING_APPLIED, and no new agent bubble starts.
     const steering = isThinking;
+    // Epic 1, E1-09 UI: plan mode rides START_TASK only (a steer is
+    // mid-task guidance, not a new task). Read the per-session choice.
+    const planMode = !!planModeBySession[activeSessionRef.current || '__pending'];
     setChatMessages(prev => steering
       ? [...prev, { id: messageId, role: 'user', content: text, isFinal: true, queued: true, steering: true }]
       : [
@@ -679,7 +839,8 @@ function AppContent() {
         payload: {
           prompt: text,
           session_id: activeSession,
-          message_id: messageId
+          message_id: messageId,
+          ...(steering ? {} : { plan_mode: planMode })
         }
       }));
     } else if (steering) {
@@ -815,31 +976,29 @@ function AppContent() {
     setIsThinking(false);
   };
 
-  const handleEditMessage = (msg, index) => {
-    // Only user messages are editable, and only with real text content.
-    if (!msg || msg.role !== 'user') return;
+  // Epic 1 UI batch: the truncate machinery shared by edit-and-resend
+  // and regenerate (E1-08). sendSessionTruncate tells the engine to
+  // wipe a user message + everything after it and returns the
+  // occurrence of that message among identical user messages;
+  // pruneMessagesFrom cuts the local list at the same row, resolved
+  // defensively (rendered index, then shared id, then the
+  // occurrence-aware content match) so the wrong branch is never cut.
+  const sendSessionTruncate = (msg, index, list) => {
     const content = typeof msg.content === 'string' ? msg.content : '';
-
-    // 1. Cancel any running task first so ghost progress doesn't stream in
-    if (isThinking) {
-      handleStopTask();
-    }
-
-    // 2. Tell the engine to wipe this message + everything after it.
-    //    Sent through the socket facade unconditionally: the facade
-    //    queues while offline and flushes in order on reconnect, so the
-    //    truncate is never silently dropped (the old readyState check
-    //    threw it away whenever the socket was mid-reconnect). The
-    //    occurrence tells the engine WHICH identical message was
-    //    clicked when the id isn't a stored row id.
-    const sessionId = activeSessionRef.current;
     let occurrence = 0;
     if (Number.isInteger(index) && index > 0) {
-      occurrence = chatMessages
+      occurrence = (list || [])
         .slice(0, index)
         .filter(m => m.role === 'user' && m.content === content)
         .length;
     }
+    // Sent through the socket facade unconditionally: the facade
+    // queues while offline and flushes in order on reconnect, so the
+    // truncate is never silently dropped (a readyState check threw it
+    // away whenever the socket was mid-reconnect). The occurrence
+    // tells the engine WHICH identical message was addressed when the
+    // id isn't a stored row id.
+    const sessionId = activeSessionRef.current;
     if (sessionId && wsRef.current && wsRef.current.send) {
       wsRef.current.send(JSON.stringify({
         type: 'SESSION_TRUNCATE_REQUEST',
@@ -854,34 +1013,123 @@ function AppContent() {
         }
       }));
     }
-
-    // 3. Prune the local chat from the edited message onward. Resolve
-    //    the row defensively — rendered index first (it is the row the
-    //    user clicked), then the shared id, then the occurrence-aware
-    //    content match. If none resolve, leave the list untouched
-    //    rather than cutting the wrong branch.
-    setChatMessages(prev => {
-      let idx = -1;
-      if (Number.isInteger(index) && prev[index]
-          && prev[index].role === 'user' && prev[index].content === content) {
-        idx = index;
-      }
-      if (idx === -1 && msg.id) {
-        idx = prev.findIndex(m => m.id === msg.id);
-      }
-      if (idx === -1) {
-        let seen = -1;
-        idx = prev.findIndex(m => {
-          if (m.role === 'user' && m.content === content) {
-            seen += 1;
-            return seen === occurrence;
-          }
-          return false;
-        });
-      }
-      return idx === -1 ? prev : prev.slice(0, idx);
-    });
+    return occurrence;
   };
+
+  const pruneMessagesFrom = (prev, msg, index, occurrence) => {
+    const content = typeof msg.content === 'string' ? msg.content : '';
+    let idx = -1;
+    if (Number.isInteger(index) && prev[index]
+        && prev[index].role === 'user' && prev[index].content === content) {
+      idx = index;
+    }
+    if (idx === -1 && msg.id) {
+      idx = prev.findIndex(m => m.id === msg.id);
+    }
+    if (idx === -1) {
+      let seen = -1;
+      idx = prev.findIndex(m => {
+        if (m.role === 'user' && m.content === content) {
+          seen += 1;
+          return seen === occurrence;
+        }
+        return false;
+      });
+    }
+    return idx === -1 ? prev : prev.slice(0, idx);
+  };
+
+  const handleEditMessage = (msg, index) => {
+    // Only user messages are editable, and only with real text content.
+    if (!msg || msg.role !== 'user') return;
+
+    // 1. Cancel any running task first so ghost progress doesn't stream in
+    if (isThinking) {
+      handleStopTask();
+    }
+
+    // 2+3. Truncate the stored session at this message and prune the
+    // local chat from it onward; the composer refill happens in the
+    // chat window (it owns the input state).
+    const occurrence = sendSessionTruncate(msg, index, chatMessages);
+    setChatMessages(prev => pruneMessagesFrom(prev, msg, index, occurrence));
+  };
+
+  // Epic 1 UI batch (E1-08): regenerate the last exchange. Same
+  // truncate as edit-and-resend, but the prompt is resent immediately
+  // as a fresh task — nothing goes into the composer, and the send
+  // path adds exactly one new user bubble (the normal one).
+  const handleRegenerate = () => {
+    if (isThinking) return;
+    const lastUserIdx = chatMessages.findLastIndex(m => m.role === 'user');
+    if (lastUserIdx === -1) return;
+    const userMsg = chatMessages[lastUserIdx];
+    const prompt = typeof userMsg.content === 'string' ? userMsg.content : '';
+    if (!prompt) return;
+    const occurrence = sendSessionTruncate(userMsg, lastUserIdx, chatMessages);
+    setChatMessages(prev => pruneMessagesFrom(prev, userMsg, lastUserIdx, occurrence));
+    handleSendMessage(prompt);
+  };
+
+  // Epic 1, E1-09 UI: plan mode is a per-session choice.
+  const planModeKey = activeSession || '__pending';
+  const planMode = !!planModeBySession[planModeKey];
+  const handleTogglePlanMode = () => {
+    setPlanModeBySession(prev => ({ ...prev, [planModeKey]: !prev[planModeKey] }));
+  };
+
+  // Epic 1 UI batch (E1-08): session rename (inline edit in the list).
+  const handleStartRenameSession = (session, e) => {
+    if (e) e.stopPropagation();
+    setEditingSessionId(session.id);
+    setEditingSessionTitle(session.title || session.name || '');
+  };
+
+  const handleCancelRenameSession = () => {
+    setEditingSessionId(null);
+    setEditingSessionTitle('');
+  };
+
+  const handleCommitRenameSession = (sessionId) => {
+    if (editingSessionId !== sessionId) return; // Escape-cancel already closed it
+    const title = editingSessionTitle.trim();
+    setEditingSessionId(null);
+    setEditingSessionTitle('');
+    if (!title) return; // an empty title cancels instead of renaming
+    if (wsRef.current && wsRef.current.send) {
+      wsRef.current.send(JSON.stringify({
+        type: 'SESSION_RENAME_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { session_id: sessionId, title }
+      }));
+    }
+  };
+
+  // Epic 1 UI batch (E1-08): debounced session search. An empty query
+  // restores the normal list; results are only applied when they answer
+  // the current query (see SESSION_SEARCH_RESPONSE above).
+  useEffect(() => {
+    sessionSearchQueryRef.current = sessionSearchQuery;
+    if (sessionSearchTimerRef.current) clearTimeout(sessionSearchTimerRef.current);
+    if (!sessionSearchQuery.trim()) {
+      setSessionSearchResults(null);
+      return;
+    }
+    sessionSearchTimerRef.current = setTimeout(() => {
+      if (wsRef.current && wsRef.current.send) {
+        wsRef.current.send(JSON.stringify({
+          type: 'SESSION_SEARCH_REQUEST',
+          schema_version: 1,
+          request_id: Date.now().toString(),
+          payload: { query: sessionSearchQuery }
+        }));
+      }
+    }, 300);
+    return () => {
+      if (sessionSearchTimerRef.current) clearTimeout(sessionSearchTimerRef.current);
+    };
+  }, [sessionSearchQuery]);
 
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', overflow: 'hidden', backgroundColor: isFloating ? 'transparent' : '#05050f', flexDirection: 'column' }}>
@@ -989,29 +1237,119 @@ function AppContent() {
                 </button>
               </div>
               
+              {/* Epic 1 UI batch (E1-08): session search. A non-empty
+                  query swaps the list for engine search results. */}
+              <div style={{ padding: '0 24px', marginBottom: '12px' }}>
+                <input
+                  type="text"
+                  placeholder="Search chats..."
+                  aria-label="Search chats"
+                  value={sessionSearchQuery}
+                  onChange={(e) => setSessionSearchQuery(e.target.value)}
+                  style={{
+                    width: '100%',
+                    boxSizing: 'border-box',
+                    background: 'rgba(255,255,255,0.05)',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    borderRadius: '8px',
+                    padding: '7px 10px',
+                    color: '#fff',
+                    fontSize: '12px',
+                    outline: 'none'
+                  }}
+                />
+              </div>
+
               <div className="chat-scroll" style={{ padding: '0 12px', flex: 1, overflowY: 'auto' }}>
-                {sessions.map(s => (
-                  <div 
-                    key={s.id} 
+                {sessionSearchResults !== null ? (
+                  sessionSearchResults.length === 0 ? (
+                    <div style={{ color: '#9090a0', fontSize: '13px', padding: '12px 14px' }}>No chats match your search.</div>
+                  ) : sessionSearchResults.map(r => (
+                    <div
+                      key={r.id}
+                      className={`session-item ${activeSession === r.id ? 'active' : ''}`}
+                      onClick={() => handleSessionSwitch(r.id)}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: '8px'
+                      }}
+                    >
+                      <MessageSquare size={16} style={{ opacity: activeSession === r.id ? 1 : 0.5, flexShrink: 0, marginTop: '2px' }} />
+                      <div style={{ overflow: 'hidden' }}>
+                        <div style={{ fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.title || `Session ${r.id}`}</div>
+                        {r.snippet && (
+                          <div style={{ fontSize: '12px', color: '#9090a0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.snippet}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                ) : sessions.map(s => (
+                  <div
+                    key={s.id}
                     className={`session-item ${activeSession === s.id ? 'active' : ''}`}
                     onClick={() => handleSessionSwitch(s.id)}
+                    onDoubleClick={() => handleStartRenameSession(s)}
                     style={{
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'space-between'
                     }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden', flex: 1 }}>
                       <MessageSquare size={16} style={{ opacity: activeSession === s.id ? 1 : 0.5, flexShrink: 0 }} />
-                      <span style={{ fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.title || s.name || `Session ${s.id}`}</span>
+                      {editingSessionId === s.id ? (
+                        <input
+                          type="text"
+                          aria-label="Session title"
+                          autoFocus
+                          value={editingSessionTitle}
+                          onChange={(e) => setEditingSessionTitle(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                          onDoubleClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleCommitRenameSession(s.id);
+                            } else if (e.key === 'Escape') {
+                              e.preventDefault();
+                              handleCancelRenameSession();
+                            }
+                          }}
+                          onBlur={() => handleCommitRenameSession(s.id)}
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            background: 'rgba(0,0,0,0.3)',
+                            border: '1px solid rgba(167, 139, 250, 0.5)',
+                            borderRadius: '6px',
+                            padding: '3px 6px',
+                            color: '#fff',
+                            fontSize: '13px',
+                            outline: 'none'
+                          }}
+                        />
+                      ) : (
+                        <span style={{ fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.title || s.name || `Session ${s.id}`}</span>
+                      )}
                     </div>
-                    <button 
-                      className="session-delete-btn"
-                      onClick={(e) => handleDeleteSession(s.id, e)}
-                      title="Delete Session"
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                    <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+                      <button
+                        className="session-rename-btn"
+                        onClick={(e) => handleStartRenameSession(s, e)}
+                        title="Rename Session"
+                        aria-label="Rename session"
+                      >
+                        <Pencil size={13} />
+                      </button>
+                      <button
+                        className="session-delete-btn"
+                        onClick={(e) => handleDeleteSession(s.id, e)}
+                        title="Delete Session"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1032,6 +1370,10 @@ function AppContent() {
           providers={providers}
           onChangeModel={handleChangeModel}
           onEditMessage={handleEditMessage}
+          onRegenerate={handleRegenerate}
+          planMode={planMode}
+          onTogglePlanMode={handleTogglePlanMode}
+          scratchpad={scratchpadBySession[activeSession || '__pending'] || null}
           onDetach={(state) => {
             localStorage.setItem('floating_transfer_state', JSON.stringify({
               messages: chatMessages,

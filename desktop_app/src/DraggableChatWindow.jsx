@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2 } from 'lucide-react';
+import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
 import './chat.css';
@@ -576,6 +576,154 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
   );
 }
 
+// Epic 1, E1-17: display-only scratchpad panel. Mid-task the agent
+// can sketch a diagram / SVG / notes here; the content arrives
+// pre-sanitised from the engine (scripts and handlers stripped). The
+// panel sits above the composer so it never interrupts the message
+// stream; it collapses, and dismissing hides it until the next
+// SCRATCHPAD event (App stores a fresh object per event, which the
+// effect below treats as "reopen").
+export function ScratchpadPanel({ scratchpad }) {
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isDismissed, setIsDismissed] = useState(false);
+  const [mermaidSvg, setMermaidSvg] = useState('');
+  const [mermaidError, setMermaidError] = useState('');
+
+  const kind = scratchpad?.kind || 'text';
+  const content = typeof scratchpad?.content === 'string' ? scratchpad.content : '';
+  const agent = scratchpad?.agent || null;
+
+  useEffect(() => {
+    setIsDismissed(false);
+    setIsCollapsed(false);
+  }, [scratchpad]);
+
+  // Mermaid sources render to inline SVG with the package loaded
+  // lazily (importing this window never pays for it). Strict security
+  // level plus the engine-side sanitisation keep it display-only.
+  // Any failure falls back to showing the source with a note — the
+  // panel must never take the chat down with it.
+  useEffect(() => {
+    if (!scratchpad || kind !== 'mermaid') {
+      setMermaidSvg('');
+      setMermaidError('');
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const mod = await import('mermaid');
+        const mermaid = mod.default || mod;
+        mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+        const renderId = `aether-scratchpad-${Math.random().toString(36).slice(2, 10)}`;
+        const result = await mermaid.render(renderId, content);
+        if (!cancelled) {
+          setMermaidSvg(result?.svg || '');
+          setMermaidError('');
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setMermaidSvg('');
+          setMermaidError(err?.message || 'render failed');
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [scratchpad, kind, content]);
+
+  if (!scratchpad || isDismissed) return null;
+
+  return (
+    <div
+      className="scratchpad-panel"
+      data-testid="scratchpad-panel"
+      style={{
+        margin: '12px 16px 0 16px',
+        borderRadius: '14px',
+        background: 'rgba(10, 14, 24, 0.55)',
+        border: '1px solid rgba(96, 165, 250, 0.28)',
+        overflow: 'hidden',
+        flexShrink: 0
+      }}
+    >
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        padding: '8px 12px',
+        color: '#93c5fd',
+        fontSize: '12px',
+        userSelect: 'none'
+      }}>
+        <Edit2 size={13} style={{ flexShrink: 0 }} />
+        <span style={{ fontWeight: 600, letterSpacing: '0.4px' }}>Scratchpad</span>
+        <span style={{
+          fontSize: '10px',
+          background: 'rgba(96, 165, 250, 0.16)',
+          border: '1px solid rgba(96, 165, 250, 0.35)',
+          padding: '2px 6px',
+          borderRadius: '4px',
+          fontWeight: 600,
+          letterSpacing: '0.5px',
+          textTransform: 'uppercase'
+        }}>{kind}</span>
+        {agent && <span style={{ fontSize: '11px', color: '#a1a1aa' }}>{agent}</span>}
+        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          onClick={() => setIsCollapsed(!isCollapsed)}
+          aria-label={isCollapsed ? 'Expand scratchpad' : 'Collapse scratchpad'}
+          title={isCollapsed ? 'Expand scratchpad' : 'Collapse scratchpad'}
+          style={{ background: 'transparent', border: 'none', color: '#93c5fd', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px' }}
+        >
+          <ChevronDown size={14} style={{ transition: 'transform 0.3s ease', transform: isCollapsed ? 'rotate(0deg)' : 'rotate(180deg)' }} />
+        </button>
+        <button
+          type="button"
+          onClick={() => setIsDismissed(true)}
+          aria-label="Dismiss scratchpad"
+          title="Dismiss scratchpad"
+          style={{ background: 'transparent', border: 'none', color: '#a1a1aa', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px' }}
+        >
+          <X size={14} />
+        </button>
+      </div>
+      {!isCollapsed && (
+        <div
+          className="chat-scroll"
+          style={{
+            maxHeight: '260px',
+            overflowY: 'auto',
+            overflowX: 'auto',
+            padding: '10px 12px',
+            borderTop: '1px solid rgba(255, 255, 255, 0.06)',
+            background: 'rgba(0, 0, 0, 0.25)'
+          }}
+        >
+          {kind === 'svg' && (
+            <div className="scratchpad-svg" dangerouslySetInnerHTML={{ __html: content }} />
+          )}
+          {kind === 'mermaid' && (mermaidSvg ? (
+            <div className="scratchpad-mermaid" dangerouslySetInnerHTML={{ __html: mermaidSvg }} />
+          ) : mermaidError ? (
+            <div>
+              <div style={{ fontSize: '11px', color: '#fca5a5', marginBottom: '6px' }}>
+                Diagram could not be rendered — showing the source instead.
+              </div>
+              <pre className="scratchpad-source" style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '11.5px', color: '#d4d4d8' }}>{content}</pre>
+            </div>
+          ) : (
+            <div style={{ fontSize: '11.5px', color: '#a1a1aa' }}>Rendering diagram…</div>
+          ))}
+          {kind !== 'svg' && kind !== 'mermaid' && (
+            <pre className="scratchpad-text" style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '12px', color: '#e2e8f0' }}>{content}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ContextMenu({ menu, onClose, onShowToast, setInput }) {
   if (!menu) return null;
 
@@ -766,6 +914,10 @@ export default function DraggableChatWindow({
   providers = [],
   onChangeModel = () => {},
   onEditMessage,
+  onRegenerate,
+  planMode = false,
+  scratchpad = null,
+  onTogglePlanMode,
   onDetach,
   isFloating,
   initialInput = '',
@@ -958,6 +1110,12 @@ export default function DraggableChatWindow({
     }
   };
 
+  // Epic 1 UI batch (E1-08): regenerate is offered on the last final
+  // agent bubble only (error bubbles included), and never mid-task.
+  const lastFinalAgentIndex = messages.findLastIndex(
+    m => (m.role === 'agent' || m.role === 'assistant') && m.isFinal
+  );
+
   const handleMouseMove = (e) => {
     if (nodeRef.current) {
       const rect = nodeRef.current.getBoundingClientRect();
@@ -1315,6 +1473,22 @@ export default function DraggableChatWindow({
                           Queued
                         </div>
                       )}
+                      {i === lastFinalAgentIndex && !isThinking && onRegenerate && (
+                        <button
+                          type="button"
+                          className="msg-regenerate-btn"
+                          title="Regenerate response"
+                          aria-label="Regenerate response"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onRegenerate();
+                          }}
+                        >
+                          <RotateCcw size={12} />
+                          <span>Regenerate</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -1323,6 +1497,9 @@ export default function DraggableChatWindow({
 
               <div ref={messagesEndRef} />
             </div>
+
+            {/* Scratchpad panel (Epic 1, E1-17): above the composer, below the message stream */}
+            <ScratchpadPanel scratchpad={scratchpad} />
 
             {/* Input Area */}
             <div style={{ padding: '16px', borderTop: '1px solid rgba(255,255,255,0.08)', position: 'relative' }}>
@@ -1379,6 +1556,18 @@ export default function DraggableChatWindow({
                   ))}
                 </div>
               )}
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
+                <button
+                  type="button"
+                  className={`plan-mode-toggle ${planMode ? 'active' : ''}`}
+                  aria-pressed={planMode}
+                  aria-label="Toggle plan mode"
+                  title="Plan mode: agents only use read-only tools"
+                  onClick={() => onTogglePlanMode && onTogglePlanMode()}
+                >
+                  Plan
+                </button>
+              </div>
               <form onSubmit={handleSubmit} className="ios-glass-input" style={{ 
                 display: 'flex', 
                 alignItems: 'flex-end',
