@@ -27,6 +27,7 @@ from aether_engine.langgraph.executor import (
     run_langgraph_task,
 )
 from aether_engine.langgraph.fast_chat import load_session_history, run_fast_chat
+from aether_engine.langgraph.steering import enqueue_steer
 from aether_engine.memory import session_store
 from aether_engine.orchestration.core import (
     _build_provider_list_async,
@@ -185,6 +186,10 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
         logger.warning(f"Error fetching pending approvals: {e}")
 
     task_runner: asyncio.Task | None = None
+    # Session of the task this connection most recently started or
+    # resumed — lets STEER_TASK tell "a task is live for this session"
+    # apart from "start a new task" (Epic 1, E1-07).
+    task_session_id: str | None = None
     active_downloads: dict[str, asyncio.Task] = {}
     secret_store = SecretStore()
 
@@ -277,6 +282,43 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 continue
 
             req_id = msg.request_id
+
+            # -----------------------------------------------------------
+            # Steering (Epic 1, E1-07): a message for a session whose
+            # task is running — or paused for approval — is queued for
+            # that task (saved + enqueued, nothing cancelled). With no
+            # live task for the session it falls through and is handled
+            # as a normal START_TASK below, so a steer can never strand
+            # a message.
+            # -----------------------------------------------------------
+            if msg.type == EventType.STEER_TASK:
+                steer_prompt = (msg.payload.get("prompt") or "").strip()
+                steer_session = msg.payload.get("session_id") or task_session_id
+                steer_active = bool(
+                    steer_session
+                    and task_runner is not None
+                    and not task_runner.done()
+                    and (task_session_id is None or task_session_id == steer_session)
+                )
+                steer_paused = False
+                if steer_session and not steer_active:
+                    try:
+                        pending = await get_pending_approvals()
+                        steer_paused = any(
+                            p.get("thread_id") == steer_session for p in pending)
+                    except Exception:  # noqa: BLE001 — the approval scan is best-effort: failure degrades a steer to a normal new task, never a lost message
+                        steer_paused = False
+                if steer_prompt and steer_session and (steer_active or steer_paused):
+                    try:
+                        await asyncio.to_thread(
+                            session_store.add_message, steer_session, "user",
+                            steer_prompt, None, msg.payload.get("message_id"))
+                    except Exception as e:  # noqa: BLE001 — best-effort persistence, same as START_TASK: a save failure must not lose the steer
+                        logger.error(f"Failed to save steering message: {e}")
+                    enqueue_steer(
+                        steer_session, steer_prompt, msg.payload.get("message_id"))
+                    continue
+                msg.type = EventType.START_TASK
 
             # -----------------------------------------------------------
             # Task lifecycle events
@@ -470,6 +512,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         plan_mode=bool(msg.payload.get("plan_mode")),
                     )
 
+                task_session_id = session_id
                 task_runner = asyncio.create_task(
                     execute_task_generator(task_generator, decision.provider, decision.model, req_id, session_id=session_id)
                 )
@@ -546,6 +589,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     task_runner.cancel()
                     
                 req_id = msg.request_id or "resume"
+                task_session_id = approval_key
                 task_runner = asyncio.create_task(
                     execute_task_generator(resume_gen, engine_state.active_provider, engine_state.active_model, req_id, session_id=session_id or engine_state.active_session_id)
                 )

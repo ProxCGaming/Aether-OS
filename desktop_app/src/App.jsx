@@ -118,6 +118,18 @@ function AppContent() {
             }
             return prev;
           });
+        } else if (data.type === 'STEERING_APPLIED') {
+          // Epic 1, E1-07: the engine applied a queued steer to the
+          // running task — clear the bubble's queued flag.
+          const appliedId = data.payload?.message_id || data.request_id;
+          if (appliedId) {
+            const clearQueued = (list) => (list || []).map(m =>
+              m.id === appliedId ? { ...m, queued: false, steering: false } : m);
+            setChatMessages(prev => clearQueued(prev));
+            Object.keys(sessionCacheRef.current).forEach((sid) => {
+              sessionCacheRef.current[sid] = clearQueued(sessionCacheRef.current[sid]);
+            });
+          }
         } else if (data.type === 'TASK_PROGRESS') {
           let delta = data.payload.text_delta;
           if (delta !== undefined && delta !== null && typeof delta !== 'string') {
@@ -647,15 +659,21 @@ function AppContent() {
     const messageId = (window.crypto && typeof window.crypto.randomUUID === 'function')
       ? window.crypto.randomUUID()
       : `msg-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
-    setChatMessages(prev => [
-      ...prev,
-      { id: messageId, role: 'user', content: text, isFinal: true },
-      { role: 'agent', content: '', thoughts: [], isFinal: false }
-    ]);
+    // Epic 1, E1-07: sending while a task is running steers that task
+    // instead of replacing it — the bubble is flagged queued until the
+    // engine answers STEERING_APPLIED, and no new agent bubble starts.
+    const steering = isThinking;
+    setChatMessages(prev => steering
+      ? [...prev, { id: messageId, role: 'user', content: text, isFinal: true, queued: true, steering: true }]
+      : [
+          ...prev,
+          { id: messageId, role: 'user', content: text, isFinal: true },
+          { role: 'agent', content: '', thoughts: [], isFinal: false }
+        ]);
     setIsThinking(true);
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
-        type: 'START_TASK',
+        type: steering ? 'STEER_TASK' : 'START_TASK',
         schema_version: 1,
         request_id: messageId,
         payload: {
@@ -664,6 +682,10 @@ function AppContent() {
           message_id: messageId
         }
       }));
+    } else if (steering) {
+      // Offline steer: keep the bubble queued rather than failing the
+      // running task's bubble; the engine never saw it, and clearing
+      // the flag is STEERING_APPLIED's job once reconnect delivers it.
     } else {
       setTimeout(() => {
         setIsThinking(false);

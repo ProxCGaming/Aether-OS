@@ -356,7 +356,10 @@ describe('DraggableChatWindow (default export)', () => {
     expect(composer.value).toBe('');
   });
 
-  it('does not send while the agent is thinking', () => {
+  it('sends while the agent is thinking, as steering (Epic 1, E1-07)', () => {
+    // E1-07 changed this contract: a message sent mid-task no longer
+    // dead-ends in the composer - it is forwarded so App can send it
+    // as STEER_TASK and the running task is steered, not replaced.
     const onSendMessage = jest.fn();
     renderChat({ onSendMessage, isThinking: true });
 
@@ -364,6 +367,15 @@ describe('DraggableChatWindow (default export)', () => {
     fireEvent.change(composer, { target: { value: 'hello' } });
     fireEvent.keyDown(composer, { key: 'Enter', shiftKey: false });
 
-    expect(onSendMessage).not.toHaveBeenCalled();
+    expect(onSendMessage).toHaveBeenCalledWith('hello');
+    expect(composer.value).toBe('');
+  });
+
+  it('renders the queued indicator on a steering bubble', () => {
+    renderChat({
+      messages: [{ id: 'm-steer', role: 'user', content: 'queued steer', queued: true }],
+    });
+    expect(screen.getByTestId('queued-indicator')).toBeInTheDocument();
+    expect(screen.getByText('Queued')).toBeInTheDocument();
   });
 });

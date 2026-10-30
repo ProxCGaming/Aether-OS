@@ -36,6 +36,12 @@ from aether_engine.langgraph.compaction import (
     make_provider_summariser,
     resolve_summariser_provider,
 )
+from aether_engine.langgraph.steering import (
+    drain_steers,
+    enqueue_steer,
+    has_pending_steers,
+    steer_message_dicts,
+)
 from aether_engine.memory import episodic, knowledge_graph, session_store
 from aether_engine.providers.base import (
     BaseProvider,
@@ -247,10 +253,59 @@ async def run_langgraph_task(
         event_queue = asyncio.Queue()
         event_bus.subscribe(task_id, event_queue)
 
+        # Steering (Epic 1, E1-07): steers for this session are drained
+        # at step boundaries. The current astream segment is closed and
+        # a new segment continues the SAME thread with the steers
+        # appended as user messages — the checkpointer holds all prior
+        # state, so nothing already emitted is replayed (the consumer's
+        # delta counters keep event translation delta-only across the
+        # restart).
+        steering_key = session_id or thread_id
+
         async def _graph_runner():
+            segment_input: Any = initial_state
             try:
-                async for evt in graph.astream(initial_state, config=config, stream_mode="updates"):
-                    await event_queue.put(("graph", evt))
+                while True:
+                    interrupted_segment = False
+                    steered = False
+                    stream = graph.astream(
+                        segment_input, config=config, stream_mode="updates")
+                    try:
+                        async for evt in stream:
+                            await event_queue.put(("graph", evt))
+                            if isinstance(evt, dict) and "__interrupt__" in evt:
+                                # Approval pause: steers stay queued;
+                                # the resume path applies them.
+                                interrupted_segment = True
+                                break
+                            if has_pending_steers(steering_key):
+                                steers = drain_steers(steering_key)
+                                for steer in steers:
+                                    await event_queue.put(
+                                        ("steering_applied", steer))
+                                segment_input = {
+                                    "messages": steer_message_dicts(steers)}
+                                steered = True
+                                break
+                    finally:
+                        aclose = getattr(stream, "aclose", None)
+                        if aclose is not None:
+                            await aclose()
+                    if interrupted_segment:
+                        break
+                    if steered:
+                        continue
+                    # The stream ended: a steer that landed during the
+                    # final step still belongs to this run — continue
+                    # with it instead of completing without it.
+                    if has_pending_steers(steering_key):
+                        steers = drain_steers(steering_key)
+                        for steer in steers:
+                            await event_queue.put(("steering_applied", steer))
+                        segment_input = {
+                            "messages": steer_message_dicts(steers)}
+                        continue
+                    break
                 await event_queue.put(("graph_done", None))
             except Exception as e:  # noqa: BLE001 — graph-run boundary: any astream failure is forwarded to the consumer, which re-raises and logs it
                 await event_queue.put(("graph_error", e))
@@ -272,6 +327,18 @@ async def run_langgraph_task(
                     continue
                     
                 source, data = item
+                if source == "steering_applied":
+                    yield Event(
+                        type=EventType.STEERING_APPLIED,
+                        request_id=request_id,
+                        payload={
+                            "task_id": task_id,
+                            "session_id": session_id,
+                            "message_id": data.message_id,
+                            "content": data.text,
+                        },
+                    )
+                    continue
                 if source == "graph_done":
                     break
                 if source == "graph_error":
@@ -590,79 +657,142 @@ async def resume_langgraph_task(
             # post-resume additions count as new output.
             messages_seen = len(state_obj.values.get("messages") or [])
             delegation_seen = len(state_obj.values.get("delegation_log") or [])
-            
-            async for event in graph.astream(Command(resume=approved), config=config, stream_mode="updates"):
-                for node_name, state_update in event.items():
-                    if node_name == "__interrupt__":
-                        intr_val = state_update[0].value
-                        if isinstance(intr_val, dict) and intr_val.get("type") == "approval_request":
+
+            # Steering (Epic 1, E1-07): steers queued while the task
+            # waited for approval are drained now, but they cannot ride
+            # the resume Command itself — the paused specialist resumes
+            # from its own subgraph checkpoint and never re-reads the
+            # parent messages channel (verified empirically). They are
+            # applied as a fresh segment on the same thread once the
+            # resume segment settles (see below); if the task pauses
+            # again first, they go back on the queue untouched.
+            steering_key = (
+                kwargs.get("session_id")
+                or state_obj.values.get("session_id")
+                or thread_id
+            )
+            pending_steers = drain_steers(steering_key)
+
+            async def _consume_segment(segment_input):
+                nonlocal interrupted, messages_seen, delegation_seen
+                async for event in graph.astream(segment_input, config=config, stream_mode="updates"):
+                    for node_name, state_update in event.items():
+                        if node_name == "__interrupt__":
+                            intr_val = state_update[0].value
+                            if isinstance(intr_val, dict) and intr_val.get("type") == "approval_request":
+                                yield Event(
+                                    type=EventType.TOOL_APPROVAL_REQUEST,
+                                    request_id=thread_id,
+                                    payload={
+                                        "tool_name": intr_val.get("tool_name"),
+                                        "args": intr_val.get("args"),
+                                        "task_id": task_id,
+                                        "approval_key": thread_id,
+                                        "task_class": intr_val.get("task_class"),
+                                        "workspace_roots": workspace_roots or [],
+                                    },
+                                )
+                                interrupted = True
+                                break
+                        if not isinstance(state_update, dict):
+                            continue
+                        if node_name == "supervisor" and isinstance(state_update.get("messages"), list):
+                            messages_seen = max(messages_seen, len(state_update["messages"]))
+                        if node_name == "supervisor" and len(state_update.get("delegation_log") or []) > delegation_seen:
+                            delegation_seen = len(state_update["delegation_log"])
+                            log_entry = state_update["delegation_log"][-1]
+                            decision = log_entry.get("decision", {})
+                            next_step = decision.get("next", "UNKNOWN")
+                            reason = decision.get("reason", "")
                             yield Event(
-                                type=EventType.TOOL_APPROVAL_REQUEST,
+                                type=EventType.TASK_PROGRESS,
                                 request_id=thread_id,
                                 payload={
-                                    "tool_name": intr_val.get("tool_name"),
-                                    "args": intr_val.get("args"),
                                     "task_id": task_id,
-                                    "approval_key": thread_id,
-                                    "task_class": intr_val.get("task_class"),
-                                    "workspace_roots": workspace_roots or [],
+                                    "text_delta": f"\\n\\n[Supervisor] -> Delegation to {next_step.upper()} BLOCKED by spawn policy\\nReason: {reason}\\n\\n" if decision.get("denied") else f"\\n\\n[Supervisor] -> Delegating to {next_step.upper()}\\nReason: {reason}\\n\\n",
+                                    "full_text": "",
+                                    "turn": 0,
+                                    "node": node_name,
                                 },
                             )
-                            interrupted = True
-                            break
-                    if not isinstance(state_update, dict):
-                        continue
-                    if node_name == "supervisor" and isinstance(state_update.get("messages"), list):
-                        messages_seen = max(messages_seen, len(state_update["messages"]))
-                    if node_name == "supervisor" and len(state_update.get("delegation_log") or []) > delegation_seen:
-                        delegation_seen = len(state_update["delegation_log"])
-                        log_entry = state_update["delegation_log"][-1]
-                        decision = log_entry.get("decision", {})
-                        next_step = decision.get("next", "UNKNOWN")
-                        reason = decision.get("reason", "")
-                        yield Event(
-                            type=EventType.TASK_PROGRESS,
-                            request_id=thread_id,
-                            payload={
-                                "task_id": task_id,
-                                "text_delta": f"\\n\\n[Supervisor] -> Delegating to {next_step.upper()}\\nReason: {reason}\\n\\n",
-                                "full_text": "",
-                                "turn": 0,
-                                "node": node_name,
-                            },
-                        )
-                    elif "messages" in state_update and isinstance(state_update["messages"], list):
-                        new_messages = state_update["messages"][messages_seen:]
-                        messages_seen = len(state_update["messages"])
-                        for msg in new_messages:
-                            if msg.get("role") == "assistant" and msg.get("content"):
-                                full_response_parts.append(msg["content"])
+                            if decision.get("denied"):
+                                # E1-11: same surfacing as the run path —
+                                # the explanation is the resumed task's
+                                # response when no specialist runs.
+                                denial_text = f"Delegation to {next_step} was blocked by the spawn policy: {reason}"
+                                full_response_parts.append(denial_text)
                                 yield Event(
                                     type=EventType.TASK_PROGRESS,
                                     request_id=thread_id,
                                     payload={
                                         "task_id": task_id,
-                                        "text_delta": msg["content"],
-                                        "full_text": msg["content"],
+                                        "text_delta": denial_text,
+                                        "full_text": denial_text,
                                         "turn": 0,
-                                        "node": node_name,
+                                        "node": "assistant",
                                     },
                                 )
-                            elif msg.get("role") == "tool":
-                                yield Event(
-                                    type=EventType.TASK_PROGRESS,
-                                    request_id=thread_id,
-                                    payload={
-                                        "task_id": task_id,
-                                        "text_delta": f"\\n\\n[Tool Executed: {msg.get('name')}]\\n",
-                                        "full_text": f"\\n\\n[Tool Executed: {msg.get('name')}]\\n",
-                                        "turn": 0,
-                                        "node": node_name,
-                                    },
-                                )
-                if interrupted:
-                    break
+                        elif "messages" in state_update and isinstance(state_update["messages"], list):
+                            new_messages = state_update["messages"][messages_seen:]
+                            messages_seen = len(state_update["messages"])
+                            for msg in new_messages:
+                                if msg.get("role") == "assistant" and msg.get("content"):
+                                    full_response_parts.append(msg["content"])
+                                    yield Event(
+                                        type=EventType.TASK_PROGRESS,
+                                        request_id=thread_id,
+                                        payload={
+                                            "task_id": task_id,
+                                            "text_delta": msg["content"],
+                                            "full_text": msg["content"],
+                                            "turn": 0,
+                                            "node": node_name,
+                                        },
+                                    )
+                                elif msg.get("role") == "tool":
+                                    yield Event(
+                                        type=EventType.TASK_PROGRESS,
+                                        request_id=thread_id,
+                                        payload={
+                                            "task_id": task_id,
+                                            "text_delta": f"\\n\\n[Tool Executed: {msg.get('name')}]\\n",
+                                            "full_text": f"\\n\\n[Tool Executed: {msg.get('name')}]\\n",
+                                            "turn": 0,
+                                            "node": node_name,
+                                        },
+                                    )
+                    if interrupted:
+                        break
 
+
+
+            interrupted = False
+            async for _ev in _consume_segment(Command(resume=approved)):
+                yield _ev
+
+            if pending_steers and not interrupted:
+                # The resumed segment settled: apply the steers as a
+                # fresh segment on the same thread, where the next
+                # provider call re-reads the full state and sees them.
+                for steer in pending_steers:
+                    yield Event(
+                        type=EventType.STEERING_APPLIED,
+                        request_id=thread_id,
+                        payload={
+                            "task_id": task_id,
+                            "session_id": state_obj.values.get("session_id"),
+                            "message_id": steer.message_id,
+                            "content": steer.text,
+                        },
+                    )
+                async for _ev in _consume_segment(
+                        {"messages": steer_message_dicts(pending_steers)}):
+                    yield _ev
+            elif pending_steers:
+                # Paused again before the steers could be applied:
+                # return them to the queue for the next resume.
+                for steer in pending_steers:
+                    enqueue_steer(steering_key, steer.text, steer.message_id)
             if interrupted:
                 # Phase 10.1 A2: same as the run path -- a re-interrupt on
                 # resume is still a pause for approval, not a failure.

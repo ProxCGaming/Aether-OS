@@ -15,6 +15,8 @@ class InvalidEventPayloadError(Exception): pass
 class EventType(str, Enum):
     HELLO = "HELLO"
     START_TASK = "START_TASK"
+    STEER_TASK = "STEER_TASK"
+    STEERING_APPLIED = "STEERING_APPLIED"
     CANCEL_TASK = "CANCEL_TASK"
     TASK_CREATED = "TASK_CREATED"
     TASK_PROGRESS = "TASK_PROGRESS"

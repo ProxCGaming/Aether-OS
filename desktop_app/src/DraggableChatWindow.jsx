@@ -950,7 +950,9 @@ export default function DraggableChatWindow({
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (input.trim() && !isThinking) {
+    // While a task runs, submitting steers it (Epic 1, E1-07) - App
+    // decides START_TASK vs STEER_TASK; the input must not dead-end.
+    if (input.trim()) {
       onSendMessage(input.trim());
       setInput('');
     }
@@ -1304,6 +1306,15 @@ export default function DraggableChatWindow({
                           </div>
                         )
                       )}
+                      {(msg.queued || msg.steering) && (
+                        <div
+                          className="msg-queued-indicator"
+                          data-testid="queued-indicator"
+                          style={{ marginTop: '6px', fontSize: '10px', letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.55)' }}
+                        >
+                          Queued
+                        </div>
+                      )}
                     </div>
                   </div>
                 );
@@ -1395,6 +1406,31 @@ export default function DraggableChatWindow({
                   rows={1}
                 />
                 {isThinking ? (
+                  <>
+                  {input.trim() && (
+                    <button
+                      type="submit"
+                      title="Queue steering message"
+                      aria-label="Queue steering message"
+                      style={{
+                        background: 'var(--accent)',
+                        border: 'none',
+                        borderRadius: '50%',
+                        width: '32px',
+                        height: '32px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: '#fff',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s',
+                        marginLeft: '8px',
+                        flexShrink: 0
+                      }}
+                    >
+                      <Send size={14} />
+                    </button>
+                  )}
                   <button 
                     type="button"
                     onClick={onStopTask}
@@ -1420,6 +1456,7 @@ export default function DraggableChatWindow({
                   >
                     <Square size={12} fill="currentColor" />
                   </button>
+                  </>
                 ) : (
                   <button 
                     type="submit"
