@@ -55,7 +55,7 @@ DEFAULT_AUDIT_LOG_PATH = Path("logs/audit.log")
 # Tools the worker is allowed to execute. Anything else is refused —
 # an unknown tool must never report a false success (the old code
 # returned {"status": "noop"} for unknown tools).
-ALLOWED_TOOLS = frozenset({"execute_shell", "write_file", "delete_file", "edit_file", "create_directory"})
+ALLOWED_TOOLS = frozenset({"execute_shell", "write_file", "delete_file", "edit_file", "create_directory", "run_checks"})
 
 
 async def run_worker(task_payload: dict):
@@ -131,6 +131,45 @@ async def run_worker(task_payload: dict):
             raise ValueError("Directory path is required")
         Path(path).mkdir(parents=True, exist_ok=True)
         return {"path": path, "created": True}
+
+    if tool_name == "run_checks":
+        # Epic 2, E2-11: run the repo's own detected checks and return
+        # the same parsed summary the engine's implementation produces
+        # (shared logic in aether_common.checks).
+        from aether_common.checks import (
+            CHECK_TIMEOUT_S,
+            detect_checks,
+            format_summary,
+            parse_result,
+        )
+
+        path = args.get("path")
+        if not path:
+            raise ValueError("Repository path is required")
+        root = Path(path)
+        if not root.is_dir():
+            raise ValueError(f"run_checks failed: not a directory: {path}")
+        results = []
+        for check in detect_checks(root):
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *check["argv"], cwd=str(root),
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=CHECK_TIMEOUT_S)
+                except TimeoutError:
+                    proc.kill()
+                    await proc.communicate()
+                    results.append({"name": check["name"], "ok": False, "passed": 0, "failed": 0,
+                                    "errors": 1, "failures": [f"timed out after {CHECK_TIMEOUT_S}s"]})
+                    continue
+                output = stdout.decode(errors="ignore") + stderr.decode(errors="ignore")
+                results.append({**parse_result(check["kind"], output, proc.returncode or 0), "name": check["name"]})
+            except OSError as exc:
+                results.append({"name": check["name"], "ok": False, "passed": 0, "failed": 0,
+                                "errors": 1, "failures": [f"could not run: {exc}"]})
+        return {"path": path, "summary": format_summary(str(root), results)}
 
     raise ValueError(f"Unknown tool: {tool_name!r}")
 

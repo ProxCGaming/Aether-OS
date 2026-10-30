@@ -82,6 +82,17 @@ def validate_tool_request(
             return ValidationResult(False, f"Create-directory validation failed: path '{path}' is outside permitted workspace roots.")
         return ValidationResult(True, details={"path": str(path)})
 
+    if tool_name in ("project_tree", "run_checks"):
+        # Epic 2, E2-11: both take a directory inside the roots
+        # (project_tree's path is optional — absent means the root).
+        raw = args.get("path")
+        if raw:
+            path = Path(str(raw))
+            if not _is_path_in_roots(path, roots):
+                return ValidationResult(False, f"Path validation failed: path '{path}' is outside permitted workspace roots.")
+            return ValidationResult(True, details={"path": str(path)})
+        return ValidationResult(True, details={"tool_name": tool_name})
+
     if tool_name == "delete_file":
         path = Path(args.get("path", ""))
         if not _is_path_in_roots(path, roots):

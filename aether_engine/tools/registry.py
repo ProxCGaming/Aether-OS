@@ -273,6 +273,7 @@ def build_tool_registry(
     """
     registry = ToolRegistry()
     registry.register(create_current_time_tool())
+    from aether_engine.tools.codebase import codebase_tools
     from aether_engine.tools.filesystem import filesystem_read_tools
     from aether_engine.tools.scratchpad import create_scratchpad_tool
 
@@ -281,6 +282,8 @@ def build_tool_registry(
         registry.register(tool)
     if include_file_tools:
         for tool in create_file_tools():
+            registry.register(tool)
+        for tool in codebase_tools():
             registry.register(tool)
     if include_web_tools:
         for tool in create_web_tools():
