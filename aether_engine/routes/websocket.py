@@ -1860,10 +1860,20 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
             
             elif msg.type == EventType.MEMORY_GRAPH_REQUEST:
                 backend = backend_or_none(engine_state.user_config, context="memory graph list")
-                facts = backend.list_facts(
-                    limit=msg.payload.get("limit", 100),
-                    include_history=bool(msg.payload.get("include_history")),
-                ) if backend is not None else []
+                if backend is None:
+                    facts = []
+                elif msg.payload.get("query"):
+                    # Epic 4, E4-08: fact search for the Memory UI.
+                    facts = backend.search_facts(
+                        str(msg.payload["query"]),
+                        limit=msg.payload.get("limit", 100),
+                        include_history=bool(msg.payload.get("include_history")),
+                    )
+                else:
+                    facts = backend.list_facts(
+                        limit=msg.payload.get("limit", 100),
+                        include_history=bool(msg.payload.get("include_history")),
+                    )
                 await ws.send_text(Event(
                     type=EventType.MEMORY_GRAPH_RESPONSE,
                     request_id=req_id,

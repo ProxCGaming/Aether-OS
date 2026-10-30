@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Trash2 } from 'lucide-react';
+import { Trash2, Pencil, Download } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 
 export default function MemoryManagement() {
@@ -8,13 +8,28 @@ export default function MemoryManagement() {
   const [episodes, setEpisodes] = useState([]);
   const [facts, setFacts] = useState([]);
   const [selectedEpisode, setSelectedEpisode] = useState(null);
+  const [episodesMeta, setEpisodesMeta] = useState(null);
+  const [searchInput, setSearchInput] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [includeHistory, setIncludeHistory] = useState(false);
+  const [editingFactId, setEditingFactId] = useState(null);
+  const [editText, setEditText] = useState('');
+  const [exportStatus, setExportStatus] = useState(null);
+
+  // Debounce the fact search input into the query used for graph requests
+  useEffect(() => {
+    const timer = setTimeout(() => setSearchQuery(searchInput.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
 
   useEffect(() => {
     // Initial fetch when component mounts or memory tab changes
     if (memoryTab === 'episodic') {
       sendMessage('MEMORY_EPISODES_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
     } else if (memoryTab === 'kg') {
-      sendMessage('MEMORY_GRAPH_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+      const payload = { include_history: includeHistory };
+      if (searchQuery) payload.query = searchQuery;
+      sendMessage('MEMORY_GRAPH_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload });
     }
 
     const handleMessage = (event) => {
@@ -22,11 +37,24 @@ export default function MemoryManagement() {
         const data = JSON.parse(event.data);
         if (data.type === 'MEMORY_EPISODES_RESPONSE' || data.type === 'MEMORY_EPISODE_DELETE_RESPONSE') {
           setEpisodes(data.payload.episodes || []);
+          if (data.payload.backend !== undefined || data.payload.embedding_stats) {
+            setEpisodesMeta({ backend: data.payload.backend, embedding_stats: data.payload.embedding_stats });
+          }
         } else if (data.type === 'MEMORY_EPISODES_CLEAR_RESPONSE') {
           setEpisodes([]);
           setSelectedEpisode(null);
         } else if (data.type === 'MEMORY_GRAPH_RESPONSE' || data.type === 'MEMORY_FACT_DELETE_RESPONSE' || data.type === 'MEMORY_ENTITY_DELETE_RESPONSE') {
           setFacts(data.payload.facts || []);
+        } else if (data.type === 'MEMORY_FACT_UPDATE_RESPONSE') {
+          if (data.payload.facts) setFacts(data.payload.facts);
+          if (data.payload.success) setEditingFactId(null);
+        } else if (data.type === 'MEMORY_EXPORT_RESPONSE') {
+          if (data.payload.success && data.payload.export) {
+            downloadExport(data.payload.export);
+            setExportStatus(null);
+          } else {
+            setExportStatus(data.payload.error || 'Export failed.');
+          }
         } else if (data.type === 'MEMORY_GRAPH_CLEAR_RESPONSE') {
           setFacts([]);
         }
@@ -34,7 +62,7 @@ export default function MemoryManagement() {
         // ignore
       }
     };
-    
+
     if (wsRef.current) {
       wsRef.current.addEventListener('message', handleMessage);
     }
@@ -43,7 +71,7 @@ export default function MemoryManagement() {
         wsRef.current.removeEventListener('message', handleMessage);
       }
     };
-  }, [wsRef, sendMessage, memoryTab]);
+  }, [wsRef, sendMessage, memoryTab, searchQuery, includeHistory]);
 
   const handleDeleteEpisode = (taskId) => {
     if (!taskId) return;
@@ -73,6 +101,40 @@ export default function MemoryManagement() {
       sendMessage('MEMORY_GRAPH_CLEAR_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
       setFacts([]);
     }
+  };
+
+  const downloadExport = (exportData) => {
+    try {
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'aether-memory-export.json';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      // Download is best-effort (e.g. unsupported in test environments)
+    }
+  };
+
+  const handleExport = () => {
+    setExportStatus(null);
+    sendMessage('MEMORY_EXPORT_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+  };
+
+  const handleStartEdit = (fact) => {
+    setEditingFactId(fact.fact_id);
+    setEditText(fact.fact_text ?? fact.content ?? '');
+  };
+
+  const handleSaveEdit = (fact) => {
+    sendMessage('MEMORY_FACT_UPDATE_REQUEST', {
+      schema_version: 1,
+      request_id: Date.now().toString(),
+      payload: { fact_id: fact.fact_id, fact_text: editText, include_history: includeHistory }
+    });
   };
 
   return (
@@ -122,7 +184,26 @@ export default function MemoryManagement() {
       </div>
 
       {memoryTab === 'episodic' && (
-        <div style={{ display: 'flex', gap: '24px', height: '600px' }}>
+        <div>
+          {episodesMeta && (episodesMeta.backend || episodesMeta.embedding_stats) && (
+            <div style={{ fontSize: '13px', color: '#9090a0', marginBottom: '16px' }}>
+              {episodesMeta.backend && <span>Backend: {episodesMeta.backend}</span>}
+              {episodesMeta.embedding_stats && (
+                <span>
+                  {episodesMeta.backend ? ' · ' : ''}
+                  Embeddings: {episodesMeta.embedding_stats.embedded}/{episodesMeta.embedding_stats.episodes} embedded
+                  {episodesMeta.embedding_stats.pending > 0 ? ` · ${episodesMeta.embedding_stats.pending} pending` : ''}
+                </span>
+              )}
+              {episodesMeta.embedding_stats?.last_failure && (
+                <div style={{ color: '#fbbf24', marginTop: '4px' }}>
+                  ⚠ Last embedding failure: {episodesMeta.embedding_stats.last_failure.error_type}
+                  {episodesMeta.embedding_stats.last_failure.error ? ` — ${episodesMeta.embedding_stats.last_failure.error}` : ''}
+                </div>
+              )}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: '24px', height: '600px' }}>
           <div style={{ width: '320px', display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto', paddingRight: '8px' }} className="chat-scroll">
             {episodes.length === 0 ? (
               <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center' }}>No episodes found.</div>
@@ -205,11 +286,41 @@ export default function MemoryManagement() {
               </div>
             )}
           </div>
+          </div>
         </div>
       )}
 
       {memoryTab === 'kg' && (
         <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' }}>
+            <input
+              type="text"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Search facts…"
+              style={{ background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', color: '#f0f0f5', padding: '8px 12px', fontSize: '13px', minWidth: '220px', outline: 'none' }}
+            />
+            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#c9c9d4', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={includeHistory}
+                onChange={(e) => setIncludeHistory(e.target.checked)}
+              />
+              Show superseded
+            </label>
+            <button
+              onClick={handleExport}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(124,58,237,0.15)', border: '1px solid rgba(124,58,237,0.35)', color: '#c4b5fd', padding: '8px 14px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s' }}
+              onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(124,58,237,0.28)'}
+              onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(124,58,237,0.15)'}
+            >
+              <Download size={14} />
+              Export Memory
+            </button>
+          </div>
+          {exportStatus && (
+            <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '16px' }}>{exportStatus}</div>
+          )}
           {facts.length === 0 ? (
             <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
               No facts in Knowledge Graph.
@@ -240,11 +351,57 @@ export default function MemoryManagement() {
                     </button>
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {entityFacts.map(fact => (
-                      <div key={fact.fact_id} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px' }}>
-                        <div style={{ flex: 1, fontSize: '13px', lineHeight: '1.5' }}>{fact.content}</div>
-                      </div>
-                    ))}
+                    {entityFacts.map(fact => {
+                      const isSuperseded = fact.status === 'superseded';
+                      const isEditing = editingFactId === fact.fact_id;
+                      return (
+                        <div key={fact.fact_id} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px', opacity: isSuperseded ? 0.55 : 1 }}>
+                          {isEditing ? (
+                            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                              <textarea
+                                value={editText}
+                                onChange={(e) => setEditText(e.target.value)}
+                                rows={3}
+                                style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(124,58,237,0.4)', borderRadius: '6px', color: '#f0f0f5', padding: '8px', fontSize: '13px', lineHeight: '1.5', resize: 'vertical', outline: 'none', fontFamily: 'inherit' }}
+                              />
+                              <div style={{ display: 'flex', gap: '8px' }}>
+                                <button
+                                  onClick={() => handleSaveEdit(fact)}
+                                  style={{ background: 'rgba(124,58,237,0.35)', border: '1px solid rgba(124,58,237,0.5)', color: '#fff', padding: '5px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 500, cursor: 'pointer' }}
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  onClick={() => setEditingFactId(null)}
+                                  style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#c9c9d4', padding: '5px 12px', borderRadius: '6px', fontSize: '12px', cursor: 'pointer' }}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <div style={{ flex: 1, fontSize: '13px', lineHeight: '1.5' }}>
+                                {fact.fact_text ?? fact.content}
+                                {isSuperseded && (
+                                  <span style={{ marginLeft: '8px', fontSize: '10px', background: 'rgba(251,191,36,0.15)', color: '#fbbf24', padding: '1px 6px', borderRadius: '8px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>superseded</span>
+                                )}
+                              </div>
+                              <button
+                                title="Edit this fact"
+                                onClick={() => handleStartEdit(fact)}
+                                style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'transparent', border: '1px solid rgba(255,255,255,0.12)', color: '#9090a0', padding: '4px 8px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', flexShrink: 0, transition: 'all 0.2s' }}
+                                onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.borderColor = 'rgba(124,58,237,0.5)'; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.color = '#9090a0'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.12)'; }}
+                              >
+                                <Pencil size={13} />
+                                Edit
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               ))}
