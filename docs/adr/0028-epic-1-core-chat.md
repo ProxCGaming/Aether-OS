@@ -8,8 +8,9 @@
   `create_supervisor()` migration (ADR 0027). This record captures the
   epic-level decisions that individual slice commits reference, so a
   future reader does not have to reconstruct them from commit bodies.
-  Baseline at close: pytest 651+ passed / 14 known pre-existing
-  failures / 2 skipped; Jest 191/191.
+  Baseline at close: pytest 664 passed / 14 known pre-existing
+  failures (plus one documented full-suite flake) / 2 skipped;
+  Jest 191/191.
 
 ## Decisions
 

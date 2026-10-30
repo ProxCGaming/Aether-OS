@@ -33,7 +33,7 @@
   same DB sees the finished state after interrupt + resume; steering
   suite covers steers across the approval pause.
 - pytest + Jest green with no new failures over the Epic 0 baseline —
-  pytest: 14 failures, all in the known pre-existing families
+  pytest: 664 passed, 14 failures, all in the known pre-existing families
   (startup validation, engine_ws provider pins, providers panel,
   phase5 pins, episodic-needs-Ollama, workspace containment);
   `test_mcp_auto_connect`'s dead-server test is a known full-suite
