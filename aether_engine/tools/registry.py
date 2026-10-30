@@ -403,6 +403,16 @@ class ToolRegistry:
                 logger.debug("Failed to write TOOL_VALIDATION_FAILED audit event", exc_info=True)
             raise ToolExecutionError(f"Pre-flight validation failed for '{name}': {validation.error}")
 
+        # ── Step 2.5: tool_call hooks (Epic 7, E7-01) ────────────────
+        # Registered guardrails may rewrite args or block the call;
+        # a throwing hook fails closed (see tools/hooks.py).
+        from aether_engine.tools.hooks import HookBlock, apply_tool_call_hooks
+
+        try:
+            call_args = apply_tool_call_hooks(name, call_args, audit_logger=log)
+        except HookBlock as block:
+            raise ToolExecutionError(f"Tool '{name}' blocked by a hook: {block}") from block
+
         # ── Step 3: sandbox routing (ADR 0010) ─────────────────────────
         try:
             if tool.source.startswith("mcp:"):
@@ -419,7 +429,9 @@ class ToolRegistry:
                         result[: tool.max_output_chars]
                         + f"\n...[output truncated to {tool.max_output_chars} chars]"
                     )
-                return result
+                from aether_engine.tools.hooks import apply_tool_result_hooks
+
+                return apply_tool_result_hooks(name, call_args, result, audit_logger=log)
             if tool.risk != ToolRisk.READ_ONLY:
                 from aether_engine.workers.sandbox import execute_tool_in_worker
                 result = await execute_tool_in_worker(
@@ -459,4 +471,8 @@ class ToolRegistry:
                 })
             except Exception:  # best-effort audit write: a logging failure must never fail a successful execution
                 logger.debug("Failed to write TOOL_EXECUTED audit event", exc_info=True)
-        return result
+        # Epic 7, E7-01: tool_result hooks get the final word on what
+        # the agent sees (replace or withhold; see tools/hooks.py).
+        from aether_engine.tools.hooks import apply_tool_result_hooks
+
+        return apply_tool_result_hooks(name, call_args, result, audit_logger=log)
