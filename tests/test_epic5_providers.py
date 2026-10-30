@@ -43,17 +43,19 @@ class _Stream:
     def __init__(self, chunks, error=None, error_after=None):
         self._chunks = chunks
         self._error = error
-        self._error_after = error_after  # raise after N chunks
+        self._error_after = error_after  # raise after N chunks yielded
 
     def __aiter__(self):
         return self._gen()
 
     async def _gen(self):
-        for i, c in enumerate(self._chunks):
-            if self._error is not None and self._error_after is not None and i == self._error_after:
+        yielded = 0
+        for c in self._chunks:
+            if self._error is not None and self._error_after is not None and yielded == self._error_after:
                 raise self._error
             yield c
-        if self._error is not None and self._error_after is None:
+            yielded += 1
+        if self._error is not None and (self._error_after is None or self._error_after >= yielded):
             raise self._error
 
 
@@ -215,6 +217,8 @@ def test_unhealthy_default_falls_back_with_honest_reason():
 
 
 def test_validate_api_key_success_and_gemini_ping_model(monkeypatch):
+    from aether_engine.providers.litellm_provider import validate_api_key
+
     seen = {}
 
     async def fake_acompletion(**kwargs):
@@ -222,21 +226,21 @@ def test_validate_api_key_success_and_gemini_ping_model(monkeypatch):
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
-    provider = LiteLLMProvider(api_key="sk-test", model="gemini-3.5-flash", provider_name="google_gemini")
-    ok, _message = asyncio.run(provider.validate_api_key())
-    assert ok is True
+    result = asyncio.run(validate_api_key("google_gemini", "sk-test"))
+    assert result["status"] == "connected"
     assert "gemini-3.5-flash" in str(seen.get("model"))
 
 
 def test_validate_api_key_is_time_bounded(monkeypatch):
+    from aether_engine.providers.litellm_provider import validate_api_key
+
     async def hang(**kwargs):
         await asyncio.sleep(60)
 
     monkeypatch.setattr(litellm, "acompletion", hang)
-    provider = LiteLLMProvider(api_key="sk-test", model="gemini-3.5-flash", provider_name="google_gemini")
     start = time.monotonic()
-    ok, message = asyncio.run(provider.validate_api_key())
+    result = asyncio.run(validate_api_key("google_gemini", "sk-test", timeout=2))
     elapsed = time.monotonic() - start
-    assert ok is False
-    assert elapsed < 30  # bounded (10s validation timeout + slack), never a hang
-    assert message  # an honest failure message, not silence
+    assert result["status"] == "network_error"  # a timeout is never a success
+    assert elapsed < 20  # bounded by the 2s timeout (+ generous load slack), not the 60s hang
+    assert result["message"]  # an honest failure message, not silence
