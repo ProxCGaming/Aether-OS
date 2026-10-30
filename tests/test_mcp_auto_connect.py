@@ -87,7 +87,13 @@ async def test_start_auto_connect_connects_eligible_skips_others_dead_does_not_b
 
 async def test_start_auto_connect_returns_immediately_with_dead_server(tmp_path):
     registry = _registry(tmp_path)
-    registry.add_server("dead", _http_config("http://127.0.0.1:1/mcp", timeout=30))
+    # Epic 3, E3-03 flake hardening: the wait budget below (15s) must
+    # exceed the dead server's connect timeout, or an environment
+    # where the refused connection degrades into a slow failure
+    # (firewall DROP, proxy detour) fails this test spuriously. The
+    # property under test — start_auto_connect itself never blocks —
+    # is asserted separately (< 2s) and does not need a 30s timeout.
+    registry.add_server("dead", _http_config("http://127.0.0.1:1/mcp", timeout=5))
     start = time.monotonic()
     registry.start_auto_connect()
     assert time.monotonic() - start < 2, "start_auto_connect blocked startup"
