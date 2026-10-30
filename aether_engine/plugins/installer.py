@@ -505,14 +505,56 @@ class PluginInstaller:
         self._save_registry()
 
     def toggle(self, plugin_name: str, enabled: bool):
-        if plugin_name in self._registry:
-            self._registry[plugin_name]["enabled"] = enabled
-            self._save_registry()
+        """Enable/disable with real teardown and rebuild (Epic 7, E7-05).
 
-            # Since toggle doesn't uninstall, if disabled we might want to unregister tools temporarily.
-            # For now, toggling is just state update, and the engine logic should check enabled state.
-        else:
+        Previously this flipped a flag and nothing stopped working —
+        the plugin's skills stayed indexed and its MCP servers stayed
+        registered. Now: disabling removes the plugin's MCP servers
+        from the global registry and moves its skill dirs into
+        ``~/.aether/skills/.disabled-by-plugin/<plugin>/`` (out of
+        the scanned tree); enabling reverses both, re-validating the
+        stored manifest's MCP configs before re-adding them. The
+        skill manager's index is refreshed after any move.
+        """
+        if plugin_name not in self._registry:
             raise KeyError(f"Plugin not found: {plugin_name}")
+        data = self._registry[plugin_name]
+        if data.get("enabled", True) == enabled:
+            return
+
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+        from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+
+        skills_root = Path.home() / ".aether" / "skills"
+        holding = skills_root / ".disabled-by-plugin" / plugin_name
+
+        if not enabled:
+            for mcp_name in data.get("installed_mcp", []):
+                try:
+                    GLOBAL_MCP_REGISTRY.remove_server_sync(mcp_name)
+                except Exception as e:  # noqa: BLE001 — teardown is best-effort per server; the toggle itself must complete
+                    logger.warning(f"Disable {plugin_name}: could not remove MCP server {mcp_name}: {e}")
+            for skill_path_str in data.get("installed_skills", []):
+                src = Path(skill_path_str)
+                if src.exists():
+                    holding.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(src), str(holding / src.name))
+        else:
+            if holding.exists():
+                for skill_dir in list(holding.iterdir()):
+                    shutil.move(str(skill_dir), str(skills_root / skill_dir.name))
+                holding.rmdir()
+            # Re-validate before re-adding: the manifest on record is
+            # re-resolved against the installed plugin dir, exactly
+            # as at install time.
+            manifest = PluginManifest(**data["manifest"])
+            plugin_dir = self.plugins_dir / plugin_name
+            for mcp_name, config_dict in resolve_mcp_server_configs(plugin_dir, manifest):
+                GLOBAL_MCP_REGISTRY.add_server(mcp_name, config_dict)
+
+        GLOBAL_SKILL_MANAGER.refresh()
+        data["enabled"] = enabled
+        self._save_registry()
 
     def get_all(self) -> dict[str, Any]:
         return self._registry
