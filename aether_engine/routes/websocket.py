@@ -494,6 +494,18 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         include_file_tools=reqs.wants_code or (requested_model is not None),
                     )
 
+                    # Epic 1, E1-14: config layers — global → project
+                    # (.aether/config.json in the workspace) → per-task
+                    # overlay. engine_state.user_config is never mutated;
+                    # the layered copy serves only this task.
+                    from aether_engine.config_layers import effective_user_config
+
+                    task_user_config = effective_user_config(
+                        engine_state.user_config,
+                        workspace_root=workspace_roots[0] if workspace_roots else None,
+                        overlay=msg.payload.get("config_overlay"),
+                    )
+
                     task_generator = run_langgraph_task(
                         prompt=prompt,
                         provider=provider_instance,
@@ -503,10 +515,10 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         workspace_roots=workspace_roots,
                         disabled_nodes=engine_state.disabled_nodes,
                         session_id=session_id,
-                        agent_models=engine_state.user_config.agent_models,
-                        agent_tools=engine_state.user_config.agent_tools,
+                        agent_models=task_user_config.agent_models,
+                        agent_tools=task_user_config.agent_tools,
                         secret_store=secret_store,
-                        user_config=engine_state.user_config,
+                        user_config=task_user_config,
                         forced_agent=forced_agent,
                         active_skills=active_skills,
                         plan_mode=bool(msg.payload.get("plan_mode")),
