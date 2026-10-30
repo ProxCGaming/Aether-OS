@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Key, CheckCircle2 } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 
-export default function ProviderSettings({ providers = [] }) {
+export default function ProviderSettings({ providers = [], health = {} }) {
   const { wsRef, sendMessage } = useAetherSocket();
   const [keys, setKeys] = useState({});
   const [baseUrls, setBaseUrls] = useState({});
@@ -131,6 +131,8 @@ export default function ProviderSettings({ providers = [] }) {
           const isConfigured = p.has_key;
           const isCustom = providerName.startsWith('custom_') || providerName === 'custom_openai';
           const isExpanded = expandedProvider === providerName;
+          const healthInfo = health && typeof health === 'object' ? health[providerName] : null;
+          const healthColor = !healthInfo ? null : healthInfo.status === 'healthy' ? '#10b981' : healthInfo.status === 'degraded' ? '#f59e0b' : '#ef4444';
           
           return (
             <div key={providerName} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', overflow: 'hidden', transition: 'all 0.3s' }}>
@@ -140,6 +142,12 @@ export default function ProviderSettings({ providers = [] }) {
               >
                 <h3 style={{ fontSize: '16px', margin: 0 }}>{displayName}</h3>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                  {healthInfo && (
+                    <div data-testid={`provider-health-${providerName}`} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: healthColor }}>
+                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: healthColor, display: 'inline-block' }} />
+                      {healthInfo.status}{healthInfo.latency_ms > 0 ? ` · ${Math.round(healthInfo.latency_ms)} ms` : ''}
+                    </div>
+                  )}
                   {isConfigured ? (
                     <>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#10b981', fontSize: '13px' }}>

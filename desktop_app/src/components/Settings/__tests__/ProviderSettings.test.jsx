@@ -294,3 +294,21 @@ describe('ProviderSettings key storage (Phase 10.1 C1)', () => {
     expect(screen.getByText('Configured')).toBeInTheDocument();
   });
 });
+
+describe('ProviderSettings health surface (Epic 5, E5-05)', () => {
+  it('renders per-provider health state and last latency', () => {
+    const providers = [
+      { name: 'google_gemini', display_name: 'Google Gemini', has_key: true, models: [] },
+      { name: 'openai', display_name: 'OpenAI', has_key: true, models: [] },
+    ];
+    const health = {
+      google_gemini: { status: 'degraded', latency_ms: 250.4 },
+      openai: { status: 'healthy', latency_ms: 0 },
+    };
+    render(<ProviderSettings providers={providers} health={health} />);
+    expect(screen.getByTestId('provider-health-google_gemini')).toHaveTextContent('degraded');
+    expect(screen.getByTestId('provider-health-google_gemini')).toHaveTextContent('250 ms');
+    expect(screen.getByTestId('provider-health-openai')).toHaveTextContent('healthy');
+    expect(screen.getByTestId('provider-health-openai')).not.toHaveTextContent('ms');
+  });
+});

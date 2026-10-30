@@ -69,6 +69,7 @@ function AppContent() {
   // SettingsPanel, ProviderSettings) all expect [], and MODEL_DEFAULT_CHANGED
   // maps over it — it silently no-op'd while this was the initial {}.
   const [providers, setProviders] = useState([]);
+  const [providerHealth, setProviderHealth] = useState({});
   const [localModels, setLocalModels] = useState([]);
 
   // Dashboard State (real data, not hardcoded)
@@ -669,6 +670,8 @@ function AppContent() {
           // silently no-op (its Array.isArray guard bailed out).
           const list = data.payload.providers;
           setProviders(Array.isArray(list) ? list : (list && typeof list === 'object' ? Object.values(list) : []));
+          // Epic 5, E5-05: per-provider health travels with the list.
+          if (data.payload.health && typeof data.payload.health === 'object') setProviderHealth(data.payload.health);
         } else if (data.type === 'PROVIDER_REMOVE_RESPONSE' || data.type === 'PROVIDER_SAVE_RESPONSE') {
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
@@ -1424,6 +1427,7 @@ function AppContent() {
                  <SettingsPanel 
                    wsRef={wsRef} 
                    providers={providers}
+                   providerHealth={providerHealth}
                    localModels={localModels}
                    activeSession={activeSession}
                  />
