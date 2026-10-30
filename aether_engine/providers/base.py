@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any
 
 
 # ---------------------------------------------------------------------------
@@ -44,23 +45,27 @@ class InvalidResponseError(ProviderError):
 @dataclass
 class ToolCall:
     name: str
-    args: Dict[str, Any] = field(default_factory=dict)
-    call_id: Optional[str] = None
-    thought_signature: Optional[Any] = None
+    args: dict[str, Any] = field(default_factory=dict)
+    call_id: str | None = None
+    thought_signature: Any | None = None
 
 
 @dataclass
 class ToolResult:
     name: str
     content: Any
-    call_id: Optional[str] = None
+    call_id: str | None = None
 
 
 @dataclass
 class StreamChunk:
-    text: Optional[str] = None
-    tool_calls: Optional[List[ToolCall]] = None
-    finish_reason: Optional[str] = None
+    text: str | None = None
+    tool_calls: list[ToolCall] | None = None
+    finish_reason: str | None = None
+    # E1-16: model reasoning/thinking text, when the model exposes it.
+    # Always separate from `text`: thinking is displayed in the UI's
+    # Thinking collapsible and must never leak into the answer.
+    thinking: str | None = None
 
 
 class BaseProvider(ABC):
@@ -69,9 +74,9 @@ class BaseProvider(ABC):
     @abstractmethod
     async def call_stream(
         self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        node_name: Optional[str] = None,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        node_name: str | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream response chunks and/or tool call requests for the given message history.
 

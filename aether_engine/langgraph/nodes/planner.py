@@ -15,6 +15,7 @@ from aether_engine.langgraph.state import (
     message_dicts,
 )
 from aether_engine.langgraph.structured import apply_output_schema
+from aether_engine.langgraph.thinking import forward_thinking
 
 logger = logging.getLogger("aether_engine.langgraph.planner")
 
@@ -127,6 +128,7 @@ async def planner_node(state: AetherState, config: RunnableConfig) -> dict:
     accumulated_tool_calls = {}
     
     async for chunk in provider.call_stream(messages, tools=tools, node_name="planner"):
+        forward_thinking(state, "planner", chunk)
         if chunk.text:
             content_parts.append(chunk.text)
         if chunk.tool_calls:

@@ -6,15 +6,15 @@ with one consistent interface, automatic retries, and structured tool calling.
 """
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any
 
 import litellm
 
 from aether_engine.providers.base import (
     AuthenticationError,
     BaseProvider,
-    InvalidResponseError,
     NetworkError,
     ProviderError,
     RateLimitError,
@@ -41,7 +41,7 @@ logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 # ---------------------------------------------------------------------------
 # LiteLLM requires provider-prefixed model names for non-OpenAI providers.
 # This map translates our internal registry IDs → LiteLLM model strings.
-_LITELLM_MODEL_MAP: Dict[str, str] = {
+_LITELLM_MODEL_MAP: dict[str, str] = {
     # Google Gemini (via Google AI Studio)
     "gemini-2.5-flash": "gemini/gemini-2.5-flash",
     "gemini-2.5-pro": "gemini/gemini-2.5-pro",
@@ -59,7 +59,7 @@ _LITELLM_MODEL_MAP: Dict[str, str] = {
 }
 
 # Provider-specific base URLs (only needed for non-standard endpoints)
-_PROVIDER_BASE_URL: Dict[str, str] = {
+_PROVIDER_BASE_URL: dict[str, str] = {
     "deepseek": "https://api.deepseek.com",
     "openrouter": "https://openrouter.ai/api/v1",
 }
@@ -101,8 +101,7 @@ def resolve_litellm_model(model_id: str, provider_name: str = "") -> str:
         return _LITELLM_MODEL_MAP[model_id]
 
     # Clean Google Gemini API format 'models/gemini-...'
-    if model_id.startswith("models/"):
-        model_id = model_id[7:]
+    model_id = model_id.removeprefix("models/")
 
     # If provider is explicitly known, apply provider-specific prefix rules:
     if provider_name == "openrouter":
@@ -166,7 +165,7 @@ class FallbackModel:
     model: str
     api_key: str
     provider_name: str
-    base_url: Optional[str] = None
+    base_url: str | None = None
 
 
 class LiteLLMProvider(BaseProvider):
@@ -180,8 +179,8 @@ class LiteLLMProvider(BaseProvider):
         api_key: str,
         model: str,
         provider_name: str = "google_gemini",
-        base_url: Optional[str] = None,
-        fallback_models: Optional[List[FallbackModel]] = None,
+        base_url: str | None = None,
+        fallback_models: list[FallbackModel] | None = None,
         reasoning_effort: str = "standard",
     ):
         api_key = api_key.strip() if api_key else ""
@@ -194,18 +193,18 @@ class LiteLLMProvider(BaseProvider):
         self.base_url = base_url.rstrip("/") if base_url else None
         self.litellm_model = resolve_litellm_model(model, provider_name)
         # Per-node fallback: list of FallbackModel with full provider config for cross-provider fallback
-        self.fallback_models: List[FallbackModel] = fallback_models or []
+        self.fallback_models: list[FallbackModel] = fallback_models or []
         # Phase 9, B2: user-selected reasoning depth, forwarded to litellm for
         # reasoning-capable models ("standard" | "medium" | "high").
         self.reasoning_effort = reasoning_effort or "standard"
 
     def _build_call_kwargs(
         self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """Build the keyword arguments dict for litellm.acompletion()."""
-        kwargs: Dict[str, Any] = {
+        kwargs: dict[str, Any] = {
             "model": self.litellm_model,
             "messages": self._convert_messages(messages),
             "stream": True,
@@ -233,7 +232,7 @@ class LiteLLMProvider(BaseProvider):
 
         return kwargs
 
-    def _convert_messages(self, messages: Any) -> List[Dict[str, Any]]:
+    def _convert_messages(self, messages: Any) -> list[dict[str, Any]]:
         """Convert internal message format to OpenAI-compatible messages for LiteLLM.
 
         Also normalizes turn structure for strict providers like Google Gemini / Vertex AI
@@ -242,7 +241,7 @@ class LiteLLMProvider(BaseProvider):
         if isinstance(messages, str):
             return [{"role": "user", "content": messages}]
 
-        converted: List[Dict[str, Any]] = []
+        converted: list[dict[str, Any]] = []
 
         for msg in messages:
             if isinstance(msg, str):
@@ -286,12 +285,12 @@ class LiteLLMProvider(BaseProvider):
                     "tool_call_id": str(call_id),
                 })
             elif role == "assistant":
-                entry: Dict[str, Any] = {"role": "assistant"}
+                entry: dict[str, Any] = {"role": "assistant"}
                 if content:
                     entry["content"] = content
 
                 # Convert tool_calls to OpenAI format
-                if "tool_calls" in msg and msg["tool_calls"]:
+                if msg.get("tool_calls"):
                     tc_list = []
                     for tc in msg["tool_calls"]:
                         if isinstance(tc, ToolCall):
@@ -351,7 +350,7 @@ class LiteLLMProvider(BaseProvider):
             chat_msgs.insert(0, {"role": "user", "content": "Please proceed with the task."})
 
         # Merge adjacent assistant messages to prevent consecutive model turns
-        normalized_chat: List[Dict[str, Any]] = []
+        normalized_chat: list[dict[str, Any]] = []
         for m in chat_msgs:
             if normalized_chat and normalized_chat[-1].get("role") == "assistant" and m.get("role") == "assistant":
                 prev = normalized_chat[-1]
@@ -368,7 +367,7 @@ class LiteLLMProvider(BaseProvider):
 
         return system_msgs + normalized_chat
 
-    def _convert_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _convert_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Convert internal tool definitions to OpenAI-format function tools.
 
         Handles both formats:
@@ -402,9 +401,9 @@ class LiteLLMProvider(BaseProvider):
 
     async def call_stream(
         self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        node_name: Optional[str] = None,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        node_name: str | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream response chunks from any LiteLLM-supported provider.
 
@@ -415,14 +414,14 @@ class LiteLLMProvider(BaseProvider):
         """
         # Build the list of models to try: primary first, then fallbacks
         # Each entry is a tuple of (model_string, api_key, base_url, provider_name)
-        models_to_try: List[tuple] = [
+        models_to_try: list[tuple] = [
             (self.litellm_model, self.api_key, self.base_url, self.provider_name)
         ] + [
             (fm.model, fm.api_key, fm.base_url, fm.provider_name)
             for fm in self.fallback_models
         ]
 
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
         for model_idx, (current_model, current_api_key, current_base_url, current_provider) in enumerate(models_to_try):
             is_fallback = model_idx > 0
             try:
@@ -440,7 +439,7 @@ class LiteLLMProvider(BaseProvider):
 
                 response = await litellm.acompletion(**kwargs)
 
-                accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
+                accumulated_tool_calls: dict[int, dict[str, Any]] = {}
 
                 async for chunk in response:
                     delta = chunk.choices[0].delta if chunk.choices else None
@@ -450,6 +449,12 @@ class LiteLLMProvider(BaseProvider):
                         continue
 
                     text = getattr(delta, "content", None) if delta else None
+                    # E1-16: reasoning-capable models expose their
+                    # thinking on the delta (LiteLLM normalises it to
+                    # reasoning_content; some providers use thinking).
+                    thinking = None
+                    if delta:
+                        thinking = getattr(delta, "reasoning_content", None) or getattr(delta, "thinking", None)
                     tool_call_deltas = getattr(delta, "tool_calls", None) if delta else None
 
                     # Accumulate tool call chunks (they arrive incrementally)
@@ -471,9 +476,10 @@ class LiteLLMProvider(BaseProvider):
                                 if tc_delta.function.arguments:
                                     acc["arguments"] += tc_delta.function.arguments
 
-                    # Emit text chunks as they arrive
-                    if text:
-                        yield StreamChunk(text=text, finish_reason=finish_reason)
+                    # Emit text chunks as they arrive (thinking rides
+                    # along on its own field, never inside the text)
+                    if text or thinking:
+                        yield StreamChunk(text=text, thinking=thinking, finish_reason=finish_reason)
                     elif finish_reason and not accumulated_tool_calls:
                         yield StreamChunk(finish_reason=finish_reason)
 
@@ -591,9 +597,9 @@ async def validate_api_key(
     provider_name: str,
     api_key: str,
     model: str = "",
-    base_url: Optional[str] = None,
+    base_url: str | None = None,
     timeout: float = VALIDATION_TIMEOUT,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Validate a provider API key by making a minimal completion call.
 
     Returns dict with 'status' ('connected', 'invalid_key', 'network_error')
@@ -627,7 +633,7 @@ async def validate_api_key(
     # LiteLLM's OpenAI client requires a non-empty key to bypass client-side validation.
     effective_api_key = api_key if api_key else "sk-no-key-required"
 
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "model": litellm_model,
         "messages": [{"role": "user", "content": "ping"}],
         "max_tokens": 5,
@@ -645,7 +651,7 @@ async def validate_api_key(
         # wait_for is the backstop: LiteLLM honours `timeout` for most
         # providers, but a stalled provider must not block validation
         # indefinitely if the kwarg is dropped anywhere along the path.
-        resp = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=timeout)
+        await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=timeout)
         latency = (time.time() - start) * 1000.0
         return {
             "status": "connected",
@@ -654,7 +660,7 @@ async def validate_api_key(
         }
     except litellm.AuthenticationError:
         return {"status": "invalid_key", "message": "Invalid API key."}
-    except (litellm.RateLimitError,):
+    except litellm.RateLimitError:
         # Rate limit means the key is valid, just throttled
         latency = (time.time() - start) * 1000.0
         return {
@@ -662,7 +668,7 @@ async def validate_api_key(
             "message": "API key is valid (rate limited).",
             "latency_ms": round(latency, 2),
         }
-    except (asyncio.TimeoutError, litellm.Timeout):
+    except (TimeoutError, litellm.Timeout):
         # Phase 10.1, B1: a stalled provider previously blocked validation
         # indefinitely (no timeout anywhere on this call). Return a real
         # error in the DiscoveryResult shape — code None means no HTTP
@@ -675,7 +681,7 @@ async def validate_api_key(
             "code": None,
             "latency_ms": round(latency, 2),
         }
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — validation boundary: any provider failure becomes a structured network_error result, never a crash.
         return {"status": "network_error", "message": f"Validation failed: {e}", "code": None}
 
 
@@ -695,7 +701,7 @@ def _safe_json_dumps(obj: Any) -> str:
         return str(obj)
 
 
-def _safe_json_loads(s: str) -> Dict[str, Any]:
+def _safe_json_loads(s: str) -> dict[str, Any]:
     """Safely parse a JSON string into a dict."""
     if not s:
         return {}

@@ -104,6 +104,18 @@ async def run_fast_chat(
     parts: list[str] = []
     try:
         async for chunk in provider.call_stream(messages, tools=None, node_name="fast_chat"):
+            if getattr(chunk, "thinking", None):
+                # E1-16: thinking streams on its own event type, never
+                # inside the answer text.
+                yield Event(
+                    type=EventType.THINKING,
+                    request_id=request_id,
+                    payload={
+                        "task_id": task_id,
+                        "node": "assistant",
+                        "text_delta": chunk.thinking,
+                    },
+                )
             if chunk.text:
                 parts.append(chunk.text)
                 yield Event(
