@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { SocketProvider, useAetherSocket } from './contexts/SocketContext';
 import ForceGraph3D from 'react-force-graph-3d';
 import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu, Pencil } from 'lucide-react';
@@ -6,6 +6,8 @@ import DraggableChatWindow from './DraggableChatWindow';
 import SettingsPanel from './SettingsPanel';
 import Dashboard from './Dashboard';
 import Projects from './Projects';
+import Onboarding from './components/Onboarding';
+import CommandPalette from './components/CommandPalette';
 import './chat.css';
 
 // Decorative background graph (branding, not live data — see Phase 9 B3)
@@ -70,6 +72,11 @@ function AppContent() {
   // maps over it — it silently no-op'd while this was the initial {}.
   const [providers, setProviders] = useState([]);
   const [providerHealth, setProviderHealth] = useState({});
+  // Epic 6: engine config (onboarding flag, reset), palette + shortcuts UI.
+  const [engineConfig, setEngineConfig] = useState(null);
+  const [providersLoaded, setProvidersLoaded] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [localModels, setLocalModels] = useState([]);
 
   // Dashboard State (real data, not hardcoded)
@@ -412,6 +419,7 @@ function AppContent() {
             setActiveSession(data.payload.session_id);
             if (wsRef.current) {
               wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+        wsRef.current.send(JSON.stringify({ type: 'CONFIG_GET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
             }
           }
           let result = data.payload.response || data.payload.result || data.payload.output;
@@ -647,6 +655,7 @@ function AppContent() {
           // Refresh list
           if (wsRef.current) {
             wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+        wsRef.current.send(JSON.stringify({ type: 'CONFIG_GET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
           }
         } else if (data.type === 'SESSION_DELETE_RESPONSE') {
           const deletedId = data.payload.session_id;
@@ -670,8 +679,11 @@ function AppContent() {
           // silently no-op (its Array.isArray guard bailed out).
           const list = data.payload.providers;
           setProviders(Array.isArray(list) ? list : (list && typeof list === 'object' ? Object.values(list) : []));
+          setProvidersLoaded(true);
           // Epic 5, E5-05: per-provider health travels with the list.
           if (data.payload.health && typeof data.payload.health === 'object') setProviderHealth(data.payload.health);
+        } else if (data.type === 'CONFIG_GET_RESPONSE' || data.type === 'CONFIG_UPDATE_RESPONSE' || data.type === 'CONFIG_RESET_RESPONSE') {
+          if (data.payload && data.payload.config) setEngineConfig(data.payload.config);
         } else if (data.type === 'PROVIDER_REMOVE_RESPONSE' || data.type === 'PROVIDER_SAVE_RESPONSE') {
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
@@ -785,6 +797,7 @@ function AppContent() {
       setStatus('Online');
       if (wsRef.current) {
         wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+        wsRef.current.send(JSON.stringify({ type: 'CONFIG_GET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
         wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
         wsRef.current.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
         wsRef.current.send(JSON.stringify({ type: 'PLUGIN_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
@@ -900,6 +913,79 @@ function AppContent() {
       }));
     }
   };
+
+  // Epic 6, E6-02: completing or skipping onboarding persists the
+  // flag engine-side so the overlay appears exactly once.
+  const handleOnboardingDone = useCallback(() => {
+    setEngineConfig(prev => (prev ? { ...prev, onboarding_completed: true } : prev));
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'CONFIG_UPDATE_REQUEST', schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { config: { onboarding_completed: true } },
+      }));
+    }
+  }, [wsRef]);
+
+  // Epic 6, E6-03: palette items — only entries that really act.
+  const paletteItems = useMemo(() => {
+    const items = [
+      { id: 'act-new-chat', kind: 'action', label: 'New chat', run: () => { handleNewChat(); setActiveTab('Chat'); } },
+      { id: 'act-tab-chat', kind: 'action', label: 'Go to Chat', run: () => setActiveTab('Chat') },
+      { id: 'act-tab-dashboard', kind: 'action', label: 'Go to Dashboard', run: () => setActiveTab('Dashboard') },
+      { id: 'act-tab-projects', kind: 'action', label: 'Go to Projects', run: () => setActiveTab('Projects') },
+      { id: 'act-tab-settings', kind: 'action', label: 'Go to Settings', run: () => setActiveTab('Settings') },
+      { id: 'act-shortcuts', kind: 'action', label: 'Keyboard shortcuts', run: () => setShortcutsOpen(true) },
+    ];
+    (sessions || []).forEach(sess => {
+      items.push({
+        id: `sess-${sess.id}`, kind: 'session',
+        label: sess.title || 'Untitled chat',
+        run: () => { handleSessionSwitch(sess.id); setActiveTab('Chat'); },
+      });
+    });
+    (Array.isArray(providers) ? providers : [])
+      .filter(p => p.has_key && Array.isArray(p.models))
+      .forEach(p => {
+        p.models.forEach(m => {
+          items.push({
+            id: `model-${p.name}-${m}`, kind: 'model', label: m, hint: p.name,
+            run: () => {
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({
+                  type: 'MODEL_SET_DEFAULT', schema_version: 1,
+                  request_id: Date.now().toString(),
+                  payload: { provider: p.name, model: m },
+                }));
+              }
+            },
+          });
+        });
+      });
+    return items;
+  }, [sessions, providers, wsRef]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Epic 6, E6-03: the wired shortcut set (the dialog lists exactly
+  // these): Ctrl+K palette, Ctrl+N new chat, Ctrl+, Settings.
+  useEffect(() => {
+    if (isFloating) return undefined;
+    const onKey = (e) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        setPaletteOpen(prev => !prev);
+      } else if (mod && (e.key === 'n' || e.key === 'N')) {
+        e.preventDefault();
+        handleNewChat();
+        setActiveTab('Chat');
+      } else if (mod && e.key === ',') {
+        e.preventDefault();
+        setActiveTab('Settings');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isFloating]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleDeleteSession = (id, e) => {
     e.stopPropagation(); // prevent triggering handleSessionSwitch
@@ -1166,6 +1252,7 @@ function AppContent() {
         {!isFloating && (
           <button
             onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+            aria-label="Toggle sidebar"
             style={{
               position: 'absolute',
               top: '22px',
@@ -1433,8 +1520,35 @@ function AppContent() {
                  />
                </div>
             )}
-            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} onStartWorkflow={() => setActiveTab('Chat')} />}
+            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} providerHealth={providerHealth} wsRef={wsRef} onStartWorkflow={() => setActiveTab('Chat')} />}
             {activeTab === 'Projects' && <Projects wsRef={wsRef} />}
+            {!isFloating && engineConfig && !engineConfig.onboarding_completed && providersLoaded
+              && !(Array.isArray(providers) && providers.some(p => p.has_key)) && (
+              <Onboarding providers={providers} onDone={handleOnboardingDone} />
+            )}
+            {!isFloating && (
+              <CommandPalette open={paletteOpen} items={paletteItems} onClose={() => setPaletteOpen(false)} />
+            )}
+            {!isFloating && shortcutsOpen && (
+              <div data-testid="shortcuts-dialog" style={{ position: 'fixed', inset: 0, background: 'rgba(5,5,10,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 205 }} onClick={() => setShortcutsOpen(false)}>
+                <div style={{ background: 'rgba(20,20,28,0.98)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '16px', padding: '24px', width: '380px', maxWidth: '92vw', color: '#f0f0f5' }} onClick={(e) => e.stopPropagation()}>
+                  <h3 style={{ margin: '0 0 14px 0' }}>Keyboard shortcuts</h3>
+                  {[
+                    ['Ctrl+K', 'Command palette'],
+                    ['Ctrl+N', 'New chat'],
+                    ['Ctrl+,', 'Open Settings'],
+                    ['Alt+Space', 'Show / hide Aether-OS (global)'],
+                    ['Esc', 'Close palette / dialogs'],
+                  ].map(([keys, desc]) => (
+                    <div key={keys} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.06)', fontSize: '14px' }}>
+                      <span style={{ fontFamily: 'monospace', color: '#a78bfa' }}>{keys}</span>
+                      <span style={{ color: '#c9c9d4' }}>{desc}</span>
+                    </div>
+                  ))}
+                  <button onClick={() => setShortcutsOpen(false)} style={{ marginTop: '16px', background: '#7c3aed', color: '#fff', border: 'none', padding: '8px 18px', borderRadius: '10px', cursor: 'pointer' }}>Done</button>
+                </div>
+              </div>
+            )}
             {activeTab !== 'Settings' && activeTab !== 'Dashboard' && activeTab !== 'Projects' && (
                <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: '#9090a0' }}>
                  <h2>{activeTab} view coming soon.</h2>
@@ -1554,13 +1668,13 @@ function TitleBar({ isChatDetached, onReattachChat, isThinking, onStopTask }) {
           </button>
         )}
         <div style={{ display: 'flex', height: '100%' }}>
-          <button onClick={handleMinimize} className="window-btn" title="Minimize">
+          <button onClick={handleMinimize} className="window-btn" title="Minimize" aria-label="Minimize window">
             <Minus size={14} />
           </button>
-          <button onClick={handleMaximize} className="window-btn" title="Maximize">
+          <button onClick={handleMaximize} className="window-btn" title="Maximize" aria-label="Maximize window">
             <Square size={12} />
           </button>
-          <button onClick={handleClose} className="window-btn close-btn" title="Close">
+          <button onClick={handleClose} className="window-btn close-btn" title="Close" aria-label="Close window">
             <X size={14} />
           </button>
         </div>

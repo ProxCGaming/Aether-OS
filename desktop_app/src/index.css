@@ -182,3 +182,16 @@ h1, h2, h3 {
   50% { transform: translate(-50%, -60%) scale(1.05); }
   100% { transform: translate(-50%, -50%) scale(1); }
 }
+/* Epic 6, E6-07: a visible keyboard focus ring for every interactive
+   element in the shell. The app is mouse-first visually, but core
+   flows must be completable keyboard-only; :focus-visible keeps the
+   ring off mouse clicks. */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid #a78bfa;
+  outline-offset: 2px;
+}
