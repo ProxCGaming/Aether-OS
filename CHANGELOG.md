@@ -2,6 +2,56 @@
 
 All notable changes to the **Aether-OS** project will be documented in this file. 
 
+## [0.3.5] — 2026-10-31 — The full build (Epics 0–10)
+
+Built back-to-back on the `build/full-build` staging branch; `main`
+untouched and nothing published — release remains the owner's act.
+Per-epic detail lives in `docs/audits/`; decisions in `docs/adr/`
+(0026–0037).
+
+- **Orchestration & chat (Epics 0–1):** four divergent lines
+  reconciled onto one staging branch; routing migrated to
+  LangGraph's official `create_supervisor()` wrapped by Aether's
+  approval pause, tool policy and memory briefing (8-test parity
+  suite); fast chat, plan mode, in-graph blackboard, compaction,
+  steering queue, per-agent models, session search/rename/titles,
+  thinking stream, scratchpad. Fixed on the way (Epic 7 pass): fast
+  chat was silently dead — plain chat never replied.
+- **Tools & MCP (Epics 2–3):** built-in tools 7 → 18 with
+  containment and argument/path-aware policy; approval cache; MCP
+  risk overrides, catalogue cap with audited drops, end-to-end
+  supervisor → MCP tool path against a fake server.
+- **Memory (Epic 4):** switchable facade (native default; Mem0 /
+  LangMem / Graphiti adapters), KG supersede, embedding stats +
+  startup backfill, memory export.
+- **Providers (Epic 5):** fallback barred after tool results or
+  partial output; task-level fallback gated on requirement change;
+  curated registry (`gemini-3.5-flash`); bounded key validation —
+  hardened further after the Test button could wedge the app ~60 s
+  (30 s budget, in-flight dedupe, background answer, UI spinner).
+- **Desktop (Epic 6):** single-instance lock, tray, Alt+Space
+  summon, window-state restore, notifications, 3-step onboarding,
+  command palette, workspaces, health dashboard, settings search,
+  config reset (secrets untouched).
+- **Plugins & skills (Epic 7):** fail-closed tool hooks, TTSR
+  stream rules, persisted skill disable that truly hides skills
+  from agents, skill auto-match, plugin disable as real teardown.
+- **Optimisation (Epic 9):** engine cold start 5.6 s → 1.1 s, RSS
+  206 MB → 82 MB (deferred litellm import); embedding circuit
+  breaker (degraded query 105 ms → 5.6 ms); entry bundle
+  1,946 kB → 537 kB; production lint 398 → 0; reliability drills.
+- **Hardening & packaging (Epic 10):** audit-log rotation (10 MB,
+  5 archives); dependency sweep (pyasn1 fixes; filelock accepted
+  with reasons, ADR 0037); hash-verified backup/restore; redacted
+  diagnostics export; crash logs (engine + shell); report-only
+  update check; real app/tray icons; electron-builder now packages
+  the `electron/` helpers; version single-sourced at 0.3.5.
+- **Known limitations:** the Windows installer walkthrough
+  (install → onboard → uninstall on a fresh profile) awaits the
+  owner's Windows pass; external memory backends run live only
+  once their packages/services are installed (adapters are
+  stub-tested).
+
 ## [Unreleased] (Current Session)
 
 ### Added

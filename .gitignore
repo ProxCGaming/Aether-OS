@@ -53,3 +53,5 @@ dist/
 dist-electron/
 build/
 .venv-phase9/
+!desktop_app/build/
+!desktop_app/build/icon.png

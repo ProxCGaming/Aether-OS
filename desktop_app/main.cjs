@@ -193,9 +193,19 @@ function createWindow() {
 
 function createTray() {
   if (tray) return;
-  // Placeholder icon until packaging ships a real one (Epic 10);
-  // the menu + tooltip carry the function.
-  tray = new Tray(nativeImage.createEmpty());
+  // Real tray icon (Epic 10): the packaged build carries
+  // dist/tray-icon.png; dev falls back to public/ and finally to an
+  // empty image so the menu + tooltip still work.
+  const fs = require('fs');
+  const candidates = [
+    path.join(__dirname, 'dist', 'tray-icon.png'),
+    path.join(__dirname, 'public', 'tray-icon.png'),
+  ];
+  const iconPath = candidates.find((p) => fs.existsSync(p));
+  const image = iconPath
+    ? nativeImage.createFromPath(iconPath).resize({ width: 32, height: 32 })
+    : nativeImage.createEmpty();
+  tray = new Tray(image);
   tray.setToolTip('Aether-OS');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Show Aether-OS', click: showMainWindow },
