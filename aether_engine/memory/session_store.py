@@ -59,6 +59,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE session_messages ADD COLUMN thoughts TEXT")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE session_messages ADD COLUMN attachments TEXT")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     _initialized = DB_PATH
 
@@ -98,6 +102,20 @@ def get_session(session_id: str) -> dict[str, Any] | None:
                     m["thoughts"] = [th]
             else:
                 m["thoughts"] = []
+
+            att = m.get("attachments")
+            if att:
+                if isinstance(att, str):
+                    try:
+                        m["attachments"] = json.loads(att)
+                    except (ValueError, TypeError):
+                        m["attachments"] = []
+                elif isinstance(att, list):
+                    m["attachments"] = att
+                else:
+                    m["attachments"] = [att]
+            else:
+                m["attachments"] = []
             messages.append(m)
         
         session = dict(session_row)
@@ -124,7 +142,14 @@ def create_session(title: str = "New Chat") -> str:
 _CLIENT_MESSAGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$")
 
 
-def add_message(session_id: str, role: str, content: str, thoughts: Any = None, message_id: str | None = None) -> str:
+def add_message(
+    session_id: str,
+    role: str,
+    content: str,
+    thoughts: Any = None,
+    message_id: str | None = None,
+    attachments: Any = None,
+) -> str:
     init_db()
     msg_id = message_id if (isinstance(message_id, str) and _CLIENT_MESSAGE_ID.match(message_id)) else str(uuid.uuid4())
     now = int(time.time())
@@ -139,19 +164,32 @@ def add_message(session_id: str, role: str, content: str, thoughts: Any = None, 
             thoughts_json = json.dumps(thoughts)
     else:
         thoughts_json = None
+
+    if attachments is not None:
+        if isinstance(attachments, str):
+            try:
+                json.loads(attachments)
+                attachments_json = attachments
+            except (ValueError, TypeError):
+                attachments_json = json.dumps(attachments)
+        else:
+            attachments_json = json.dumps(attachments)
+    else:
+        attachments_json = None
+
     with _get_conn() as conn:
         try:
             conn.execute(
-                "INSERT INTO session_messages (id, session_id, role, content, thoughts, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-                (msg_id, session_id, role, content, thoughts_json, now)
+                "INSERT INTO session_messages (id, session_id, role, content, thoughts, attachments, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (msg_id, session_id, role, content, thoughts_json, attachments_json, now)
             )
         except sqlite3.IntegrityError:
             # A re-delivered packet can carry the same client id twice;
             # the message must still be stored, under a fresh UUID.
             msg_id = str(uuid.uuid4())
             conn.execute(
-                "INSERT INTO session_messages (id, session_id, role, content, thoughts, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-                (msg_id, session_id, role, content, thoughts_json, now)
+                "INSERT INTO session_messages (id, session_id, role, content, thoughts, attachments, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (msg_id, session_id, role, content, thoughts_json, attachments_json, now)
             )
         conn.execute(
             "UPDATE sessions SET updated_at = ? WHERE id = ?",

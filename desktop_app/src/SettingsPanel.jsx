@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock } from 'lucide-react';
+import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock, Scissors } from 'lucide-react';
 import Dropdown from './Dropdown';
 import LocalModelsTab from './LocalModelsTab';
 import './chat.css';
@@ -43,6 +43,7 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
   // Advanced Config State
   const [disableFallbacks, setDisableFallbacks] = useState(false);
   const [fallbackChain, setFallbackChain] = useState('');
+  const [snipHotkey, setSnipHotkey] = useState('CommandOrControl+Shift+S');
   
   // A5: State for Reasoning Effort and Node model override
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem('reasoning_effort') || 'standard');
@@ -278,6 +279,9 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
           if (data.payload.config) {
             setDisableFallbacks(data.payload.config.disable_fallbacks || false);
             setFallbackChain((data.payload.config.fallback_chain || []).join(', '));
+            if (data.payload.config.snip_hotkey) {
+              setSnipHotkey(data.payload.config.snip_hotkey);
+            }
             // Phase 9, B1/B2: engine-persisted auxiliary models and reasoning effort.
             setAuxModels(data.payload.config.auxiliary_models || {});
             const serverEffort = data.payload.config.reasoning_effort;
@@ -1180,6 +1184,53 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                   />
                 </div>
               )}
+            </div>
+
+            <div style={{
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px solid rgba(255,255,255,0.06)',
+              borderRadius: '8px',
+              padding: '16px',
+              marginTop: '16px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                <Scissors size={16} color="#7c3aed" />
+                <div style={{ fontWeight: 500, fontSize: '14px' }}>Screen Snip Hotkey</div>
+              </div>
+              <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
+                Global accelerator to trigger screen region snipping (e.g., <code>CommandOrControl+Shift+S</code>).
+              </div>
+              <input
+                type="text"
+                value={snipHotkey}
+                data-testid="snip-hotkey-input"
+                onChange={(e) => setSnipHotkey(e.target.value)}
+                onBlur={() => {
+                  const hotkey = snipHotkey.trim() || 'CommandOrControl+Shift+S';
+                  setSnipHotkey(hotkey);
+                  if (window.electronAPI?.registerSnipShortcut) {
+                    window.electronAPI.registerSnipShortcut(hotkey);
+                  }
+                  if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({
+                      type: 'CONFIG_UPDATE_REQUEST',
+                      schema_version: 1,
+                      request_id: Date.now().toString(),
+                      payload: { config: { snip_hotkey: hotkey } }
+                    }));
+                  }
+                }}
+                placeholder="CommandOrControl+Shift+S"
+                style={{
+                  width: '100%',
+                  background: 'rgba(0,0,0,0.2)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: '6px',
+                  padding: '10px 12px',
+                  color: '#fff',
+                  fontSize: '13px'
+                }}
+              />
             </div>
           </div>
         )}

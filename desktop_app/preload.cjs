@@ -26,5 +26,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   openFloatingChat: (sessionId) => ipcRenderer.invoke('open-floating-chat', sessionId),
   openLogsFolder: () => ipcRenderer.invoke('open-logs-folder'),
-  closeFloatingChat: () => ipcRenderer.invoke('close-floating-chat')
+  closeFloatingChat: () => ipcRenderer.invoke('close-floating-chat'),
+  triggerSnip: () => ipcRenderer.invoke('trigger-snip'),
+  onTriggerSnip: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('trigger-snip', handler);
+    return () => ipcRenderer.removeListener('trigger-snip', handler);
+  },
+  captureScreen: (rect) => ipcRenderer.invoke('capture-screen', rect),
+  registerSnipShortcut: (shortcut) => ipcRenderer.invoke('register-snip-shortcut', shortcut),
+  getSnipShortcut: () => ipcRenderer.invoke('get-snip-shortcut')
 });

@@ -578,11 +578,12 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                             p.get("thread_id") == steer_session for p in pending)
                     except Exception:  # noqa: BLE001 — the approval scan is best-effort: failure degrades a steer to a normal new task, never a lost message
                         steer_paused = False
+                steer_attachments = msg.payload.get("attachments") or []
                 if steer_prompt and steer_session and (steer_active or steer_paused):
                     try:
                         await asyncio.to_thread(
                             session_store.add_message, steer_session, "user",
-                            steer_prompt, None, msg.payload.get("message_id"))
+                            steer_prompt, None, msg.payload.get("message_id"), steer_attachments)
                     except Exception as e:  # noqa: BLE001 — best-effort persistence, same as START_TASK: a save failure must not lose the steer
                         logger.error(f"Failed to save steering message: {e}")
                     enqueue_steer(
@@ -602,6 +603,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         pass
 
                 prompt = msg.payload.get("prompt", "").strip() or "Say hello"
+                attachments = msg.payload.get("attachments") or []
                 cfg = engine_state.user_config
                 requested_model = msg.payload.get("model")
                 session_id = msg.payload.get("session_id")
@@ -670,7 +672,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     # one identity (edit-and-resend addresses the row).
                     await asyncio.to_thread(
                         session_store.add_message, session_id, "user", prompt,
-                        None, msg.payload.get("message_id"))
+                        None, msg.payload.get("message_id"), attachments)
                 except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not block the task
                     logger.error(f"Failed to save user message: {e}")
 
@@ -685,6 +687,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     user_default_model=cfg.default_model,
                     requested_model=requested_model,
                     auxiliary_models=cfg.auxiliary_models,
+                    images=attachments,
                 )
 
                 try:
@@ -771,6 +774,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         history,
                         request_id=req_id,
                         session_id=session_id,
+                        attachments=attachments,
                     )
                 else:
                     # One central builder (PRD Q3) — task start, approval
@@ -802,6 +806,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         forced_agent=forced_agent,
                         active_skills=active_skills,
                         plan_mode=bool(msg.payload.get("plan_mode")),
+                        attachments=attachments,
                     )
 
                 # Epic 5, E5-02: task-level fallback factory (§6.4).
@@ -827,6 +832,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     "forced_agent": forced_agent,
                     "active_skills": active_skills,
                     "plan_mode": bool(msg.payload.get("plan_mode")),
+                    "attachments": attachments,
                 }
 
                 async def _task_retry_factory(failed_provider, failed_model, failed_task_id, _ctx=_rebuild):
@@ -852,7 +858,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         gen = run_fast_chat(
                             _ctx["prompt"], fallback_instance, _ctx["history"],
                             request_id=_ctx["req_id"], session_id=_ctx["session_id"],
-                            task_id=failed_task_id)
+                            task_id=failed_task_id, attachments=_ctx.get("attachments"))
                     else:
                         gen = run_langgraph_task(
                             prompt=_ctx["prompt"],
@@ -871,6 +877,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                             active_skills=_ctx["active_skills"],
                             plan_mode=_ctx["plan_mode"],
                             task_id=failed_task_id,
+                            attachments=_ctx.get("attachments"),
                         )
                     return gen, entry.provider, entry.id
 

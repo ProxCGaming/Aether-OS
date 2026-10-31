@@ -213,7 +213,7 @@ class LiteLLMProvider(BaseProvider):
         ttsr_rules: list | None = None,
     ):
         api_key = api_key.strip() if api_key else ""
-        if not api_key and provider_name != "custom_openai" and provider_name != "openai_compatible":
+        if not api_key and provider_name not in ("custom_openai", "openai_compatible", "ollama"):
             raise AuthenticationError("API key cannot be empty.")
         
         self.api_key = api_key if api_key else "sk-no-key-required"

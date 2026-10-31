@@ -76,8 +76,9 @@ class RoutingPolicy:
         requirements: TaskRequirements | None = None,
         requested_model: str | None = None,
         auxiliary_models: dict[str, str] | None = None,
+        images: list[Any] | None = None,
     ) -> RoutingDecision:
-        reqs = requirements or infer_task_requirements(prompt)
+        reqs = requirements or infer_task_requirements(prompt, images=images)
 
         # If user explicitly requested a specific model and its provider is healthy
         if requested_model:
@@ -143,10 +144,17 @@ class RoutingPolicy:
             # heuristics. Stored as "provider:::model" (or absent/"auto").
             vision_override = (auxiliary_models or {}).get("vision", "auto")
             if vision_override and vision_override != "auto":
-                o_provider, _, o_model = vision_override.partition(":::")
-                if (o_provider and o_model
-                        and o_provider in configured_providers
-                        and health_manager.is_provider_available(o_provider)):
+                if ":::" in vision_override:
+                    o_provider, _, o_model = vision_override.partition(":::")
+                elif "/" in vision_override and not vision_override.startswith("models/"):
+                    o_provider, o_model = vision_override.split("/", 1)
+                else:
+                    o_provider, o_model = "", vision_override
+
+                if o_provider == "ollama" or (
+                    o_provider in configured_providers
+                    and health_manager.is_provider_available(o_provider)
+                ):
                     o_entry = self.registry.get_model(o_model)
                     if o_entry and o_entry.provider == o_provider:
                         return RoutingDecision(
@@ -155,6 +163,12 @@ class RoutingPolicy:
                             reason=f"User auxiliary override (vision) → {o_entry.label}",
                             capabilities=list(o_entry.capabilities),
                         )
+                    return RoutingDecision(
+                        provider=o_provider,
+                        model=o_model,
+                        reason=f"User auxiliary override (vision) → {o_model}",
+                        capabilities=["chat", "vision"],
+                    )
             if user_def_entry and "vision" in user_def_entry.capabilities:
                 return RoutingDecision(
                     provider=user_def_entry.provider,

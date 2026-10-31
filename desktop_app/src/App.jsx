@@ -1190,7 +1190,7 @@ function AppContent() {
     }
   }, [canvasArtifacts, handleSelectArtifact, activeSession, wsRef]);
 
-  const handleSendMessage = (text) => {
+  const handleSendMessage = (text, attachments = []) => {
     // E8-1.1b: sending a message while the rewind undo toast is up
     // dismisses it and commits the rewind — the engine does the
     // pruning when this START_TASK arrives; here we only drop the
@@ -1214,10 +1214,10 @@ function AppContent() {
     // mid-task guidance, not a new task). Read the per-session choice.
     const planMode = !!planModeBySession[activeSessionRef.current || '__pending'];
     setChatMessages(prev => steering
-      ? [...prev, { id: messageId, role: 'user', content: text, isFinal: true, queued: true, steering: true }]
+      ? [...prev, { id: messageId, role: 'user', content: text, attachments, isFinal: true, queued: true, steering: true }]
       : [
           ...prev,
-          { id: messageId, role: 'user', content: text, isFinal: true },
+          { id: messageId, role: 'user', content: text, attachments, isFinal: true },
           { role: 'agent', content: '', thoughts: [], isFinal: false }
         ]);
     setIsThinking(true);
@@ -1230,6 +1230,7 @@ function AppContent() {
           prompt: text,
           session_id: activeSession,
           message_id: messageId,
+          attachments: attachments || [],
           ...(steering ? {} : { plan_mode: planMode })
         }
       }));
@@ -2080,6 +2081,7 @@ function AppContent() {
                     ['Ctrl+N', 'New chat'],
                     ['Ctrl+,', 'Open Settings'],
                     ['Alt+Space', 'Show / hide Aether-OS (global)'],
+                    [engineConfig?.snip_hotkey || 'Ctrl+Shift+S', 'Snip & ask (global)'],
                     ['Esc', 'Close palette / dialogs'],
                   ].map(([keys, desc]) => (
                     <div key={keys} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.06)', fontSize: '14px' }}>

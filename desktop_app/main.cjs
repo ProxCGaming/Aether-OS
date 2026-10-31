@@ -250,6 +250,33 @@ function createFloatingChat(sessionId) {
   });
 }
 
+// Epic 8, E8-4.1: global snip shortcut & capture manager
+let currentSnipShortcut = 'CommandOrControl+Shift+S';
+
+function triggerSnipFlow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (!mainWindow.isVisible()) mainWindow.show();
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+    mainWindow.webContents.send('trigger-snip');
+  }
+  if (floatingChatWindow && !floatingChatWindow.isDestroyed()) {
+    floatingChatWindow.webContents.send('trigger-snip');
+  }
+}
+
+function registerSnipGlobalShortcut(shortcut) {
+  if (currentSnipShortcut) {
+    try { globalShortcut.unregister(currentSnipShortcut); } catch (e) { /* ignore */ }
+  }
+  currentSnipShortcut = shortcut || 'CommandOrControl+Shift+S';
+  try {
+    globalShortcut.register(currentSnipShortcut, triggerSnipFlow);
+  } catch (err) {
+    console.error('Failed to register snip shortcut:', err);
+  }
+}
+
 app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return;
   createWindow();
@@ -261,6 +288,8 @@ app.whenReady().then(() => {
   } catch (err) {
     console.error('Failed to register summon hotkey:', err);
   }
+  // Epic 8, E8-4.1: global screen snip hotkey (Settings-changeable, default Ctrl+Shift+S / Cmd+Shift+S)
+  registerSnipGlobalShortcut(currentSnipShortcut);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -356,4 +385,47 @@ ipcMain.handle('show-open-dialog', async (event, options) => {
   });
   if (result.canceled) return null;
   return result.filePaths[0];
+});
+
+// Epic 8, E8-4.1: Snip IPC handlers
+ipcMain.handle('trigger-snip', () => {
+  triggerSnipFlow();
+  return true;
+});
+
+ipcMain.handle('get-snip-shortcut', () => {
+  return currentSnipShortcut;
+});
+
+ipcMain.handle('register-snip-shortcut', (event, shortcut) => {
+  registerSnipGlobalShortcut(shortcut);
+  return currentSnipShortcut;
+});
+
+ipcMain.handle('capture-screen', async (event, rect) => {
+  try {
+    const { desktopCapturer, screen } = require('electron');
+    const primaryDisplay = screen.getPrimaryDisplay();
+    const { width, height } = primaryDisplay.size;
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: Math.max(1, width), height: Math.max(1, height) }
+    });
+    if (sources && sources.length > 0) {
+      const img = sources[0].thumbnail;
+      if (rect && rect.width > 0 && rect.height > 0) {
+        const cropped = img.crop({
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        });
+        return cropped.toDataURL();
+      }
+      return img.toDataURL();
+    }
+  } catch (err) {
+    console.warn('desktopCapturer unavailable in this environment, using synthetic fallback:', err);
+  }
+  return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 });

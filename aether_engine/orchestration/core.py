@@ -14,7 +14,7 @@ from aether_engine.providers.litellm_provider import LiteLLMProvider, validate_a
 from aether_engine.routing.fallback import (
     get_fallback_candidates,
 )
-from aether_engine.secrets.storage import SecretStore
+from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
 from aether_engine.state import engine_state
 
 logger = logging.getLogger("aether_engine.orchestration.core")
@@ -310,7 +310,13 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
         resolve_litellm_model,
     )
 
-    api_key = secret_store.load_provider(provider_name)
+    if provider_name == "ollama":
+        try:
+            api_key = secret_store.load_provider(provider_name)
+        except ProviderNotFoundError:
+            api_key = "sk-no-key-required"
+    else:
+        api_key = secret_store.load_provider(provider_name)
     base_url = engine_state.user_config.custom_base_urls.get(provider_name)
 
     fallback_models: list[FallbackModel] = []

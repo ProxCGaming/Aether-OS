@@ -214,6 +214,8 @@ class UserConfig:
     # model-facing history exceeds either bound, the older turns are
     # folded into a summary (see langgraph/compaction.py); the most
     # recent compaction_keep_recent messages always stay verbatim.
+    # Epic 8, E8-4.1: global screen region snip hotkey (Settings-changeable)
+    snip_hotkey: str = "CommandOrControl+Shift+S"
     compaction_trigger_messages: int = 40
     compaction_trigger_chars: int = 24000
     compaction_keep_recent: int = 12
@@ -262,6 +264,7 @@ class UserConfig:
             "kg_max_facts": self.kg_max_facts,
             "session_retention_days": self.session_retention_days,
             "session_max_sessions": self.session_max_sessions,
+            "snip_hotkey": self.snip_hotkey,
             "compaction_trigger_messages": self.compaction_trigger_messages,
             "compaction_trigger_chars": self.compaction_trigger_chars,
             "compaction_keep_recent": self.compaction_keep_recent,
@@ -357,6 +360,7 @@ class UserConfig:
             kg_max_facts=_as_int(d.get("kg_max_facts"), 5000),
             session_retention_days=_as_int(d.get("session_retention_days"), 180),
             session_max_sessions=_as_int(d.get("session_max_sessions"), 200),
+            snip_hotkey=d.get("snip_hotkey") or "CommandOrControl+Shift+S",
             compaction_trigger_messages=_as_int(d.get("compaction_trigger_messages"), 40),
             compaction_trigger_chars=_as_int(d.get("compaction_trigger_chars"), 24000),
             compaction_keep_recent=_as_int(d.get("compaction_keep_recent"), 12),

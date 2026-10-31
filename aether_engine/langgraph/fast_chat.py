@@ -23,6 +23,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any
 
 from aether_common.contracts import Event, EventType, TaskState, validate_transition
@@ -142,6 +143,7 @@ async def run_fast_chat(
     request_id: str | None = None,
     session_id: str | None = None,
     task_id: str | None = None,
+    attachments: list[Any] | None = None,
 ) -> AsyncGenerator[Event, None]:
     """Stream a direct chat reply for *prompt*, mirroring the graph
     runner's event contract (see module docstring)."""
@@ -170,7 +172,42 @@ async def run_fast_chat(
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}]
     messages.extend(history or [])
-    messages.append({"role": "user", "content": prompt})
+
+    user_content: Any = prompt
+    if attachments:
+        parts_list: list[dict[str, Any]] = []
+        if prompt:
+            parts_list.append({"type": "text", "text": prompt})
+        for att in attachments:
+            url = None
+            if isinstance(att, dict):
+                url = att.get("data") or att.get("url")
+                if not url and att.get("path"):
+                    p = Path(att["path"])
+                    if p.exists() and p.is_file():
+                        import base64
+
+                        mime = att.get("mime_type") or "image/png"
+                        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+                        url = f"data:{mime};base64,{b64}"
+                    elif str(att["path"]).startswith("data:"):
+                        url = att["path"]
+            elif isinstance(att, str):
+                if att.startswith(("data:", "http")):
+                    url = att
+                else:
+                    p = Path(att)
+                    if p.exists() and p.is_file():
+                        import base64
+
+                        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+                        url = f"data:image/png;base64,{b64}"
+            if url:
+                parts_list.append({"type": "image_url", "image_url": {"url": url}})
+        if parts_list:
+            user_content = parts_list
+
+    messages.append({"role": "user", "content": user_content})
 
     start_time = time.time()
     parts: list[str] = []

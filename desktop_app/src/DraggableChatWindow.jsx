@@ -4,6 +4,7 @@ import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, 
 import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
 import UndoToast from './components/UndoToast';
+import SnipOverlay from './components/SnipOverlay';
 import './chat.css';
 
 export function getNodeStyle(nodeName = '') {
@@ -1190,7 +1191,9 @@ export default function DraggableChatWindow({
   artifactsCount = 0,
   isCanvasOpen = false,
   onToggleCanvas = () => {},
-  onOpenArtifact = () => {}
+  onOpenArtifact = () => {},
+  onTriggerSnip,
+  initialAttachments = []
 }) {
   const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
@@ -1204,6 +1207,38 @@ export default function DraggableChatWindow({
   // Epic 8, E8-1.1a: which message's step menu is open (index into
   // messages), or null. One menu at a time.
   const [openStepMenu, setOpenStepMenu] = useState(null);
+  const [attachments, setAttachments] = useState(initialAttachments || []);
+  const [isSnipOverlayOpen, setIsSnipOverlayOpen] = useState(false);
+
+  useEffect(() => {
+    if (initialAttachments && initialAttachments.length > 0) {
+      setAttachments(initialAttachments);
+    }
+  }, [initialAttachments]);
+
+  useEffect(() => {
+    if (window.electronAPI && typeof window.electronAPI.onTriggerSnip === 'function') {
+      return window.electronAPI.onTriggerSnip(() => {
+        setIsSnipOverlayOpen(true);
+      });
+    }
+  }, []);
+
+  const handleTriggerSnip = () => {
+    if (onTriggerSnip) {
+      onTriggerSnip();
+    }
+    setIsSnipOverlayOpen(true);
+  };
+
+  const handleSnipCaptured = (snip) => {
+    setIsSnipOverlayOpen(false);
+    setAttachments(prev => [...prev, snip]);
+  };
+
+  const handleRemoveAttachment = (idxToRemove) => {
+    setAttachments(prev => prev.filter((_, idx) => idx !== idxToRemove));
+  };
 
   const approveToolWithEdits = (msg, scope) => {
     if (!onApproveTool) return;
@@ -1408,9 +1443,14 @@ export default function DraggableChatWindow({
     e.preventDefault();
     // While a task runs, submitting steers it (Epic 1, E1-07) - App
     // decides START_TASK vs STEER_TASK; the input must not dead-end.
-    if (input.trim()) {
-      onSendMessage(input.trim());
+    if (input.trim() || attachments.length > 0) {
+      if (attachments.length > 0) {
+        onSendMessage(input.trim(), attachments);
+      } else {
+        onSendMessage(input.trim());
+      }
       setInput('');
+      setAttachments([]);
     }
   };
 
@@ -1981,6 +2021,25 @@ export default function DraggableChatWindow({
                         />
                       )}
                       
+                      {Array.isArray(msg.attachments) && msg.attachments.length > 0 && (
+                        <div className="msg-attachments" data-testid="message-attachments" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: msg.content ? '8px' : '0' }}>
+                          {msg.attachments.map((att, attIdx) => {
+                            const src = att.data || att.url || (att.path ? (att.path.startsWith('data:') ? att.path : `file://${att.path}`) : '');
+                            return (
+                              <div key={attIdx} className="msg-attachment-item" style={{ maxWidth: '240px', borderRadius: '8px', overflow: 'hidden' }}>
+                                {src ? (
+                                  <img src={src} alt={att.name || 'Attachment'} style={{ maxWidth: '100%', maxHeight: '200px', objectFit: 'contain', display: 'block', borderRadius: '8px' }} />
+                                ) : (
+                                  <div style={{ padding: '4px 8px', background: 'rgba(255,255,255,0.1)', borderRadius: '6px', fontSize: '12px' }}>
+                                    {att.name || 'Attachment'}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      
                       {msg.content ? (
                         <ReactMarkdown>
                           {msg.content
@@ -2101,12 +2160,77 @@ export default function DraggableChatWindow({
                 >
                   Plan
                 </button>
+                <button
+                  type="button"
+                  className="snip-btn"
+                  data-testid="snip-ask-btn"
+                  title="Snip & ask (Ctrl+Shift+S)"
+                  aria-label="Snip screen region"
+                  onClick={handleTriggerSnip}
+                  style={{
+                    marginLeft: '8px',
+                    background: 'rgba(255,255,255,0.06)',
+                    border: '1px solid rgba(255,255,255,0.12)',
+                    borderRadius: '8px',
+                    padding: '4px 10px',
+                    color: '#cbd5e1',
+                    fontSize: '12px',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  <Scissors size={13} color="#a78bfa" />
+                  Snip &amp; ask
+                </button>
               </div>
               <form onSubmit={handleSubmit} className="ios-glass-input" style={{ 
                 display: 'flex', 
-                alignItems: 'flex-end',
+                flexDirection: 'column',
                 padding: '8px 12px' 
               }}>
+                {attachments.length > 0 && (
+                  <div data-testid="composer-attachments-preview" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '8px', width: '100%' }}>
+                    {attachments.map((att, idx) => (
+                      <div key={idx} style={{ position: 'relative', display: 'inline-block' }}>
+                        <img
+                          data-testid="composer-attachment-thumbnail"
+                          src={att.data || att.url || (att.path ? `file://${att.path}` : '')}
+                          alt={att.name || 'Attached snip'}
+                          style={{ width: '56px', height: '56px', objectFit: 'cover', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.2)' }}
+                        />
+                        <button
+                          type="button"
+                          data-testid="remove-attachment-btn"
+                          onClick={() => handleRemoveAttachment(idx)}
+                          style={{
+                            position: 'absolute',
+                            top: '-6px',
+                            right: '-6px',
+                            width: '18px',
+                            height: '18px',
+                            borderRadius: '50%',
+                            background: '#ef4444',
+                            color: '#fff',
+                            border: 'none',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            cursor: 'pointer',
+                            padding: 0,
+                          }}
+                          title="Remove attachment"
+                        >
+                          <X size={10} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: 'flex', width: '100%', alignItems: 'flex-end' }}>
                 <textarea 
                   ref={textareaRef}
                   value={input}
@@ -2183,9 +2307,9 @@ export default function DraggableChatWindow({
                 ) : (
                   <button 
                     type="submit"
-                    disabled={!input.trim()}
+                    disabled={!input.trim() && attachments.length === 0}
                     style={{
-                      background: input.trim() ? 'var(--accent)' : 'rgba(255,255,255,0.1)',
+                      background: (input.trim() || attachments.length > 0) ? 'var(--accent)' : 'rgba(255,255,255,0.1)',
                       border: 'none',
                       borderRadius: '50%',
                       width: '32px',
@@ -2193,8 +2317,8 @@ export default function DraggableChatWindow({
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      color: input.trim() ? '#fff' : 'rgba(255,255,255,0.4)',
-                      cursor: input.trim() ? 'pointer' : 'default',
+                      color: (input.trim() || attachments.length > 0) ? '#fff' : 'rgba(255,255,255,0.4)',
+                      cursor: (input.trim() || attachments.length > 0) ? 'pointer' : 'default',
                       transition: 'all 0.2s',
                       marginLeft: '8px',
                       flexShrink: 0
@@ -2203,6 +2327,7 @@ export default function DraggableChatWindow({
                     <Send size={14} />
                   </button>
                 )}
+                </div>
               </form>
               <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.3)', textAlign: 'center', marginTop: '8px' }}>
                 Press Enter to send, Shift+Enter for new line
@@ -2229,6 +2354,8 @@ export default function DraggableChatWindow({
             <span>{toastMessage}</span>
           </div>
         )}
+
+        <SnipOverlay isOpen={isSnipOverlayOpen} onCapture={handleSnipCaptured} onCancel={() => setIsSnipOverlayOpen(false)} />
 
         {/* Apple iOS Glass Context Menu */}
         <ContextMenu 
