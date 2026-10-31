@@ -1022,6 +1022,8 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
 
         {activeMenu === 'BrowserPolicy' && (
           <BrowserPolicyPanel wsRef={wsRef} />
+        )}
+
         {activeMenu === 'Usage' && (
           <UsageSettingsPanel wsRef={wsRef} dailyBudget={dailyBudget} budgetAlert={budgetAlert} budgetExceeded={!!budgetAlert} />
         )}
