@@ -248,6 +248,93 @@ function AppContent() {
   const sessionCostUsd = costTasks.reduce((sum, t) => sum + (t.cost_usd || 0), 0);
   const runningCostTaskIds = isThinking && lastCostTaskId ? [lastCostTaskId] : [];
 
+  // Epic 8, E8-5.1a: voice mode. voiceState mirrors the engine
+  // session — {status: 'starting'|'active'|'error', sessionId,
+  // partialText, assistantText, error, webrtcConfig} — or null when
+  // voice mode is off. Partial transcripts are provisional display
+  // only; finals commit into chatMessages (the engine persists the
+  // same turns to the session store). The ref mirror exists
+  // because the engine-message handler is registered once and must
+  // not close over render-scoped state.
+  const [voiceState, setVoiceState] = useState(null);
+  const [voiceAudioChunk, setVoiceAudioChunk] = useState(null);
+  const voiceStateRef = useRef(null);
+  const voiceChunkSeqRef = useRef(0);
+
+  const applyVoiceState = useCallback((next) => {
+    voiceStateRef.current = next;
+    setVoiceState(next);
+  }, []);
+
+  const sendVoiceRequest = useCallback((type, payload) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type,
+        schema_version: 1,
+        request_id: `voice_${Date.now()}`,
+        payload,
+      }));
+      return true;
+    }
+    return false;
+  }, [wsRef]);
+
+  const commitVoiceAssistant = useCallback((state) => {
+    const text = (state && state.assistantText) || '';
+    if (text.trim()) {
+      setChatMessages(prev => [...prev, {
+        id: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        role: 'agent', content: text, thoughts: [], isFinal: true,
+      }]);
+    }
+  }, []);
+
+  const handleVoiceStart = useCallback(() => {
+    const current = voiceStateRef.current;
+    if (current && current.status !== 'error') return;
+    const sessionId = activeSessionRef.current;
+    if (!sendVoiceRequest('VOICE_SESSION_START_REQUEST', { session_id: sessionId })) {
+      applyVoiceState({
+        status: 'error', sessionId, partialText: '', assistantText: '',
+        error: 'voice unavailable: the engine is not connected', webrtcConfig: null,
+      });
+      return;
+    }
+    applyVoiceState({
+      status: 'starting', sessionId, partialText: '',
+      assistantText: '', error: null, webrtcConfig: null,
+    });
+  }, [applyVoiceState, sendVoiceRequest]);
+
+  const handleVoiceStop = useCallback(() => {
+    const current = voiceStateRef.current;
+    if (!current) return;
+    // Tear the UI down immediately (the overlay unmount stops the
+    // mic); the engine stops its pipeline on the request — or on
+    // disconnect if the request never arrives. The reply streamed
+    // so far commits as a normal message.
+    commitVoiceAssistant(current);
+    sendVoiceRequest('VOICE_SESSION_STOP_REQUEST', {
+      session_id: current.sessionId || activeSessionRef.current,
+    });
+    applyVoiceState(null);
+  }, [applyVoiceState, commitVoiceAssistant, sendVoiceRequest]);
+
+  const handleVoiceDismissError = useCallback(() => {
+    applyVoiceState(null);
+  }, [applyVoiceState]);
+
+  // Leaving the voice session's chat ends voice mode without
+  // committing the provisional bubbles here — the engine already
+  // persisted the finals to that session's store.
+  useEffect(() => {
+    const current = voiceStateRef.current;
+    if (current && current.sessionId && current.sessionId !== activeSession) {
+      sendVoiceRequest('VOICE_SESSION_STOP_REQUEST', { session_id: current.sessionId });
+      applyVoiceState(null);
+    }
+  }, [activeSession, applyVoiceState, sendVoiceRequest]);
+
   // Takes the session explicitly (or reads the ref) because the
   // engine-message handler is registered once and must not close
   // over render-scoped state — the requestRewindManifest pattern.
@@ -1061,6 +1148,88 @@ function AppContent() {
         } else if (data.type === 'DEV_SERVER_DETECT_RESPONSE') {
           // Epic 8, E8-2.2: dev-server probe result for the Preview tab
           setDevServerInfo(data.payload || null);
+        } else if (data.type === 'VOICE_SESSION_START_RESPONSE') {
+          // Epic 8, E8-5.1a: ok -> the overlay opens and the mic
+          // starts; refused -> the engine's honest reason shows and
+          // no device is ever opened.
+          const p = data.payload || {};
+          const current = voiceStateRef.current;
+          if (current) {
+            if (p.ok) {
+              applyVoiceState({
+                ...current,
+                status: 'active',
+                sessionId: p.session_id || current.sessionId,
+                webrtcConfig: p.webrtc_config || null,
+                error: null,
+              });
+              if (p.session_id && p.session_id !== activeSessionRef.current) {
+                setActiveSession(p.session_id);
+              }
+            } else {
+              applyVoiceState({
+                ...current,
+                status: 'error',
+                sessionId: p.session_id || current.sessionId,
+                error: p.error || 'Voice is unavailable on this machine.',
+                webrtcConfig: null,
+              });
+            }
+          }
+        } else if (data.type === 'VOICE_PARTIAL_TRANSCRIPT') {
+          const p = data.payload || {};
+          const current = voiceStateRef.current;
+          if (current && current.status === 'active' && p.session_id === current.sessionId) {
+            if (p.is_final) {
+              // Commit in order: the previous reply if it was still
+              // streaming, then this user turn.
+              commitVoiceAssistant(current);
+              if (p.text) {
+                setChatMessages(prev => [...prev, {
+                  id: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  role: 'user', content: p.text, isFinal: true,
+                }]);
+              }
+              applyVoiceState({ ...current, partialText: '', assistantText: '' });
+            } else {
+              applyVoiceState({ ...current, partialText: p.text || '' });
+            }
+          }
+        } else if (data.type === 'VOICE_OUTPUT_CHUNK') {
+          const p = data.payload || {};
+          const current = voiceStateRef.current;
+          if (current && current.status === 'active' && p.session_id === current.sessionId) {
+            if (p.text_delta) {
+              applyVoiceState({
+                ...current,
+                assistantText: (current.assistantText || '') + p.text_delta,
+              });
+            }
+            if (p.audio_chunk) {
+              voiceChunkSeqRef.current += 1;
+              setVoiceAudioChunk({ seq: voiceChunkSeqRef.current, data: p.audio_chunk });
+            }
+          }
+        } else if (data.type === 'VOICE_BARGE_IN') {
+          // E8-5.1b emits this; the client honours the committed-
+          // words rule by replacing the streaming bubble with
+          // exactly the text that was actually heard.
+          const p = data.payload || {};
+          const current = voiceStateRef.current;
+          if (current && p.session_id === current.sessionId) {
+            const committed = p.committed_text || '';
+            if (committed.trim()) {
+              setChatMessages(prev => [...prev, {
+                id: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                role: 'agent', content: committed, thoughts: [], isFinal: true,
+              }]);
+            }
+            applyVoiceState({ ...current, assistantText: '' });
+          }
+        } else if (data.type === 'VOICE_SESSION_STOP_RESPONSE') {
+          // A local stop already tore the UI down; this only lands
+          // for a stop we did not initiate.
+          if (voiceStateRef.current) applyVoiceState(null);
         } else if (data.type === 'USAGE_LEDGER_QUERY_RESPONSE') {
           // Epic 8, E8-A8.1a: rebuild the cost surfaces from the
           // ledger rows themselves, so the header total and the
@@ -2162,6 +2331,11 @@ function AppContent() {
           onRequestCostBreakdown={requestCostBreakdown}
           browserSession={browserSessions[activeSession] || null}
           onBrowserControl={handleBrowserControl}
+          voiceState={voiceState}
+          voiceAudioChunk={voiceAudioChunk}
+          onVoiceStart={handleVoiceStart}
+          onVoiceStop={handleVoiceStop}
+          onVoiceDismissError={handleVoiceDismissError}
         />
       )}
 

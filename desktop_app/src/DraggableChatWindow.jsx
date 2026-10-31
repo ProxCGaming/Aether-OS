@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-import { Globe, Play, Pause, Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download, MoreHorizontal, CircleDollarSign } from 'lucide-react';
+import { Globe, Play, Pause, Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download, MoreHorizontal, CircleDollarSign, Mic } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
 import UndoToast from './components/UndoToast';
 import SnipOverlay from './components/SnipOverlay';
 import CostHeaderPopover, { formatUsd } from './components/CostHeaderPopover';
+import VoiceOverlay from './components/VoiceOverlay';
 import './chat.css';
 
 export function getNodeStyle(nodeName = '') {
@@ -1490,7 +1491,12 @@ export default function DraggableChatWindow({
   runningCostTaskIds = [],
   onRequestCostBreakdown = () => {},
   browserSession = null,
-  onBrowserControl = null
+  onBrowserControl = null,
+  voiceState = null,
+  voiceAudioChunk = null,
+  onVoiceStart = () => {},
+  onVoiceStop = () => {},
+  onVoiceDismissError = () => {}
 }) {
   const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
@@ -1990,6 +1996,46 @@ export default function DraggableChatWindow({
                 {artifactsCount}
               </span>
             </button>
+            {/* Voice mode (Epic 8, E8-5.1a) */}
+            <button
+              type="button"
+              data-testid="voice-header-btn"
+              onClick={() => {
+                if (voiceState && (voiceState.status === 'active' || voiceState.status === 'starting')) onVoiceStop();
+                else onVoiceStart();
+              }}
+              title="Voice mode"
+              aria-label="Toggle voice mode"
+              style={{
+                background: voiceState && voiceState.status === 'active' ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                border: voiceState && voiceState.status === 'active' ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                color: '#fff',
+                cursor: 'pointer',
+                padding: '6px 10px',
+                borderRadius: '999px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                transition: 'all 0.2s',
+                fontSize: '12px',
+                fontWeight: 500
+              }}
+            >
+              <Mic size={14} />
+              <span>Voice</span>
+              {voiceState && voiceState.status === 'active' && (
+                <span
+                  data-testid="voice-live-dot"
+                  style={{
+                    width: '8px',
+                    height: '8px',
+                    borderRadius: '50%',
+                    background: '#f87171',
+                    display: 'inline-block'
+                  }}
+                />
+              )}
+            </button>
             {/* Session Export menu */}
             <div ref={exportMenuRef} style={{ position: 'relative' }}>
               <button
@@ -2484,6 +2530,25 @@ export default function DraggableChatWindow({
               })}
 
 
+              {/* Voice live mirror (Epic 8, E8-5.1a): provisional
+                  bubbles — the partial transcript and the streaming
+                  reply. Finals commit as real messages via App. */}
+              {voiceState && voiceState.partialText && (
+                <div className="chat-message user" data-testid="voice-partial-bubble" style={{ display: 'flex', flexDirection: 'row-reverse', gap: '12px', padding: '16px 20px', opacity: 0.75 }}>
+                  <div style={{ background: 'rgba(255,255,255,0.1)', borderRadius: '50%', width: '36px', height: '36px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <User size={18} color="#fff" />
+                  </div>
+                  <div style={{ fontSize: '14px', lineHeight: 1.6, fontStyle: 'italic' }}>{voiceState.partialText}</div>
+                </div>
+              )}
+              {voiceState && voiceState.assistantText && (
+                <div className="chat-message agent" data-testid="voice-assistant-bubble" style={{ display: 'flex', gap: '12px', padding: '16px 20px' }}>
+                  <div style={{ background: 'rgba(var(--accent-rgb), 0.2)', borderRadius: '50%', width: '36px', height: '36px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <Bot size={18} color="#a78bfa" />
+                  </div>
+                  <div style={{ fontSize: '14px', lineHeight: 1.6 }}>{voiceState.assistantText}</div>
+                </div>
+              )}
               <div ref={messagesEndRef} />
             </div>
 
@@ -2757,6 +2822,21 @@ export default function DraggableChatWindow({
             <Check size={14} color="#10b981" />
             <span>{toastMessage}</span>
           </div>
+        )}
+
+        {voiceState && (
+          <VoiceOverlay
+            open
+            active={voiceState.status === 'active'}
+            status={voiceState.status === 'active' ? (voiceState.assistantText ? 'speaking' : 'listening') : voiceState.status}
+            partialText={voiceState.partialText || ''}
+            assistantText={voiceState.assistantText || ''}
+            error={voiceState.error || null}
+            webrtcConfig={voiceState.webrtcConfig || null}
+            audioChunk={voiceAudioChunk}
+            onStop={onVoiceStop}
+            onDismiss={onVoiceDismissError}
+          />
         )}
 
         <SnipOverlay isOpen={isSnipOverlayOpen} onCapture={handleSnipCaptured} onCancel={() => setIsSnipOverlayOpen(false)} />

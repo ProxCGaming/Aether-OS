@@ -400,6 +400,10 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
     task_session_id: str | None = None
     active_downloads: dict[str, asyncio.Task] = {}
     secret_store = SecretStore()
+    # Epic 8, E8-5.1a: this connection's voice session, if any. The
+    # pipeline runs as its own task — the talker lane never queues
+    # behind task_runner (grill Q28/Q29).
+    voice_state: dict[str, Any] = {"pipeline": None, "task": None}
 
     async def _send_validation_result(resp_type, req_id_, pname_, key_, base_url_):
         """Answer a provider Test request from a background task.
@@ -493,6 +497,45 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 ).to_json())
         except Exception:  # Background decoration must never surface as a task error.
             logger.warning("Session title update failed", exc_info=True)
+
+    # ── Voice session (Epic 8, E8-5.1a) ─────────────────────────────
+    # The cascade itself lives in aether_engine.voice.pipeline; this
+    # layer only wires it to the socket: events out, transcript
+    # commits into the session store, teardown on stop/disconnect.
+
+    async def _emit_voice_event(event: Event) -> None:
+        try:
+            await ws.send_text(event.to_json())
+        except Exception:  # a dead socket must not kill the pipeline mid-turn
+            logger.debug("voice event send failed", exc_info=True)
+
+    async def _run_voice_pipeline(pipeline) -> None:
+        try:
+            await pipeline.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # the session is over either way; never wedge the socket
+            logger.warning("voice pipeline ended with an error", exc_info=True)
+
+    async def _stop_voice_session() -> None:
+        """Stop the connection's voice pipeline, if any. Closing the
+        pipeline's transport ends its frame loop; cancelling the run
+        task is the backstop."""
+        pipeline = voice_state.get("pipeline")
+        task = voice_state.get("task")
+        voice_state["pipeline"] = None
+        voice_state["task"] = None
+        if pipeline is not None:
+            try:
+                await pipeline.stop()
+            except Exception:  # teardown is best-effort by definition
+                logger.debug("voice pipeline stop failed", exc_info=True)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str, session_id: str | None = None, *, routing_reason: str = "Default Routing", routing_capabilities: list | None = None, retry_factory=None):
         """Stream one task's events to the client.
@@ -3061,15 +3104,109 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         payload={"success": False, "error": "Path not found"},
                     ).to_json())
 
+            # -----------------------------------------------------------
+            # Voice session (Epic 8, E8-5.1a)
+            # -----------------------------------------------------------
+            elif msg.type == EventType.VOICE_SESSION_START_REQUEST:
+                # Fail-closed start: an unavailable stage (missing
+                # local STT/TTS/VAD/transport) or an unconfigured
+                # chat model answers ok=False with the honest reason
+                # and opens nothing — no device, no model, no peer.
+                await _stop_voice_session()
+                voice_session_id = msg.payload.get("session_id")
+                if not voice_session_id:
+                    voice_session_id = await asyncio.to_thread(
+                        session_store.create_session, "Voice conversation")
+                cfg = engine_state.user_config
+                voice_error: str | None = None
+                voice_pipeline = None
+                webrtc_config = None
+                try:
+                    voice_provider = _create_provider_instance(
+                        cfg.default_provider, cfg.default_model, secret_store)
+                except (ProviderNotFoundError, SecretDecryptionError) as e:
+                    voice_provider = None
+                    voice_error = (
+                        f"voice unavailable: chat model {cfg.default_provider}/"
+                        f"{cfg.default_model} is not configured ({e})")
+                if voice_provider is not None:
+                    from aether_engine.voice import VoiceUnavailableError
+                    from aether_engine.voice.pipeline import (
+                        create_voice_pipeline,
+                        fast_chat_talker,
+                    )
+
+                    async def _persist_voice_user(text: str, _sid: str = voice_session_id) -> None:
+                        try:
+                            await asyncio.to_thread(
+                                session_store.add_message,
+                                _sid, "user", text)
+                        except Exception as e:  # noqa: BLE001 — best-effort persistence, as START_TASK: a save failure must not lose the turn
+                            logger.error(f"Failed to save voice user message: {e}")
+
+                    async def _persist_voice_assistant(text: str, _sid: str = voice_session_id) -> None:
+                        try:
+                            await asyncio.to_thread(
+                                session_store.add_message,
+                                _sid, "assistant", text)
+                        except Exception as e:  # noqa: BLE001 — best-effort persistence, as task completion: a save failure must not lose the turn
+                            logger.error(f"Failed to save voice assistant message: {e}")
+
+                    async def _voice_turn_error(message: str) -> None:
+                        await _emit_voice_event(Event(
+                            type=EventType.ERROR,
+                            payload={"message": f"Voice reply failed: {message}"},
+                        ))
+
+                    voice_pipeline, voice_error = create_voice_pipeline(
+                        session_id=voice_session_id,
+                        talker=fast_chat_talker(
+                            voice_provider, session_id=voice_session_id),
+                        emit=_emit_voice_event,
+                        on_user_final=_persist_voice_user,
+                        on_assistant_final=_persist_voice_assistant,
+                        on_turn_error=_voice_turn_error,
+                    )
+                    if voice_pipeline is not None:
+                        try:
+                            webrtc_config = await voice_pipeline.start()
+                        except VoiceUnavailableError as e:
+                            voice_error = str(e)
+                            voice_pipeline = None
+                if voice_pipeline is not None:
+                    voice_state["pipeline"] = voice_pipeline
+                    voice_state["task"] = asyncio.ensure_future(
+                        _run_voice_pipeline(voice_pipeline))
+                await ws.send_text(Event(
+                    type=EventType.VOICE_SESSION_START_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "ok": voice_pipeline is not None,
+                        "session_id": voice_session_id,
+                        "webrtc_config": webrtc_config,
+                        "error": voice_error,
+                    },
+                ).to_json())
+
+            elif msg.type == EventType.VOICE_SESSION_STOP_REQUEST:
+                await _stop_voice_session()
+                await ws.send_text(Event(
+                    type=EventType.VOICE_SESSION_STOP_RESPONSE,
+                    request_id=req_id,
+                    payload={"ok": True},
+                ).to_json())
+
     except WebSocketDisconnect:
         logger.info(f"Client disconnected from {ip}:{port}")
         if task_runner and not task_runner.done():
             task_runner.cancel()
+        await _stop_voice_session()
         engine_state.audit_logger.log_event("CLIENT_DISCONNECTED", {"client_ip": ip})
     except Exception as e:  # noqa: BLE001 — top-level socket boundary: any session failure is logged and the task is cancelled, never propagated
         logger.error(f"WebSocket session error: {e}")
         if task_runner and not task_runner.done():
             task_runner.cancel()
+        await _stop_voice_session()
 
 # --- Legacy unauthenticated HTTP management routes: REMOVED (Phase 9, A1) ---
 # The seven HTTP routes that used to live here (GET/POST/DELETE/PATCH on

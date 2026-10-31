@@ -181,6 +181,31 @@ class EventType(str, Enum):
     # ANALYZED payload: the full updated media item dict.
     MEDIA_ANALYSIS_PROGRESS = "MEDIA_ANALYSIS_PROGRESS"
     MEDIA_ANALYZED = "MEDIA_ANALYZED"
+    # Epic 8, E8-5.1: streaming voice conversation. START_REQUEST
+    # payload: {"session_id": str | None} — the engine creates a
+    # session when omitted and answers {"ok": bool, "session_id": str,
+    # "webrtc_config": dict | None, "error": str | None}; a refused
+    # start is always ok=False with an honest "voice unavailable: ..."
+    # error and never opens an audio device. STOP_REQUEST payload:
+    # {"session_id": str}; STOP_RESPONSE: {"ok": bool}.
+    # VOICE_PARTIAL_TRANSCRIPT is an outbound push for the user's
+    # speech: {"session_id", "speaker": "user", "text": str,
+    # "is_final": bool} — partials are provisional display only; the
+    # is_final text is the one committed to session history.
+    # VOICE_OUTPUT_CHUNK is an outbound push for the talker's reply:
+    # {"session_id", "speaker": "assistant", "text_delta": str,
+    # "audio_chunk": str | None (base64 audio), "timestamp": float}.
+    # VOICE_BARGE_IN (E8-5.1b behaviour; the contract lands with the
+    # pipeline's interrupt seam in E8-5.1a): {"session_id",
+    # "stopped_at_char": int, "committed_text": str} — committed
+    # history keeps only the assistant words actually heard.
+    VOICE_SESSION_START_REQUEST = "VOICE_SESSION_START_REQUEST"
+    VOICE_SESSION_START_RESPONSE = "VOICE_SESSION_START_RESPONSE"
+    VOICE_SESSION_STOP_REQUEST = "VOICE_SESSION_STOP_REQUEST"
+    VOICE_SESSION_STOP_RESPONSE = "VOICE_SESSION_STOP_RESPONSE"
+    VOICE_PARTIAL_TRANSCRIPT = "VOICE_PARTIAL_TRANSCRIPT"
+    VOICE_OUTPUT_CHUNK = "VOICE_OUTPUT_CHUNK"
+    VOICE_BARGE_IN = "VOICE_BARGE_IN"
     # Epic 1, E1-16: model thinking, streamed apart from the answer
     THINKING = "THINKING"
     # Epic 1, E1-17: agent scratchpad content for the display-only panel
