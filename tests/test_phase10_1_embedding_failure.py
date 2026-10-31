@@ -8,14 +8,13 @@ embed was indistinguishable from "never attempted".
 These tests fail on the pre-fix code (no ``EPISODIC_EMBEDDING_FAILED``
 audit event, 1.0s timeout) and pass after it.
 """
-import asyncio
 import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from aether_engine.memory import episodic
-from aether_engine.memory.episodic import store_episode, _embed_text
+from aether_engine.memory.episodic import _embed_text, store_episode
 
 
 @pytest.fixture
@@ -43,6 +42,9 @@ def isolated_dbs(tmp_path):
         patch("aether_engine.memory.episodic.DB_PATH", test_db),
         patch("aether_engine.memory.episodic.EMBEDDINGS_DB_PATH", test_emb_db),
         patch("aether_engine.memory.episodic._get_conn", side_effect=fake_get_conn),
+        # Epic 9: the embedding circuit breaker is process state; each
+        # simulated-failure test starts from a closed breaker.
+        patch("aether_engine.memory.episodic._embed_unavailable_until", 0.0),
         patch("aether_engine.memory.episodic._audit_logger.log_event") as mock_log,
     ):
         yield test_db, test_emb_db, mock_log
@@ -69,7 +71,7 @@ def _embedding_row(test_emb_db, task_id):
 async def test_embedding_failure_stores_episode_unembedded_and_logs_failure(
     isolated_dbs, caplog
 ):
-    test_db, test_emb_db, mock_log = isolated_dbs
+    _test_db, test_emb_db, mock_log = isolated_dbs
     task_id = "task-embed-fail-1"
 
     with patch(
@@ -107,12 +109,12 @@ async def test_embedding_failure_stores_episode_unembedded_and_logs_failure(
 
 
 async def test_embedding_timeout_stores_episode_unembedded(isolated_dbs):
-    test_db, test_emb_db, mock_log = isolated_dbs
+    _test_db, test_emb_db, mock_log = isolated_dbs
     task_id = "task-embed-timeout-1"
 
     with patch(
         "aether_engine.memory.episodic.litellm.aembedding",
-        new=AsyncMock(side_effect=asyncio.TimeoutError()),
+        new=AsyncMock(side_effect=TimeoutError()),
     ):
         await store_episode(
             task_id, "Do a thing", "Did the thing", ["test"], "SUCCESS",
@@ -130,7 +132,7 @@ async def test_embedding_timeout_stores_episode_unembedded(isolated_dbs):
 async def test_embedding_failure_clears_stale_embedding_row(isolated_dbs):
     """A re-store after a failure must not leave a stale row masquerading
     as a successful embed (the pre-fix code never deleted it)."""
-    test_db, test_emb_db, mock_log = isolated_dbs
+    _test_db, test_emb_db, mock_log = isolated_dbs
     task_id = "task-embed-stale-1"
 
     fake_response = MagicMock()

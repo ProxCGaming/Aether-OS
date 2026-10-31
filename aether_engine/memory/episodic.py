@@ -110,27 +110,68 @@ def init_embeddings_db() -> None:
         """)
         conn.commit()
 
+# Epic 9: embedding-endpoint circuit breaker. When the embedding
+# endpoint is unreachable, each attempt costs LiteLLM retry/backoff
+# (~1s, up to the 30s wait_for bound if the endpoint blackholes), and
+# a single query could pay it 1 + backfill_limit times — measured:
+# a 5.0s first query over 2,000 unembedded episodes with Ollama down.
+# After a connection-class failure, attempts pause for the cooldown
+# and callers degrade to lexical retrieval immediately; the failure
+# itself is still logged distinctly (below), and any success resets
+# the breaker. Arbitrary errors (bad request, auth) do NOT trip it.
+_EMBED_BREAKER_COOLDOWN_S = 60.0
+_embed_unavailable_until: float = 0.0
+
+
+def _embed_breaker_open() -> bool:
+    return time.monotonic() < _embed_unavailable_until
+
+
+def _trip_embed_breaker(error: Exception) -> None:
+    global _embed_unavailable_until
+    if isinstance(error, (ConnectionError, TimeoutError)) or type(error).__name__ in (
+        "APIConnectionError",
+        "ConnectError",
+    ):
+        _embed_unavailable_until = time.monotonic() + _EMBED_BREAKER_COOLDOWN_S
+
+
 async def _embed_text(text: str, task_id: str | None = None,
                     context: str = "store") -> list[float] | None:
     """Embed ``text`` via Ollama. Returns ``None`` on failure — but never
     silently: every failure is logged distinctly (model, error, episode id)
     to the audit log and the module logger. No retry/backfill here
     (Phase 10.3); callers must treat ``None`` as "not embedded"."""
+    global _embed_unavailable_until
+    if _embed_breaker_open():
+        # Degraded mode (Epic 9): the endpoint recently proved
+        # unreachable; skip the doomed attempt. Not audit-logged per
+        # episode — the tripping failure already was.
+        logger.debug("Embedding skipped: endpoint in circuit-breaker cooldown")
+        return None
     litellm = _load_litellm()  # Epic 9: deferred import, bound locally
     try:
         response = await asyncio.wait_for(
             litellm.aembedding(
                 model=EMBEDDING_MODEL,
                 input=[text],
-                api_base="http://127.0.0.1:11434"
+                api_base="http://127.0.0.1:11434",
+                # Single attempt, per this function's contract ("no
+                # retry here" — the system's retry IS the backfill).
+                # LiteLLM's default retries cost ~3.9s of backoff
+                # against a dead endpoint before the breaker can trip.
+                num_retries=0,
             ),
             timeout=EMBEDDING_TIMEOUT_SECONDS
         )
+        _embed_unavailable_until = 0.0
         return response.data[0]["embedding"]
     except TimeoutError as e:
+        _trip_embed_breaker(e)
         _log_embedding_failure(e, task_id, context)
         return None
     except Exception as e:  # noqa: BLE001 — embedding is best-effort: any failure means "not embedded", never a raised error
+        _trip_embed_breaker(e)
         _log_embedding_failure(e, task_id, context)
         return None
 
