@@ -230,4 +230,12 @@ describe('SettingsPanel tool policy dropdown (Phase 10.3 C2)', () => {
     fireEvent.click(screen.getByText('Workspace Indexing'));
     expect(screen.getByRole('heading', { level: 2, name: 'Workspace Indexing' })).toBeInTheDocument();
   });
+
+  it('switches to Usage tab when clicked', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Usage'));
+    expect(screen.getByRole('heading', { level: 2, name: 'Usage & Budget' })).toBeInTheDocument();
+  });
 });

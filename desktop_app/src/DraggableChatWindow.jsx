@@ -6,6 +6,7 @@ import Dropdown from './Dropdown';
 import UndoToast from './components/UndoToast';
 import SnipOverlay from './components/SnipOverlay';
 import CostHeaderPopover, { formatUsd } from './components/CostHeaderPopover';
+import ContextBar, { CompactContextBar } from './components/ContextBar';
 import VoiceOverlay from './components/VoiceOverlay';
 import './chat.css';
 
@@ -1490,6 +1491,9 @@ export default function DraggableChatWindow({
   costTasks = [],
   runningCostTaskIds = [],
   onRequestCostBreakdown = () => {},
+  contextBreakdown = null,
+  onRequestContextBreakdown = () => {},
+  budgetAlert = null,
   browserSession = null,
   onBrowserControl = null,
   voiceState = null,
@@ -1505,6 +1509,8 @@ export default function DraggableChatWindow({
   const exportMenuRef = useRef(null);
   const [showCostPopover, setShowCostPopover] = useState(false);
   const costMenuRef = useRef(null);
+  const [showContextPopover, setShowContextPopover] = useState(false);
+  const contextMenuRef = useRef(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [toastMessage, setToastMessage] = useState('');  // Epic 8, E8-1.3: per-approval argument editor state for the
   // inline approval cards, keyed by message id: { text, error }.
@@ -1664,6 +1670,9 @@ export default function DraggableChatWindow({
         setShowExportMenu(false);
       if (costMenuRef.current && !costMenuRef.current.contains(e.target)) {
         setShowCostPopover(false);
+      }
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target)) {
+        setShowContextPopover(false);
       }
       }
     };
@@ -1937,6 +1946,14 @@ export default function DraggableChatWindow({
             </div>
           </div>
           <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+            {/* Compact default-model context bar (Epic 8, E8-A8.1b) */}
+            <CompactContextBar
+              breakdown={contextBreakdown}
+              onClick={() => {
+                setShowContextPopover((prev) => !prev);
+                if (!showContextPopover) onRequestContextBreakdown();
+              }}
+            />
             {/* Cost Ledger (Epic 8, E8-A8.1a) */}
             <div ref={costMenuRef} style={{ position: 'relative' }}>
               <button
@@ -1971,7 +1988,41 @@ export default function DraggableChatWindow({
                   tasks={costTasks}
                   totalCostUsd={sessionCostUsd}
                   runningTaskIds={runningCostTaskIds}
+                  budgetAlert={budgetAlert}
                 />
+              )}
+            </div>
+            {/* Context Breakdown Popover (Epic 8, E8-A8.1b) */}
+            <div ref={contextMenuRef} style={{ position: 'relative' }}>
+              <button
+                type="button"
+                data-testid="context-header-btn"
+                onClick={() => {
+                  setShowContextPopover((prev) => !prev);
+                  if (!showContextPopover) onRequestContextBreakdown();
+                }}
+                title="Context window breakdown"
+                aria-label="Context window breakdown"
+                style={{
+                  background: showContextPopover ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                  border: showContextPopover ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                  color: '#fff',
+                  cursor: 'pointer',
+                  padding: '6px 10px',
+                  borderRadius: '999px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'all 0.2s',
+                  fontSize: '12px',
+                  fontWeight: 500
+                }}
+              >
+                <Layers size={14} />
+                <span>Context</span>
+              </button>
+              {showContextPopover && (
+                <ContextBar breakdown={contextBreakdown} />
               )}
             </div>
             {/* Artifacts Canvas Toggle (Epic 8, E8-2.1) */}

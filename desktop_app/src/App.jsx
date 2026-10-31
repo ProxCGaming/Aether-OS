@@ -247,6 +247,10 @@ function AppContent() {
   const [lastCostTaskId, setLastCostTaskId] = useState(null);
   const sessionCostUsd = costTasks.reduce((sum, t) => sum + (t.cost_usd || 0), 0);
   const runningCostTaskIds = isThinking && lastCostTaskId ? [lastCostTaskId] : [];
+  // Epic 8, E8-A8.1b: context breakdown and daily budget alerting.
+  const [contextBreakdown, setContextBreakdown] = useState(null);
+  const [dailyBudget, setDailyBudget] = useState(null);
+  const [budgetAlert, setBudgetAlert] = useState(null);
 
   // Epic 8, E8-5.1a: voice mode. voiceState mirrors the engine
   // session — {status: 'starting'|'active'|'error', sessionId,
@@ -349,6 +353,21 @@ function AppContent() {
         schema_version: 1,
         request_id: `session_cost_${target}_${Date.now()}`,
         payload: { session_id: target }
+      }));
+    }
+  }, [wsRef]);
+
+  const requestContextBreakdown = useCallback((sessionId, model) => {
+    const target = sessionId || activeSessionRef.current;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'CONTEXT_BREAKDOWN_REQUEST',
+        schema_version: 1,
+        request_id: `context_breakdown_${target || 'none'}_${Date.now()}`,
+        payload: {
+          session_id: target || '',
+          model: model || null,
+        }
       }));
     }
   }, [wsRef]);
@@ -672,6 +691,7 @@ function AppContent() {
           // now the task's calls are all recorded (also covers the
           // fast-chat path, whose calls publish no live bus events).
           requestCostBreakdown(data.payload?.session_id || activeSessionRef.current);
+          requestContextBreakdown(data.payload?.session_id || activeSessionRef.current);
           // Remove from active tasks for Dashboard
           if (data.payload?.task_id || data.request_id) {
             setActiveTaskIds(prev => { const next = new Set(prev); next.delete(data.payload?.task_id || data.request_id); return next; });
@@ -1281,7 +1301,19 @@ function AppContent() {
               };
               return [updated, ...prev.filter(t => t.task_id !== p.task_id)];
             });
+            requestContextBreakdown(p.session_id);
           }
+        } else if (data.type === 'CONTEXT_BREAKDOWN_RESPONSE') {
+          // Epic 8, E8-A8.1b: segmented context breakdown for header and settings
+          if (data.payload) {
+            setContextBreakdown(data.payload);
+          }
+        } else if (data.type === 'DAILY_BUDGET_SET_RESPONSE') {
+          // Epic 8, E8-A8.1b: daily budget updated
+          setDailyBudget(data.payload?.daily_budget_usd != null ? data.payload.daily_budget_usd : null);
+        } else if (data.type === 'DAILY_BUDGET_EXCEEDED') {
+          // Epic 8, E8-A8.1b: soft alert on daily budget (running task finishes uninterrupted)
+          setBudgetAlert(data.payload);
         } else if (data.type === 'ERROR') {
           setIsThinking(false);
           setChatMessages(prev => {
@@ -1435,12 +1467,13 @@ function AppContent() {
     }
   }, [activeSession, isConnected, wsRef]);
 
-  // Epic 8, E8-A8.1a: sync the cost surfaces when the session changes
+  // Epic 8, E8-A8.1a/b: sync the cost and context surfaces when the session changes
   useEffect(() => {
     setCostTasks([]);
     setLastCostTaskId(null);
     requestCostBreakdown();
-  }, [activeSession, isConnected, requestCostBreakdown]);
+    requestContextBreakdown();
+  }, [activeSession, isConnected, requestCostBreakdown, requestContextBreakdown]);
 
   const handleToggleCanvas = useCallback(() => {
     setIsCanvasOpen(prev => {
@@ -2342,6 +2375,9 @@ function AppContent() {
           costTasks={costTasks}
           runningCostTaskIds={runningCostTaskIds}
           onRequestCostBreakdown={requestCostBreakdown}
+          contextBreakdown={contextBreakdown}
+          onRequestContextBreakdown={requestContextBreakdown}
+          budgetAlert={budgetAlert}
           browserSession={browserSessions[activeSession] || null}
           onBrowserControl={handleBrowserControl}
           voiceState={voiceState}
@@ -2407,6 +2443,8 @@ function AppContent() {
                    providerHealth={providerHealth}
                    localModels={localModels}
                    activeSession={activeSession}
+                   dailyBudget={dailyBudget}
+                   budgetAlert={budgetAlert}
                  />
                </div>
             )}

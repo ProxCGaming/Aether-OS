@@ -127,4 +127,62 @@ describe('App cost ledger header (E8-A8.1a)', () => {
     // Header and popover agree.
     expect(screen.getByTestId('cost-header-total')).toHaveTextContent('$0.0015');
   });
+
+  it('renders persistent compact default-model context bar and opens breakdown popover', async () => {
+    await connectAndRender();
+
+    // Default model compact bar is always present in header
+    const compactBar = screen.getByTestId('compact-context-bar');
+    expect(compactBar).toBeInTheDocument();
+
+    // Push CONTEXT_BREAKDOWN_RESPONSE
+    emitEngineMessage({
+      type: 'CONTEXT_BREAKDOWN_RESPONSE',
+      payload: {
+        model: 'gemini-3.5-flash',
+        context_limit: 1048576,
+        total_tokens: 2500,
+        percent_used: 0.24,
+        components: [
+          { name: 'system prompt', tokens: 500, share: 0.2 },
+          { name: 'memory briefing', tokens: 0, share: 0.0 },
+          { name: 'history', tokens: 1000, share: 0.4 },
+          { name: 'tool outputs', tokens: 500, share: 0.2 },
+          { name: 'scratchpad', tokens: 0, share: 0.0 },
+          { name: 'repo map', tokens: 300, share: 0.12 },
+          { name: 'skill catalogue', tokens: 200, share: 0.08 },
+        ],
+      },
+    });
+
+    expect(compactBar).toHaveTextContent('gemini-3.5-flash');
+    expect(compactBar).toHaveTextContent('0.24%');
+
+    // Click Context button to open popover
+    fireEvent.click(screen.getByTestId('context-header-btn'));
+    expect(screen.getByTestId('context-bar-panel')).toBeInTheDocument();
+    expect(screen.getByTestId('context-segmented-bar')).toBeInTheDocument();
+    expect(screen.getByTestId('context-item-system-prompt')).toHaveTextContent('500');
+    expect(screen.getByTestId('context-item-repo-map')).toHaveTextContent('300');
+  });
+
+  it('displays soft alert notice when daily budget is exceeded', async () => {
+    await connectAndRender();
+
+    // Budget exceeded alert arrives
+    emitEngineMessage({
+      type: 'DAILY_BUDGET_EXCEEDED',
+      payload: {
+        daily_budget_usd: 5.00,
+        today_spend_usd: 6.25,
+      },
+    });
+
+    // Open cost popover
+    fireEvent.click(screen.getByTestId('cost-header-btn'));
+    const alert = screen.getByTestId('budget-exceeded-alert');
+    expect(alert).toBeInTheDocument();
+    expect(alert).toHaveTextContent(/daily budget exceeded/i);
+    expect(alert).toHaveTextContent('$6.25');
+  });
 });

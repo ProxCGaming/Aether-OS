@@ -163,11 +163,22 @@ class EventType(str, Enum):
     # entries. TASK_COST_UPDATE is an outbound push per recorded call:
     # {"session_id", "task_id", "delta_cost_usd",
     # "task_total_cost_usd", "input_tokens", "output_tokens",
-    # "model"}. The context-breakdown and daily-budget contracts
-    # arrive with E8-A8.1b, which owns those surfaces.
+    # "model"}.
     USAGE_LEDGER_QUERY_REQUEST = "USAGE_LEDGER_QUERY_REQUEST"
     USAGE_LEDGER_QUERY_RESPONSE = "USAGE_LEDGER_QUERY_RESPONSE"
     TASK_COST_UPDATE = "TASK_COST_UPDATE"
+    # Epic 8, E8-A8.1b: context breakdown + daily budget alerting.
+    # CONTEXT_BREAKDOWN_REQUEST payload: {"session_id": str, "task_id": str | None, "model": str | None}.
+    # CONTEXT_BREAKDOWN_RESPONSE payload: {"model": str, "context_limit": int, "total_tokens": int,
+    # "percent_used": float, "components": [{"name": str, "tokens": int, "share": float}]}.
+    # DAILY_BUDGET_SET_REQUEST payload: {"daily_budget_usd": float | None}.
+    # DAILY_BUDGET_SET_RESPONSE payload: {"daily_budget_usd": float | None, "ok": bool}.
+    # DAILY_BUDGET_EXCEEDED payload: {"daily_budget_usd": float, "today_spend_usd": float} (soft alert push).
+    CONTEXT_BREAKDOWN_REQUEST = "CONTEXT_BREAKDOWN_REQUEST"
+    CONTEXT_BREAKDOWN_RESPONSE = "CONTEXT_BREAKDOWN_RESPONSE"
+    DAILY_BUDGET_SET_REQUEST = "DAILY_BUDGET_SET_REQUEST"
+    DAILY_BUDGET_SET_RESPONSE = "DAILY_BUDGET_SET_RESPONSE"
+    DAILY_BUDGET_EXCEEDED = "DAILY_BUDGET_EXCEEDED"
     # Epic 8, E8-4.2: Media index + Library section
     MEDIA_LIST_REQUEST = "MEDIA_LIST_REQUEST"
     MEDIA_LIST_RESPONSE = "MEDIA_LIST_RESPONSE"

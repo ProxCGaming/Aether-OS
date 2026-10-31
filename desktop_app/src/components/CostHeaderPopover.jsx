@@ -1,4 +1,5 @@
 import React from 'react';
+import { AlertTriangle } from 'lucide-react';
 
 // Epic 8, E8-A8.1a: live session-cost popover for the chat header.
 //
@@ -70,7 +71,7 @@ const rowStyle = {
   gap: '12px',
 };
 
-export default function CostHeaderPopover({ tasks = [], totalCostUsd = 0, runningTaskIds = [] }) {
+export default function CostHeaderPopover({ tasks = [], totalCostUsd = 0, runningTaskIds = [], budgetAlert = null }) {
   const running = new Set(runningTaskIds || []);
   return (
     <div
@@ -99,6 +100,28 @@ export default function CostHeaderPopover({ tasks = [], totalCostUsd = 0, runnin
         <span>Session cost</span>
         <span data-testid="cost-popover-total">{formatUsd(totalCostUsd)}</span>
       </div>
+      {budgetAlert && (
+        <div
+          data-testid="budget-exceeded-alert"
+          style={{
+            background: 'rgba(245, 158, 11, 0.15)',
+            border: '1px solid rgba(245, 158, 11, 0.35)',
+            borderRadius: '6px',
+            padding: '6px 8px',
+            marginBottom: '8px',
+            color: '#fbbf24',
+            fontSize: '11px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+          }}
+        >
+          <AlertTriangle size={14} />
+          <span>
+            Daily budget exceeded ({formatUsd(budgetAlert.today_spend_usd || 0)} / {formatUsd(budgetAlert.daily_budget_usd || 0)}) — running tasks finish uninterrupted
+          </span>
+        </div>
+      )}
       {tasks.length === 0 && (
         <div style={{ color: 'rgba(255,255,255,0.55)', padding: '4px 0' }}>
           No model calls recorded yet.

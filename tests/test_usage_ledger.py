@@ -373,6 +373,68 @@ class TestContracts:
         assert EventType.USAGE_LEDGER_QUERY_REQUEST.value == "USAGE_LEDGER_QUERY_REQUEST"
         assert EventType.USAGE_LEDGER_QUERY_RESPONSE.value == "USAGE_LEDGER_QUERY_RESPONSE"
         assert EventType.TASK_COST_UPDATE.value == "TASK_COST_UPDATE"
+        assert EventType.CONTEXT_BREAKDOWN_REQUEST.value == "CONTEXT_BREAKDOWN_REQUEST"
+        assert EventType.CONTEXT_BREAKDOWN_RESPONSE.value == "CONTEXT_BREAKDOWN_RESPONSE"
+        assert EventType.DAILY_BUDGET_SET_REQUEST.value == "DAILY_BUDGET_SET_REQUEST"
+        assert EventType.DAILY_BUDGET_SET_RESPONSE.value == "DAILY_BUDGET_SET_RESPONSE"
+        assert EventType.DAILY_BUDGET_EXCEEDED.value == "DAILY_BUDGET_EXCEEDED"
+
+    def test_today_total_and_soft_budget_alert(self, ledger, monkeypatch):
+        # Record calls today
+        ledger.record_call(
+            model_name="gemini-3.5-flash",
+            provider_name="google_gemini",
+            input_tokens=1000,
+            output_tokens=500,
+            cost_usd=1.50,
+            session_id="s_budget",
+            task_id="t_budget",
+        )
+        assert ledger.today_total() == pytest.approx(1.50)
+
+        # Event bus subscriber
+        bus = EventBus()
+        queue = asyncio.Queue()
+        bus.subscribe("t_budget_2", queue)
+        monkeypatch.setattr(ledger_module, "event_bus", bus)
+
+        # Configure daily budget of $2.00
+        from aether_engine.config import UserConfig
+        cfg = UserConfig(daily_budget_usd=2.00)
+        monkeypatch.setattr("aether_engine.config.load_config", lambda: cfg)
+
+        # Call with $0.40 does not exceed $2.00 budget (total $1.90)
+        ledger_module.check_daily_budget(
+            ledger=ledger,
+            task_id="t_budget_2",
+            daily_budget_usd=2.00,
+        )
+        assert queue.empty()
+
+        # Another call with $0.20 brings today's total to $2.10, crossing budget
+        ledger.record_call(
+            model_name="gemini-3.5-flash",
+            provider_name="google_gemini",
+            input_tokens=500,
+            output_tokens=200,
+            cost_usd=0.60,
+            session_id="s_budget",
+            task_id="t_budget_2",
+        )
+        assert ledger.today_total() == pytest.approx(2.10)
+
+        # Soft alert triggers: publishes DAILY_BUDGET_EXCEEDED, does NOT raise any exception
+        exceeded = ledger_module.check_daily_budget(
+            ledger=ledger,
+            task_id="t_budget_2",
+            daily_budget_usd=2.00,
+        )
+        assert exceeded is True
+        assert not queue.empty()
+        ev = queue.get_nowait()
+        assert ev.type == EventType.DAILY_BUDGET_EXCEEDED
+        assert ev.payload["daily_budget_usd"] == 2.00
+        assert ev.payload["today_spend_usd"] == pytest.approx(2.10)
 
     def test_query_response_shape(self, ledger):
         ledger.record_call(model_name="gemini-3.5-flash", provider_name="google_gemini",

@@ -1900,6 +1900,54 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     payload=result,
                 ).to_json())
 
+            elif msg.type == EventType.CONTEXT_BREAKDOWN_REQUEST:
+                # Epic 8, E8-A8.1b: segmented context breakdown for header and settings
+                from aether_engine.cost.context_breakdown import get_context_breakdown
+
+                session_id = msg.payload.get("session_id", "")
+                task_id = msg.payload.get("task_id")
+                model = msg.payload.get("model") or getattr(engine_state, "active_model", None)
+
+                result = await asyncio.to_thread(
+                    get_context_breakdown,
+                    session_id=session_id,
+                    task_id=task_id,
+                    model=model,
+                )
+                await ws.send_text(Event(
+                    type=EventType.CONTEXT_BREAKDOWN_RESPONSE,
+                    request_id=req_id,
+                    payload=result,
+                ).to_json())
+
+            elif msg.type == EventType.DAILY_BUDGET_SET_REQUEST:
+                # Epic 8, E8-A8.1b: daily budget update with soft alert
+                from aether_engine.cost.ledger import get_usage_ledger
+
+                raw_budget = msg.payload.get("daily_budget_usd")
+                budget = float(raw_budget) if raw_budget is not None else None
+                if budget is not None and budget <= 0:
+                    budget = None
+                engine_state.user_config.daily_budget_usd = budget
+                save_config(engine_state.user_config)
+
+                await ws.send_text(Event(
+                    type=EventType.DAILY_BUDGET_SET_RESPONSE,
+                    request_id=req_id,
+                    payload={"daily_budget_usd": budget, "ok": True},
+                ).to_json())
+
+                if budget is not None and budget > 0:
+                    today_spend = get_usage_ledger().today_total()
+                    if today_spend > budget:
+                        await ws.send_text(Event(
+                            type=EventType.DAILY_BUDGET_EXCEEDED,
+                            payload={
+                                "daily_budget_usd": float(budget),
+                                "today_spend_usd": float(today_spend),
+                            },
+                        ).to_json())
+
             elif msg.type == EventType.BROWSER_TASK_PAUSE_REQUEST:
                 # Epic 8, E8-6.1: browser control channel — pause /
                 # resume / take-control / return-control / stop for

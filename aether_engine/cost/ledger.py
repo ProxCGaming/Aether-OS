@@ -290,6 +290,20 @@ class UsageLedger:
             ).fetchone()
         return float(row[0]) if row else 0.0
 
+    def today_total(self) -> float:
+        """Sum of cost_usd for calls recorded today (since local midnight)."""
+        import datetime
+        now = datetime.datetime.now()
+        midnight = datetime.datetime(now.year, now.month, now.day)
+        start_ts = int(midnight.timestamp())
+        self.init_db()
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_ledger WHERE timestamp >= ?",
+                (start_ts,),
+            ).fetchone()
+        return float(row[0]) if row else 0.0
+
 
 GLOBAL_USAGE_LEDGER: UsageLedger | None = None
 
@@ -299,6 +313,51 @@ def get_usage_ledger() -> UsageLedger:
     if GLOBAL_USAGE_LEDGER is None:
         GLOBAL_USAGE_LEDGER = UsageLedger()
     return GLOBAL_USAGE_LEDGER
+
+
+def check_daily_budget(
+    *,
+    ledger: UsageLedger | None = None,
+    task_id: str | None = None,
+    daily_budget_usd: float | None = None,
+) -> bool:
+    """Check if today's spend exceeds the configured daily budget.
+
+    If exceeded, publishes DAILY_BUDGET_EXCEEDED on the event bus for task_id
+    (if task_id provided). This is a soft alert ONLY — never raises, never
+    interrupts running tasks. Returns True if exceeded, False otherwise.
+    """
+    led = ledger or get_usage_ledger()
+    if daily_budget_usd is None:
+        try:
+            from aether_engine.config import load_config
+            cfg = load_config()
+            daily_budget_usd = getattr(cfg, "daily_budget_usd", None)
+        except Exception:  # noqa: BLE001
+            daily_budget_usd = None
+
+    if daily_budget_usd is None or daily_budget_usd <= 0:
+        return False
+
+    today_spend = led.today_total()
+    if today_spend > daily_budget_usd:
+        if task_id:
+            try:
+                event_bus.publish(
+                    task_id,
+                    Event(
+                        type=EventType.DAILY_BUDGET_EXCEEDED,
+                        request_id=task_id,
+                        payload={
+                            "daily_budget_usd": float(daily_budget_usd),
+                            "today_spend_usd": float(today_spend),
+                        },
+                    ),
+                )
+            except Exception:
+                logger.debug("Failed to publish DAILY_BUDGET_EXCEEDED on event_bus", exc_info=True)
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +450,7 @@ def record_provider_call(
                     },
                 ),
             )
+            check_daily_budget(ledger=ledger, task_id=task_id)
         return row
     except Exception:  # recording is observational; it must never break a model call.
         logger.exception("Failed to record provider call in usage ledger")
