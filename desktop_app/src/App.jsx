@@ -234,6 +234,9 @@ function AppContent() {
   const [canvasArtifacts, setCanvasArtifacts] = useState([]);
   const [selectedArtifactId, setSelectedArtifactId] = useState(null);
   const [activeArtifactContent, setActiveArtifactContent] = useState(null);
+  // Epic 8, E8-2.2: latest dev-server probe result for the canvas
+  // Preview tab (DEV_SERVER_DETECT_RESPONSE payload, or null).
+  const [devServerInfo, setDevServerInfo] = useState(null);
   const importFileInputRef = useRef(null);
   // Epic 8, E8-A8.1a: cost ledger surfaces. costTasks is the
   // popover's per-task/per-model shape, built from ledger rows
@@ -1012,6 +1015,9 @@ function AppContent() {
           }
         } else if (data.type === 'ARTIFACT_GET_RESPONSE') {
           setActiveArtifactContent(data.payload);
+        } else if (data.type === 'DEV_SERVER_DETECT_RESPONSE') {
+          // Epic 8, E8-2.2: dev-server probe result for the Preview tab
+          setDevServerInfo(data.payload || null);
         } else if (data.type === 'USAGE_LEDGER_QUERY_RESPONSE') {
           // Epic 8, E8-A8.1a: rebuild the cost surfaces from the
           // ledger rows themselves, so the header total and the
@@ -1179,6 +1185,9 @@ function AppContent() {
 
   // Epic 8, E8-2.1: sync artifacts when active session changes
   useEffect(() => {
+    // Epic 8, E8-2.2: a probe result belongs to the previous
+    // session's project — never carry it across sessions.
+    setDevServerInfo(null);
     if (activeSession && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'ARTIFACT_LIST_REQUEST',
@@ -1248,6 +1257,20 @@ function AppContent() {
       }));
     }
   }, [activeSession, wsRef]);
+
+  // Epic 8, E8-2.2: ask the engine to probe for a dev server in the
+  // artifact's project directory; the answer lands in devServerInfo
+  // via DEV_SERVER_DETECT_RESPONSE.
+  const handleDetectDevServer = useCallback(({ workspace_root = null, project_path = null } = {}) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'DEV_SERVER_DETECT_REQUEST',
+        schema_version: 1,
+        request_id: `dev_server_detect_${Date.now()}`,
+        payload: { workspace_root, project_path }
+      }));
+    }
+  }, [wsRef]);
 
   const handleOpenArtifact = useCallback((pathOrTitle) => {
     setIsCanvasOpen(true);
@@ -2114,6 +2137,8 @@ function AppContent() {
           selectedArtifactId={selectedArtifactId}
           onSelectArtifact={handleSelectArtifact}
           activeArtifactContent={activeArtifactContent}
+          devServerInfo={devServerInfo}
+          onDetectDevServer={handleDetectDevServer}
         />
       )}
 

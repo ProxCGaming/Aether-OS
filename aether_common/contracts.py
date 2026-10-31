@@ -148,6 +148,14 @@ class EventType(str, Enum):
     ARTIFACT_GET_REQUEST = "ARTIFACT_GET_REQUEST"
     ARTIFACT_GET_RESPONSE = "ARTIFACT_GET_RESPONSE"
     ARTIFACT_RECORDED = "ARTIFACT_RECORDED"
+    # Epic 8, E8-2.2: Canvas B - project preview dev-server detection.
+    # DEV_SERVER_DETECT_REQUEST payload: {"workspace_root": str | None,
+    # "project_path": str | None}; the engine probes the candidate
+    # localhost ports (5173, 3000, 8000, 8080) and reads package.json.
+    # DEV_SERVER_DETECT_RESPONSE payload: {"running": bool,
+    # "port": int | None, "url": str | None, "framework": str | None}.
+    DEV_SERVER_DETECT_REQUEST = "DEV_SERVER_DETECT_REQUEST"
+    DEV_SERVER_DETECT_RESPONSE = "DEV_SERVER_DETECT_RESPONSE"
     # Epic 8, E8-A8.1a: cost ledger query + live per-call cost push.
     # USAGE_LEDGER_QUERY_RESPONSE payload: {"entries": [...],
     # "totals": {"total_cost_usd", "input_tokens", "output_tokens",

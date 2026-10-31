@@ -1715,6 +1715,22 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     payload=result,
                 ).to_json())
 
+            elif msg.type == EventType.DEV_SERVER_DETECT_REQUEST:
+                # Epic 8, E8-2.2: probe for a running dev server so the
+                # canvas Preview tab can load it in its sandboxed frame.
+                from aether_engine.artifacts.dev_server import detect_dev_server
+
+                result = await asyncio.to_thread(
+                    detect_dev_server,
+                    workspace_root=msg.payload.get("workspace_root"),
+                    project_path=msg.payload.get("project_path"),
+                )
+                await ws.send_text(Event(
+                    type=EventType.DEV_SERVER_DETECT_RESPONSE,
+                    request_id=req_id,
+                    payload=result,
+                ).to_json())
+
             elif msg.type == EventType.USAGE_LEDGER_QUERY_REQUEST:
                 # Epic 8, E8-A8.1a: the header cost popover and (with
                 # E8-A8.1b) Settings → Usage read the ledger here.

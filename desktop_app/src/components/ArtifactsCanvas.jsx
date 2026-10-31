@@ -1,10 +1,26 @@
-import React, { useMemo, useState } from 'react';
-import { X, Copy, Check, Download, ExternalLink, FileCode, FileText, GitCommit, Image, Database, AlertCircle } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { X, Copy, Check, Download, ExternalLink, FileCode, FileText, GitCommit, Image, Database, AlertCircle, Eye } from 'lucide-react';
 import CodeRenderer from './renderers/CodeRenderer';
 import MarkdownRenderer from './renderers/MarkdownRenderer';
 import DiffRenderer from './renderers/DiffRenderer';
 import DataRenderer from './renderers/DataRenderer';
 import ImageViewer from './renderers/ImageViewer';
+import ProjectPreview from './renderers/ProjectPreview';
+
+// Epic 8, E8-2.2: web artifacts (HTML pages) get a Preview tab beside
+// the Code tab; everything else stays code-only.
+const isWebArtifact = (art) => {
+  if (!art) return false;
+  if (art.kind === 'html') return true;
+  const name = (art.file_path || art.title || '').toLowerCase();
+  return /\.(html|htm)$/.test(name);
+};
+
+const projectDirOf = (filePath) => {
+  if (!filePath) return null;
+  const dir = filePath.replace(/[/\\][^/\\]*$/, '');
+  return dir || null;
+};
 
 export default function ArtifactsCanvas({
   isOpen = false,
@@ -13,9 +29,12 @@ export default function ArtifactsCanvas({
   selectedArtifactId = null,
   onSelectArtifact = () => {},
   activeArtifactContent = null,
-  _isLoading = false
+  _isLoading = false,
+  devServerInfo = null,
+  onDetectDevServer = null
 }) {
   const [copied, setCopied] = useState(false);
+  const [viewerTab, setViewerTab] = useState('code');
 
   // Group artifacts by task_id and sort tasks newest first
   const taskGroups = useMemo(() => {
@@ -41,9 +60,26 @@ export default function ArtifactsCanvas({
     return Array.from(groups.values()).sort((a, b) => b.latestTime - a.latestTime);
   }, [artifacts]);
 
-  if (!isOpen) return null;
-
   const currentArtifact = activeArtifactContent?.artifact || artifacts.find(a => a.id === selectedArtifactId);
+  const currentArtifactId = currentArtifact?.id || null;
+
+  // E8-2.2: switching artifacts always lands back on the Code tab —
+  // the preview is an on-demand view, never the default.
+  useEffect(() => {
+    setViewerTab('code');
+  }, [currentArtifactId]);
+
+  // E8-2.2: opening the Preview tab asks the engine to probe for a
+  // dev server in the artifact's project directory. Deps are kept
+  // narrow on purpose: detection fires once per tab-open/artifact,
+  // not on every artifact-list refresh.
+  useEffect(() => {
+    if (viewerTab !== 'preview' || !onDetectDevServer || !isWebArtifact(currentArtifact)) return;
+    onDetectDevServer({ workspace_root: null, project_path: projectDirOf(currentArtifact.file_path) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewerTab, currentArtifactId]);
+
+  if (!isOpen) return null;
 
   const handleCopy = () => {
     const textToCopy = activeArtifactContent?.content || activeArtifactContent?.diff || '';
@@ -153,6 +189,18 @@ export default function ArtifactsCanvas({
     }
 
     return <CodeRenderer content={content} fileName={currentArtifact.title} />;
+  };
+
+  // E8-2.2: only web artifacts get viewer tabs, and never for a file
+  // that has vanished (the missing placeholder owns that state).
+  const showViewerTabs = Boolean(
+    currentArtifact && isWebArtifact(currentArtifact) && activeArtifactContent?.exists !== false
+  );
+
+  const requestDetection = () => {
+    if (onDetectDevServer && currentArtifact) {
+      onDetectDevServer({ workspace_root: null, project_path: projectDirOf(currentArtifact.file_path) });
+    }
   };
 
   const getArtifactIcon = (art) => {
@@ -440,9 +488,58 @@ export default function ArtifactsCanvas({
             </div>
           )}
 
+          {/* E8-2.2: Code / Preview tabs — web artifacts only */}
+          {showViewerTabs && (
+            <div
+              data-testid="artifact-viewer-tabs"
+              style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}
+            >
+              {[
+                { id: 'code', label: 'Code', icon: <FileCode size={12} /> },
+                { id: 'preview', label: 'Preview', icon: <Eye size={12} /> },
+              ].map((tab) => {
+                const isActive = viewerTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    data-testid={`artifact-tab-${tab.id}`}
+                    onClick={() => setViewerTab(tab.id)}
+                    style={{
+                      background: isActive ? 'rgba(167, 139, 250, 0.18)' : 'rgba(255, 255, 255, 0.05)',
+                      border: isActive ? '1px solid rgba(167, 139, 250, 0.35)' : '1px solid rgba(255, 255, 255, 0.08)',
+                      borderRadius: '6px',
+                      color: isActive ? '#fff' : '#94a3b8',
+                      padding: '4px 10px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      fontSize: '11px',
+                      fontWeight: isActive ? 600 : 400,
+                    }}
+                  >
+                    {tab.icon}
+                    <span>{tab.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           {/* Active Renderer */}
           <div style={{ flex: 1, overflow: 'hidden' }}>
-            {renderViewer()}
+            {viewerTab === 'preview' && showViewerTabs ? (
+              <ProjectPreview
+                key={currentArtifact.id}
+                artifact={currentArtifact}
+                content={currentArtifact.kind === 'diff' ? null : (activeArtifactContent?.content || null)}
+                devServer={devServerInfo}
+                onDetect={requestDetection}
+              />
+            ) : (
+              renderViewer()
+            )}
           </div>
         </div>
       </div>
