@@ -61,6 +61,9 @@ async def test_plan_mode_offers_only_read_only_tools(monkeypatch):
     await planner_module.planner_node(_state(plan_mode=True), _config(provider, registry))
     names = {t["function"]["name"] for t in provider.seen_tools}
     assert names == {
+        # Epic 8, E8-6.1: browser_extract is READ_ONLY page
+        # reading, so plan mode offers it like the other readers.
+        "browser_extract",
         "fetch_url",
         "find_files",
         "get_current_time",

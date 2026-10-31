@@ -262,6 +262,21 @@ function AppContent() {
       }));
     }
   }, [wsRef]);
+
+  // Epic 8, E8-6.1: dedicated-profile agent browser session state
+  const [browserSessions, setBrowserSessions] = useState({});
+  const handleBrowserControl = useCallback((action) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({
+      type: 'BROWSER_TASK_PAUSE_REQUEST',
+      schema_version: 1,
+      request_id: `browser_control_${Date.now()}`,
+      payload: {
+        session_id: activeSessionRef.current,
+        action: action,
+      }
+    }));
+  }, [wsRef]);
   
   useEffect(() => {
     if (isFloating) {
@@ -782,6 +797,34 @@ function AppContent() {
             }
           } else {
             clearRewindUndo();
+          }
+        } else if (data.type === 'BROWSER_TASK_PAUSE_RESPONSE') {
+          // Epic 8, E8-6.1: dedicated-profile agent browser control response
+          const payload = data.payload || {};
+          const sid = payload.session_id || activeSessionRef.current;
+          if (sid) {
+            setBrowserSessions(prev => ({
+              ...prev,
+              [sid]: {
+                controlState: payload.control_state,
+                currentUrl: payload.current_url || '',
+                challenge: payload.challenge || null,
+              }
+            }));
+          }
+        } else if (data.type === 'BROWSER_CHALLENGE_DETECTED') {
+          // Epic 8, E8-6.1: CAPTCHA / 2FA park notification — agent never solves challenges
+          const payload = data.payload || {};
+          const sid = payload.session_id || activeSessionRef.current;
+          if (sid) {
+            setBrowserSessions(prev => ({
+              ...prev,
+              [sid]: {
+                controlState: 'waiting_user',
+                currentUrl: payload.url || '',
+                challenge: { challenge: payload.challenge, url: payload.url },
+              }
+            }));
           }
         } else if (data.type === 'FALLBACK_STARTED') {
           setChatMessages(prev => [...prev, { 
@@ -2117,6 +2160,8 @@ function AppContent() {
           costTasks={costTasks}
           runningCostTaskIds={runningCostTaskIds}
           onRequestCostBreakdown={requestCostBreakdown}
+          browserSession={browserSessions[activeSession] || null}
+          onBrowserControl={handleBrowserControl}
         />
       )}
 

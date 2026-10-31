@@ -300,6 +300,25 @@ class EventType(str, Enum):
     WORKSPACE_INDEX_STATUS_RESPONSE = "WORKSPACE_INDEX_STATUS_RESPONSE"
     WORKSPACE_INDEX_PROGRESS = "WORKSPACE_INDEX_PROGRESS"
 
+    # Browser core (Epic 8, E8-6.1): dedicated-profile agent
+    # browser. BROWSER_TASK_PAUSE_REQUEST is the browser control
+    # channel — payload {"session_id": str | None, "action":
+    # "pause" | "resume" | "take_control" | "return_control" |
+    # "stop"} (session_id omitted targets the active session).
+    # BROWSER_TASK_PAUSE_RESPONSE payload: {"success": bool,
+    # "session_id": str | None, "control_state": "agent" |
+    # "paused" | "user" | "waiting_user" | "stopped" | "none",
+    # "current_url": str, "challenge": dict | None,
+    # "error": str (only when success is False)}.
+    # BROWSER_CHALLENGE_DETECTED is an outbound push when a CAPTCHA
+    # or 2FA page parks the agent: payload {"session_id": str,
+    # "task_id": str | None, "url": str, "challenge": "captcha" |
+    # "two_factor"} — the agent waits for the user and never
+    # attempts the challenge itself.
+    BROWSER_TASK_PAUSE_REQUEST = "BROWSER_TASK_PAUSE_REQUEST"
+    BROWSER_TASK_PAUSE_RESPONSE = "BROWSER_TASK_PAUSE_RESPONSE"
+    BROWSER_CHALLENGE_DETECTED = "BROWSER_CHALLENGE_DETECTED"
+
     # Agent Management
     AGENT_LIST_REQUEST = "AGENT_LIST_REQUEST"
     AGENT_LIST_RESPONSE = "AGENT_LIST_RESPONSE"

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download, MoreHorizontal, CircleDollarSign } from 'lucide-react';
+import { Globe, Play, Pause, Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download, MoreHorizontal, CircleDollarSign } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
 import UndoToast from './components/UndoToast';
@@ -1161,6 +1161,296 @@ function ContextMenu({ menu, onClose, onShowToast, setInput }) {
   );
 }
 
+// Epic 8, E8-6.1: browser task card for the dedicated agent browser
+export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
+  const { controlState = 'agent', currentUrl = '', challenge = null } = session || {};
+
+  const isStopped = controlState === 'stopped';
+  const isPaused = controlState === 'paused';
+  const isUserControl = controlState === 'user';
+  const isWaitingUser = controlState === 'waiting_user';
+
+  const challengeType = challenge?.challenge ? String(challenge.challenge).toLowerCase() : '';
+  const challengeDisplay = challengeType === 'two_factor' ? 'Two-factor' : (challengeType || 'verification');
+
+  return (
+    <div
+      data-testid="browser-task-card"
+      style={{
+        margin: '12px 16px 0 16px',
+        borderRadius: '14px',
+        border: '1px solid rgba(59, 130, 246, 0.25)',
+        background: 'rgba(15, 23, 42, 0.85)',
+        backdropFilter: 'blur(16px)',
+        padding: '12px 16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '10px',
+        boxShadow: '0 4px 20px rgba(0, 0, 0, 0.25)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+          <div style={{
+            width: '28px',
+            height: '28px',
+            borderRadius: '8px',
+            background: 'rgba(59, 130, 246, 0.15)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#60a5fa',
+            flexShrink: 0,
+          }}>
+            <Globe size={16} />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <span style={{ fontSize: '13px', fontWeight: 600, color: '#f1f5f9' }}>
+              Agent Browser (Dedicated Profile)
+            </span>
+            {currentUrl ? (
+              <span
+                style={{
+                  fontSize: '11px',
+                  color: '#94a3b8',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                title={currentUrl}
+              >
+                {currentUrl}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        <div style={{
+          fontSize: '11px',
+          fontWeight: 500,
+          padding: '2px 8px',
+          borderRadius: '999px',
+          background: isWaitingUser
+            ? 'rgba(245, 158, 11, 0.15)'
+            : isUserControl
+            ? 'rgba(168, 85, 247, 0.15)'
+            : isPaused
+            ? 'rgba(234, 179, 8, 0.15)'
+            : isStopped
+            ? 'rgba(239, 68, 68, 0.15)'
+            : 'rgba(59, 130, 246, 0.15)',
+          color: isWaitingUser
+            ? '#fbbf24'
+            : isUserControl
+            ? '#c084fc'
+            : isPaused
+            ? '#fde047'
+            : isStopped
+            ? '#f87171'
+            : '#60a5fa',
+          border: `1px solid ${
+            isWaitingUser
+              ? 'rgba(245, 158, 11, 0.3)'
+              : isUserControl
+              ? 'rgba(168, 85, 247, 0.3)'
+              : isPaused
+              ? 'rgba(234, 179, 8, 0.3)'
+              : isStopped
+              ? 'rgba(239, 68, 68, 0.3)'
+              : 'rgba(59, 130, 246, 0.3)'
+          }`,
+        }}>
+          {isWaitingUser
+            ? 'Parked'
+            : isUserControl
+            ? 'User in control'
+            : isPaused
+            ? 'Paused'
+            : isStopped
+            ? 'Stopped'
+            : 'Active'}
+        </div>
+      </div>
+
+      {isWaitingUser && (
+        <div style={{
+          background: 'rgba(245, 158, 11, 0.1)',
+          border: '1px solid rgba(245, 158, 11, 0.25)',
+          borderRadius: '8px',
+          padding: '8px 12px',
+          fontSize: '12px',
+          color: '#fef3c7',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+        }}>
+          <ShieldAlert size={16} color="#fbbf24" style={{ flexShrink: 0 }} />
+          <span>
+            Waiting for you: {challengeDisplay} challenge detected in browser window. The agent never solves challenges. Please complete it to continue.
+          </span>
+        </div>
+      )}
+
+      {isUserControl && (
+        <div style={{
+          background: 'rgba(168, 85, 247, 0.1)',
+          border: '1px solid rgba(168, 85, 247, 0.25)',
+          borderRadius: '8px',
+          padding: '8px 12px',
+          fontSize: '12px',
+          color: '#f3e8ff',
+        }}>
+          You have control of the browser window. The agent is waiting for you to return control.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+        {isPaused ? (
+          <button
+            type="button"
+            data-testid="browser-resume-btn"
+            onClick={() => onControl('resume')}
+            style={{
+              background: 'rgba(59, 130, 246, 0.2)',
+              border: '1px solid rgba(59, 130, 246, 0.4)',
+              color: '#93c5fd',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <Play size={13} />
+            <span>Resume</span>
+          </button>
+        ) : !isWaitingUser && !isUserControl ? (
+          <button
+            type="button"
+            data-testid="browser-pause-btn"
+            disabled={isStopped}
+            onClick={() => onControl('pause')}
+            style={{
+              background: isStopped ? 'rgba(255, 255, 255, 0.05)' : 'rgba(234, 179, 8, 0.15)',
+              border: isStopped ? '1px solid rgba(255, 255, 255, 0.1)' : '1px solid rgba(234, 179, 8, 0.35)',
+              color: isStopped ? '#64748b' : '#fde047',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: isStopped ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <Pause size={13} />
+            <span>Pause</span>
+          </button>
+        ) : null}
+
+        {isUserControl ? (
+          <button
+            type="button"
+            data-testid="browser-return-control-btn"
+            onClick={() => onControl('return_control')}
+            style={{
+              background: 'rgba(168, 85, 247, 0.2)',
+              border: '1px solid rgba(168, 85, 247, 0.4)',
+              color: '#d8b4fe',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <Bot size={13} />
+            <span>Return Control</span>
+          </button>
+        ) : !isWaitingUser ? (
+          <button
+            type="button"
+            data-testid="browser-take-control-btn"
+            disabled={isStopped}
+            onClick={() => onControl('take_control')}
+            style={{
+              background: isStopped ? 'rgba(255, 255, 255, 0.05)' : 'rgba(168, 85, 247, 0.15)',
+              border: isStopped ? '1px solid rgba(255, 255, 255, 0.1)' : '1px solid rgba(168, 85, 247, 0.35)',
+              color: isStopped ? '#64748b' : '#d8b4fe',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: isStopped ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <User size={13} />
+            <span>Take Control</span>
+          </button>
+        ) : null}
+
+        {isWaitingUser && (
+          <button
+            type="button"
+            data-testid="browser-resume-btn"
+            onClick={() => onControl('resume')}
+            style={{
+              background: 'rgba(59, 130, 246, 0.2)',
+              border: '1px solid rgba(59, 130, 246, 0.4)',
+              color: '#93c5fd',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <Play size={13} />
+            <span>Resume</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          data-testid="browser-stop-btn"
+          disabled={isStopped}
+          onClick={() => onControl('stop')}
+          style={{
+            background: isStopped ? 'rgba(255, 255, 255, 0.05)' : 'rgba(239, 68, 68, 0.15)',
+            border: isStopped ? '1px solid rgba(255, 255, 255, 0.1)' : '1px solid rgba(239, 68, 68, 0.35)',
+            color: isStopped ? '#64748b' : '#fca5a5',
+            borderRadius: '8px',
+            padding: '5px 12px',
+            fontSize: '12px',
+            fontWeight: 500,
+            cursor: isStopped ? 'not-allowed' : 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+          }}
+        >
+          <Square size={13} />
+          <span>Stop</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
 export default function DraggableChatWindow({ 
   messages, 
   onSendMessage, 
@@ -1198,7 +1488,9 @@ export default function DraggableChatWindow({
   sessionCostUsd = 0,
   costTasks = [],
   runningCostTaskIds = [],
-  onRequestCostBreakdown = () => {}
+  onRequestCostBreakdown = () => {},
+  browserSession = null,
+  onBrowserControl = null
 }) {
   const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
@@ -1216,6 +1508,62 @@ export default function DraggableChatWindow({
   const [openStepMenu, setOpenStepMenu] = useState(null);
   const [attachments, setAttachments] = useState(initialAttachments || []);
   const [isSnipOverlayOpen, setIsSnipOverlayOpen] = useState(false);
+
+  // Epic 8, E8-6.1: agent-browser control and activity tracking
+  const [localControlState, setLocalControlState] = useState(null);
+  const lastBrowserStateRef = useRef(browserSession?.controlState);
+  const lastBrowserChallengeRef = useRef(browserSession?.challenge);
+
+  if (lastBrowserStateRef.current !== browserSession?.controlState ||
+      lastBrowserChallengeRef.current !== browserSession?.challenge) {
+    lastBrowserStateRef.current = browserSession?.controlState;
+    lastBrowserChallengeRef.current = browserSession?.challenge;
+    if (localControlState !== null) {
+      setLocalControlState(null);
+    }
+  }
+
+  const browserActivity = React.useMemo(() => {
+    let latest = null;
+    for (const m of messages || []) {
+      for (const t of m.thoughts || []) {
+        const payload = t.payload || {};
+        const toolName = payload.tool_name || t.tool_name || '';
+        if (typeof toolName === 'string' && toolName.startsWith('browser_')) {
+          const url = payload.tool_args?.url || payload.args?.url || '';
+          latest = { toolName, url };
+        }
+      }
+    }
+    return latest;
+  }, [messages]);
+
+  const activeBrowserSession = React.useMemo(() => {
+    if (!browserActivity && !browserSession) return null;
+    return {
+      controlState: localControlState || browserSession?.controlState || 'agent',
+      currentUrl: browserSession?.currentUrl || browserActivity?.url || '',
+      challenge: browserSession?.challenge || null,
+    };
+  }, [browserActivity, browserSession, localControlState]);
+
+  const handleBrowserControlClick = React.useCallback((action) => {
+    if (action === 'pause') {
+      setLocalControlState('paused');
+    } else if (action === 'resume') {
+      setLocalControlState('agent');
+    } else if (action === 'take_control') {
+      setLocalControlState('user');
+    } else if (action === 'return_control') {
+      setLocalControlState('agent');
+    } else if (action === 'stop') {
+      setLocalControlState('stopped');
+    }
+    if (onBrowserControl) {
+      onBrowserControl(action);
+    }
+  }, [onBrowserControl]);
+
 
   useEffect(() => {
     if (initialAttachments && initialAttachments.length > 0) {
@@ -2138,6 +2486,14 @@ export default function DraggableChatWindow({
 
               <div ref={messagesEndRef} />
             </div>
+
+            {/* Agent browser task card (Epic 8, E8-6.1) */}
+            {activeBrowserSession && (
+              <BrowserTaskCard
+                session={activeBrowserSession}
+                onControl={handleBrowserControlClick}
+              />
+            )}
 
             {/* Scratchpad panel (Epic 1, E1-17): above the composer, below the message stream */}
             <ScratchpadPanel scratchpad={scratchpad} />

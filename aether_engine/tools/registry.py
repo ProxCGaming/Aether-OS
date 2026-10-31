@@ -298,6 +298,14 @@ def build_tool_registry(
     if include_web_tools:
         for tool in create_web_tools():
             registry.register(tool)
+    # Epic 8, E8-6.1: agent-browser tools. Registered like every
+    # other built-in — risk levels attached, the policy pipeline
+    # applies unchanged; the tools themselves fail closed when
+    # Playwright is unavailable (see browser/tools.py).
+    from aether_engine.browser.tools import create_browser_tools
+
+    for tool in create_browser_tools():
+        registry.register(tool)
     for tool in mcp_tools or []:
         registry.register(tool)
     return registry
@@ -427,11 +435,16 @@ class ToolRegistry:
 
         # ── Step 3: sandbox routing (ADR 0010) ─────────────────────────
         try:
-            if tool.source.startswith("mcp:"):
+            if tool.source.startswith("mcp:") or tool.source == "browser":
                 # MCP tools run in-process in the engine (PRD Q4): the
                 # worker hardcodes 3 builtin tools and cannot hold MCP
                 # sessions, so routing an MCP tool there would silently
                 # no-op. The MCP server itself is already isolated.
+                # Browser tools (Epic 8, E8-6.1) share the rationale:
+                # they drive a live Playwright session the engine
+                # holds in its dedicated profile — a worker subprocess
+                # cannot adopt it. Policy, pre-flight and hooks above
+                # apply to both, unchanged.
                 if inspect.iscoroutinefunction(tool.execute_fn):
                     result = await tool.execute_fn(**call_args)
                 else:
@@ -441,10 +454,13 @@ class ToolRegistry:
                         result[: tool.max_output_chars]
                         + f"\n...[output truncated to {tool.max_output_chars} chars]"
                     )
-                from aether_engine.tools.hooks import apply_tool_result_hooks
+                if tool.source.startswith("mcp:"):
+                    from aether_engine.tools.hooks import apply_tool_result_hooks
 
-                return apply_tool_result_hooks(name, call_args, result, audit_logger=log)
-            if tool.risk != ToolRisk.READ_ONLY:
+                    return apply_tool_result_hooks(name, call_args, result, audit_logger=log)
+                # Browser executions fall through to the shared tail:
+                # TOOL_EXECUTED audit + tool_result hooks below.
+            elif tool.risk != ToolRisk.READ_ONLY:
                 from aether_engine.workers.sandbox import execute_tool_in_worker
                 result = await execute_tool_in_worker(
                     tool_name=name,

@@ -1757,6 +1757,22 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     payload=result,
                 ).to_json())
 
+            elif msg.type == EventType.BROWSER_TASK_PAUSE_REQUEST:
+                # Epic 8, E8-6.1: browser control channel — pause /
+                # resume / take-control / return-control / stop for
+                # the dedicated agent browser (browser task card).
+                from aether_engine.browser.session import get_browser_manager
+
+                browser_result = await get_browser_manager().control(
+                    session_id=msg.payload.get("session_id"),
+                    action=str(msg.payload.get("action", "")),
+                )
+                await ws.send_text(Event(
+                    type=EventType.BROWSER_TASK_PAUSE_RESPONSE,
+                    request_id=req_id,
+                    payload=browser_result,
+                ).to_json())
+
             # -----------------------------------------------------------
             # Media Store & Library (Epic 8, E8-4.2)
             # -----------------------------------------------------------
