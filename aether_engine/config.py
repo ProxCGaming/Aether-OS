@@ -146,6 +146,11 @@ class UserConfig:
     # asks, the sensitive floor, and shell rules all still apply.
     approval_mode: str = "ask"
     workspace_roots: list[str] = field(default_factory=list)
+    # Epic 8, E8-3.1: token budget for the ambient repo map injected
+    # into graph-task supervisor context (rag/repo_map.py), rebuilt
+    # from live files at task start and ranked toward the task.
+    # Fast chat never receives a map. <= 0 disables the map.
+    repo_map_token_budget: int = 1000
     agent_models: dict[str, str] = field(default_factory=dict)
     agent_tools: dict[str, list[str]] = field(default_factory=dict)
     agent_skills: dict[str, list[str]] = field(default_factory=dict)

@@ -43,6 +43,11 @@ _SYSTEM_PROMPT = (
     "say so briefly instead of inventing results."
 )
 
+# Epic 8, E8-3.1 (grill Q18): fast chat NEVER receives a repo map —
+# the map is a graph-task-only ambient layer, built by
+# rag/repo_map.py and injected by the supervisor. Do not import it
+# here; tests/test_repo_map.py pins this exclusion.
+
 
 def load_session_history(
     session_id: str | None,

@@ -53,6 +53,7 @@ from aether_engine.langgraph.nodes.supervisor import (
     _decision_from_text,
     _resolve_supervisor_provider,
     _supervisor_system_prompt,
+    repo_map_context,
 )
 from aether_engine.langgraph.state import blackboard_briefing, message_dicts
 from aether_engine.tools.policy import resolve_policy_by_name
@@ -325,6 +326,19 @@ def supervisor_routing_prompt(state: dict) -> list:
     summary_section = context_summary_section(state)
     if summary_section:
         text += f"\n\n{summary_section}"
+    # E8-3.1: ambient repo map (graph tasks only), the same section
+    # supervisor_node appends — built by nodes/supervisor.repo_map_context
+    # from the run's granted workspace roots, ranked toward this task.
+    repo_section = repo_map_context(
+        config,
+        state.get("original_prompt", ""),
+        " ".join(
+            str(m.get("content", ""))
+            for m in message_dicts(state.get("messages", []))
+        ),
+    )
+    if repo_section:
+        text += f"\n\n{repo_section}"
     # E1-06: the routing model sees the compacted view (summary above +
     # verbatim tail), never the folded middle turns. The state channel
     # itself keeps the full history.

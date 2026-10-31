@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -437,6 +438,48 @@ def _should_end_task(state: AetherState) -> bool:
     return bool(has_specialist_response)
 
 
+def repo_map_context(
+    config: RunnableConfig | None, prompt: str, context_text: str = ""
+) -> str:
+    """Epic 8, E8-3.1: the ambient repo map section for a graph task.
+
+    Built from the run's granted workspace roots, ranked toward
+    *prompt* (with *context_text* — the conversation so far — as a
+    weaker "files in play" bias), inside the user's token budget
+    (``repo_map_token_budget``). Returns "" when no workspace is
+    granted, the budget disables the map, or the build fails: the
+    map is ambient context and must never break routing. Shared by
+    ``supervisor_node`` and the create_supervisor routing prompt
+    (``supervisor_model.supervisor_routing_prompt``). Graph tasks
+    only — fast chat never calls this (grill Q18).
+    """
+    configurable = (config or {}).get("configurable", {}) if config else {}
+    roots = configurable.get("workspace_roots") or []
+    if not roots:
+        return ""
+    user_config = configurable.get("user_config")
+    budget = getattr(user_config, "repo_map_token_budget", 1000)
+    if not isinstance(budget, int):
+        budget = 1000
+    try:
+        from aether_engine.rag.repo_map import build_repo_map
+
+        text = build_repo_map(
+            [str(r) for r in roots], prompt,
+            token_budget=budget, context_text=context_text,
+        )
+    except Exception:  # ambient context must never break routing
+        logger.debug("Repo map build failed", exc_info=True)
+        return ""
+    if not text:
+        return ""
+    return (
+        "Repository map of the granted workspace (code signatures only, "
+        "ranked for this task — use it to target file reads; it is not "
+        f"the files' content):\n{text}"
+    )
+
+
 async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
     """
     Supervisor node routes to exactly one specialist or decides it is done.
@@ -497,6 +540,23 @@ async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
     if not any(isinstance(m, dict) and m.get("role") == "user" for m in state_messages):
         orig = state.get("original_prompt") or "Please review the task."
         state_messages.insert(0, {"role": "user", "content": orig})
+
+    # Epic 8, E8-3.1: ambient repo map for graph tasks (never fast
+    # chat) — rebuilt from the workspace's live files, ranked toward
+    # this prompt, appended to the supervisor's context before it
+    # plans. Built in a thread: tree-sitter parsing is CPU work.
+    repo_section = await asyncio.to_thread(
+        repo_map_context,
+        config,
+        original_prompt,
+        " ".join(
+            str(m.get("content", ""))
+            for m in state_messages
+            if isinstance(m, dict)
+        ),
+    )
+    if repo_section:
+        system_prompt = f"{system_prompt}\n\n{repo_section}"
 
     messages = [{"role": "system", "content": system_prompt}] + state_messages
 
