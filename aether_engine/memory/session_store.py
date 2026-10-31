@@ -160,6 +160,55 @@ def add_message(session_id: str, role: str, content: str, thoughts: Any = None, 
         conn.commit()
     return msg_id
 
+def fork_session(source_session_id: str, cut_message_id: str | None, new_title: str) -> dict[str, Any] | None:
+    """Copy a session and its messages up to a cut boundary (E8-1.2).
+
+    The copy is a brand-new session: copied messages get fresh ids
+    (message ids are globally unique), while role, content, thoughts
+    and timestamps are preserved verbatim and inserted in stored
+    order, so the copy renders exactly like the source prefix.
+    ``cut_message_id`` is the last message copied (inclusive); None
+    copies the whole session. The cut id is resolved inside the
+    source session only — an id that lives in another session never
+    cuts this one. Returns {"new_session_id", "title",
+    "messages_copied"}, or None when the source session or the cut
+    message cannot be resolved (nothing is created in that case).
+    The source is only ever read.
+    """
+    init_db()
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM sessions WHERE id = ?", (source_session_id,))
+        source = cur.fetchone()
+        if not source:
+            return None
+        cur.execute(
+            "SELECT * FROM session_messages WHERE session_id = ? ORDER BY timestamp ASC, rowid ASC",
+            (source_session_id,),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+        if cut_message_id is not None:
+            cut_index = next(
+                (i for i, m in enumerate(rows) if m["id"] == cut_message_id), None)
+            if cut_index is None:
+                return None
+            rows = rows[:cut_index + 1]
+        new_id = str(uuid.uuid4())
+        now = int(time.time())
+        title = new_title if new_title else source["title"]
+        conn.execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (new_id, title, now, now)
+        )
+        for m in rows:
+            conn.execute(
+                "INSERT INTO session_messages (id, session_id, role, content, thoughts, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), new_id, m["role"], m["content"], m["thoughts"], m["timestamp"])
+            )
+        conn.commit()
+    return {"new_session_id": new_id, "title": title, "messages_copied": len(rows)}
+
+
 def delete_session(session_id: str) -> bool:
     init_db()
     with _get_conn() as conn:

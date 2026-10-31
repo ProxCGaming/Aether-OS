@@ -134,6 +134,14 @@ class EventType(str, Enum):
     TASK_REWIND_RESPONSE = "TASK_REWIND_RESPONSE"
     TASK_REWIND_UNDO_REQUEST = "TASK_REWIND_UNDO_REQUEST"
     TASK_REWIND_UNDO_RESPONSE = "TASK_REWIND_UNDO_RESPONSE"
+    # Epic 8, E8-1.2: fork from anywhere. SESSION_FORK copies a
+    # session up to a completed step boundary — a manifest
+    # step_index of the last task, or a message_id for older steps —
+    # into a NEW session named "Fork of <title>"; the checkpoint
+    # thread is copied up to the point when the boundary carries
+    # one. The source session is never altered.
+    SESSION_FORK_REQUEST = "SESSION_FORK_REQUEST"
+    SESSION_FORK_RESPONSE = "SESSION_FORK_RESPONSE"
     # Epic 8, E8-2.1: Canvas A - artifact store + per-session panel
     ARTIFACT_LIST_REQUEST = "ARTIFACT_LIST_REQUEST"
     ARTIFACT_LIST_RESPONSE = "ARTIFACT_LIST_RESPONSE"

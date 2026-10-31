@@ -1183,6 +1183,7 @@ export default function DraggableChatWindow({
   sessionId = null,
   rewindManifest = null,
   onRewindRequest = null,
+  onForkRequest = null,
   rewindUndo = null,
   onRewindUndo = null,
   onRewindUndoExpire = null,
@@ -1946,12 +1947,26 @@ export default function DraggableChatWindow({
                               </div>
                             </>
                           )}
-                          <button type="button" className="step-menu-action" data-testid="fork-action" disabled>
+                          <button
+                            type="button"
+                            className="step-menu-action"
+                            data-testid="fork-action"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setOpenStepMenu(null);
+                              if (onForkRequest) {
+                                onForkRequest({
+                                  message_id: msg.id || null,
+                                  step_index: rewindPoint.scope === 'current' && rewindPoint.entry
+                                    ? rewindPoint.entry.step_index
+                                    : null,
+                                });
+                              }
+                            }}
+                          >
                             Fork from here
                           </button>
-                          <div className="step-menu-hint" data-testid="fork-hint">
-                            Forking arrives with E8-1.2.
-                          </div>
                         </div>
                       )}
                       {(msg.role === 'agent' || msg.role === 'assistant') && (

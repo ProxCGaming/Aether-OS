@@ -199,6 +199,29 @@ function AppContent() {
     clearRewindUndo();
     if (sessionId) requestRewindManifest(sessionId);
   }, [rewindUndo, clearRewindUndo, requestRewindManifest]);
+  // Epic 8, E8-1.2: fork the active session at a step boundary. The
+  // step menu hands over the boundary it resolved (a manifest
+  // step_index for the last task's steps, a message_id for older
+  // ones); the engine copies the history — and, for a manifest
+  // point, the checkpoint state — into a new session, and the
+  // SESSION_FORK_RESPONSE handler below lands the user in it.
+  const handleForkRequest = useCallback(({ message_id, step_index } = {}) => {
+    const sessionId = activeSessionRef.current;
+    if (!sessionId) return;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'SESSION_FORK_REQUEST',
+        schema_version: 1,
+        request_id: `session_fork_${Date.now()}`,
+        payload: {
+          session_id: sessionId,
+          message_id: message_id ?? null,
+          step_index: step_index ?? null,
+          new_title: null,
+        },
+      }));
+    }
+  }, [wsRef]);
   const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Artifacts', 'Projects', 'Settings'
   const [initialInput, setInitialInput] = useState('');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -857,6 +880,22 @@ function AppContent() {
               type: 'success',
               message: `Exported ${data.payload?.filename || data.payload?.format || 'session'}`
             });
+          }
+        } else if (data.type === 'SESSION_FORK_RESPONSE') {
+          // E8-1.2: the fork is a new session ("Fork of <title>")
+          // holding the history up to the chosen step. Refresh the
+          // list and land the user in it; the source is untouched.
+          if (data.payload?.ok && data.payload?.new_session_id) {
+            if (wsRef.current) {
+              wsRef.current.send(JSON.stringify({
+                type: 'SESSION_LIST_REQUEST',
+                schema_version: 1,
+                request_id: Date.now().toString()
+              }));
+            }
+            handleSessionSwitch(data.payload.new_session_id);
+          } else if (data.payload?.error) {
+            console.warn('Fork refused:', data.payload.error);
           }
         } else if (data.type === 'SESSION_IMPORT_RESPONSE') {
           if (data.payload?.ok) {
@@ -1938,6 +1977,7 @@ function AppContent() {
           scratchpad={scratchpadBySession[activeSession || '__pending'] || null}
           rewindManifest={rewindManifest}
           onRewindRequest={handleRewindRequest}
+          onForkRequest={handleForkRequest}
           rewindUndo={rewindUndo && rewindUndo.sessionId === activeSession ? rewindUndo : null}
           onRewindUndo={handleRewindUndoClick}
           onRewindUndoExpire={handleRewindUndoExpire}

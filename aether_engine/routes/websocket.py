@@ -38,6 +38,7 @@ from aether_engine.orchestration.core import (
     validate_provider_key_shared,
 )
 from aether_engine.providers.discovery import fetch_available_models
+from aether_engine.rewind import fork as fork_service
 from aether_engine.rewind import manifest as rewind_manifest
 from aether_engine.rewind import service as rewind_service
 from aether_engine.routing.intent import classify_intent
@@ -1492,6 +1493,51 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     type=EventType.TASK_REWIND_UNDO_RESPONSE,
                     request_id=req_id,
                     payload=undo_result,
+                ).to_json())
+
+            elif msg.type == EventType.SESSION_FORK_REQUEST:
+                # Epic 8, E8-1.2: fork the session at a completed
+                # step boundary into a new session. Refused while
+                # this session's task is live or paused for approval
+                # — the boundary must describe settled state, and
+                # copying a thread mid-run could catch it torn. The
+                # service validates the boundary itself (manifest
+                # step of the last task, or a message id).
+                sess_id = msg.payload.get("session_id")
+                fork_busy = bool(
+                    sess_id
+                    and task_runner is not None
+                    and not task_runner.done()
+                    and (task_session_id is None or task_session_id == sess_id)
+                )
+                if sess_id and not fork_busy:
+                    try:
+                        pending = await get_pending_approvals()
+                        fork_busy = any(
+                            p.get("thread_id") == sess_id for p in pending)
+                    except Exception:  # noqa: BLE001 — best-effort scan, same doctrine as the rewind guard: a failed scan degrades to the service's own validation
+                        fork_busy = False
+                if fork_busy:
+                    fork_result = {
+                        "ok": False,
+                        "new_session_id": "",
+                        "source_session_id": sess_id,
+                        "title": "",
+                        "messages_copied": 0,
+                        "error": "Cannot fork while a task is running or waiting for approval in this session.",
+                    }
+                else:
+                    fork_result = await asyncio.to_thread(
+                        fork_service.fork_session_at,
+                        sess_id,
+                        message_id=msg.payload.get("message_id"),
+                        step_index=msg.payload.get("step_index"),
+                        new_title=msg.payload.get("new_title"),
+                    )
+                await ws.send_text(Event(
+                    type=EventType.SESSION_FORK_RESPONSE,
+                    request_id=req_id,
+                    payload=fork_result,
                 ).to_json())
 
             elif msg.type == EventType.APPROVAL_GRANTS_REQUEST:

@@ -42,8 +42,9 @@ function renderChat(props = {}) {
 // for the CURRENT task's steps (label, checkpoint, files written so
 // far). E8-1.1b makes "Rewind to here" live on those points (it hands
 // the entry to onRewindRequest; App owns the confirm modal + engine
-// call). Fork stays honestly disabled until E8-1.2, and older tasks'
-// steps keep the disabled current-task-only hint.
+// call). Older tasks' steps keep the disabled current-task-only hint
+// for rewind; fork (E8-1.2, covered in ForkSession.test.jsx) is live
+// on every step instead.
 describe('DraggableChatWindow rewind step menu (E8-1.1a/1.1b)', () => {
   const messages = [
     { id: 'u1', role: 'user', content: 'first task', isFinal: true, thoughts: [] },
@@ -80,8 +81,9 @@ describe('DraggableChatWindow rewind step menu (E8-1.1a/1.1b)', () => {
     expect(meta).toHaveTextContent('cp0000aa');
     expect(within(menu).getByTestId('rewind-action')).not.toBeDisabled();
     expect(within(menu).queryByTestId('rewind-hint')).not.toBeInTheDocument();
-    expect(within(menu).getByTestId('fork-action')).toBeDisabled();
-    expect(within(menu).getByTestId('fork-hint')).toHaveTextContent('E8-1.2');
+    // E8-1.2: fork is live on every step (see ForkSession.test.jsx).
+    expect(within(menu).getByTestId('fork-action')).not.toBeDisabled();
+    expect(within(menu).queryByTestId('fork-hint')).not.toBeInTheDocument();
   });
 
   it('current task agent step shows the latest point with files written so far', () => {
