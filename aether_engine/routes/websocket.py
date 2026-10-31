@@ -179,6 +179,75 @@ async def _run_mcp_prompt_into_chat(
     })
     return {"ok": True, "messages": messages, "session_id": session_id, "error": ""}
 
+
+async def handle_artifact_get(artifact_id: str) -> dict[str, Any]:
+    """Retrieve an artifact and inspect file existence on disk (Epic 8, E8-2.1)."""
+    from aether_engine.artifacts.store import get_artifact_store
+    art_store = get_artifact_store()
+    art = await asyncio.to_thread(art_store.get_artifact, artifact_id)
+    if not art:
+        return {
+            "artifact": None,
+            "content": None,
+            "diff": None,
+            "exists": False,
+            "error": "Artifact not found",
+        }
+
+    kind = art.get("kind", "file")
+    file_path = art.get("file_path")
+    diff = None
+    content = None
+    exists = True
+    error = None
+
+    if kind == "diff":
+        diff = art.get("content")
+        if file_path:
+            exists = Path(file_path).is_file()
+            if not exists:
+                error = f"File {file_path} no longer exists on disk"
+    elif kind == "file":
+        if not file_path or not Path(file_path).is_file():
+            exists = False
+            error = f"File {file_path} no longer exists on disk" if file_path else "File path not specified"
+        else:
+            try:
+                ext = Path(file_path).suffix.lower()
+                if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico"):
+                    import base64
+                    b64 = base64.b64encode(Path(file_path).read_bytes()).decode("ascii")
+                    mime = (
+                        "image/png" if ext == ".png"
+                        else "image/jpeg" if ext in (".jpg", ".jpeg")
+                        else "image/gif" if ext == ".gif"
+                        else "image/webp" if ext == ".webp"
+                        else "application/octet-stream"
+                    )
+                    content = f"data:{mime};base64,{b64}"
+                else:
+                    content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+            except Exception as read_err:  # noqa: BLE001
+                exists = False
+                error = f"Error reading file: {read_err}"
+    else:  # report, html, etc.
+        if file_path and Path(file_path).is_file():
+            try:
+                content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+            except Exception as read_err:  # noqa: BLE001
+                error = f"Error reading file: {read_err}"
+        else:
+            content = art.get("content")
+
+    return {
+        "artifact": art,
+        "content": content,
+        "diff": diff,
+        "exists": exists,
+        "error": error,
+    }
+
+
 @router.websocket("/ws/tasks")
 async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
     ip = ws.client.host if ws.client else "unknown"
@@ -1183,6 +1252,12 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
             elif msg.type == EventType.SESSION_DELETE_REQUEST:
                 sess_id = msg.payload.get("session_id")
                 deleted = await asyncio.to_thread(session_store.delete_session, sess_id) if sess_id else False
+                if sess_id:
+                    try:
+                        from aether_engine.artifacts.store import get_artifact_store
+                        await asyncio.to_thread(get_artifact_store().delete_by_session, sess_id)
+                    except Exception as cascade_err:  # noqa: BLE001
+                        logger.warning(f"Failed to cascade delete artifacts for session {sess_id}: {cascade_err}")
                 await ws.send_text(Event(
                     type=EventType.SESSION_DELETE_RESPONSE,
                     request_id=req_id,
@@ -1374,6 +1449,34 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     type=EventType.APPROVAL_GRANT_REVOKE_RESPONSE,
                     request_id=req_id,
                     payload={"id": grant_id, "revoked": revoked, "grants": grants},
+                ).to_json())
+
+            # -----------------------------------------------------------
+            # Artifact Store (Epic 8, E8-2.1)
+            # -----------------------------------------------------------
+            elif msg.type == EventType.ARTIFACT_LIST_REQUEST:
+                from aether_engine.artifacts.store import get_artifact_store
+                art_store = get_artifact_store()
+                sess_id = msg.payload.get("session_id")
+                is_global = bool(msg.payload.get("global"))
+                limit = msg.payload.get("limit")
+                offset = msg.payload.get("offset")
+                artifacts, total = await asyncio.to_thread(
+                    art_store.list_artifacts, session_id=sess_id, is_global=is_global, limit=limit, offset=offset
+                )
+                await ws.send_text(Event(
+                    type=EventType.ARTIFACT_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"artifacts": artifacts, "total": total},
+                ).to_json())
+
+            elif msg.type == EventType.ARTIFACT_GET_REQUEST:
+                art_id = msg.payload.get("artifact_id", "")
+                result = await handle_artifact_get(art_id)
+                await ws.send_text(Event(
+                    type=EventType.ARTIFACT_GET_RESPONSE,
+                    request_id=req_id,
+                    payload=result,
                 ).to_json())
 
             # -----------------------------------------------------------

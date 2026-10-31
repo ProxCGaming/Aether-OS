@@ -24,6 +24,7 @@ See ADR 0009 (fail-closed, pre-flight), ADR 0010 (workspace restriction), ADR 00
 """
 import json
 import logging
+from pathlib import Path
 
 from langchain_core.runnables import RunnableConfig
 
@@ -146,6 +147,16 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
         user_config = configurable.get("user_config")
         audit_logger = configurable.get("audit_logger")
         try:
+            # Epic 8, E8-2.1: Pre-capture content for edit_file to compute unified diff
+            old_file_content = None
+            if tool_name == "edit_file" and args.get("path"):
+                try:
+                    p = Path(args["path"])
+                    if p.is_file():
+                        old_file_content = p.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    old_file_content = None
+
             result = await registry.execute(
                 tool_name,
                 args,
@@ -169,6 +180,61 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                 executed_write = registry.get_tool(tool_name).risk.value != "read_only"
             except Exception:  # noqa: BLE001 — unknown tool metadata must not fail the run; it just doesn't flip the prewalk switch.
                 executed_write = False
+
+            # Epic 8, E8-2.1: Auto-collect file writes and edits into ArtifactStore
+            if executed_write and tool_name in ("write_file", "edit_file"):
+                try:
+                    from aether_common.text_edit import make_unified_diff
+                    from aether_engine.artifacts.store import get_artifact_store
+
+                    art_store = get_artifact_store()
+                    file_path = args.get("path")
+                    file_p = Path(file_path) if file_path else None
+                    title = file_p.name if file_p else "file"
+                    sess_id = state.get("session_id") or configurable.get("session_id") or "default"
+                    t_id = state.get("task_id") or configurable.get("request_id") or "default"
+
+                    diff_text = None
+                    if tool_name == "edit_file":
+                        kind = "diff"
+                        try:
+                            new_file_content = file_p.read_text(encoding="utf-8", errors="replace") if (file_p and file_p.is_file()) else ""
+                            diff_text = make_unified_diff(old_file_content or "", new_file_content, str(file_path))
+                        except Exception as diff_exc:  # noqa: BLE001 — diff generation error is safely displayed
+                            diff_text = f"Diff unavailable: {diff_exc}"
+                    else:
+                        kind = "file"
+
+                    artifact_record = art_store.record_artifact(
+                        session_id=sess_id,
+                        task_id=t_id,
+                        kind=kind,
+                        title=title,
+                        file_path=str(file_path) if file_path else None,
+                        content=diff_text,
+                        metadata={"tool": tool_name},
+                    )
+
+                    if t_id:
+                        event_bus.publish(
+                            t_id,
+                            Event(
+                                type=EventType.ARTIFACT_RECORDED,
+                                request_id=t_id,
+                                payload={
+                                    "artifact_id": artifact_record["id"],
+                                    "session_id": artifact_record["session_id"],
+                                    "task_id": artifact_record["task_id"],
+                                    "kind": artifact_record["kind"],
+                                    "title": artifact_record["title"],
+                                    "path": artifact_record["file_path"],
+                                    "created_at": artifact_record["created_at"],
+                                },
+                            ),
+                        )
+                except Exception:
+                    logger.exception(f"Failed to record artifact for {tool_name}")
+
             # E1-17: publish scratchpad renders for the UI panel
             # (sanitised in scratchpad_event_payload; display-only).
             if tool_name == SCRATCHPAD_TOOL_NAME:

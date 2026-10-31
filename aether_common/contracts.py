@@ -125,6 +125,12 @@ class EventType(str, Enum):
     # contracts arrive with E8-1.1b.
     REWIND_MANIFEST_GET_REQUEST = "REWIND_MANIFEST_GET_REQUEST"
     REWIND_MANIFEST_GET_RESPONSE = "REWIND_MANIFEST_GET_RESPONSE"
+    # Epic 8, E8-2.1: Canvas A - artifact store + per-session panel
+    ARTIFACT_LIST_REQUEST = "ARTIFACT_LIST_REQUEST"
+    ARTIFACT_LIST_RESPONSE = "ARTIFACT_LIST_RESPONSE"
+    ARTIFACT_GET_REQUEST = "ARTIFACT_GET_REQUEST"
+    ARTIFACT_GET_RESPONSE = "ARTIFACT_GET_RESPONSE"
+    ARTIFACT_RECORDED = "ARTIFACT_RECORDED"
     # Epic 1, E1-16: model thinking, streamed apart from the answer
     THINKING = "THINKING"
     # Epic 1, E1-17: agent scratchpad content for the display-only panel

@@ -299,7 +299,7 @@ function parseApprovalEditedArgs(text, originalArgs) {
 }
 
 
-export function ToolActivityCard({ payload, isNested = false, pendingApproval = null, onApproveTool = null }) {  // Epic 8, E8-1.3: approval argument editor state (hooks first —
+export function ToolActivityCard({ payload, isNested = false, pendingApproval = null, onApproveTool = null, onOpenArtifact = null }) {  // Epic 8, E8-1.3: approval argument editor state (hooks first —
   // the early return below must stay after them).
   const [argsEditorOpen, setArgsEditorOpen] = useState(false);
   const [argsText, setArgsText] = useState('');
@@ -351,6 +351,30 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
         <div className="tool-identity">
           <TerminalSquare size={14} className="tool-terminal-icon" />
           <span className="tool-call-name">{tool_name || 'unknown_tool'}</span>
+          {tool_args?.path && (
+            <button
+              type="button"
+              className="tool-card-file-link"
+              data-testid="tool-card-file-link"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (onOpenArtifact) onOpenArtifact(tool_args.path);
+              }}
+              title={`View in artifacts: ${tool_args.path}`}
+              style={{
+                background: 'rgba(167, 139, 250, 0.15)',
+                border: '1px solid rgba(167, 139, 250, 0.3)',
+                color: '#c084fc',
+                borderRadius: '4px',
+                padding: '1px 6px',
+                fontSize: '11px',
+                cursor: 'pointer',
+                fontFamily: 'monospace'
+              }}
+            >
+              {tool_args.path.split(/[\/]/).pop()}
+            </button>
+          )}
           <span className="tool-route-badge">
             {callerNode.toUpperCase()} ➔ {targetNode.toUpperCase()}
           </span>
@@ -503,7 +527,7 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
   );
 }
 
-export function NodeActivityCard({ activity, nestedTools = [], rawDelta }) {
+export function NodeActivityCard({ activity, nestedTools = [], rawDelta, onOpenArtifact = null }) {
   if (!activity) return null;
 
   const { from_node, to_node, action, reason, briefing, input_payload, output_payload, status } = activity;
@@ -561,7 +585,7 @@ export function NodeActivityCard({ activity, nestedTools = [], rawDelta }) {
             </div>
             <div className="nested-tools-list">
               {nestedTools.map((t, tIdx) => (
-                <ToolActivityCard key={tIdx} payload={t.payload} isNested={true} />
+                <ToolActivityCard key={tIdx} payload={t.payload} isNested={true} onOpenArtifact={onOpenArtifact} />
               ))}
             </div>
           </div>
@@ -580,7 +604,7 @@ export function NodeActivityCard({ activity, nestedTools = [], rawDelta }) {
   );
 }
 
-export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopTask, onApproveTool = null, pendingApprovals = [] }) {
+export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopTask, onApproveTool = null, pendingApprovals = [], onOpenArtifact = null }) {
   let parsedThoughts = thoughts;
   if (typeof thoughts === 'string') {
     try {
@@ -762,6 +786,7 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
                     activity={item.activity} 
                     nestedTools={item.tools} 
                     rawDelta={item.rawDelta} 
+                    onOpenArtifact={onOpenArtifact}
                   />
                 );
               }
@@ -773,6 +798,7 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
                     payload={item.payload} 
                     pendingApproval={approval}
                     onApproveTool={onApproveTool}
+                    onOpenArtifact={onOpenArtifact}
                   />
                 );
               }
@@ -1154,7 +1180,11 @@ export default function DraggableChatWindow({
   isSidebarCollapsed = false,
   onExportSession = () => {},
   sessionId = null,
-  rewindManifest = null
+  rewindManifest = null,
+  artifactsCount = 0,
+  isCanvasOpen = false,
+  onToggleCanvas = () => {},
+  onOpenArtifact = () => {}
 }) {
   const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
@@ -1415,7 +1445,7 @@ export default function DraggableChatWindow({
         position: 'absolute',
         top: '40px',
         left: isSidebarCollapsed ? '80px' : '360px',
-        right: '40px',
+        right: isCanvasOpen ? '530px' : '40px',
         bottom: '40px',
         width: 'auto',
         height: 'auto',
@@ -1478,6 +1508,46 @@ export default function DraggableChatWindow({
             </div>
           </div>
           <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+            {/* Artifacts Canvas Toggle (Epic 8, E8-2.1) */}
+            <button
+              type="button"
+              data-testid="artifacts-header-btn"
+              onClick={() => onToggleCanvas && onToggleCanvas()}
+              title="Artifacts"
+              aria-label="Toggle Artifacts Canvas"
+              style={{
+                background: isCanvasOpen ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                border: isCanvasOpen ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                color: '#fff',
+                cursor: 'pointer',
+                padding: '6px 10px',
+                borderRadius: '999px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                transition: 'all 0.2s',
+                fontSize: '12px',
+                fontWeight: 500
+              }}
+            >
+              <Layers size={14} />
+              <span>Artifacts</span>
+              <span
+                data-testid="artifacts-badge"
+                style={{
+                  background: isCanvasOpen ? '#8b5cf6' : 'rgba(255, 255, 255, 0.15)',
+                  color: '#fff',
+                  borderRadius: '999px',
+                  padding: '1px 6px',
+                  fontSize: '10px',
+                  fontWeight: 600,
+                  minWidth: '16px',
+                  textAlign: 'center'
+                }}
+              >
+                {artifactsCount}
+              </span>
+            </button>
             {/* Session Export menu */}
             <div ref={exportMenuRef} style={{ position: 'relative' }}>
               <button
@@ -1871,6 +1941,7 @@ export default function DraggableChatWindow({
                           onStopTask={onStopTask} 
                           onApproveTool={onApproveTool}
                           pendingApprovals={messages.filter(m => m.role === 'tool_approval')}
+                          onOpenArtifact={onOpenArtifact}
                         />
                       )}
                       

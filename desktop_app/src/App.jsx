@@ -12,6 +12,7 @@ import Dashboard from './Dashboard';
 import Projects from './Projects';
 import Onboarding from './components/Onboarding';
 import CommandPalette from './components/CommandPalette';
+import ArtifactsCanvas from './components/ArtifactsCanvas';
 import './chat.css';
 
 // Decorative background graph (branding, not live data — see Phase 9 B3)
@@ -137,6 +138,11 @@ function AppContent() {
   const [slashCommands, setSlashCommands] = useState([]);
   const [importStatus, setImportStatus] = useState(null);
   const [_exportStatus, setExportStatus] = useState(null);
+  // Epic 8, E8-2.1: Artifacts canvas state (auto-derived, per-session, view-only)
+  const [isCanvasOpen, setIsCanvasOpen] = useState(false);
+  const [canvasArtifacts, setCanvasArtifacts] = useState([]);
+  const [selectedArtifactId, setSelectedArtifactId] = useState(null);
+  const [activeArtifactContent, setActiveArtifactContent] = useState(null);
   const importFileInputRef = useRef(null);
   
   useEffect(() => {
@@ -783,6 +789,40 @@ function AppContent() {
           const plugins = data.payload.plugins;
           const pluginArr = Array.isArray(plugins) ? plugins : Object.values(plugins || {});
           setPluginCount(pluginArr.filter(p => p.enabled !== false).length);
+        } else if (data.type === 'ARTIFACT_LIST_RESPONSE') {
+          const list = data.payload?.artifacts || [];
+          setCanvasArtifacts(list);
+          const savedId = activeSession ? localStorage.getItem(`aether_canvas_selected_${activeSession}`) : null;
+          if (savedId && list.some(a => a.id === savedId)) {
+            setSelectedArtifactId(savedId);
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({
+                type: 'ARTIFACT_GET_REQUEST',
+                schema_version: 1,
+                request_id: Date.now().toString(),
+                payload: { artifact_id: savedId }
+              }));
+            }
+          }
+        } else if (data.type === 'ARTIFACT_RECORDED') {
+          if (data.payload?.session_id === activeSession) {
+            setCanvasArtifacts(prev => {
+              const filtered = prev.filter(a => a.id !== data.payload.artifact_id);
+              const artObj = {
+                id: data.payload.artifact_id,
+                session_id: data.payload.session_id,
+                task_id: data.payload.task_id,
+                kind: data.payload.kind,
+                title: data.payload.title,
+                file_path: data.payload.path,
+                created_at: data.payload.created_at
+              };
+              return [artObj, ...filtered];
+            });
+            // Never auto-opens during task execution per PRD
+          }
+        } else if (data.type === 'ARTIFACT_GET_RESPONSE') {
+          setActiveArtifactContent(data.payload);
         } else if (data.type === 'ERROR') {
           setIsThinking(false);
           setChatMessages(prev => {
@@ -904,6 +944,91 @@ function AppContent() {
     }
     wasConnectedRef.current = isConnected;
   }, [isConnected, wsRef]);
+
+  // Epic 8, E8-2.1: sync artifacts when active session changes
+  useEffect(() => {
+    if (activeSession && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'ARTIFACT_LIST_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { session_id: activeSession, global: false }
+      }));
+      const savedId = localStorage.getItem(`aether_canvas_selected_${activeSession}`);
+      setSelectedArtifactId(savedId || null);
+      if (savedId) {
+        wsRef.current.send(JSON.stringify({
+          type: 'ARTIFACT_GET_REQUEST',
+          schema_version: 1,
+          request_id: Date.now().toString(),
+          payload: { artifact_id: savedId }
+        }));
+      } else {
+        setActiveArtifactContent(null);
+      }
+    } else if (!activeSession) {
+      setCanvasArtifacts([]);
+      setSelectedArtifactId(null);
+      setActiveArtifactContent(null);
+    }
+  }, [activeSession, isConnected, wsRef]);
+
+  const handleToggleCanvas = useCallback(() => {
+    setIsCanvasOpen(prev => {
+      const next = !prev;
+      if (next && canvasArtifacts.length > 0 && !selectedArtifactId) {
+        const firstId = canvasArtifacts[0].id;
+        setSelectedArtifactId(firstId);
+        if (activeSession) {
+          localStorage.setItem(`aether_canvas_selected_${activeSession}`, firstId);
+        }
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            type: 'ARTIFACT_GET_REQUEST',
+            schema_version: 1,
+            request_id: Date.now().toString(),
+            payload: { artifact_id: firstId }
+          }));
+        }
+      }
+      return next;
+    });
+  }, [canvasArtifacts, selectedArtifactId, activeSession, wsRef]);
+
+  const handleSelectArtifact = useCallback((artifactId) => {
+    setSelectedArtifactId(artifactId);
+    if (activeSession) {
+      localStorage.setItem(`aether_canvas_selected_${activeSession}`, artifactId);
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'ARTIFACT_GET_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { artifact_id: artifactId }
+      }));
+    }
+  }, [activeSession, wsRef]);
+
+  const handleOpenArtifact = useCallback((pathOrTitle) => {
+    setIsCanvasOpen(true);
+    const cleanName = pathOrTitle ? pathOrTitle.split(/[/\\]/).pop() : '';
+    const match = canvasArtifacts.find(a =>
+      a.file_path === pathOrTitle ||
+      a.title === pathOrTitle ||
+      a.title === cleanName
+    );
+    if (match) {
+      handleSelectArtifact(match.id);
+    } else if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'ARTIFACT_LIST_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { session_id: activeSession, global: false }
+      }));
+    }
+  }, [canvasArtifacts, handleSelectArtifact, activeSession, wsRef]);
 
   const handleSendMessage = (text) => {
     // One stable id for this message, shared by the rendered bubble and
@@ -1666,6 +1791,21 @@ function AppContent() {
           initialInput={initialInput}
           slashCommands={slashCommands}
           isSidebarCollapsed={isSidebarCollapsed}
+          artifactsCount={canvasArtifacts.length}
+          isCanvasOpen={isCanvasOpen}
+          onToggleCanvas={handleToggleCanvas}
+          onOpenArtifact={handleOpenArtifact}
+        />
+      )}
+
+      {activeTab === 'Chat' && !isChatDetached && isCanvasOpen && (
+        <ArtifactsCanvas
+          isOpen={isCanvasOpen}
+          onClose={() => setIsCanvasOpen(false)}
+          artifacts={canvasArtifacts}
+          selectedArtifactId={selectedArtifactId}
+          onSelectArtifact={handleSelectArtifact}
+          activeArtifactContent={activeArtifactContent}
         />
       )}
 
