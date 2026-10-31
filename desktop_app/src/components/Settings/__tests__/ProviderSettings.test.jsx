@@ -312,3 +312,67 @@ describe('ProviderSettings health surface (Epic 5, E5-05)', () => {
     expect(screen.getByTestId('provider-health-openai')).not.toHaveTextContent('ms');
   });
 });
+
+describe('ProviderSettings Test-button hardening', () => {
+  let mockSendMessage;
+  let mockWsRef;
+  let messageListeners;
+
+  beforeEach(() => {
+    mockSendMessage = jest.fn();
+    messageListeners = [];
+    mockWsRef = {
+      current: {
+        addEventListener: jest.fn((event, cb) => { if (event === 'message') messageListeners.push(cb); }),
+        removeEventListener: jest.fn(),
+        readyState: 1,
+      },
+    };
+    useAetherSocket.mockReturnValue({ wsRef: mockWsRef, sendMessage: mockSendMessage });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  const simulateMessage = (data) => {
+    messageListeners.forEach(cb => cb({ data: JSON.stringify(data) }));
+  };
+
+  test('a double-click sends ONE validation request', () => {
+    render(<ProviderSettings providers={[{ name: 'google_gemini', display_name: 'Google Gemini', has_key: true }]} />);
+    fireEvent.click(screen.getByText('Google Gemini'));
+    const btn = screen.getByText('Test').closest('button');
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    const validations = mockSendMessage.mock.calls.filter(([type]) => type === 'SETTINGS_PROVIDER_VALIDATE_REQUEST');
+    expect(validations).toHaveLength(1);
+    expect(screen.getByText(/Checking the key with the provider/)).toBeInTheDocument();
+  });
+
+  test('no engine answer in 35s shows a timeout and re-enables the button', () => {
+    jest.useFakeTimers();
+    render(<ProviderSettings providers={[{ name: 'google_gemini', display_name: 'Google Gemini', has_key: true }]} />);
+    fireEvent.click(screen.getByText('Google Gemini'));
+    fireEvent.click(screen.getByText(/Testing|Test/).closest('button'));
+    act(() => { jest.advanceTimersByTime(36000); });
+    expect(screen.getByText(/No answer from the engine in 35s/)).toBeInTheDocument();
+    const btn = screen.getByText('Test').closest('button');
+    expect(btn).not.toBeDisabled();
+    // And a retry actually sends a new request (guard was cleared).
+    fireEvent.click(btn);
+    const validations = mockSendMessage.mock.calls.filter(([type]) => type === 'SETTINGS_PROVIDER_VALIDATE_REQUEST');
+    expect(validations).toHaveLength(2);
+  });
+
+  test('a late response after a retry clears cleanly to success', async () => {
+    render(<ProviderSettings providers={[{ name: 'google_gemini', display_name: 'Google Gemini', has_key: true }]} />);
+    fireEvent.click(screen.getByText('Google Gemini'));
+    fireEvent.click(screen.getByText('Test').closest('button'));
+    act(() => {
+      simulateMessage({ type: 'SETTINGS_PROVIDER_VALIDATE_RESULT', payload: { provider: 'google_gemini', success: true } });
+    });
+    await waitFor(() => expect(screen.getByText('Test Successful')).toBeInTheDocument());
+  });
+});
