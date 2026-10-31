@@ -968,6 +968,10 @@ function AppContent() {
             // Epic 2: engine-built preview ({diff} for edit_file, or
             // {error} when no preview could be built, or null).
             preview: data.payload.preview || null,
+            // Epic 8, E8-6.2: browser confirmation details (category
+            // + the exact action named from the page) when this
+            // approval is a browser confirmation; null otherwise.
+            browser_confirmation: data.payload.browser_confirmation || null,
             isFinal: true
           };
           if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
@@ -1797,7 +1801,7 @@ function AppContent() {
     }
   };
 
-  const handleToolApproval = (requestId, approved, approvalKey, scope, editedArgs) => {
+  const handleToolApproval = (requestId, approved, approvalKey, scope, editedArgs, browserEnvelope) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const key = approvalKey || requestId;
       wsRef.current.send(JSON.stringify({
@@ -1813,7 +1817,11 @@ function AppContent() {
           // Epic 8, E8-1.3: approval-time argument edits ride the
           // GRANTED event as the full replacement argument set; the
           // engine re-runs the full policy pipeline on them.
-          ...(approved && editedArgs ? { edited_args: editedArgs } : {})
+          ...(approved && editedArgs ? { edited_args: editedArgs } : {}),
+          // Epic 8, E8-6.2: a per-task envelope grant made at a
+          // browser confirmation rides the GRANTED event; the engine
+          // scopes it to the confirmed action's category + site.
+          ...(approved && browserEnvelope ? { browser_envelope: browserEnvelope } : {})
         }
       }));
       // Remove the approval card from chat

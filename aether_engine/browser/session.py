@@ -199,6 +199,12 @@ class BrowserSession:
         self._state = BrowserControlState.AGENT
         self.current_url = ""
         self.challenge: dict[str, Any] | None = None
+        # Epic 8, E8-6.2: page snapshot cache (title + HTML as of the
+        # last navigate/click). The confirmation classifier reads
+        # this synchronously at approval time to name the exact
+        # action a pending click/type would perform on THIS page.
+        self.last_title: str = ""
+        self.last_page_content: str = ""
 
     @property
     def control_state(self) -> BrowserControlState:
@@ -266,6 +272,10 @@ class BrowserSession:
         driver = self._driver
         content = await driver.page_content()
         title = await driver.page_title()
+        # E8-6.2: refresh the classifier's page snapshot (capped —
+        # classification needs element text/attrs, not whole apps).
+        self.last_title = title or ""
+        self.last_page_content = (content or "")[:200_000]
         hit = detect_challenge(url=self.current_url, title=title, content=content)
         if hit is None:
             return None
@@ -418,6 +428,18 @@ class BrowserSessionManager:
             if task_id and not active.task_id:
                 active.task_id = task_id
             return active
+        # Epic 8, E8-6.2: the master switch blocks NEW browser tasks
+        # outright — a session may only be CREATED while the browser
+        # agent is enabled. A live session (returned above) is never
+        # blocked or replaced by the toggle: a running task is not
+        # killed mid-action.
+        from aether_engine.browser.policy import current_browser_policy
+
+        if not current_browser_policy().enabled:
+            raise BrowserError(
+                "The browser agent is disabled in Settings (Browser Agent "
+                "Policy). Enable it there to start a new browser task."
+            )
         session = BrowserSession(
             self.profile_dir,
             task_id=task_id,

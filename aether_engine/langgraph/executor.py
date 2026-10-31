@@ -493,6 +493,7 @@ async def run_langgraph_task(
                                     "approval_key": thread_id,
                                     "task_class": intr_val.get("task_class"),
 "preview": intr_val.get("preview"),
+"browser_confirmation": intr_val.get("browser_confirmation"),
                                     "workspace_roots": workspace_roots or [],
                                 },
                             )
@@ -814,6 +815,7 @@ async def resume_langgraph_task(
     agent_models: dict[str, str] | None = None,
     agent_tools: dict[str, list[str]] | None = None,
     edited_args: dict[str, Any] | None = None,
+    browser_envelope: dict[str, Any] | None = None,
     **kwargs,
 ) -> AsyncGenerator[Event, None]:
     """Resume an interrupted LangGraph task and yield remaining events.
@@ -920,6 +922,7 @@ async def resume_langgraph_task(
                                         "approval_key": thread_id,
                                         "task_class": intr_val.get("task_class"),
 "preview": intr_val.get("preview"),
+"browser_confirmation": intr_val.get("browser_confirmation"),
                                         "workspace_roots": workspace_roots or [],
                                     },
                                 )
@@ -1035,9 +1038,17 @@ async def resume_langgraph_task(
             # Epic 8, E8-1.3: approval-time argument edits ride the
             # resume value as a dict; an unedited approval keeps the
             # legacy bare-boolean resume exactly as before.
+            # Epic 8, E8-6.2: a browser-envelope grant granted at a
+            # confirmation rides the same dict (the pause node scopes
+            # it to the confirmed action's category + site itself).
             resume_value: Any = approved
-            if approved and isinstance(edited_args, dict):
-                resume_value = {"approved": True, "edited_args": edited_args}
+            if approved and (isinstance(edited_args, dict)
+                             or isinstance(browser_envelope, dict)):
+                resume_value = {"approved": True}
+                if isinstance(edited_args, dict):
+                    resume_value["edited_args"] = edited_args
+                if isinstance(browser_envelope, dict):
+                    resume_value["browser_envelope"] = browser_envelope
             async for _ev in _consume_segment(Command(resume=resume_value)):
                 yield _ev
 
@@ -1205,7 +1216,8 @@ async def get_pending_approvals() -> list[dict[str, Any]]:
                                 "tool_name": intr_val.get("tool_name"),
                                 "args": intr_val.get("args"),
                                 "task_class": intr_val.get("task_class", "standard"),
-                                "preview": intr_val.get("preview")
+                                "preview": intr_val.get("preview"),
+                                "browser_confirmation": intr_val.get("browser_confirmation")
                             })
                             break
             except Exception as e:  # noqa: BLE001 — per-thread scan isolation: one unreadable thread is logged and must not abort the approvals listing

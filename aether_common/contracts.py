@@ -350,6 +350,22 @@ class EventType(str, Enum):
     BROWSER_TASK_PAUSE_RESPONSE = "BROWSER_TASK_PAUSE_RESPONSE"
     BROWSER_CHALLENGE_DETECTED = "BROWSER_CHALLENGE_DETECTED"
 
+    # Browser confirmation policy (Epic 8, E8-6.2): the Settings →
+    # Browser Agent Policy surface. GET_RESPONSE payload:
+    # {"enabled": bool, "vault_autofill": bool,
+    # "envelopes_enabled": bool, "categories": {"payments": str,
+    # "sends_publishes": str, "deletes": str,
+    # "account_changes": str}} where each mode is "always_confirm" |
+    # "allow_with_envelope" | "allow_freely". SET_REQUEST is a
+    # partial update — any of the same fields, absent/None meaning
+    # "unchanged". SET_RESPONSE payload: {"success": bool,
+    # "policy": <the full policy dict>, "error": str (only when
+    # success is False)}; a rejected update changes nothing.
+    BROWSER_POLICY_GET_REQUEST = "BROWSER_POLICY_GET_REQUEST"
+    BROWSER_POLICY_GET_RESPONSE = "BROWSER_POLICY_GET_RESPONSE"
+    BROWSER_POLICY_SET_REQUEST = "BROWSER_POLICY_SET_REQUEST"
+    BROWSER_POLICY_SET_RESPONSE = "BROWSER_POLICY_SET_RESPONSE"
+
     # Agent Management
     AGENT_LIST_REQUEST = "AGENT_LIST_REQUEST"
     AGENT_LIST_RESPONSE = "AGENT_LIST_RESPONSE"

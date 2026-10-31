@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock, Scissors } from 'lucide-react';
+import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock, Scissors, Globe } from 'lucide-react';
 import Dropdown from './Dropdown';
 import LocalModelsTab from './LocalModelsTab';
 import './chat.css';
@@ -7,6 +7,7 @@ import ProviderSettings from './components/Settings/ProviderSettings';
 import MemoryManagement from './components/Settings/MemoryManagement';
 import DiagnosticsPanel from './components/Settings/DiagnosticsPanel';
 import WorkspaceIndexingPanel from './components/Settings/WorkspaceIndexingPanel';
+import BrowserPolicyPanel from './components/Settings/BrowserPolicyPanel';
 
 export default function SettingsPanel({ wsRef, providers = [], providerHealth = {}, localModels = [], activeSession = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
@@ -480,6 +481,7 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
     { keywords: 'plugins install enable disable', id: 'Plugins', icon: <Plug size={18} />, label: 'Plugins' },
     { keywords: 'skills slash commands enable disable', id: 'Skills', icon: <Box size={18} />, label: 'Skills' },
     { keywords: 'workspace indexing rag prose embedder files pause resume search watcher exclusions', id: 'WorkspaceIndexing', icon: <Layers size={18} />, label: 'Workspace Indexing' },
+    { keywords: 'browser agent policy payments envelopes confirmation autofill categories', id: 'BrowserPolicy', icon: <Globe size={18} />, label: 'Browser Agent' },
     { keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
     { keywords: 'capabilities diagnostics environment scheduler', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
     { keywords: 'advanced routing fallbacks reset defaults developer', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' }
@@ -1014,6 +1016,10 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
 
         {activeMenu === 'WorkspaceIndexing' && (
           <WorkspaceIndexingPanel wsRef={wsRef} />
+        )}
+
+        {activeMenu === 'BrowserPolicy' && (
+          <BrowserPolicyPanel wsRef={wsRef} />
         )}
 
         {activeMenu === 'Advanced' && (

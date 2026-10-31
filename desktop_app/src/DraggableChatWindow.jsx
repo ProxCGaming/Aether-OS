@@ -1510,6 +1510,9 @@ export default function DraggableChatWindow({
   // inline approval cards, keyed by message id: { text, error }.
   // Presence of an entry means that card's editor is open.
   const [approvalArgEdits, setApprovalArgEdits] = useState({});
+  // Epic 8, E8-6.2: per-approval "allow for this task" envelope
+  // opt-ins on browser confirmation cards, keyed by message id.
+  const [browserEnvelopeGrants, setBrowserEnvelopeGrants] = useState({});
   // Epic 8, E8-1.1a: which message's step menu is open (index into
   // messages), or null. One menu at a time.
   const [openStepMenu, setOpenStepMenu] = useState(null);
@@ -1602,12 +1605,28 @@ export default function DraggableChatWindow({
     setAttachments(prev => prev.filter((_, idx) => idx !== idxToRemove));
   };
 
+  // Epic 8, E8-6.2: the envelope grant a browser confirmation
+  // carries when its "allow for this task" box is checked.
+  // Payments never offer one; the engine re-scopes the grant to
+  // the confirmed action's category + site regardless.
+  const browserEnvelopeGrantFor = (msg) => {
+    const confirmation = msg && msg.browser_confirmation;
+    if (!confirmation || confirmation.category === 'payments') return undefined;
+    return browserEnvelopeGrants[msg.id] ? { grant: true } : undefined;
+  };
+
   const approveToolWithEdits = (msg, scope) => {
     if (!onApproveTool) return;
+    const envelope = browserEnvelopeGrantFor(msg);
+    const approve = (s, edited) => {
+      if (envelope) onApproveTool(msg.id, true, msg.approval_key, s, edited, envelope);
+      else if (edited) onApproveTool(msg.id, true, msg.approval_key, s, edited);
+      else if (s) onApproveTool(msg.id, true, msg.approval_key, s);
+      else onApproveTool(msg.id, true, msg.approval_key);
+    };
     const editState = approvalArgEdits[msg.id];
     if (!editState) {
-      if (scope) onApproveTool(msg.id, true, msg.approval_key, scope);
-      else onApproveTool(msg.id, true, msg.approval_key);
+      approve(scope, undefined);
       return;
     }
     const { editedArgs, error } = parseApprovalEditedArgs(editState.text, msg.tool_args || {});
@@ -1615,9 +1634,7 @@ export default function DraggableChatWindow({
       setApprovalArgEdits(prev => ({ ...prev, [msg.id]: { ...editState, error } }));
       return;
     }
-    if (editedArgs) onApproveTool(msg.id, true, msg.approval_key, scope, editedArgs);
-    else if (scope) onApproveTool(msg.id, true, msg.approval_key, scope);
-    else onApproveTool(msg.id, true, msg.approval_key);
+    approve(scope, editedArgs || undefined);
   };
 
   const toastTimeoutRef = useRef(null);
@@ -2209,6 +2226,31 @@ export default function DraggableChatWindow({
                         {msg.preview && (
                           <div style={{ marginBottom: '20px' }}>
                             <ApprovalPreview preview={msg.preview} />
+                          </div>
+                        )}
+                        {msg.browser_confirmation && (
+                          <div style={{ marginBottom: '20px' }}>
+                            <div
+                              data-testid="browser-confirmation-description"
+                              style={{ background: 'rgba(59, 130, 246, 0.12)', border: '1px solid rgba(59, 130, 246, 0.35)', padding: '12px', borderRadius: '8px', fontSize: '14px', color: '#bfdbfe' }}
+                            >
+                              {msg.browser_confirmation.description}
+                            </div>
+                            {msg.browser_confirmation.category === 'payments' ? (
+                              <div style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
+                                Payments are always confirmed individually — no envelope can cover them.
+                              </div>
+                            ) : (
+                              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#e2e8f0', marginTop: '10px', cursor: 'pointer' }}>
+                                <input
+                                  type="checkbox"
+                                  data-testid="browser-envelope-checkbox"
+                                  checked={!!browserEnvelopeGrants[msg.id]}
+                                  onChange={(e) => setBrowserEnvelopeGrants(prev => ({ ...prev, [msg.id]: e.target.checked }))}
+                                />
+                                Allow {msg.browser_confirmation.category.replace(/_/g, ' ')} actions on {msg.browser_confirmation.site_name || msg.browser_confirmation.site_host} for the rest of this task
+                              </label>
+                            )}
                           </div>
                         )}
                         {!approvalArgEdits[msg.id] ? (

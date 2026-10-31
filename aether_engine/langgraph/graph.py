@@ -22,6 +22,7 @@ from langgraph_supervisor import create_supervisor
 
 logger = logging.getLogger("aether_engine.langgraph.graph")
 
+from aether_engine.browser.policy import BROWSER_TOOL_NAMES
 from aether_engine.langgraph.nodes.coder import coder_node
 from aether_engine.langgraph.nodes.execute_tool import execute_tool_node
 from aether_engine.langgraph.nodes.pause import dummy_pause_node
@@ -47,6 +48,25 @@ SPECIALIST_NODES = {
     "planner": planner_node,
     "coder": coder_node,
 }
+
+
+def _is_browser_write(tool_name, registry) -> bool:
+    """A non-read-only agent-browser tool (Epic 8, E8-6.1/6.2).
+
+    Resolved from the registry when available (source + risk are the
+    authority); the fixed tool-name set is the fallback.
+    """
+    if not tool_name:
+        return False
+    if registry is not None:
+        try:
+            tool = registry.get_tool(tool_name)
+            return tool.source == "browser" and tool.risk.value != "read_only"
+        except Exception:
+            # An unresolvable tool falls back to the name set below;
+            # routing must never break on a registry lookup.
+            logger.debug("Browser-tool lookup failed in _is_browser_write", exc_info=True)
+    return tool_name in BROWSER_TOOL_NAMES and tool_name != "browser_extract"
 
 
 def tool_router(state: AetherState, config=None) -> str:
@@ -78,6 +98,13 @@ def tool_router(state: AetherState, config=None) -> str:
         ),
         approval_mode=user_config.approval_mode if user_config else "ask",
     )
+    # Epic 8, E8-6.2: browser writes always meet the confirmation
+    # gate in the pause node — the per-category browser policy
+    # (Settings → Browser Agent Policy), not the generic tool policy
+    # or approval mode, decides whether they actually pause. An
+    # explicit per-tool Deny still wins: execution denies it there.
+    if policy != "deny" and _is_browser_write(pending.get("name"), registry):
+        return "pause_for_approval"
     if policy == "ask":
         # E2-09: a stored approval grant skips the pause (registry.execute
         # re-checks the same cache before running, so the two sites agree).

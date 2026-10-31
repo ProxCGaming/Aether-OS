@@ -3,9 +3,69 @@ import logging
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
+from aether_engine.browser.policy import BROWSER_TOOL_NAMES
 from aether_engine.langgraph.state import AetherState
 
 logger = logging.getLogger("aether_engine.langgraph.nodes.pause")
+
+_default_audit_logger = None
+
+
+def _pause_audit_logger(config) -> object:
+    """The audit logger for pause-node events: the graph config's
+    logger when one is wired, else a lazily-built default (the same
+    fallback ToolRegistry.execute uses)."""
+    global _default_audit_logger
+    configured = (config or {}).get("configurable", {}).get("audit_logger")
+    if configured is not None:
+        return configured
+    if _default_audit_logger is None:
+        from aether_engine.audit import AuditLogger
+
+        _default_audit_logger = AuditLogger()
+    return _default_audit_logger
+
+
+def _audit_browser(config, action: str, details: dict) -> None:
+    try:
+        _pause_audit_logger(config).log_event(action, details)
+    except Exception:
+        logger.debug("Failed to write %s audit event", action, exc_info=True)
+
+
+def _evaluate_browser_gate(tool_name: str, args: dict, state, config):
+    """Run the E8-6.2 confirmation gate for one browser tool call.
+
+    Returns ``(decision, task_id)``. Evaluation is side-effect free
+    on the confirm/deny paths (an envelope is consumed only when it
+    authorises the action), which matters here: LangGraph replays
+    this node when an interrupt resumes, so anything the confirm
+    path did would otherwise happen twice.
+    """
+    from aether_engine.browser.policy import (
+        classify_browser_action,
+        evaluate_browser_action,
+        page_context_from_session,
+        policy_from_user_config,
+    )
+    from aether_engine.browser.session import (
+        BrowserControlState,
+        get_browser_manager,
+    )
+
+    configurable = (config or {}).get("configurable", {})
+    policy = policy_from_user_config(configurable.get("user_config"))
+    session = get_browser_manager().active_session
+    session_running = bool(
+        session is not None
+        and session.control_state != BrowserControlState.STOPPED
+    )
+    classification = classify_browser_action(
+        tool_name, args, **page_context_from_session(session))
+    task_id = state.get("task_id") or configurable.get("request_id")
+    decision = evaluate_browser_action(
+        policy, classification, task_id=task_id, session_running=session_running)
+    return decision, task_id
 
 
 def changed_arg_fields(original_args: dict, edited_args: dict) -> list[str]:
@@ -63,6 +123,44 @@ def dummy_pause_node(state: AetherState, config: RunnableConfig) -> dict:
     call_id = pending.get("call_id") or f"call_{tool_name}"
     req_id = config.get("configurable", {}).get("request_id")
 
+    # ── Browser confirmation gate (Epic 8, E8-6.2) ──────────────────
+    # Browser writes always pass through this node (tool_router), and
+    # the per-category policy decides what the generic approval means
+    # for them: free / in-envelope / allow-freely actions are approved
+    # in place with NO pause; a disabled browser agent rejects new
+    # tasks in place; anything else falls through to the interrupt
+    # below with a confirmation payload naming the exact action.
+    browser_decision = None
+    browser_task_id = None
+    if tool_name in BROWSER_TOOL_NAMES:
+        browser_decision, browser_task_id = _evaluate_browser_gate(
+            tool_name, args, state, config)
+        classification = browser_decision.classification
+        audit_details = {
+            "task_id": browser_task_id,
+            "tool_name": tool_name,
+            "category": classification.category,
+            "site_host": classification.site_host,
+            "reason": browser_decision.reason,
+        }
+        if browser_decision.verdict == "allow":
+            _audit_browser(config, "BROWSER_ACTION_AUTO_ALLOWED", audit_details)
+            return {"pending_tool_call": {**pending, "approved": True}}
+        if browser_decision.verdict == "deny":
+            _audit_browser(config, "BROWSER_ACTION_BLOCKED_DISABLED", audit_details)
+            msg = {
+                "role": "tool",
+                "name": tool_name,
+                "content": (
+                    "Error: The browser agent is disabled in Settings "
+                    "(Browser Agent Policy), so this browser action was "
+                    "blocked. The user can enable it there to allow new "
+                    "browser tasks."
+                ),
+                "tool_call_id": call_id,
+            }
+            return {"pending_tool_call": None, "messages": [msg]}
+
     logger.info(f"Interrupting graph for approval of {tool_name}")
     
     # Pause execution and save state to sqlite
@@ -76,6 +174,11 @@ def dummy_pause_node(state: AetherState, config: RunnableConfig) -> dict:
     if tool_name == "edit_file":
         roots = config.get("configurable", {}).get("workspace_roots") or []
         interrupt_payload["preview"] = _edit_preview(args, roots)
+    if browser_decision is not None:
+        # The confirmation card names the EXACT action (amount and
+        # merchant from the page — see browser/policy.py).
+        interrupt_payload["browser_confirmation"] = \
+            browser_decision.classification.confirmation_payload()
     decision = interrupt(interrupt_payload)
 
     # Epic 8, E8-1.3: the resume value is either the legacy boolean or
@@ -94,6 +197,14 @@ def dummy_pause_node(state: AetherState, config: RunnableConfig) -> dict:
 
     if not approved:
         logger.info(f"User rejected {tool_name}")
+        if browser_decision is not None:
+            _audit_browser(config, "BROWSER_CONFIRMATION_DENIED", {
+                "task_id": browser_task_id,
+                "tool_name": tool_name,
+                "category": browser_decision.classification.category,
+                "site_host": browser_decision.classification.site_host,
+                "description": browser_decision.classification.description,
+            })
         # Clear the tool call and return a rejection message
         msg = {
             "role": "tool",
@@ -105,6 +216,35 @@ def dummy_pause_node(state: AetherState, config: RunnableConfig) -> dict:
             "pending_tool_call": None,
             "messages": [msg]
         }
+
+    if browser_decision is not None:
+        # Post-interrupt code runs exactly once (on the resume
+        # replay), so the decision audit + envelope grant land once.
+        _audit_browser(config, "BROWSER_CONFIRMATION_APPROVED", {
+            "task_id": browser_task_id,
+            "tool_name": tool_name,
+            "category": browser_decision.classification.category,
+            "site_host": browser_decision.classification.site_host,
+            "description": browser_decision.classification.description,
+        })
+        if isinstance(decision, dict) and decision.get("browser_envelope"):
+            from aether_engine.browser.policy import (
+                grant_envelope_from_confirmation,
+            )
+
+            envelope = grant_envelope_from_confirmation(
+                task_id=browser_task_id,
+                action=browser_decision.classification,
+                spec=decision.get("browser_envelope"),
+            )
+            if envelope is not None:
+                _audit_browser(config, "BROWSER_ENVELOPE_GRANTED", {
+                    "task_id": browser_task_id,
+                    "category": envelope.category,
+                    "site_host": envelope.site_host,
+                    "max_actions": envelope.max_actions,
+                    "expires_at": envelope.expires_at,
+                })
 
     # If approved, mutate the pending_tool_call to reflect approval, and graph proceeds to execute_tool
     updated = {**pending, "approved": True}

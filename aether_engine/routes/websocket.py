@@ -447,6 +447,16 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
         lambda: (engine_state.user_config.search_provider, engine_state.user_config.search_fallback_to_ddgs)
     )
 
+    # Epic 8, E8-6.2: the browser session layer reads the live
+    # browser policy through this seam (master switch for new
+    # sessions), read fresh from the user config on every check.
+    from aether_engine.browser.policy import (
+        policy_from_user_config,
+        set_browser_policy_loader,
+    )
+
+    set_browser_policy_loader(lambda: policy_from_user_config(engine_state.user_config))
+
     async def _learn_fast_chat_in_background(task_id: str, prompt: str, response_text: str, p_name: str, p_model: str):
         """Epic 4, E4-05: fast-chat learn parity — detached after
         TASK_COMPLETED; the work itself lives in
@@ -1175,6 +1185,12 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 edited_args = msg.payload.get("edited_args") if is_approved else None
                 if not isinstance(edited_args, dict):
                     edited_args = None
+                # Epic 8, E8-6.2: an envelope grant the owner made at
+                # a browser confirmation rides the GRANTED event; the
+                # pause node scopes it to the confirmed action.
+                browser_envelope = msg.payload.get("browser_envelope") if is_approved else None
+                if not isinstance(browser_envelope, dict):
+                    browser_envelope = None
                 if edited_args is not None:
                     try:
                         pending = await get_pending_approvals()
@@ -1252,6 +1268,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     secret_store=secret_store,
                     user_config=engine_state.user_config,
                     edited_args=edited_args,
+                    browser_envelope=browser_envelope,
                 )
 
                 if task_runner and not task_runner.done():
@@ -1897,6 +1914,50 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     type=EventType.BROWSER_TASK_PAUSE_RESPONSE,
                     request_id=req_id,
                     payload=browser_result,
+                ).to_json())
+
+            elif msg.type == EventType.BROWSER_POLICY_GET_REQUEST:
+                # Epic 8, E8-6.2: Settings → Browser Agent Policy reads
+                # the confirmation policy (categories + toggles).
+                from aether_engine.browser.policy import policy_from_user_config
+
+                await ws.send_text(Event(
+                    type=EventType.BROWSER_POLICY_GET_RESPONSE,
+                    request_id=req_id,
+                    payload=policy_from_user_config(engine_state.user_config).to_dict(),
+                ).to_json())
+
+            elif msg.type == EventType.BROWSER_POLICY_SET_REQUEST:
+                # Epic 8, E8-6.2: partial policy update — validated
+                # fully before anything mutates, so a rejected update
+                # changes nothing. Persisted with the rest of the
+                # user config and audited by field name.
+                from aether_engine.browser.policy import (
+                    apply_policy_update,
+                    policy_from_user_config,
+                )
+
+                ok, error = apply_policy_update(engine_state.user_config, msg.payload)
+                response_payload: dict = {
+                    "success": ok,
+                    "policy": policy_from_user_config(engine_state.user_config).to_dict(),
+                }
+                if ok:
+                    save_config(engine_state.user_config)
+                    changed = sorted(
+                        key for key in ("enabled", "vault_autofill", "envelopes_enabled")
+                        if msg.payload.get(key) is not None
+                    )
+                    if isinstance(msg.payload.get("categories"), dict):
+                        changed += [f"categories.{k}" for k in msg.payload["categories"]]
+                    engine_state.audit_logger.log_event(
+                        "BROWSER_POLICY_UPDATED", {"fields": changed})
+                else:
+                    response_payload["error"] = error
+                await ws.send_text(Event(
+                    type=EventType.BROWSER_POLICY_SET_RESPONSE,
+                    request_id=req_id,
+                    payload=response_payload,
                 ).to_json())
 
             # -----------------------------------------------------------

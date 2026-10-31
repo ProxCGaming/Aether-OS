@@ -219,6 +219,23 @@ class UserConfig:
     compaction_trigger_messages: int = 40
     compaction_trigger_chars: int = 24000
     compaction_keep_recent: int = 12
+    # Epic 8, E8-6.2: browser agent confirmation policy (Settings →
+    # Browser Agent Policy; see browser/policy.py). Shipped preset:
+    # agent enabled, envelopes enabled, vault autofill OFF (the vault
+    # itself arrives with E8-6.3), and every consequential category
+    # (payments, sends_publishes, deletes, account_changes) set to
+    # "always_confirm". Modes are validated by
+    # browser.policy.clean_category_modes on load: an unknown mode
+    # tightens back to "always_confirm", never loosens.
+    browser_agent_enabled: bool = True
+    browser_vault_autofill: bool = False
+    browser_envelopes_enabled: bool = True
+    browser_category_modes: dict[str, str] = field(default_factory=lambda: {
+        "payments": "always_confirm",
+        "sends_publishes": "always_confirm",
+        "deletes": "always_confirm",
+        "account_changes": "always_confirm",
+    })
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -268,6 +285,10 @@ class UserConfig:
             "compaction_trigger_messages": self.compaction_trigger_messages,
             "compaction_trigger_chars": self.compaction_trigger_chars,
             "compaction_keep_recent": self.compaction_keep_recent,
+            "browser_agent_enabled": self.browser_agent_enabled,
+            "browser_vault_autofill": self.browser_vault_autofill,
+            "browser_envelopes_enabled": self.browser_envelopes_enabled,
+            "browser_category_modes": dict(self.browser_category_modes),
         }
 
     @classmethod
@@ -364,7 +385,19 @@ class UserConfig:
             compaction_trigger_messages=_as_int(d.get("compaction_trigger_messages"), 40),
             compaction_trigger_chars=_as_int(d.get("compaction_trigger_chars"), 24000),
             compaction_keep_recent=_as_int(d.get("compaction_keep_recent"), 12),
+            browser_agent_enabled=bool(d.get("browser_agent_enabled", True)),
+            browser_vault_autofill=bool(d.get("browser_vault_autofill", False)),
+            browser_envelopes_enabled=bool(d.get("browser_envelopes_enabled", True)),
+            browser_category_modes=_clean_browser_category_modes(d.get("browser_category_modes")),
         )
+
+
+def _clean_browser_category_modes(value) -> dict[str, str]:
+    """Epic 8, E8-6.2: delegate to the browser policy validator —
+    unknown categories drop, unknown modes tighten to always_confirm."""
+    from aether_engine.browser.policy import clean_category_modes
+
+    return clean_category_modes(value)
 
 
 def _clean_mcp_risk_overrides(value) -> dict[str, str]:
