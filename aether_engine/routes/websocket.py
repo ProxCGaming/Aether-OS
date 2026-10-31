@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,7 @@ from aether_engine.tools.registry import (
     create_web_tools,
 )
 from aether_engine.validation.diagnostics import run_environment_diagnostics
+from aether_engine.version import APP_VERSION
 
 logger = logging.getLogger("aether_engine.routes.websocket")
 
@@ -171,7 +173,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
             type=EventType.HELLO,
             payload={
                 "message": "AETHER Engine Ready",
-                "version": "0.3.5",
+                "version": APP_VERSION,
                 "active_provider": engine_state.active_provider,
                 "active_model": engine_state.active_model,
                 "health": engine_state.health_manager.get_all_statuses(),
@@ -2125,6 +2127,125 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         payload = {"success": False, "error": str(e)}
                 await ws.send_text(Event(
                     type=EventType.MEMORY_EXPORT_RESPONSE,
+                    request_id=req_id,
+                    payload=payload,
+                ).to_json())
+
+            elif msg.type == EventType.BACKUP_CREATE_REQUEST:
+                # Epic 10, E10-03: snapshot ~/.aether into a zip under
+                # the active workspace's AetherBackups folder.
+                try:
+                    from aether_engine.backup import create_backup
+
+                    roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
+                    stamp = time.strftime("%Y%m%d-%H%M%S")
+                    dest = Path(roots[0]) / "AetherBackups" / f"aether-backup-{stamp}.zip"
+                    manifest = await asyncio.to_thread(
+                        create_backup, dest,
+                        include_secrets=bool(msg.payload.get("include_secrets")),
+                    )
+                    engine_state.audit_logger.log_event("BACKUP_CREATED", {
+                        "path": str(dest), "files": len(manifest["files"]),
+                        "include_secrets": manifest["include_secrets"],
+                    })
+                    payload = {"success": True, "path": str(dest), "files": len(manifest["files"]),
+                               "include_secrets": manifest["include_secrets"]}
+                except Exception as e:  # noqa: BLE001 — backup failure must surface, not crash the handler
+                    payload = {"success": False, "error": str(e)}
+                await ws.send_text(Event(
+                    type=EventType.BACKUP_CREATE_RESPONSE,
+                    request_id=req_id,
+                    payload=payload,
+                ).to_json())
+
+            elif msg.type == EventType.BACKUP_RESTORE_REQUEST:
+                # Epic 10, E10-03: validate-then-write restore. The
+                # running engine keeps in-memory state, so the
+                # response is explicit that a restart applies it.
+                try:
+                    from aether_engine.backup import restore_backup
+
+                    result = await asyncio.to_thread(
+                        restore_backup, Path(str(msg.payload.get("path", "")))
+                    )
+                    engine_state.audit_logger.log_event("BACKUP_RESTORED", {
+                        "files": result["files"],
+                    })
+                    payload = {"success": True, "files": result["files"],
+                               "restart_required": True}
+                except Exception as e:  # noqa: BLE001 — restore failure must surface, not crash the handler
+                    payload = {"success": False, "error": str(e)}
+                await ws.send_text(Event(
+                    type=EventType.BACKUP_RESTORE_RESPONSE,
+                    request_id=req_id,
+                    payload=payload,
+                ).to_json())
+
+            elif msg.type == EventType.DIAGNOSTICS_EXPORT_REQUEST:
+                # Epic 10, E10-04: redacted bundle — config scrubbed by
+                # the audit redactor, memory as counts only.
+                try:
+                    from aether_engine.diagnostics import build_diagnostics
+                    from aether_engine.memory import episodic as _episodic
+                    from aether_engine.memory import knowledge_graph as _kg
+
+                    store = SecretStore()
+                    with _kg._get_conn() as _conn:
+                        kg_count = _conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+                    bundle = build_diagnostics(
+                        user_config=engine_state.user_config,
+                        health=engine_state.health_manager.get_all_statuses(),
+                        kg_count=kg_count,
+                        episodic_count=_episodic.embedding_stats().get("total", 0),
+                        audit_log_path=engine_state.audit_logger.log_path,
+                        providers=store.list_providers(),
+                    )
+                    payload = {"success": True, "bundle": bundle}
+                except Exception as e:  # noqa: BLE001 — diagnostics failure must surface, not crash the handler
+                    payload = {"success": False, "error": str(e)}
+                await ws.send_text(Event(
+                    type=EventType.DIAGNOSTICS_EXPORT_RESPONSE,
+                    request_id=req_id,
+                    payload=payload,
+                ).to_json())
+
+            elif msg.type == EventType.VERSION_CHECK_REQUEST:
+                # Epic 10, E10-05: report-only update check against the
+                # project's GitHub releases. Nothing downloads or
+                # installs — the user decides.
+                try:
+                    import httpx
+
+                    def _parse(v: str) -> tuple:
+                        parts = []
+                        for piece in v.lstrip("v").split("."):
+                            digits = "".join(c for c in piece if c.isdigit())
+                            parts.append(int(digits) if digits else 0)
+                        return tuple(parts)
+
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        resp = await client.get(
+                            "https://api.github.com/repos/ProxCGaming/Aether-OS/releases/latest",
+                            headers={"Accept": "application/vnd.github+json"},
+                        )
+                    if resp.status_code == 404:
+                        payload = {"success": False, "error": "No releases have been published yet.",
+                                   "current": APP_VERSION}
+                    elif resp.status_code != 200:
+                        payload = {"success": False, "error": f"GitHub answered {resp.status_code}.",
+                                   "current": APP_VERSION}
+                    else:
+                        latest = str(resp.json().get("tag_name", "")).lstrip("v")
+                        payload = {
+                            "success": True,
+                            "current": APP_VERSION,
+                            "latest": latest,
+                            "update_available": _parse(latest) > _parse(APP_VERSION),
+                        }
+                except Exception as e:  # noqa: BLE001 — a failed check must surface, not crash the handler
+                    payload = {"success": False, "error": str(e), "current": APP_VERSION}
+                await ws.send_text(Event(
+                    type=EventType.VERSION_CHECK_RESPONSE,
                     request_id=req_id,
                     payload=payload,
                 ).to_json())

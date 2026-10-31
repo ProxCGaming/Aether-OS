@@ -25,6 +25,12 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
   const [settingsQuery, setSettingsQuery] = useState('');
   const [resetArmed, setResetArmed] = useState(false);
   const [resetDone, setResetDone] = useState(false);
+  // Epic 10: backup / restore + update check (Advanced tab).
+  const [backupStatus, setBackupStatus] = useState('');
+  const [includeSecrets, setIncludeSecrets] = useState(false);
+  const [restorePath, setRestorePath] = useState('');
+  const [restoreStatus, setRestoreStatus] = useState('');
+  const [versionCheck, setVersionCheck] = useState('');
   const [approvalGrants, setApprovalGrants] = useState([]);
   const [mcpServers, setMcpServers] = useState({});
   const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '' });
@@ -241,6 +247,33 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
         } else if (data.type === 'CONFIG_RESET_RESPONSE') {
           setResetArmed(false);
           setResetDone(true);
+        } else if (data.type === 'BACKUP_CREATE_RESPONSE') {
+          setBackupStatus(data.payload.success
+            ? `Backup saved: ${data.payload.path} (${data.payload.files} files)`
+            : `Backup failed: ${data.payload.error}`);
+        } else if (data.type === 'BACKUP_RESTORE_RESPONSE') {
+          setRestoreStatus(data.payload.success
+            ? `Restored ${data.payload.files} files. Restart Aether for the restore to take effect.`
+            : `Restore failed: ${data.payload.error}`);
+        } else if (data.type === 'DIAGNOSTICS_EXPORT_RESPONSE') {
+          if (data.payload.success) {
+            const blob = new Blob([JSON.stringify(data.payload.bundle, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `aether-diagnostics-${new Date().toISOString().slice(0, 10)}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+            setVersionCheck('Diagnostics exported — the file contains no API keys and no memory content.');
+          } else {
+            setVersionCheck(`Diagnostics export failed: ${data.payload.error}`);
+          }
+        } else if (data.type === 'VERSION_CHECK_RESPONSE') {
+          setVersionCheck(data.payload.success
+            ? (data.payload.update_available
+              ? `A newer version is available: ${data.payload.latest} (you have ${data.payload.current}). Download it from the project's GitHub releases when you're ready — nothing is installed automatically.`
+              : `You're on the latest version (${data.payload.current}).`)
+            : `Couldn't check for updates: ${data.payload.error}`);
         } else if (data.type === 'CONFIG_GET_RESPONSE' || data.type === 'CONFIG_UPDATE_RESPONSE') {
           if (data.payload.config) {
             setDisableFallbacks(data.payload.config.disable_fallbacks || false);
@@ -1003,6 +1036,85 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
               )}
             </div>
             
+            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Backup & restore</h3>
+              <p style={{ color: '#9090a0', fontSize: '13px', margin: '0 0 16px 0' }}>
+                A backup snapshots your settings, memory, sessions and skills into one zip in your workspace's
+                AetherBackups folder. API keys stay out unless you include the (encrypted) secret store.
+                Restoring replaces those files on disk — restart Aether afterwards for it to take effect.
+              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
+                <button
+                  onClick={() => {
+                    setBackupStatus('Creating backup…');
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ type: 'BACKUP_CREATE_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: { include_secrets: includeSecrets } }));
+                    }
+                  }}
+                  style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                >
+                  Create backup
+                </button>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#c0c0cc', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={includeSecrets} onChange={(e) => setIncludeSecrets(e.target.checked)} />
+                  Include encrypted secret store
+                </label>
+              </div>
+              {backupStatus && <div style={{ fontSize: '13px', color: '#a0a0b0', marginBottom: '16px', wordBreak: 'break-all' }}>{backupStatus}</div>}
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <input
+                  value={restorePath}
+                  onChange={(e) => setRestorePath(e.target.value)}
+                  placeholder="Path to a backup zip…"
+                  aria-label="Backup zip path"
+                  style={{ flex: 1, minWidth: '220px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', padding: '9px 12px', color: '#f0f0f5', fontSize: '13px' }}
+                />
+                <button
+                  onClick={() => {
+                    if (!restorePath.trim()) { setRestoreStatus('Enter the path to a backup zip first.'); return; }
+                    setRestoreStatus('Restoring…');
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ type: 'BACKUP_RESTORE_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: { path: restorePath.trim() } }));
+                    }
+                  }}
+                  style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                >
+                  Restore
+                </button>
+              </div>
+              {restoreStatus && <div style={{ fontSize: '13px', color: '#a0a0b0', marginTop: '12px' }}>{restoreStatus}</div>}
+              <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', marginTop: '20px', paddingTop: '16px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => {
+                    setVersionCheck('Checking…');
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ type: 'VERSION_CHECK_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+                    }
+                  }}
+                  style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                >
+                  Check for updates
+                </button>
+                <button
+                  onClick={() => {
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ type: 'DIAGNOSTICS_EXPORT_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+                    }
+                  }}
+                  style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                >
+                  Export diagnostics
+                </button>
+                <button
+                  onClick={() => { if (window.electronAPI && window.electronAPI.openLogsFolder) window.electronAPI.openLogsFolder(); }}
+                  style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                >
+                  Open logs folder
+                </button>
+                {versionCheck && <span style={{ fontSize: '13px', color: '#a0a0b0' }}>{versionCheck}</span>}
+              </div>
+            </div>
+
             <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>
               <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '16px', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Network size={18} style={{ color: '#a78bfa' }} /> Model Routing & Fallbacks

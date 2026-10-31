@@ -10,10 +10,15 @@ from aether_engine.providers.discovery import fetch_available_models
 from aether_engine.routes.websocket import router as ws_router
 from aether_engine.secrets.storage import SecretStore
 from aether_engine.state import engine_state
+from aether_engine.version import APP_VERSION
 
 logger = logging.getLogger("aether_engine.app")
 
 async def lifespan(_app: FastAPI):
+    # Epic 10, E10-04: unhandled exceptions land in ~/.aether/logs/crash.log.
+    from aether_engine.diagnostics import install_crash_logging
+
+    install_crash_logging()
     engine_state.initialize()
 
     # Epic 9: warm the deferred litellm import in a background thread.
@@ -103,7 +108,7 @@ async def lifespan(_app: FastAPI):
     logger.info("AETHER Engine stopped.")
 
 
-app = FastAPI(title="AETHER Engine", version="0.3.5", lifespan=lifespan)
+app = FastAPI(title="AETHER Engine", version=APP_VERSION, lifespan=lifespan)
 app.include_router(ws_router)
 
 @app.get("/health")
