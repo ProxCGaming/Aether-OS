@@ -87,13 +87,52 @@ def _redact(value: Any, key: str | None = None) -> Any:
 
 
 class AuditLogger:
-    def __init__(self, log_path: Path = DEFAULT_AUDIT_LOG_PATH):
+    def __init__(self, log_path: Path = DEFAULT_AUDIT_LOG_PATH,
+                 max_bytes: int = 10 * 1024 * 1024, backup_count: int = 5):
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Epic 10, E10-02: size-based rotation (the follow-up the C2
+        # note above deferred). Hash-chaining stays an accepted,
+        # documented risk — see ADR 0037.
+        self.max_bytes = max_bytes
+        self.backup_count = backup_count
+
+    def _archive_path(self, index: int) -> Path:
+        return self.log_path.with_name(f"{self.log_path.name}.{index}.gz")
+
+    def _rotate(self) -> None:
+        import gzip
+        import shutil
+
+        for i in range(self.backup_count - 1, 0, -1):
+            src = self._archive_path(i)
+            if src.exists():
+                src.replace(self._archive_path(i + 1))
+        with open(self.log_path, "rb") as f_in, gzip.open(self._archive_path(1), "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out)
+        self.log_path.write_text("", encoding="utf-8")
 
     def _append(self, record: dict[str, Any]) -> None:
+        line = json.dumps(_redact(record)) + "\n"
+        rotated = False
+        try:
+            if (
+                self.max_bytes
+                and self.log_path.exists()
+                and self.log_path.stat().st_size + len(line.encode("utf-8")) > self.max_bytes
+            ):
+                self._rotate()
+                rotated = True
+        except Exception:  # noqa: BLE001 — rotation is housekeeping: a rotation failure must never lose the audit write itself
+            rotated = False
         with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(_redact(record)) + "\n")
+            f.write(line)
+        if rotated:
+            self.log_event("AUDIT_LOG_ROTATED", {
+                "max_bytes": self.max_bytes,
+                "backup_count": self.backup_count,
+                "archive": self._archive_path(1).name,
+            })
 
     def log_connection(self, success: bool, ip: str = "unknown",
                        port: int | None = None, reason: str = "") -> None:
