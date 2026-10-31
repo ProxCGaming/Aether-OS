@@ -2626,6 +2626,69 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         payload={"success": False, "error": "Path not found"},
                     ).to_json())
 
+            elif msg.type == EventType.WORKSPACE_INDEX_START_REQUEST:
+                # Epic 8, E8-3.2: consent-first indexing (grill Q17).
+                # Without confirm this is the consent preview: counts,
+                # size, embedder and destination, nothing started and
+                # nothing mutated. With confirm, consent is recorded,
+                # indexing runs in the background with PROGRESS pushes,
+                # and the watcher keeps the index fresh afterwards.
+                from aether_engine.rag.prose_indexer import get_prose_indexer
+
+                indexer = get_prose_indexer()
+                ws_root = msg.payload.get("workspace_root", "")
+                confirm = bool(msg.payload.get("confirm"))
+                req_embedder = msg.payload.get("embedder")
+                estimate = await asyncio.to_thread(indexer.estimate, ws_root)
+                if confirm and ws_root:
+                    if req_embedder:
+                        await asyncio.to_thread(indexer.set_embedder, req_embedder)
+                    await asyncio.to_thread(indexer.grant_consent, ws_root)
+
+                    async def _run_index(root=ws_root, indexer=indexer, req_id=req_id):
+                        async def _progress(**kw):
+                            try:
+                                await ws.send_text(Event(
+                                    type=EventType.WORKSPACE_INDEX_PROGRESS,
+                                    request_id=req_id,
+                                    payload=kw,
+                                ).to_json())
+                            except Exception:  # a dead socket must not kill indexing
+                                logger.debug("Index progress push failed", exc_info=True)
+
+                        try:
+                            await indexer.index_workspace(root, progress_cb=_progress)
+                        except Exception:
+                            # Background index pass: logged, never
+                            # propagated into the socket loop.
+                            logger.exception("Workspace indexing failed for %s", root)
+                        indexer.start_watching(root)
+
+                    asyncio.create_task(_run_index())
+                await ws.send_text(Event(
+                    type=EventType.WORKSPACE_INDEX_START_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "started": bool(confirm and ws_root),
+                        "estimated_files": estimate["estimated_files"],
+                        "estimated_bytes": estimate["estimated_bytes"],
+                        "embedder": indexer.embedder,
+                        "destination": str(indexer.store.db_path),
+                    },
+                ).to_json())
+
+            elif msg.type == EventType.WORKSPACE_INDEX_STATUS_REQUEST:
+                from aether_engine.rag.prose_indexer import get_prose_indexer
+
+                indexer = get_prose_indexer()
+                status_payload = await asyncio.to_thread(
+                    indexer.status, msg.payload.get("workspace_root"))
+                await ws.send_text(Event(
+                    type=EventType.WORKSPACE_INDEX_STATUS_RESPONSE,
+                    request_id=req_id,
+                    payload=status_payload,
+                ).to_json())
+
             elif msg.type == EventType.WORKSPACE_SET_ACTIVE_REQUEST:
                 # Epic 6, E6-04: the active workspace is the first
                 # root (containment, skills, and task defaults all

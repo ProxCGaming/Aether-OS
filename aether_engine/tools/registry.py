@@ -278,6 +278,12 @@ def build_tool_registry(
     registry.register(create_scratchpad_tool())
     for tool in filesystem_read_tools():
         registry.register(tool)
+    # Epic 8, E8-3.2: deliberate prose retrieval over the workspace
+    # index (rag/). READ_ONLY and self-limiting — with no index it
+    # answers "nothing indexed" instead of failing.
+    from aether_engine.tools.workspace_search import create_workspace_search_tool
+
+    registry.register(create_workspace_search_tool())
     if include_file_tools:
         for tool in create_file_tools():
             registry.register(tool)

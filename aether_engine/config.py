@@ -151,6 +151,14 @@ class UserConfig:
     # from live files at task start and ranked toward the task.
     # Fast chat never receives a map. <= 0 disables the map.
     repo_map_token_budget: int = 1000
+    # Epic 8, E8-3.2: THE embedding model — ONE embedder serves both
+    # episodic memory and the workspace prose index, resolved through
+    # episodic.resolve_embedder (grill Q17, local-first via Ollama).
+    # Bare Ollama model name; "qwen3-embedding:4b" is the Settings
+    # "quality" option. Changing it makes existing vectors
+    # incomparable: episodic embeddings and the prose index must be
+    # rebuilt (the prose indexer drops its chunks on a switch).
+    embedding_model: str = "qwen3-embedding:0.6b"
     agent_models: dict[str, str] = field(default_factory=dict)
     agent_tools: dict[str, list[str]] = field(default_factory=dict)
     agent_skills: dict[str, list[str]] = field(default_factory=dict)
@@ -189,7 +197,9 @@ class UserConfig:
     #   Sessions: 180 days / 200 sessions (chat history: half a year).
     # Phase 10.3 A2: episodic semantic-similarity threshold (cosine).
     # Episodes scoring below it never enter RRF in query_episodes.
-    # Default 0.3: nomic-embed-text emits L2-normalised embeddings and
+    # Default 0.3: chosen when nomic-embed-text was the embedder (it
+    # emits L2-normalised embeddings); kept for the unified
+    # qwen3-embedding:0.6b (E8-3.2), which is also cosine-scored, and
     # unrelated short texts score well below 0.3 while related task
     # summaries score materially higher (same default as litellm's
     # semantic tool filter). 0.0 restores the old unthresholded behaviour.
@@ -231,6 +241,7 @@ class UserConfig:
             "search_provider": self.search_provider,
             "search_fallback_to_ddgs": self.search_fallback_to_ddgs,
             "workspace_roots": self.workspace_roots,
+            "embedding_model": self.embedding_model,
             "agent_models": self.agent_models,
             "agent_tools": self.agent_tools,
             "agent_skills": self.agent_skills,
@@ -322,6 +333,7 @@ class UserConfig:
             search_provider=d.get("search_provider") if d.get("search_provider") in ("ddgs", "exa", "brave", "tavily", "firecrawl") else "ddgs",
             search_fallback_to_ddgs=bool(d.get("search_fallback_to_ddgs", False)),
             workspace_roots=d.get("workspace_roots") if isinstance(d.get("workspace_roots"), list) else [],
+            embedding_model=str(d.get("embedding_model") or "qwen3-embedding:0.6b"),
             agent_models=_as_dict(d.get("agent_models")),
             agent_tools=_as_list_dict(d.get("agent_tools")),
             agent_skills=_as_list_dict(d.get("agent_skills")),

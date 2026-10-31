@@ -95,7 +95,10 @@ async def test_embedding_failure_stores_episode_unembedded_and_logs_failure(
     assert len(failures) == 1
     details = failures[0].args[1]
     assert details["task_id"] == task_id
-    assert details["model"] == "ollama/nomic-embed-text"
+    # Epic 8, E8-3.2: the default embedder was unified to
+    # qwen3-embedding:0.6b (ONE embedder for episodic memory + the
+    # prose index); the failure record names the resolved model.
+    assert details["model"] == "ollama/qwen3-embedding:0.6b"
     assert "Ollama down" in details["error"]
     assert "error_type" in details
 

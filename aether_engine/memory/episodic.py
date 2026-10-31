@@ -18,12 +18,45 @@ logger = logging.getLogger(__name__)
 # validation: a cold Ollama start (model load + first embed) routinely
 # exceeds 10s, while provider pings are expected to answer promptly.
 # No better value was found in code; 30s is the prompt-required value.
-EMBEDDING_MODEL = "ollama/nomic-embed-text"
+#
+# Epic 8, E8-3.2: ONE embedder serves episodic memory AND the
+# workspace prose index (rag/prose_indexer.py) — grill Q17,
+# local-first via Ollama. The configured name is the bare Ollama
+# model (UserConfig.embedding_model, whose default is
+# DEFAULT_EMBEDDER); resolve_embedder() below is the single
+# resolution path both consumers share. EMBEDDING_MODEL keeps the
+# LiteLLM form of the default for the callers/tests that reference
+# the module constant (embedding_stats, failure logging).
+DEFAULT_EMBEDDER = "qwen3-embedding:0.6b"
+EMBEDDING_MODEL = "ollama/qwen3-embedding:0.6b"
 EMBEDDING_TIMEOUT_SECONDS = 30.0
 
+
+def resolve_embedder(config: UserConfig | None = None) -> str:
+    """The configured embedder's bare Ollama model name (E8-3.2).
+
+    Resolution order matches _resolve_similarity_threshold: an
+    explicit config wins, otherwise the persisted config is loaded.
+    This is THE embedder for both episodic memory and the prose
+    index — there is deliberately no second resolution path.
+    """
+    cfg = config if config is not None else load_config()
+    return str(getattr(cfg, "embedding_model", None) or DEFAULT_EMBEDDER)
+
+
+def litellm_embedding_model(config: UserConfig | None = None,
+                            *, embedder: str | None = None) -> str:
+    """LiteLLM model string for the embedder: a bare local name gets
+    the ``ollama/`` provider prefix; an already-prefixed name (a
+    future cloud embedder, opt-in only per Q17) passes through."""
+    name = embedder or resolve_embedder(config)
+    return name if "/" in name else f"ollama/{name}"
+
 # Phase 10.3 A2: episodic semantic-similarity threshold (cosine).
-# nomic-embed-text returns L2-normalised embeddings, so cosine is the
-# native similarity. Unrelated short texts score well below 0.3 while
+# nomic-embed-text (the embedder at the time) returns L2-normalised
+# embeddings, so cosine is the native similarity; the unified
+# qwen3-embedding:0.6b (E8-3.2) is likewise used through cosine.
+# Unrelated short texts score well below 0.3 while
 # genuinely related task summaries score materially higher, so 0.3 is a
 # conservative floor: it drops noise without cutting weak-but-real
 # matches. Same 0.3 default as litellm's own semantic tool filter
@@ -127,6 +160,17 @@ def _embed_breaker_open() -> bool:
     return time.monotonic() < _embed_unavailable_until
 
 
+def embedding_breaker_open() -> bool:
+    """Public view of the shared embedding circuit breaker (Epic 9).
+
+    Epic 8, E8-3.2: the workspace prose indexer shares this breaker
+    with episodic memory — one endpoint, one cooldown. Indexing
+    checks it before attempting embeds and queues instead of
+    hammering a dead endpoint; search degrades to lexical-only.
+    """
+    return _embed_breaker_open()
+
+
 def _trip_embed_breaker(error: Exception) -> None:
     global _embed_unavailable_until
     if isinstance(error, (ConnectionError, TimeoutError)) or type(error).__name__ in (
@@ -137,11 +181,23 @@ def _trip_embed_breaker(error: Exception) -> None:
 
 
 async def _embed_text(text: str, task_id: str | None = None,
-                    context: str = "store") -> list[float] | None:
+                    context: str = "store",
+                    *, config: UserConfig | None = None) -> list[float] | None:
     """Embed ``text`` via Ollama. Returns ``None`` on failure — but never
     silently: every failure is logged distinctly (model, error, episode id)
     to the audit log and the module logger. No retry/backfill here
-    (Phase 10.3); callers must treat ``None`` as "not embedded"."""
+    (Phase 10.3); callers must treat ``None`` as "not embedded".
+
+    Epic 8, E8-3.2: the model is the unified configured embedder
+    (resolve_embedder) — the same one the prose index embeds with.
+    Episodic's own call sites deliberately do NOT thread their
+    ``config`` argument in: they resolve the ambient persisted
+    config (the same source their config was loaded from), and the
+    strict-signature test doubles that replace this function
+    (tests/test_phase10_3_episodic_recall.py) keep working. The
+    ``config`` kwarg serves the public embed_text wrapper, whose
+    callers (the prose indexer) may carry an explicit override.
+    """
     global _embed_unavailable_until
     if _embed_breaker_open():
         # Degraded mode (Epic 9): the endpoint recently proved
@@ -149,11 +205,12 @@ async def _embed_text(text: str, task_id: str | None = None,
         # episode — the tripping failure already was.
         logger.debug("Embedding skipped: endpoint in circuit-breaker cooldown")
         return None
+    model = litellm_embedding_model(config)
     litellm = _load_litellm()  # Epic 9: deferred import, bound locally
     try:
         response = await asyncio.wait_for(
             litellm.aembedding(
-                model=EMBEDDING_MODEL,
+                model=model,
                 input=[text],
                 api_base="http://127.0.0.1:11434",
                 # Single attempt, per this function's contract ("no
@@ -168,33 +225,48 @@ async def _embed_text(text: str, task_id: str | None = None,
         return response.data[0]["embedding"]
     except TimeoutError as e:
         _trip_embed_breaker(e)
-        _log_embedding_failure(e, task_id, context)
+        _log_embedding_failure(e, task_id, context, model=model)
         return None
     except Exception as e:  # noqa: BLE001 — embedding is best-effort: any failure means "not embedded", never a raised error
         _trip_embed_breaker(e)
-        _log_embedding_failure(e, task_id, context)
+        _log_embedding_failure(e, task_id, context, model=model)
         return None
 
 
+async def embed_text(text: str, *, config: UserConfig | None = None,
+                     context: str = "external") -> list[float] | None:
+    """Public embedding entry point (Epic 8, E8-3.2).
+
+    The workspace prose indexer and the ``workspace_search`` tool
+    embed through here so episodic memory and the prose index share
+    the unified model resolution AND the circuit breaker — one
+    endpoint, one failure domain, one cooldown.
+    """
+    return await _embed_text(text, context=context, config=config)
+
+
 def _log_embedding_failure(error: Exception, task_id: str | None,
-                           context: str) -> None:
+                           context: str, *, model: str | None = None) -> None:
     """Log one embedding failure distinctly: model, error, episode id.
 
     Uses the module-level audit logger (already imported at the top of
     this module — no new import, no circular-import risk) via the
     existing generic ``log_event``; no new audit event type was needed.
+    ``model`` is the resolved embedder the failed attempt used
+    (E8-3.2); it defaults to the module default's LiteLLM form.
     """
+    model = model or EMBEDDING_MODEL
     details = {
         "task_id": task_id,
         "context": context,
-        "model": EMBEDDING_MODEL,
+        "model": model,
         "error": str(error) or repr(error),
         "error_type": type(error).__name__,
     }
     _audit_logger.log_event("EPISODIC_EMBEDDING_FAILED", details)
     logger.warning(
         "EPISODIC_EMBEDDING_FAILED task_id=%s model=%s error_type=%s error=%s",
-        task_id, EMBEDDING_MODEL, type(error).__name__, error,
+        task_id, model, type(error).__name__, error,
         exc_info=True,  # noqa: LOG014 — this helper is only ever called from except handlers; exc_info captures the active exception
     )
     # Epic 4, E4-04: the most recent failure is part of embedding
@@ -202,7 +274,7 @@ def _log_embedding_failure(error: Exception, task_id: str | None,
     global _LAST_EMBEDDING_FAILURE
     _LAST_EMBEDDING_FAILURE = {
         "task_id": task_id,
-        "model": EMBEDDING_MODEL,
+        "model": model,
         "error_type": type(error).__name__,
         "error": str(error) or repr(error),
         "at": int(time.time()),
@@ -229,7 +301,9 @@ def embedding_stats() -> dict[str, Any]:
         "episodes": int(total),
         "embedded": int(embedded),
         "pending": int(total) - int(embedded),
-        "model": EMBEDDING_MODEL,
+        # E8-3.2: the resolved unified embedder's LiteLLM form —
+        # identical to EMBEDDING_MODEL under the default config.
+        "model": litellm_embedding_model(),
         "last_failure": _LAST_EMBEDDING_FAILURE,
     }
 

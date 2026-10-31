@@ -69,6 +69,9 @@ async def test_plan_mode_offers_only_read_only_tools(monkeypatch):
         "scratchpad_render",
         "search_text",
         "search_web",
+        # Epic 8, E8-3.2: workspace_search is READ_ONLY prose
+        # retrieval, so plan mode offers it like the other readers.
+        "workspace_search",
     }
 
 
