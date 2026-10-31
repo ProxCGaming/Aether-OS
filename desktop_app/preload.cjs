@@ -25,5 +25,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('chat-attached', handler);
   },
   openFloatingChat: (sessionId) => ipcRenderer.invoke('open-floating-chat', sessionId),
+  openLogsFolder: () => ipcRenderer.invoke('open-logs-folder'),
   closeFloatingChat: () => ipcRenderer.invoke('close-floating-chat')
 });

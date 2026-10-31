@@ -1,3 +1,19 @@
+
+// Epic 10: shell crash log — uncaught errors land next to the
+// engine's own crash log in ~/.aether/logs for the diagnostics view.
+try {
+  const fs0 = require('fs');
+  const path0 = require('path');
+  const os0 = require('os');
+  const crashDir = path0.join(os0.homedir(), '.aether', 'logs');
+  fs0.mkdirSync(crashDir, { recursive: true });
+  const crashPath = path0.join(crashDir, 'crash-electron.log');
+  const writeCrash = (kind, err) => {
+    try { fs0.appendFileSync(crashPath, `\n=== ${kind} ===\n${(err && err.stack) || err}\n`); } catch { /* never crash on logging */ }
+  };
+  process.on('uncaughtException', (err) => writeCrash('UNCAUGHT', err));
+  process.on('unhandledRejection', (err) => writeCrash('UNHANDLED_REJECTION', err));
+} catch { /* logging setup is best-effort */ }
 const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification, globalShortcut, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -285,6 +301,16 @@ ipcMain.handle('maximize-window', (event) => {
   }
 });
 
+ipcMain.handle('open-logs-folder', async () => {
+  const path = require('path');
+  const os = require('os');
+  const fs = require('fs');
+  const dir = path.join(os.homedir(), '.aether', 'logs');
+  fs.mkdirSync(dir, { recursive: true });
+  const { shell } = require('electron');
+  await shell.openPath(dir);
+  return dir;
+});
 ipcMain.handle('get-ws-status', () => {
   return wsClient && wsClient.readyState === WebSocket.OPEN;
 });
