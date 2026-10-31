@@ -20,7 +20,21 @@ embedding endpoint is down the item still reaches ``analyzed`` —
 only its semantic recall degrades until a later re-embed; text
 recall (and the store's lexical leg) keeps working.
 
-Transcripts for video are E8-4.4, deliberately not here.
+E8-4.4 adds the video transcript stage on top: a video's audio
+track is extracted with ffmpeg and transcribed through the local
+STT runner from E8-5.1a (``aether_engine.voice.stt`` — the same
+``SttEngine`` protocol the voice cascade uses, no second STT
+stack). The transcript is stored on the entry and folded into
+the embedded text, so a phrase that is only *spoken* in a video
+— never visible in any frame or filename — is findable through
+library search and ``media_recall``. The stage is fail-soft and
+honest in the same way as the rest of the pipeline: missing STT
+runtime or ffmpeg marks the transcript ``unavailable``, an STT
+error marks it ``failed``, a video with no audio marks
+``no_audio`` — the analysis itself still completes, and no
+transcript text is ever fabricated. Videos analysed before this
+slice gain transcripts through the same backfill (see
+``backfill_transcripts``), resumably and idempotently.
 """
 from __future__ import annotations
 
@@ -39,11 +53,58 @@ from aether_common.contracts import Event, EventType
 from aether_engine.config import UserConfig, load_config
 from aether_engine.media.store import MediaStore, get_media_store
 from aether_engine.memory import episodic
+from aether_engine.voice import VoiceUnavailableError
 
 logger = logging.getLogger("aether_engine.media.analyzer")
 
 KEYFRAME_CAP = 24
 _VISION_TIMEOUT_S = 120.0
+
+# E8-4.4: STT consumes raw PCM16 mono (SttEngine.transcribe); the
+# extraction below produces exactly that at the rate whisper
+# models expect.
+AUDIO_SAMPLE_RATE = 16000
+_EXTRACT_TIMEOUT_S = 600.0
+
+
+class AudioExtractionError(RuntimeError):
+    """ffmpeg could not extract a video's audio track."""
+
+
+class NoAudioStreamError(AudioExtractionError):
+    """The video has no audio stream to transcribe."""
+
+
+def extract_audio_pcm(
+    file_path: str | Path,
+    sample_rate: int = AUDIO_SAMPLE_RATE,
+) -> bytes:
+    """Extract a video's audio track as raw PCM16 mono samples.
+
+    Raises FileNotFoundError when ffmpeg itself is missing (the
+    caller maps that to an honest ``unavailable``), and
+    AudioExtractionError / NoAudioStreamError for a file ffmpeg
+    cannot read or that carries no audio.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y", "-v", "error",
+                "-i", str(file_path),
+                "-vn", "-ac", "1", "-ar", str(sample_rate),
+                "-f", "s16le", "pipe:1",
+            ],
+            capture_output=True, timeout=_EXTRACT_TIMEOUT_S, check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise AudioExtractionError("ffmpeg audio extraction timed out") from e
+    if proc.returncode != 0:
+        stderr = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise AudioExtractionError(
+            f"ffmpeg audio extraction failed: {stderr[:200]}")
+    if not proc.stdout:
+        raise NoAudioStreamError("video has no extractable audio stream")
+    return proc.stdout
 
 
 # ----------------------------------------------------------------------
@@ -383,6 +444,25 @@ def _embed_text_for(item_summary: str, tags: list[str], extra: str = "") -> str:
     return " ".join(p for p in parts if p)
 
 
+def _embed_text_for_item(item: dict[str, Any]) -> str:
+    """Rebuild the embedding text for an already-analysed item.
+
+    Used when the transcript stage lands after the main analysis
+    (backfill): the same composition ``analyze_item`` embeds —
+    summary, keyframe descriptions, transcript, tags.
+    """
+    probe = item.get("probe_metadata") or {}
+    extra = " ".join(
+        str(k.get("description") or "")
+        for k in probe.get("keyframe_summaries") or []
+        if isinstance(k, dict))
+    transcript = (item.get("transcript_text") or "").strip()
+    if transcript:
+        extra = f"{extra} {transcript}".strip()
+    return _embed_text_for(
+        item.get("summary_text") or "", list(item.get("tags") or []), extra)
+
+
 class MediaAnalyzer:
     """Analyses MediaStore items in the background.
 
@@ -392,6 +472,13 @@ class MediaAnalyzer:
     vision model). ``on_event`` receives contracts.Event objects
     (MEDIA_ANALYSIS_PROGRESS / MEDIA_ANALYZED); sync and async
     callbacks are both supported.
+
+    ``stt_engine`` is any ``SttEngine`` (E8-5.1a protocol) for the
+    E8-4.4 transcript stage; the default is FasterWhisperStt,
+    created lazily so importing or analysing photos never touches
+    the voice stack. The engine is opened once and kept loaded —
+    this is a background worker, and model load dominates a single
+    transcription.
     """
 
     def __init__(
@@ -400,17 +487,37 @@ class MediaAnalyzer:
         vision_provider: Any | None = None,
         on_event: Callable[[Event], Any] | None = None,
         config: UserConfig | None = None,
+        stt_engine: Any | None = None,
     ):
         self.store = store
         self._vision_provider = vision_provider
         self._on_event = on_event
         self._config = config
+        self._stt_engine = stt_engine
+        self._stt_opened = False
 
     @property
     def vision_provider(self) -> Any:
         if self._vision_provider is None:
             self._vision_provider = LiteLLMVisionProvider(config=self._config)
         return self._vision_provider
+
+    @property
+    def stt_engine(self) -> Any:
+        if self._stt_engine is None:
+            from aether_engine.voice.stt import FasterWhisperStt
+
+            self._stt_engine = FasterWhisperStt()
+        return self._stt_engine
+
+    async def close_stt(self) -> None:
+        """Release the STT model if this analyzer opened one."""
+        if self._stt_engine is not None and self._stt_opened:
+            try:
+                await self._stt_engine.close()
+            except Exception:  # release is best-effort
+                logger.debug("STT engine close failed", exc_info=True)
+            self._stt_opened = False
 
     async def _emit(self, event_type: EventType, payload: dict[str, Any]) -> None:
         if self._on_event is None:
@@ -438,8 +545,22 @@ class MediaAnalyzer:
             {"media_id": media_id, "status": "analyzing"},
         )
         try:
+            transcript_text: str | None = None
+            transcript_status: str | None = None
             if item.get("media_type") == "video":
                 summary, tags, probe, embed_extra = await self._analyze_video(item)
+                # E8-4.4 transcript stage — fail-soft by contract:
+                # whatever it returns, the analysis above stands.
+                await self._emit(
+                    EventType.MEDIA_ANALYSIS_PROGRESS,
+                    {"media_id": media_id, "status": "transcribing"},
+                )
+                transcript_text, transcript_status, transcript_error = (
+                    await self._transcribe_video(item))
+                if transcript_text:
+                    embed_extra = f"{embed_extra} {transcript_text}".strip()
+                if transcript_error:
+                    probe = {**(probe or {}), "transcript_error": transcript_error}
             else:
                 summary, tags, probe, embed_extra = await self._analyze_image(item)
 
@@ -458,6 +579,8 @@ class MediaAnalyzer:
                 tags=tags,
                 probe_metadata=probe,
                 analyzed_at=int(time.time() * 1000),
+                transcript_text=transcript_text,
+                transcript_status=transcript_status,
             )
             await self._emit(EventType.MEDIA_ANALYZED, dict(updated or {}))
             return updated
@@ -509,12 +632,117 @@ class MediaAnalyzer:
             str(k.get("description") or "") for k in keyframes if isinstance(k, dict))
         return summary, tags, merged_probe, embed_extra
 
+    # ------------------------------------------------------------------
+    # E8-4.4: video transcript stage (rides the E8-5.1a STT runner)
+    # ------------------------------------------------------------------
+
+    async def _transcribe_video(
+        self, item: dict[str, Any],
+    ) -> tuple[str | None, str, str | None]:
+        """Run the transcript stage for one video item.
+
+        Returns ``(transcript_text, transcript_status, error)`` —
+        text only on ``done`` (possibly "" for a silent video),
+        error text for ``unavailable`` / ``failed``. Never raises:
+        every failure mode is a recorded state, so the stage can
+        never sink the analysis it rides along with.
+        """
+        engine = self.stt_engine
+        try:
+            reason = engine.unavailable_reason()
+        except Exception as e:  # noqa: BLE001 — a broken probe is a failure state
+            return None, "failed", str(e) or repr(e)
+        if reason:
+            return None, "unavailable", str(reason)
+        try:
+            pcm = await asyncio.to_thread(extract_audio_pcm, item["file_path"])
+        except FileNotFoundError:
+            return None, "unavailable", "ffmpeg is not installed"
+        except NoAudioStreamError:
+            return None, "no_audio", None
+        except AudioExtractionError as e:
+            return None, "failed", str(e)
+        except Exception as e:  # noqa: BLE001 — extraction must not sink analysis
+            return None, "failed", str(e) or repr(e)
+        try:
+            if not self._stt_opened:
+                await engine.open()
+                self._stt_opened = True
+            text = await engine.transcribe(pcm, sample_rate=AUDIO_SAMPLE_RATE)
+        except VoiceUnavailableError as e:
+            return None, "unavailable", str(e)
+        except Exception as e:  # noqa: BLE001 — STT failure is a state, not a crash
+            return None, "failed", str(e) or repr(e)
+        return str(text or ""), "done", None
+
+    async def transcribe_item(self, media_id: str) -> dict[str, Any] | None:
+        """Transcribe one already-analysed video (the backfill unit).
+
+        Skips non-videos and videos whose transcript is ``done``.
+        On success the item's embedding is rebuilt with the
+        transcript folded in, so spoken-only phrases become
+        semantically recallable, not just lexically. Returns the
+        updated item.
+        """
+        item = self.store.get_media(media_id)
+        if item is None or item.get("media_type") != "video":
+            return item
+        if item.get("transcript_status") == "done":
+            return item
+        await self._emit(
+            EventType.MEDIA_ANALYSIS_PROGRESS,
+            {"media_id": media_id, "status": "transcribing"},
+        )
+        transcript_text, transcript_status, transcript_error = (
+            await self._transcribe_video(item))
+        probe = dict(item.get("probe_metadata") or {})
+        if transcript_error:
+            probe["transcript_error"] = transcript_error
+        else:
+            probe.pop("transcript_error", None)
+        updated = self.store.update_analysis(
+            media_id,
+            transcript_text=transcript_text,
+            transcript_status=transcript_status,
+            probe_metadata=probe,
+        )
+        if transcript_status == "done" and transcript_text and updated is not None:
+            vec = await episodic.embed_text(
+                _embed_text_for_item(updated),
+                config=self._config,
+                context="media_transcript",
+            )
+            if vec is not None:
+                self.store.store_embedding(media_id, vec)
+        await self._emit(EventType.MEDIA_ANALYZED, dict(updated or {}))
+        return updated
+
+    async def backfill_transcripts(self, limit: int | None = None) -> int:
+        """Transcribe every analysed video still owed a transcript.
+
+        The resumable half of the E8-4.4 backfill: each pass works
+        through ``MediaStore.list_videos_missing_transcripts``
+        (never-attempted, interrupted, and retryable items), so a
+        crash or a missing-deps pass leaves the rest for the next
+        one; ``done`` is terminal, so a completed pass followed by
+        another is a no-op. Returns how many transcripts reached
+        ``done`` in this pass.
+        """
+        done = 0
+        for item in self.store.list_videos_missing_transcripts(limit=limit):
+            result = await self.transcribe_item(item["id"])
+            if result is not None and result.get("transcript_status") == "done":
+                done += 1
+        return done
+
     async def backfill(self, limit: int | None = None) -> int:
         """Analyse every item still awaiting analysis.
 
         Covers media registered before this pipeline shipped (and
         any item left in a stale ``analyzing`` state by a crash).
-        Returns how many items reached ``analyzed``.
+        Returns how many items reached ``analyzed``. The E8-4.4
+        transcript backfill rides along in the same pass, so the
+        one startup call covers pre-slice videos too.
         """
         pending = self.store.list_by_status(("pending", "analyzing"), limit=limit)
         analyzed = 0
@@ -522,6 +750,7 @@ class MediaAnalyzer:
             result = await self.analyze_item(item["id"])
             if result is not None and result.get("status") == "analyzed":
                 analyzed += 1
+        await self.backfill_transcripts()
         return analyzed
 
 
@@ -582,6 +811,29 @@ def schedule_media_backfill() -> None:
             await get_media_analyzer().backfill()
         except Exception:  # startup backfill is best-effort
             logger.debug("Media analysis backfill failed", exc_info=True)
+
+    task = loop.create_task(_run())
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+
+
+def schedule_transcript_backfill() -> None:
+    """Kick off a detached transcript-only backfill pass (E8-4.4).
+
+    For when the STT runtime lands after startup (deps installed,
+    settings changed): pre-slice videos gain transcripts without
+    re-running the full analysis backfill.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _run() -> None:
+        try:
+            await get_media_analyzer().backfill_transcripts()
+        except Exception:  # detached backfill is best-effort
+            logger.debug("Media transcript backfill failed", exc_info=True)
 
     task = loop.create_task(_run())
     _inflight_tasks.add(task)

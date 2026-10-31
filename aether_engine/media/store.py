@@ -88,6 +88,8 @@ class MediaStore:
                     status TEXT NOT NULL DEFAULT 'pending',
                     probe_metadata_json TEXT,
                     summary_text TEXT,
+                    transcript_text TEXT,
+                    transcript_status TEXT,
                     tags_json TEXT DEFAULT '[]',
                     user_notes TEXT DEFAULT '',
                     created_at INTEGER NOT NULL,
@@ -115,7 +117,10 @@ class MediaStore:
                 "id", "session_id", "message_id", "collection", "media_type",
                 "file_path", "file_size", "mime_type", "status",
                 "probe_metadata_json", "summary_text", "tags_json", "user_notes",
-                "created_at", "analyzed_at"
+                "created_at", "analyzed_at",
+                # Epic 8, E8-4.4: transcript stage columns (added to
+                # pre-4.4 databases by this same migration loop).
+                "transcript_text", "transcript_status",
             }
             for col in expected_cols - existing_cols:
                 conn.execute(f"ALTER TABLE media_items ADD COLUMN {col} TEXT")
@@ -209,6 +214,8 @@ class MediaStore:
             "probe_metadata": probe_meta,
             "origin": probe_meta.get("origin", collection),
             "summary_text": summary_text,
+            "transcript_text": None,
+            "transcript_status": None,
             "tags": tags_list,
             "user_notes": user_notes,
             "created_at": now,
@@ -276,9 +283,10 @@ class MediaStore:
         if query and query.strip():
             q_like = f"%{query.strip()}%"
             where_clauses.append(
-                "(file_path LIKE ? OR summary_text LIKE ? OR user_notes LIKE ? OR tags_json LIKE ?)"
+                "(file_path LIKE ? OR summary_text LIKE ? OR user_notes LIKE ? "
+                "OR tags_json LIKE ? OR transcript_text LIKE ?)"
             )
-            params.extend([q_like, q_like, q_like, q_like])
+            params.extend([q_like, q_like, q_like, q_like, q_like])
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
@@ -376,6 +384,8 @@ class MediaStore:
         tags: list[str] | None = None,
         probe_metadata: dict[str, Any] | None = None,
         analyzed_at: int | None = None,
+        transcript_text: str | None = None,
+        transcript_status: str | None = None,
     ) -> dict[str, Any] | None:
         """Apply analysis outcome fields to a media item.
 
@@ -391,6 +401,12 @@ class MediaStore:
         if summary_text is not None:
             updates.append("summary_text = ?")
             params.append(summary_text)
+        if transcript_text is not None:
+            updates.append("transcript_text = ?")
+            params.append(transcript_text)
+        if transcript_status is not None:
+            updates.append("transcript_status = ?")
+            params.append(transcript_status)
         if tags is not None:
             updates.append("tags_json = ?")
             params.append(json.dumps(list(tags)))
@@ -429,6 +445,34 @@ class MediaStore:
         with self._get_conn() as conn:
             cur = conn.cursor()
             cur.execute(sql, list(statuses))
+            return [self._row_to_dict(r) for r in cur.fetchall()]
+
+    def list_videos_missing_transcripts(
+        self,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Analyzed videos the transcript stage still owes (E8-4.4).
+
+        Eligible: no attempt yet (status NULL — every video analysed
+        before E8-4.4), an interrupted attempt (``pending``), or a
+        retryable outcome (``failed`` / ``unavailable`` — the deps
+        may have been installed since). Terminal states are
+        excluded: ``done`` is never re-transcribed (idempotency)
+        and ``no_audio`` cannot change for the same file.
+        Oldest first, like ``list_by_status``.
+        """
+        self.init_db()
+        sql = (
+            "SELECT * FROM media_items WHERE media_type = 'video' "
+            "AND status = 'analyzed' AND (transcript_status IS NULL "
+            "OR transcript_status IN ('pending', 'failed', 'unavailable')) "
+            "ORDER BY created_at ASC"
+        )
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(sql)
             return [self._row_to_dict(r) for r in cur.fetchall()]
 
     def _embeddings_for(self, media_ids: list[str]) -> dict[str, list[float]]:
@@ -482,6 +526,9 @@ class MediaStore:
                 " ".join(item.get("tags") or []),
                 item.get("user_notes") or "",
                 Path(item.get("file_path") or "").name,
+                # Epic 8, E8-4.4: spoken words are searchable text —
+                # a phrase only ever said in a video is findable.
+                item.get("transcript_text") or "",
             ])
 
         lexical_ranked = sorted(
