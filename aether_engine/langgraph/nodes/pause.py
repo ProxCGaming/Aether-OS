@@ -8,6 +8,23 @@ from aether_engine.langgraph.state import AetherState
 logger = logging.getLogger("aether_engine.langgraph.nodes.pause")
 
 
+def changed_arg_fields(original_args: dict, edited_args: dict) -> list[str]:
+    """Field names whose value differs between two argument dicts.
+
+    Epic 8, E8-1.3: the diff primitive behind the approval-edit audit
+    event and the "edited" marker. Names only — values are compared
+    here but never returned, logged, or stored by this helper. Sorted
+    so audit entries and tests are deterministic.
+    """
+    original = original_args or {}
+    edited = edited_args or {}
+    return sorted(
+        key
+        for key in set(original) | set(edited)
+        if key not in original or key not in edited or original[key] != edited[key]
+    )
+
+
 def _edit_preview(args: dict, workspace_roots: list) -> dict:
     """Best-effort diff preview for an edit_file approval (Epic 2, E2-03).
 
@@ -61,7 +78,21 @@ def dummy_pause_node(state: AetherState, config: RunnableConfig) -> dict:
         interrupt_payload["preview"] = _edit_preview(args, roots)
     decision = interrupt(interrupt_payload)
 
-    if not decision:
+    # Epic 8, E8-1.3: the resume value is either the legacy boolean or
+    # {"approved": bool, "edited_args": dict | None}. Edited args are
+    # arguments ONLY — the tool name is never taken from the decision,
+    # so an edit cannot swap the tool. The edited args are not trusted
+    # here: execute_tool re-runs the full policy pipeline on them.
+    approved = False
+    edited_args = None
+    if isinstance(decision, dict):
+        approved = bool(decision.get("approved"))
+        if isinstance(decision.get("edited_args"), dict):
+            edited_args = decision["edited_args"]
+    elif decision:
+        approved = True
+
+    if not approved:
         logger.info(f"User rejected {tool_name}")
         # Clear the tool call and return a rejection message
         msg = {
@@ -76,6 +107,14 @@ def dummy_pause_node(state: AetherState, config: RunnableConfig) -> dict:
         }
 
     # If approved, mutate the pending_tool_call to reflect approval, and graph proceeds to execute_tool
+    updated = {**pending, "approved": True}
+    if edited_args is not None and changed_arg_fields(args, edited_args):
+        logger.info(
+            f"User edited arguments for {tool_name} at approval: "
+            f"{changed_arg_fields(args, edited_args)}"
+        )
+        updated["args"] = edited_args
+        updated["edited"] = True
     return {
-        "pending_tool_call": {**pending, "approved": True}
+        "pending_tool_call": updated
     }

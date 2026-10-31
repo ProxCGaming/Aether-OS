@@ -248,19 +248,78 @@ export function ApprovalPreview({ preview }) {
 export function approvalScopePath(args) {
   if (args && typeof args.path === 'string' && args.path.length > 0) return args.path;
   return null;
-}
+}
+// Epic 8, E8-1.3: parse the approval drawer's argument editor.
+// Returns { editedArgs } only when the parsed JSON is a plain object
+// that actually differs from the proposed args; { editedArgs: null }
+// for an unchanged editor (legacy approve), and { error } for text
+// that must block the approve (invalid JSON / not an object).
+function parseApprovalEditedArgs(text, originalArgs) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { editedArgs: null, error: 'Arguments must be valid JSON.' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { editedArgs: null, error: 'Arguments must be a JSON object.' };
+  }
+  const sortDeep = (v) => (Array.isArray(v)
+    ? v.map(sortDeep)
+    : (v && typeof v === 'object'
+      ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortDeep(v[k])]))
+      : v));
+  if (JSON.stringify(sortDeep(parsed)) === JSON.stringify(sortDeep(originalArgs || {}))) {
+    return { editedArgs: null, error: null };
+  }
+  return { editedArgs: parsed, error: null };
+}
+
 
-export function ToolActivityCard({ payload, isNested = false, pendingApproval = null, onApproveTool = null }) {
+export function ToolActivityCard({ payload, isNested = false, pendingApproval = null, onApproveTool = null }) {  // Epic 8, E8-1.3: approval argument editor state (hooks first —
+  // the early return below must stay after them).
+  const [argsEditorOpen, setArgsEditorOpen] = useState(false);
+  const [argsText, setArgsText] = useState('');
+  const [argsError, setArgsError] = useState('');
+
   if (!payload) return null;
 
-  const { tool_name, tool_args, status, result, node, from_node, to_node } = payload;
+  const { tool_name, tool_args, status, result, node, from_node, to_node, edited } = payload;
+
   const isPending = status === 'pending';
   const isFailed = status === 'failed';
   const needsApproval = isPending && !!pendingApproval;
   const approvalPreview = (pendingApproval && pendingApproval.preview) || payload.preview || null;
   const scopePath = approvalScopePath((pendingApproval && pendingApproval.tool_args) || tool_args);
 
-  const callerNode = from_node || node || 'agent';
+  const callerNode = from_node || node || 'agent';
+  // Epic 8, E8-1.3: approving from the drawer goes through the
+  // argument editor when it is open. An unchanged editor (or one
+  // never opened) calls back with the exact legacy argument list;
+  // a real edit appends editedArgs as the final argument.
+  const approvalArgs = (pendingApproval && pendingApproval.tool_args) || tool_args || {};
+  const approveWithEdits = (scope) => {
+    if (!onApproveTool || !pendingApproval) return;
+    if (!argsEditorOpen) {
+      if (scope) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope);
+      else onApproveTool(pendingApproval.id, true, pendingApproval.approval_key);
+      return;
+    }
+    const { editedArgs, error } = parseApprovalEditedArgs(argsText, approvalArgs);
+    if (error) {
+      setArgsError(error);
+      return;
+    }
+    if (editedArgs) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope, editedArgs);
+    else if (scope) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope);
+    else onApproveTool(pendingApproval.id, true, pendingApproval.approval_key);
+  };
+  const openArgsEditor = () => {
+    setArgsText(JSON.stringify(approvalArgs, null, 2));
+    setArgsError('');
+    setArgsEditorOpen(true);
+  };
+
   const targetNode = to_node || 'execute_tool';
 
   return (
@@ -273,6 +332,9 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
             {callerNode.toUpperCase()} ➔ {targetNode.toUpperCase()}
           </span>
         </div>
+        {edited && (
+          <span data-testid="tool-edited-badge" style={{ fontSize: '10px', fontWeight: 600, color: '#fbbf24', background: 'rgba(251, 191, 36, 0.15)', border: '1px solid rgba(251, 191, 36, 0.4)', borderRadius: '999px', padding: '2px 8px', marginRight: '8px' }}>edited by you</span>
+        )}
         <div className={`tool-status-pill tool-status-${needsApproval ? 'approval' : (status || 'pending')}`} style={needsApproval ? { background: 'rgba(239, 68, 68, 0.2)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.4)' } : {}}>
           {needsApproval ? <ShieldAlert size={11} color="#ef4444" /> : isPending ? <span className="tool-spinner-dot" /> : isFailed ? <AlertCircle size={11} /> : <CheckCircle2 size={11} />}
           <span>{needsApproval ? 'approval required' : (status || 'pending')}</span>
@@ -307,6 +369,28 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
               The agent is requesting permission to execute <strong>{tool_name}</strong>.
             </div>
             <ApprovalPreview preview={approvalPreview} />
+            {!argsEditorOpen ? (
+              <button
+                data-testid="approval-edit-args-btn"
+                onClick={openArgsEditor}
+                style={{ alignSelf: 'flex-start', padding: '6px 12px', borderRadius: '8px', background: 'rgba(255, 255, 255, 0.08)', color: '#e2e8f0', border: '1px solid rgba(255, 255, 255, 0.15)', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>
+                Edit arguments
+              </button>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <textarea
+                  data-testid="approval-args-editor"
+                  value={argsText}
+                  onChange={(e) => setArgsText(e.target.value)}
+                  rows={6}
+                  spellCheck={false}
+                  style={{ width: '100%', boxSizing: 'border-box', background: 'rgba(0,0,0,0.5)', color: '#a78bfa', border: '1px solid rgba(255, 255, 255, 0.15)', borderRadius: '8px', padding: '10px', fontFamily: 'monospace', fontSize: '12px' }}
+                />
+                {argsError && (
+                  <div data-testid="approval-args-error" style={{ fontSize: '12px', color: '#fca5a5' }}>{argsError}</div>
+                )}
+              </div>
+            )}
             <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'flex-end', marginTop: '4px' }}>
               <button 
                 onClick={() => onApproveTool && onApproveTool(pendingApproval.id, false, pendingApproval.approval_key)}
@@ -326,7 +410,8 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
               {scopePath && (
                 <>
                   <button
-                    onClick={() => onApproveTool && onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, 'file')}
+                    onClick={() => approveWithEdits('file')}
+
                     style={{
                       padding: '6px 14px',
                       borderRadius: '8px',
@@ -341,7 +426,8 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                     Approve + remember file
                   </button>
                   <button
-                    onClick={() => onApproveTool && onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, 'folder')}
+                    onClick={() => approveWithEdits('folder')}
+
                     style={{
                       padding: '6px 14px',
                       borderRadius: '8px',
@@ -358,7 +444,8 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                 </>
               )}
               <button 
-                onClick={() => onApproveTool && onApproveTool(pendingApproval.id, true, pendingApproval.approval_key)}
+                onClick={() => approveWithEdits()}
+
                 style={{
                   padding: '6px 14px',
                   borderRadius: '8px',
@@ -1046,7 +1133,29 @@ export default function DraggableChatWindow({
   const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
   const [contextMenu, setContextMenu] = useState(null);
-  const [toastMessage, setToastMessage] = useState('');
+  const [toastMessage, setToastMessage] = useState('');  // Epic 8, E8-1.3: per-approval argument editor state for the
+  // inline approval cards, keyed by message id: { text, error }.
+  // Presence of an entry means that card's editor is open.
+  const [approvalArgEdits, setApprovalArgEdits] = useState({});
+
+  const approveToolWithEdits = (msg, scope) => {
+    if (!onApproveTool) return;
+    const editState = approvalArgEdits[msg.id];
+    if (!editState) {
+      if (scope) onApproveTool(msg.id, true, msg.approval_key, scope);
+      else onApproveTool(msg.id, true, msg.approval_key);
+      return;
+    }
+    const { editedArgs, error } = parseApprovalEditedArgs(editState.text, msg.tool_args || {});
+    if (error) {
+      setApprovalArgEdits(prev => ({ ...prev, [msg.id]: { ...editState, error } }));
+      return;
+    }
+    if (editedArgs) onApproveTool(msg.id, true, msg.approval_key, scope, editedArgs);
+    else if (scope) onApproveTool(msg.id, true, msg.approval_key, scope);
+    else onApproveTool(msg.id, true, msg.approval_key);
+  };
+
   const toastTimeoutRef = useRef(null);
   const messagesEndRef = useRef(null);
   const nodeRef = useRef(null);
@@ -1445,6 +1554,28 @@ export default function DraggableChatWindow({
                             <ApprovalPreview preview={msg.preview} />
                           </div>
                         )}
+                        {!approvalArgEdits[msg.id] ? (
+                          <button
+                            data-testid="approval-edit-args-btn"
+                            onClick={() => setApprovalArgEdits(prev => ({ ...prev, [msg.id]: { text: JSON.stringify(msg.tool_args || {}, null, 2), error: '' } }))}
+                            style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', marginBottom: '20px' }}>
+                            Edit arguments
+                          </button>
+                        ) : (
+                          <div style={{ marginBottom: '20px' }}>
+                            <textarea
+                              data-testid="approval-args-editor"
+                              value={approvalArgEdits[msg.id].text}
+                              onChange={(e) => setApprovalArgEdits(prev => ({ ...prev, [msg.id]: { text: e.target.value, error: '' } }))}
+                              rows={6}
+                              spellCheck={false}
+                              style={{ width: '100%', boxSizing: 'border-box', background: 'rgba(0,0,0,0.5)', color: '#a78bfa', border: '1px solid rgba(255, 255, 255, 0.15)', borderRadius: '8px', padding: '10px', fontFamily: 'monospace', fontSize: '12px' }}
+                            />
+                            {approvalArgEdits[msg.id].error && (
+                              <div data-testid="approval-args-error" style={{ fontSize: '12px', color: '#fca5a5', marginTop: '6px' }}>{approvalArgEdits[msg.id].error}</div>
+                            )}
+                          </div>
+                        )}
                         <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                           <button 
                             onClick={() => onApproveTool && onApproveTool(msg.id, false, msg.approval_key)}
@@ -1457,14 +1588,16 @@ export default function DraggableChatWindow({
                           {approvalScopePath(msg.tool_args) && (
                             <>
                               <button 
-                                onClick={() => onApproveTool && onApproveTool(msg.id, true, msg.approval_key, 'file')}
+                                onClick={() => approveToolWithEdits(msg, 'file')}
+
                                 className="ios-close-btn"
                                 style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center' }}
                               >
                                 Approve + remember file
                               </button>
                               <button 
-                                onClick={() => onApproveTool && onApproveTool(msg.id, true, msg.approval_key, 'folder')}
+                                onClick={() => approveToolWithEdits(msg, 'folder')}
+
                                 className="ios-close-btn"
                                 style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center' }}
                               >
@@ -1473,7 +1606,8 @@ export default function DraggableChatWindow({
                             </>
                           )}
                           <button 
-                            onClick={() => onApproveTool && onApproveTool(msg.id, true, msg.approval_key)}
+                            onClick={() => approveToolWithEdits(msg)}
+
                             className="ios-close-btn"
                             style={{ background: 'rgba(239, 68, 68, 0.2)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#fca5a5', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
                           >

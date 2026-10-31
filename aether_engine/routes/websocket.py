@@ -97,6 +97,33 @@ async def _execute_tool_in_worker(tool_name: str, args: dict[str, Any], task_cla
         task_classes=engine_state.user_config.task_classes,
     )
 
+def _audit_approval_arguments_edited(
+    audit_logger: Any,
+    approval_key: str,
+    tool_name: str | None,
+    original_args: dict[str, Any],
+    edited_args: dict[str, Any],
+) -> list[str]:
+    """Epic 8, E8-1.3: audit an approval-time argument edit.
+
+    Records ``APPROVAL_ARGUMENTS_EDITED`` with the changed field NAMES
+    only — argument values must never reach the audit log (audit.py
+    redaction is the second line of defence, not the first). Returns
+    the changed field list; empty (and no event) when the "edit"
+    changed nothing.
+    """
+    from aether_engine.langgraph.nodes.pause import changed_arg_fields
+
+    changed = changed_arg_fields(original_args or {}, edited_args or {})
+    if changed:
+        audit_logger.log_event("APPROVAL_ARGUMENTS_EDITED", {
+            "approval_key": approval_key,
+            "tool_name": tool_name,
+            "changed_fields": changed,
+        })
+    return changed
+
+
 def _extract_token(ws: WebSocket, query_token: str | None) -> str | None:
     if query_token:
         return query_token
@@ -810,7 +837,30 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     engine_state.audit_logger.log_event("APPROVAL_GRANTED", {"approval_key": approval_key})
                 else:
                     engine_state.audit_logger.log_event("APPROVAL_REJECTED", {"approval_key": approval_key})
-                
+
+                # Epic 8, E8-1.3: approval-time argument edits ride the
+                # GRANTED event. Audit the changed field names against
+                # the pending call's original args (best-effort, like
+                # the scoped-grant recording below: a lookup failure
+                # must never block the approval the user just gave).
+                edited_args = msg.payload.get("edited_args") if is_approved else None
+                if not isinstance(edited_args, dict):
+                    edited_args = None
+                if edited_args is not None:
+                    try:
+                        pending = await get_pending_approvals()
+                        match = next((p for p in pending if p.get("thread_id") == approval_key), None)
+                        if match:
+                            _audit_approval_arguments_edited(
+                                engine_state.audit_logger,
+                                approval_key,
+                                match.get("tool_name"),
+                                match.get("args") or {},
+                                edited_args,
+                            )
+                    except Exception:
+                        logger.debug("Failed to audit approval argument edits", exc_info=True)
+
                 # We need to construct a provider instance for the resume generator.
                 # In a real system, provider state would be part of the task metadata or checkpointer.
                 # Here we recreate the active provider instance.
@@ -872,6 +922,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     agent_tools=engine_state.user_config.agent_tools,
                     secret_store=secret_store,
                     user_config=engine_state.user_config,
+                    edited_args=edited_args,
                 )
 
                 if task_runner and not task_runner.done():

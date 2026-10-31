@@ -531,6 +531,7 @@ async def run_langgraph_task(
                                         "tool_args": tool_args,
                                         "status": status_str,
                                         "result": tool_result,
+                                        "edited": bool(msg.get("edited")),
                                         "node": dest_node,
                                         "from_node": dest_node,
                                         "to_node": "execute_tool",
@@ -633,6 +634,7 @@ async def resume_langgraph_task(
     disabled_nodes: set | None = None,
     agent_models: dict[str, str] | None = None,
     agent_tools: dict[str, list[str]] | None = None,
+    edited_args: dict[str, Any] | None = None,
     **kwargs,
 ) -> AsyncGenerator[Event, None]:
     """Resume an interrupted LangGraph task and yield remaining events.
@@ -776,6 +778,29 @@ async def resume_langgraph_task(
                                         },
                                     )
                                 elif msg.get("role") == "tool":
+                                    # Mirror the run path's TOOL_ACTIVITY
+                                    # for the executed call so the pending
+                                    # tool card completes after a resume —
+                                    # including the Epic 8 E8-1.3 "edited"
+                                    # marker for approval-time arg edits.
+                                    tool_result = msg.get("content", "")
+                                    is_failed = isinstance(tool_result, str) and tool_result.startswith(("Error", "Validation failed"))
+                                    yield Event(
+                                        type=EventType.TOOL_ACTIVITY,
+                                        request_id=thread_id,
+                                        payload={
+                                            "task_id": task_id,
+                                            "tool_name": msg.get("name", "unknown"),
+                                            "tool_args": msg.get("args", {}),
+                                            "status": "failed" if is_failed else "completed",
+                                            "result": tool_result,
+                                            "edited": bool(msg.get("edited")),
+                                            "node": node_name,
+                                            "from_node": node_name,
+                                            "to_node": "execute_tool",
+                                            "timestamp": int(time.time()),
+                                        },
+                                    )
                                     yield Event(
                                         type=EventType.TASK_PROGRESS,
                                         request_id=thread_id,
@@ -793,7 +818,13 @@ async def resume_langgraph_task(
 
 
             interrupted = False
-            async for _ev in _consume_segment(Command(resume=approved)):
+            # Epic 8, E8-1.3: approval-time argument edits ride the
+            # resume value as a dict; an unedited approval keeps the
+            # legacy bare-boolean resume exactly as before.
+            resume_value: Any = approved
+            if approved and isinstance(edited_args, dict):
+                resume_value = {"approved": True, "edited_args": edited_args}
+            async for _ev in _consume_segment(Command(resume=resume_value)):
                 yield _ev
 
             if pending_steers and not interrupted:

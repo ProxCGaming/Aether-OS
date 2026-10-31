@@ -31,6 +31,13 @@ class EventType(str, Enum):
     NODE_ACTIVITY = "NODE_ACTIVITY"
     TOOL_APPROVAL_REQUEST = "TOOL_APPROVAL_REQUEST"
     PLUGIN_APPROVAL_REQUEST = "PLUGIN_APPROVAL_REQUEST"
+    # TOOL_APPROVAL_GRANTED payload: {"approval_key": str,
+    # "scope": "file" | "folder" | None (Epic 2 scoped grants),
+    # "edited_args": dict | None (Epic 8 E8-1.3: the full replacement
+    # argument set the user edited in the approval drawer; edited args
+    # re-run the full policy pipeline before execution)}. TOOL_ACTIVITY
+    # payloads carry "edited": bool so executed cards can show the
+    # "edited by you" pill.
     TOOL_APPROVAL_GRANTED = "TOOL_APPROVAL_GRANTED"
     TOOL_APPROVAL_REJECTED = "TOOL_APPROVAL_REJECTED"
     WORKER_EXECUTION_STARTED = "WORKER_EXECUTION_STARTED"

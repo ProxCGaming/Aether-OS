@@ -207,6 +207,12 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
         "content": result_text,
         "tool_call_id": call_id
     }
+    # Epic 8, E8-1.3: an approval-time argument edit is marked on the
+    # tool message so the executor's TOOL_ACTIVITY payload (and thus
+    # the tool card's "edited by you" pill) can reflect it. The args
+    # above are the ones that actually ran through the pipeline.
+    if pending.get("edited"):
+        tool_message["edited"] = True
 
     # Clear pending_tool_call and add the message
     update = {

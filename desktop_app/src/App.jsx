@@ -1003,7 +1003,7 @@ function AppContent() {
     }
   };
 
-  const handleToolApproval = (requestId, approved, approvalKey, scope) => {
+  const handleToolApproval = (requestId, approved, approvalKey, scope, editedArgs) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const key = approvalKey || requestId;
       wsRef.current.send(JSON.stringify({
@@ -1015,7 +1015,11 @@ function AppContent() {
           approved: approved,
           // Epic 2, E2-09: a scoped grant ("file" / "folder") rides the
           // GRANTED event; a plain approve sends no scope (= "once").
-          ...(approved && scope ? { scope } : {})
+          ...(approved && scope ? { scope } : {}),
+          // Epic 8, E8-1.3: approval-time argument edits ride the
+          // GRANTED event as the full replacement argument set; the
+          // engine re-runs the full policy pipeline on them.
+          ...(approved && editedArgs ? { edited_args: editedArgs } : {})
         }
       }));
       // Remove the approval card from chat
