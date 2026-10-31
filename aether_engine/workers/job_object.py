@@ -1,7 +1,6 @@
 """Windows Job Object wrapper to enforce resource limits on worker processes."""
 
 import logging
-import time
 
 try:
     import win32api

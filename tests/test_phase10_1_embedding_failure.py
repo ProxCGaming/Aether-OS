@@ -173,7 +173,12 @@ async def test_embed_text_timeout_is_30_seconds():
         coro.close()
         return fake_response
 
-    with patch("aether_engine.memory.episodic.asyncio.wait_for", new=fake_wait_for):
+    with (
+        # Epic 9: an earlier failure test may have tripped the
+        # embedding circuit breaker; this test needs a closed one.
+        patch("aether_engine.memory.episodic._embed_unavailable_until", 0.0),
+        patch("aether_engine.memory.episodic.asyncio.wait_for", new=fake_wait_for),
+    ):
         result = await _embed_text("hello")
     assert result == [0.5]
     assert captured["timeout"] == 30.0

@@ -1,7 +1,7 @@
 import os
+import secrets
 import tempfile
 from pathlib import Path
-import secrets
 
 DEFAULT_TOKEN_PATH = Path(".run/engine.token")
 

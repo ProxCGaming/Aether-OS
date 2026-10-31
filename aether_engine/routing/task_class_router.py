@@ -1,10 +1,10 @@
 """Heuristic task class inference for Aether OS resource profiles."""
 
 import re
-from typing import Any, Dict
+from typing import Any
 
 
-def infer_task_class(tool_name: str, args: Dict[str, Any]) -> str:
+def infer_task_class(tool_name: str, args: dict[str, Any]) -> str:
     """Infer the task class (instant, quick, standard, heavy, custom) based on tool name and arguments.
 
     Heuristic Rules:

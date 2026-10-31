@@ -6,10 +6,12 @@ specific API key/tier before displaying them in UI dropdowns or capability jobs.
 """
 import asyncio
 import logging
-from pathlib import Path
 import sqlite3
 import time
-from typing import Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from pathlib import Path
+
+from aether_engine.providers.discovery import DiscoveryError
 
 logger = logging.getLogger("aether_engine.models.reachability")
 
@@ -17,7 +19,7 @@ DEFAULT_REACHABILITY_DB = Path.home() / ".aether" / "reachability.db"
 DEFAULT_CACHE_TTL_SECONDS = 86400  # 24 hours
 
 
-class ReachableModels(List[str]):
+class ReachableModels(list[str]):
     """Result of a reachability sweep: the reachable model ids, plus the sweep error.
 
     Subclasses ``list`` so existing callers keep working unchanged — empty
@@ -38,7 +40,7 @@ class ReachableModels(List[str]):
     def __init__(
         self,
         models: Iterable[str] = (),
-        error: Optional["DiscoveryError"] = None,
+        error: DiscoveryError | None = None,
     ):
         super().__init__(models)
         self.error = error
@@ -73,7 +75,7 @@ class ModelReachabilityChecker:
             """)
             conn.commit()
 
-    def get_cached_reachability(self, provider: str, model_id: str) -> Optional[Tuple[bool, float]]:
+    def get_cached_reachability(self, provider: str, model_id: str) -> tuple[bool, float] | None:
         """Return (reachable, checked_at) if valid cache entry exists, else None."""
         now = time.time()
         with sqlite3.connect(self.db_path) as conn:
@@ -94,8 +96,8 @@ class ModelReachabilityChecker:
         provider: str,
         model_id: str,
         reachable: bool,
-        latency_ms: Optional[float] = None,
-        error_detail: Optional[str] = None,
+        latency_ms: float | None = None,
+        error_detail: str | None = None,
     ):
         """Persist reachability result to SQLite."""
         with sqlite3.connect(self.db_path) as conn:
@@ -118,7 +120,7 @@ class ModelReachabilityChecker:
         provider_name: str,
         model_id: str,
         api_key: str,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
         force: bool = False,
         timeout: float = 4.0,
     ) -> bool:
@@ -145,7 +147,7 @@ class ModelReachabilityChecker:
             self.record_reachability(cache_key, model_id, reachable=True, latency_ms=latency_ms)
             logger.info(f"Model reachable: {cache_key}/{model_id} ({latency_ms:.1f}ms)")
             return True
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — a failed probe records the model unreachable; probing never raises
             latency_ms = (time.time() - start) * 1000.0
             err_msg = str(e)
             self.record_reachability(cache_key, model_id, reachable=False, latency_ms=latency_ms, error_detail=err_msg)
@@ -155,9 +157,9 @@ class ModelReachabilityChecker:
     async def filter_reachable_models(
         self,
         provider_name: str,
-        model_ids: List[str],
+        model_ids: list[str],
         api_key: str,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
         force: bool = False,
         max_concurrency: int = 5,
         timeout: float = 4.0,
@@ -184,7 +186,7 @@ class ModelReachabilityChecker:
 
         semaphore = asyncio.Semaphore(max_concurrency)
 
-        async def _probe(mid: str) -> Tuple[str, bool]:
+        async def _probe(mid: str) -> tuple[str, bool]:
             async with semaphore:
                 reachable = await self.check_single_model(
                     provider_name=provider_name,

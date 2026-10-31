@@ -5,7 +5,7 @@ this module is the single entry point the engine's scheduler calls, so a
 scheduled run prunes every tier with one call and one audit event.
 """
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from aether_engine.audit import AuditLogger
 from aether_engine.config import UserConfig, load_config
@@ -15,7 +15,7 @@ logger = logging.getLogger("aether_engine.memory.pruning")
 _audit_logger = AuditLogger()
 
 
-def prune_all(config: Optional[UserConfig] = None) -> Dict[str, Dict[str, Any]]:
+def prune_all(config: UserConfig | None = None) -> dict[str, dict[str, Any]]:
     """Run retention pruning on all three memory tiers.
 
     Bounds come from ``config`` (or ``load_config()`` when omitted) — see

@@ -6,12 +6,9 @@ Falls back to a simple XOR obfuscation on non-Windows platforms (dev/test only).
 """
 from __future__ import annotations
 
-import base64
-import os
+import abc
 import sys
 
-
-import abc
 
 class SecretDecryptionError(Exception):
     """Raised when a stored secret cannot be decrypted."""
@@ -20,23 +17,22 @@ class BaseProtector(abc.ABC):
     @abc.abstractmethod
     def protect(self, data: bytes) -> bytes:
         """Encrypt bytes."""
-        pass
 
     @abc.abstractmethod
     def unprotect(self, data: bytes) -> bytes:
         """Decrypt bytes."""
-        pass
 
 class WindowsDPAPIProtector(BaseProtector):
     def protect(self, data: bytes) -> bytes:
         if sys.platform == "win32":
             return _dpapi_encrypt(data)
         # Non-Windows fallback using keyring
-        import keyring
         import uuid
+
+        import keyring
         secret_id = str(uuid.uuid4())
         keyring.set_password("aether-os", secret_id, data.decode("utf-8"))
-        return f"keyring:{secret_id}".encode("utf-8")
+        return f"keyring:{secret_id}".encode()
 
     def unprotect(self, data: bytes) -> bytes:
         if sys.platform == "win32":
@@ -56,7 +52,7 @@ class WindowsDPAPIProtector(BaseProtector):
             try:
                 return base64.b64decode(data)
             except Exception as e:
-                raise SecretDecryptionError(f"Failed to decode legacy secret: {e}")
+                raise SecretDecryptionError(f"Failed to decode legacy secret: {e}") from e
 
 
 if sys.platform == "win32":

@@ -1,10 +1,12 @@
-import asyncio, uuid
-from typing import AsyncGenerator, Optional
+import asyncio
+import uuid
+from collections.abc import AsyncGenerator
+
 from aether_common.contracts import Event, EventType, TaskState, validate_transition
 
 
 class SimulatedTask:
-    def __init__(self, task_id: Optional[str] = None,
+    def __init__(self, task_id: str | None = None,
                  total_ticks: int = 10, tick_interval: float = 1.0):
         self.task_id = task_id or str(uuid.uuid4())
         self.total_ticks = total_ticks
@@ -44,7 +46,7 @@ class SimulatedTask:
                 await asyncio.wait_for(self._cancel.wait(), timeout=self.tick_interval)
                 yield self._cancelled_event(tick - 1)
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
             yield Event(type=EventType.TASK_PROGRESS,

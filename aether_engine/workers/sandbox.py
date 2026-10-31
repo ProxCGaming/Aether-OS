@@ -11,7 +11,7 @@ import logging
 import os
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 from aether_common.auth import read_token
 from aether_engine.audit import AuditLogger
@@ -20,7 +20,7 @@ from aether_engine.workers.job_object import WorkerJobObject
 logger = logging.getLogger("aether_engine.workers.sandbox")
 
 # Default task-class resource profiles (mirrors UserConfig defaults).
-_DEFAULT_TASK_CLASSES: Dict[str, Dict[str, int]] = {
+_DEFAULT_TASK_CLASSES: dict[str, dict[str, int]] = {
     "instant": {"time_cap_seconds": 10, "memory_cap_mb": 512},
     "quick": {"time_cap_seconds": 60, "memory_cap_mb": 1024},
     "standard": {"time_cap_seconds": 1800, "memory_cap_mb": 4096},
@@ -30,10 +30,10 @@ _DEFAULT_TASK_CLASSES: Dict[str, Dict[str, int]] = {
 
 async def execute_tool_in_worker(
     tool_name: str,
-    args: Dict[str, Any],
+    args: dict[str, Any],
     task_class: str,
-    audit_logger: Optional[AuditLogger] = None,
-    task_classes: Optional[Dict[str, Dict[str, int]]] = None,
+    audit_logger: AuditLogger | None = None,
+    task_classes: dict[str, dict[str, int]] | None = None,
 ) -> Any:
     """Run an approved risky tool in a dedicated worker subprocess and return its result.
 
@@ -66,7 +66,7 @@ async def execute_tool_in_worker(
     job_obj = None
     try:
         job_obj = WorkerJobObject(time_cap, mem_cap)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — any job-object failure refuses the run (fail closed, see below)
         # Fail closed (Phase 9, A3 / ADR 0010): if resource limits cannot be
         # enforced, the tool must NOT run. The old behavior logged a warning
         # and continued with job_obj=None, i.e. silently unlimited execution.
@@ -124,7 +124,7 @@ async def execute_tool_in_worker(
     if job_obj and proc.pid:
         try:
             job_obj.assign_process(proc.pid)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — assignment failure refuses the run (fail closed)
             reason = f"failed to assign worker to Job Object: {e}"
             logger.error(f"Refusing to execute '{tool_name}': {reason}")
             try:
@@ -133,7 +133,7 @@ async def execute_tool_in_worker(
                 pass
             try:
                 await proc.communicate()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 — best-effort reap of an already-killed worker during cleanup
                 pass
             if audit_logger:
                 audit_logger.log_event("WORKER_EXECUTION_REFUSED", {
@@ -152,14 +152,14 @@ async def execute_tool_in_worker(
         # task_classes override). On timeout the worker is killed and a
         # distinct WORKER_EXECUTION_TIMEOUT audit event is recorded.
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=time_cap)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         try:
             proc.kill()
         except ProcessLookupError:
             pass
         try:
             await proc.communicate()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 — best-effort reap of an already-killed worker during cleanup
             pass
         wall_clock = time.time() - start_time
         reason = f"worker exceeded {time_cap}s wall-clock cap (task_class={task_class})"
@@ -173,7 +173,7 @@ async def execute_tool_in_worker(
                 "wall_clock_seconds": round(wall_clock, 2),
             })
         raise RuntimeError(f"Worker timed out after {time_cap}s (task_class={task_class}): killed")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — worker failures are reported via the audit log and a result dict, never raised
         logger.error(f"Worker process error: {e}")
         if audit_logger:
             audit_logger.log_event("WORKER_EXECUTION_TERMINATED", {

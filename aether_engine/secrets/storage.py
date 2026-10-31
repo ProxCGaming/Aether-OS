@@ -1,19 +1,16 @@
 import contextlib
 import sqlite3
 from pathlib import Path
-from typing import List, Optional, Union
 
 from aether_engine.audit import AuditLogger
 from aether_engine.secrets.dpapi import (
     BaseProtector,
-    SecretDecryptionError,
     WindowsDPAPIProtector,
 )
 
 
 class ProviderNotFoundError(Exception):
     """Raised when a requested provider key does not exist in SecretStore."""
-    pass
 
 
 class SecretStore:
@@ -21,9 +18,9 @@ class SecretStore:
 
     def __init__(
         self,
-        db_path: Optional[Union[str, Path]] = None,
-        protector: Optional[BaseProtector] = None,
-        audit_logger: Optional[AuditLogger] = None,
+        db_path: str | Path | None = None,
+        protector: BaseProtector | None = None,
+        audit_logger: AuditLogger | None = None,
     ):
         if db_path is None:
             db_path = Path.home() / ".aether" / "secrets.db"
@@ -44,22 +41,21 @@ class SecretStore:
             # Provider name only — never a key value (audit.py redacts
             # sensitive keys as a second line of defence).
             logger.log_event(action, {"provider": provider})
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 — audit logging must never break secret storage
             pass
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
-            with conn:
-                conn.execute(
-                    """
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                """
                     CREATE TABLE IF NOT EXISTS providers (
                         name TEXT PRIMARY KEY,
                         api_key BLOB NOT NULL
                     )
                     """
-                )
-                self._migrate_providers_schema(conn)
+            )
+            self._migrate_providers_schema(conn)
 
     def _migrate_providers_schema(self, conn: sqlite3.Connection) -> None:
         """Normalize legacy 'providers' tables to the current (name, api_key) schema.
@@ -91,7 +87,7 @@ class SecretStore:
         )
         conn.execute("DROP TABLE providers__legacy")
 
-    def list_providers(self) -> List[str]:
+    def list_providers(self) -> list[str]:
         if not self.db_path.exists():
             return []
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
@@ -103,18 +99,17 @@ class SecretStore:
         if not isinstance(provider, str) or not provider.strip():
             raise ValueError("Provider name must be a non-empty string.")
         if not isinstance(api_key, str):
-            raise ValueError("API key must be a string.")
+            raise TypeError("API key must be a string.")
         self._init_db()
         encrypted_bytes = self.protector.protect(api_key.encode("utf-8"))
-        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
-            with conn:
-                conn.execute(
-                    """
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                """
                     INSERT INTO providers (name, api_key) VALUES (?, ?)
                     ON CONFLICT(name) DO UPDATE SET api_key = excluded.api_key
                     """,
-                    (provider, encrypted_bytes),
-                )
+                (provider, encrypted_bytes),
+            )
 
     def load_provider(self, provider: str) -> str:
         if not self.db_path.exists():
@@ -141,10 +136,9 @@ class SecretStore:
     def delete_provider(self, provider: str) -> bool:
         if not self.db_path.exists():
             return False
-        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
-            with conn:
-                cursor = conn.execute("DELETE FROM providers WHERE name = ?", (provider,))
-                deleted = cursor.rowcount > 0
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            cursor = conn.execute("DELETE FROM providers WHERE name = ?", (provider,))
+            deleted = cursor.rowcount > 0
         # Phase 10.2, C2: deleting a stored key is a destructive action —
         # audit it, but only when a row was actually removed (critical/07
         # M4). Provider name only, never a key value.

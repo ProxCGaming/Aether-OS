@@ -1,20 +1,21 @@
 """Provider health monitoring, non-blocking latency tracking, and cooldown management."""
-from dataclasses import asdict, dataclass
 import time
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from typing import Any
 
 
 @dataclass
 class ProviderHealthState:
     provider: str
     status: str = "healthy"  # "healthy", "degraded", "offline"
-    last_successful_request: Optional[float] = None
+    last_successful_request: float | None = None
     latency_ms: float = 0.0
     consecutive_failures: int = 0
     cooldown_until: float = 0.0
-    last_error: Optional[str] = None
+    last_error: str | None = None
 
-    def is_available(self, now: Optional[float] = None) -> bool:
+    def is_available(self, now: float | None = None) -> bool:
         current_time = now if now is not None else time.time()
         if self.status == "offline":
             # If offline due to temporary failures and cooldown expired, allow a probe attempt
@@ -29,8 +30,8 @@ class ProviderHealthState:
 class ProviderHealthManager:
     """Tracks runtime health, latency metrics, and failure cooldowns for all providers."""
 
-    def __init__(self, on_status_change: Optional[Callable[[str, ProviderHealthState], None]] = None):
-        self._states: Dict[str, ProviderHealthState] = {}
+    def __init__(self, on_status_change: Callable[[str, ProviderHealthState], None] | None = None):
+        self._states: dict[str, ProviderHealthState] = {}
         self.on_status_change = on_status_change
 
     def get_state(self, provider: str) -> ProviderHealthState:
@@ -43,7 +44,6 @@ class ProviderHealthManager:
 
     def record_success(self, provider: str, latency_ms: float) -> ProviderHealthState:
         state = self.get_state(provider)
-        prev_status = state.status
         state.status = "healthy"
         state.last_successful_request = time.time()
         state.latency_ms = round(latency_ms, 2)
@@ -62,7 +62,6 @@ class ProviderHealthManager:
         is_retriable: bool = True,
     ) -> ProviderHealthState:
         state = self.get_state(provider)
-        prev_status = state.status
         state.consecutive_failures += 1
         state.last_error = error
         state.latency_ms = 0.0
@@ -99,7 +98,7 @@ class ProviderHealthManager:
         """Forget all health state for a provider (used when a provider is disconnected)."""
         self._states.pop(provider, None)
 
-    def get_all_statuses(self) -> Dict[str, Dict[str, Any]]:
+    def get_all_statuses(self) -> dict[str, dict[str, Any]]:
         return {p: asdict(s) for p, s in self._states.items()}
 
 

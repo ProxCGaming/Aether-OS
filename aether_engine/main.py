@@ -1,4 +1,7 @@
-import uvicorn, logging
+import logging
+
+import uvicorn
+
 from aether_engine.app import app
 
 logging.basicConfig(level=logging.INFO,

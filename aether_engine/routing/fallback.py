@@ -1,22 +1,24 @@
 """Safe automatic fallback policy and error classification."""
 import logging
-from typing import List, Optional, Tuple
 
 from aether_engine.providers.base import (
     AuthenticationError,
     InvalidResponseError,
     NetworkError,
-    ProviderError,
     RateLimitError,
     TimeoutError,
 )
 from aether_engine.routing.health import ProviderHealthManager
-from aether_engine.routing.registry import GLOBAL_MODEL_REGISTRY, ModelEntry, ModelRegistry
+from aether_engine.routing.registry import (
+    GLOBAL_MODEL_REGISTRY,
+    ModelEntry,
+    ModelRegistry,
+)
 
 logger = logging.getLogger("aether_engine.routing.fallback")
 
 
-def classify_provider_error(exc: Exception) -> Tuple[bool, str]:
+def classify_provider_error(exc: Exception) -> tuple[bool, str]:
     """
     Classify an exception into (is_retriable, user_friendly_message).
 
@@ -80,13 +82,13 @@ def is_retriable_error(exc: Exception) -> bool:
 
 def get_fallback_candidates(
     failed_provider: str,
-    configured_providers: List[str],
+    configured_providers: list[str],
     health_manager: ProviderHealthManager,
-    registry: Optional[ModelRegistry] = None,
-) -> List[ModelEntry]:
+    registry: ModelRegistry | None = None,
+) -> list[ModelEntry]:
     """Retrieve healthy model candidates from remaining configured providers."""
     reg = registry or GLOBAL_MODEL_REGISTRY
-    candidates: List[ModelEntry] = []
+    candidates: list[ModelEntry] = []
 
     for provider in configured_providers:
         if provider == failed_provider:

@@ -3,8 +3,8 @@ from .storage import ProviderNotFoundError, SecretStore
 
 __all__ = [
     "BaseProtector",
-    "SecretDecryptionError",
-    "WindowsDPAPIProtector",
     "ProviderNotFoundError",
+    "SecretDecryptionError",
     "SecretStore",
+    "WindowsDPAPIProtector",
 ]

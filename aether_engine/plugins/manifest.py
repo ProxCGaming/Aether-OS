@@ -1,8 +1,8 @@
 import json
 import re
 from pathlib import Path, PurePosixPath
+
 from pydantic import BaseModel, Field, field_validator
-from typing import Dict, List, Optional
 
 # Phase 10.2 B2: names become filesystem paths at install time
 # (``plugins_dir / manifest.name`` and ``skills_dest / skill.name``), so a
@@ -42,8 +42,8 @@ def _validate_relative_path(value: str, field: str) -> str:
 
 class CapabilityDef(BaseModel):
     name: str
-    description: Optional[str] = None
-    file_path: Optional[str] = None
+    description: str | None = None
+    file_path: str | None = None
 
     @field_validator("name")
     @classmethod
@@ -52,7 +52,7 @@ class CapabilityDef(BaseModel):
 
     @field_validator("file_path")
     @classmethod
-    def _file_path_is_safe(cls, v: Optional[str]) -> Optional[str]:
+    def _file_path_is_safe(cls, v: str | None) -> str | None:
         if v is None:
             return v
         return _validate_relative_path(v, "file_path")
@@ -61,10 +61,10 @@ class CapabilityDef(BaseModel):
 class PluginManifest(BaseModel):
     name: str
     version: str
-    description: Optional[str] = None
-    skills: List[CapabilityDef] = Field(default_factory=list)
-    tools: List[CapabilityDef] = Field(default_factory=list)
-    mcp_servers: List[CapabilityDef] = Field(default_factory=list)
+    description: str | None = None
+    skills: list[CapabilityDef] = Field(default_factory=list)
+    tools: list[CapabilityDef] = Field(default_factory=list)
+    mcp_servers: list[CapabilityDef] = Field(default_factory=list)
     # Phase 10.2 B2: integrity manifest for zip installs. Maps each member
     # path in the plugin zip (relative, as stored in the archive, excluding
     # manifest.json itself) to the SHA-256 hex digest of that member's bytes.
@@ -77,7 +77,7 @@ class PluginManifest(BaseModel):
     # *who* may install remains the user's explicit approval in the
     # Phase 10.1 A1 flow. A zip whose manifest carries no ``files`` map (or
     # is missing an entry for any member) is refused as unsigned.
-    files: Dict[str, str] = Field(default_factory=dict)
+    files: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("name")
     @classmethod
@@ -86,7 +86,7 @@ class PluginManifest(BaseModel):
 
     @field_validator("files")
     @classmethod
-    def _files_are_safe_hashes(cls, v: Dict[str, str]) -> Dict[str, str]:
+    def _files_are_safe_hashes(cls, v: dict[str, str]) -> dict[str, str]:
         for path, digest in v.items():
             _validate_relative_path(path, "files entry")
             if not _SHA256_HEX_RE.match(digest or ""):

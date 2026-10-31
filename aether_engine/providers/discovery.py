@@ -13,7 +13,8 @@ Design notes (per user decision, Oct 2026):
 """
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
+
 import httpx
 
 logger = logging.getLogger("aether_engine.providers.discovery")
@@ -30,13 +31,13 @@ class DiscoveryError(Exception):
     """A failed model-list fetch. ``code`` is the HTTP status, or None when
     no HTTP response was received at all (DNS, refused, timeout)."""
 
-    code: Optional[int]
+    code: int | None
     message: str
 
     def __str__(self) -> str:
         return self.message
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {"code": self.code, "message": self.message}
 
 
@@ -52,9 +53,9 @@ class DiscoveryResult:
     ``error``: set when the fetch itself failed; models/excluded are empty.
     """
 
-    models: List[str] = field(default_factory=list)
-    excluded: List[Dict[str, str]] = field(default_factory=list)
-    error: Optional[DiscoveryError] = None
+    models: list[str] = field(default_factory=list)
+    excluded: list[dict[str, str]] = field(default_factory=list)
+    error: DiscoveryError | None = None
 
     @property
     def ok(self) -> bool:
@@ -73,14 +74,14 @@ def _classify_excluded(model_id: str) -> str:
     return "other"
 
 
-def _excluded(model_id: str) -> Dict[str, str]:
+def _excluded(model_id: str) -> dict[str, str]:
     return {"id": model_id, "kind": _classify_excluded(model_id)}
 
 
 async def fetch_available_models(
     provider_name: str,
     api_key: str,
-    base_url: Optional[str] = None,
+    base_url: str | None = None,
     filter_reachability: bool = False,
     force_reachability: bool = False,
 ) -> DiscoveryResult:
@@ -129,12 +130,12 @@ async def fetch_available_models(
     except DiscoveryError as e:
         logger.warning(f"Model discovery failed for {provider_name}: {e.message}")
         return DiscoveryResult(error=e)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — discovery is best-effort: unexpected failures become a DiscoveryError result
         logger.error(f"Error discovering models for {provider_name}: {e}")
         return DiscoveryResult(error=DiscoveryError(code=None, message=str(e) or type(e).__name__))
 
 
-async def _discover_gemini_models(api_key: str) -> Tuple[List[str], List[Dict[str, str]]]:
+async def _discover_gemini_models(api_key: str) -> tuple[list[str], list[dict[str, str]]]:
     """Fetch available models from Google Gemini API and filter for content generation."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     async with httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT) as client:
@@ -147,8 +148,8 @@ async def _discover_gemini_models(api_key: str) -> Tuple[List[str], List[Dict[st
         data = resp.json()
         raw_models = data.get("models", [])
 
-    discovered: List[str] = []
-    excluded: List[Dict[str, str]] = []
+    discovered: list[str] = []
+    excluded: list[dict[str, str]] = []
     # Keywords to exclude (non-chat / image / embedding / audio / special purpose models)
     exclude_keywords = (
         "embedding", "imagen", "image", "aqa", "tts", "whisper", "audio",
@@ -158,7 +159,7 @@ async def _discover_gemini_models(api_key: str) -> Tuple[List[str], List[Dict[st
 
     for m in raw_models:
         name = m.get("name", "")  # format: "models/gemini-2.0-flash"
-        model_id = name[7:] if name.startswith("models/") else name
+        model_id = name.removeprefix("models/")
         if not model_id:
             continue
 
@@ -177,7 +178,7 @@ async def _discover_gemini_models(api_key: str) -> Tuple[List[str], List[Dict[st
     # Filter out alias/latest models that LiteLLM can't reliably resolve
     # (e.g. gemini-flash-latest, gemini-pro-latest are Vertex AI aliases, not AI Studio IDs)
     alias_blocklist = {"gemini-flash-latest", "gemini-pro-latest", "gemini-flash-lite-latest"}
-    kept: List[str] = []
+    kept: list[str] = []
     for m in discovered:
         if m in alias_blocklist:
             excluded.append({"id": m, "kind": "other"})
@@ -213,7 +214,7 @@ async def _discover_gemini_models(api_key: str) -> Tuple[List[str], List[Dict[st
     return discovered, excluded
 
 
-async def _discover_openai_models(api_key: str) -> Tuple[List[str], List[Dict[str, str]]]:
+async def _discover_openai_models(api_key: str) -> tuple[list[str], list[dict[str, str]]]:
     """Fetch available models from OpenAI /v1/models endpoint and filter for chat models."""
     url = "https://api.openai.com/v1/models"
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -227,8 +228,8 @@ async def _discover_openai_models(api_key: str) -> Tuple[List[str], List[Dict[st
         data = resp.json()
         raw_models = data.get("data", [])
 
-    discovered: List[str] = []
-    excluded: List[Dict[str, str]] = []
+    discovered: list[str] = []
+    excluded: list[dict[str, str]] = []
     # Target chat / reasoning prefixes
     target_prefixes = ("gpt-4", "gpt-3.5", "o1", "o3", "chatgpt")
     exclude_keywords = ("audio", "realtime", "embed", "moderation", "tts", "dall-e", "instruct", "transcription")
@@ -239,17 +240,18 @@ async def _discover_openai_models(api_key: str) -> Tuple[List[str], List[Dict[st
             continue
         lower = model_id.lower()
 
-        if any(lower.startswith(p) for p in target_prefixes):
-            if not any(kw in lower for kw in exclude_keywords):
-                discovered.append(model_id)
-                continue
+        if any(lower.startswith(p) for p in target_prefixes) and not any(
+            kw in lower for kw in exclude_keywords
+        ):
+            discovered.append(model_id)
+            continue
         excluded.append(_excluded(model_id))
 
     def _openai_sort_key(m_id: str) -> tuple:
         lower = m_id.lower()
         if lower.startswith("gpt-4o"):
             return (1, lower)
-        if lower.startswith("o1") or lower.startswith("o3"):
+        if lower.startswith(("o1", "o3")):
             return (2, lower)
         if lower.startswith("gpt-4"):
             return (3, lower)
@@ -259,7 +261,7 @@ async def _discover_openai_models(api_key: str) -> Tuple[List[str], List[Dict[st
     return discovered, excluded
 
 
-async def _discover_anthropic_models(api_key: str) -> Tuple[List[str], List[Dict[str, str]]]:
+async def _discover_anthropic_models(api_key: str) -> tuple[list[str], list[dict[str, str]]]:
     """Fetch available models from Anthropic /v1/models endpoint."""
     url = "https://api.anthropic.com/v1/models"
     headers = {
@@ -276,8 +278,8 @@ async def _discover_anthropic_models(api_key: str) -> Tuple[List[str], List[Dict
         data = resp.json()
         raw_models = data.get("data", [])
 
-    discovered: List[str] = []
-    excluded: List[Dict[str, str]] = []
+    discovered: list[str] = []
+    excluded: list[dict[str, str]] = []
     for m in raw_models:
         model_id = m.get("id", "")
         if not model_id:
@@ -289,7 +291,7 @@ async def _discover_anthropic_models(api_key: str) -> Tuple[List[str], List[Dict
     return discovered, excluded
 
 
-async def _discover_deepseek_models(api_key: str) -> Tuple[List[str], List[Dict[str, str]]]:
+async def _discover_deepseek_models(api_key: str) -> tuple[list[str], list[dict[str, str]]]:
     """Fetch available models from DeepSeek /models endpoint."""
     url = "https://api.deepseek.com/models"
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -307,7 +309,7 @@ async def _discover_deepseek_models(api_key: str) -> Tuple[List[str], List[Dict[
     return discovered, []
 
 
-async def _discover_openrouter_models(api_key: str) -> Tuple[List[str], List[Dict[str, str]]]:
+async def _discover_openrouter_models(api_key: str) -> tuple[list[str], list[dict[str, str]]]:
     """Fetch top text/chat models from OpenRouter /api/v1/models endpoint."""
     url = "https://openrouter.ai/api/v1/models"
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -321,8 +323,8 @@ async def _discover_openrouter_models(api_key: str) -> Tuple[List[str], List[Dic
         data = resp.json()
         raw_models = data.get("data", [])
 
-    discovered: List[str] = []
-    excluded: List[Dict[str, str]] = []
+    discovered: list[str] = []
+    excluded: list[dict[str, str]] = []
     exclude_openrouter = ("image", "embedding", "audio", "whisper", "tts", "moderation", "diffusion")
     for m in raw_models[:50]:  # Limit top 50
         model_id = m.get("id", "")
@@ -347,18 +349,18 @@ async def _discover_openrouter_models(api_key: str) -> Tuple[List[str], List[Dic
 
 async def _discover_openai_compatible_models(
     base_url: str, api_key: str
-) -> Tuple[List[str], List[Dict[str, str]]]:
+) -> tuple[list[str], list[dict[str, str]]]:
     """Fetch available models from an OpenAI-compatible /models endpoint."""
     if not base_url or not base_url.strip():
         return [], []
 
     base_url = base_url.strip().rstrip("/")
-    headers: Dict[str, str] = {}
+    headers: dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     # Spoof User-Agent to bypass strict WAF filters (e.g. AgentRouter)
     headers["User-Agent"] = "Cline/1.0.0"
-    candidates: List[str] = []
+    candidates: list[str] = []
     if base_url.endswith("/models"):
         candidates.append(base_url)
     else:
@@ -366,9 +368,9 @@ async def _discover_openai_compatible_models(
         if not base_url.endswith("/v1"):
             candidates.append(f"{base_url}/v1/models")
 
-    raw_models: List[Any] = []
-    tried: List[str] = []
-    last_error: Optional[DiscoveryError] = None
+    raw_models: list[Any] = []
+    tried: list[str] = []
+    last_error: DiscoveryError | None = None
     async with httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT) as client:
         for url in candidates:
             tried.append(url)
@@ -393,7 +395,7 @@ async def _discover_openai_compatible_models(
                     )
             except DiscoveryError:
                 raise
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — per-endpoint probe: failure moves on to the next candidate URL
                 logger.debug(f"Failed querying {url}: {e}")
                 last_error = DiscoveryError(code=None, message=f"Request to {url} failed: {e}")
                 continue
@@ -404,8 +406,8 @@ async def _discover_openai_compatible_models(
             message=f"No model list returned by any candidate endpoint: {', '.join(tried)}",
         )
 
-    discovered: List[str] = []
-    excluded: List[Dict[str, str]] = []
+    discovered: list[str] = []
+    excluded: list[dict[str, str]] = []
     exclude_keywords = ("audio", "realtime", "embed", "moderation", "tts", "dall-e", "image", "transcription", "rerank", "diffusion")
 
     for m in raw_models:
