@@ -15,11 +15,14 @@ is where that shows up.
 Any shortfall is reported WITH stage attribution (which stage blew the budget),
 never as a bare pass/fail.
 
-Honesty under missing dependencies:
-When voice runtime dependencies (faster-whisper, kokoro, silero-vad/onnxruntime,
-aiortc) are absent, this harness runs against injectable fake/simulated engines.
-The benchmark report states plainly when running on fakes — synthetic timings
-must never be presented as measured hardware latency.
+Honesty about what is measured:
+This harness ALWAYS runs against injectable fake/simulated engines with
+calibrated delays — it never loads a real model, whether or not the voice
+runtime dependencies (faster-whisper, kokoro, silero-vad/onnxruntime, aiortc)
+are installed. The benchmark report therefore always labels the run as
+running on fakes: synthetic timings must never be presented as measured
+hardware latency. (Dependency presence is still probed and reported, so a
+missing-runtime environment is called out by name.)
 
 Usage:
   uv run python benchmarks/voice_latency_bench.py [--runs 5]
@@ -123,7 +126,7 @@ class BenchmarkResult:
             lines.extend([
                 "",
                 "[FAKES DETECTED / RUNNING ON FAKES]",
-                "Voice runtime dependencies are not installed in this environment:",
+                "This run measured simulated stages, not real models:",
                 *[f"  - {r}" for r in self.fake_reasons],
                 "Timings reflect synthetic/injected stage behavior, NOT measured hardware latency.",
                 "Real-hardware verification requires Windows QA environment with native runtimes.",
@@ -570,7 +573,18 @@ def run_voice_latency_bench(
     vad_threshold: float = 0.5,
 ) -> BenchmarkResult:
     """Execute the benchmark over all test audio samples across the specified runs."""
-    is_fake, reasons = detect_runtime_deps()
+    deps_missing, reasons = detect_runtime_deps()
+    if not deps_missing:
+        # The deps are installed, but the measured stages below are
+        # still the simulated Measured* engines with calibrated
+        # delays — labelling this "native hardware" would be a
+        # placebo. The run stays labelled fake, with the reason
+        # saying exactly why.
+        reasons = [
+            "runtime dependencies are installed, but this harness "
+            "measures simulated stages with calibrated delays and "
+            "never loads a real model"
+        ]
     samples: list[StageTimings] = []
 
     for _ in range(runs):
@@ -592,7 +606,9 @@ def run_voice_latency_bench(
 
     return BenchmarkResult(
         samples=samples,
-        is_fake=is_fake,
+        # Always True: the measured stages are simulated by
+        # construction (see the deps_missing note above).
+        is_fake=True,
         fake_reasons=reasons,
         target_ms=TARGET_E2E_MS,
     )

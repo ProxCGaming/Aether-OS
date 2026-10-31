@@ -102,9 +102,15 @@ class TestContractsE853:
 
 
 class TestDictationWebsocket:
-    def test_dictation_start_fails_closed_when_stt_unavailable(self, ws_env):
+    def test_dictation_start_fails_closed_when_stt_unavailable(self, ws_env, monkeypatch):
         """When faster-whisper is not installed, dictation start returns ok=False
-        with honest reason."""
+        with honest reason. Absence is simulated with an unavailable
+        engine: the real package IS installed since the voice
+        packaging slice, so the environment no longer provides the
+        absence for free."""
+        monkeypatch.setattr(
+            ws_module, "create_stt_engine",
+            lambda: FakeStt(reason="faster-whisper is not installed (local STT)"))
         with ExitStack(), TestClient(app) as client, client.websocket_connect(
             f"/ws/tasks?token={engine_state.auth_token}"
         ) as ws:
@@ -175,9 +181,15 @@ class TestDictationWebsocket:
 
 
 class TestReadAloudWebsocket:
-    def test_read_aloud_fails_closed_when_tts_unavailable(self, ws_env):
+    def test_read_aloud_fails_closed_when_tts_unavailable(self, ws_env, monkeypatch):
         """When kokoro is not installed, read-aloud start returns ok=False
-        with honest reason."""
+        with honest reason. Absence is simulated with an unavailable
+        engine: the real package IS installed since the voice
+        packaging slice, so the environment no longer provides the
+        absence for free."""
+        monkeypatch.setattr(
+            ws_module, "create_tts_engine",
+            lambda: FakeTts(reason="kokoro is not installed (local TTS)"))
         with ExitStack(), TestClient(app) as client, client.websocket_connect(
             f"/ws/tasks?token={engine_state.auth_token}"
         ) as ws:

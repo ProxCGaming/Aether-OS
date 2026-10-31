@@ -11,9 +11,9 @@ and the device discipline from the grill (Q26-Q30):
   * NO stage opens anything before a session starts, and stopping the
     session closes the transport and every stage;
   * missing optional dependencies (Silero/onnxruntime, faster-whisper,
-    Kokoro, aiortc — none are installed in this environment) fail
-    closed with an honest "voice unavailable: <reason>" — never a
-    crash, never a silently opened device;
+    Kokoro, aiortc) fail closed with an honest
+    "voice unavailable: <reason>" — never a crash, never a silently
+    opened device;
   * the barge-in seam (E8-5.1b builds the behaviour on it):
     interrupt_output() stops the in-flight reply and reports the
     committed (actually-spoken) text.
@@ -449,12 +449,30 @@ class TestFailClosed:
         )
         assert error is None and pipeline is not None
 
-    def test_real_stages_report_unavailable_in_this_environment(self):
-        """None of the voice runtime deps are installed here, so every
-        real stage must say so — the fail-closed contract the UI shows."""
+    def test_real_stages_report_unavailable_when_deps_missing(self, monkeypatch):
+        """With the voice runtime deps missing, every real stage must
+        say so — the fail-closed contract the UI shows. Absence is
+        simulated by hiding the packages from find_spec (the stages'
+        only probe), so the test holds whether or not the packages
+        are installed in the environment — they are, since the voice
+        packaging slice declared them in pyproject."""
+        import importlib.util
+
         from aether_engine.voice.stt import FasterWhisperStt
         from aether_engine.voice.tts import KokoroTts
         from aether_engine.voice.vad import SileroVad
+
+        voice_imports = {
+            "faster_whisper", "kokoro", "onnxruntime", "numpy", "silero_vad",
+        }
+        real_find_spec = importlib.util.find_spec
+
+        def hidden_find_spec(name, package=None):
+            if name in voice_imports:
+                return None
+            return real_find_spec(name, package)
+
+        monkeypatch.setattr(importlib.util, "find_spec", hidden_find_spec)
 
         for stage in (SileroVad(), FasterWhisperStt(), KokoroTts()):
             reason = stage.unavailable_reason()
