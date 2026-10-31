@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -249,6 +250,90 @@ async def handle_artifact_get(artifact_id: str) -> dict[str, Any]:
         "exists": exists,
         "error": error,
     }
+
+
+async def _register_message_attachments(
+    session_id: str | None,
+    message_id: str | None,
+    attachments: list[Any] | None,
+    ws: WebSocket | None = None,
+) -> None:
+    """Auto-register user message attachments into MediaStore in place (Epic 8, E8-4.2)."""
+    if not attachments:
+        return
+    try:
+        import base64
+
+        from aether_engine.media.store import get_media_store
+        store = get_media_store()
+        attach_dir = Path.home() / ".aether" / "attachments" / (session_id or "global")
+
+        for att in attachments:
+            file_path = None
+            origin = "user_upload"
+            mime_type = None
+
+            if isinstance(att, dict):
+                file_path = att.get("path")
+                data_url = att.get("data") or att.get("url")
+                mime_type = att.get("mime_type")
+                name = att.get("name") or "attachment"
+
+                if "snip" in name.lower() or att.get("bounds"):
+                    origin = "snip"
+
+                if not file_path and data_url and isinstance(data_url, str) and data_url.startswith("data:"):
+                    attach_dir.mkdir(parents=True, exist_ok=True)
+                    header, _, b64_str = data_url.partition(",")
+                    if ";base64" in header:
+                        extracted_mime = header.split(":")[1].split(";")[0]
+                        mime_type = mime_type or extracted_mime
+                    ext = ".png"
+                    if mime_type and "jpeg" in mime_type:
+                        ext = ".jpg"
+                    elif mime_type and "webp" in mime_type:
+                        ext = ".webp"
+                    target_file = attach_dir / f"{uuid.uuid4().hex[:8]}_{name}"
+                    if not target_file.suffix:
+                        target_file = target_file.with_suffix(ext)
+                    target_file.write_bytes(base64.b64decode(b64_str))
+                    file_path = str(target_file)
+            elif isinstance(att, str):
+                if att.startswith("data:"):
+                    attach_dir.mkdir(parents=True, exist_ok=True)
+                    header, _, b64_str = att.partition(",")
+                    target_file = attach_dir / f"{uuid.uuid4().hex[:8]}_image.png"
+                    target_file.write_bytes(base64.b64decode(b64_str))
+                    file_path = str(target_file)
+                else:
+                    file_path = att
+
+            if file_path:
+                ext = Path(file_path).suffix.lower()
+                is_img = ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp")
+                is_vid = ext in (".mp4", ".webm", ".mkv", ".mov", ".avi")
+                if is_img or is_vid or (mime_type and mime_type.startswith(("image/", "video/"))):
+                    media_type = "video" if (is_vid or (mime_type and mime_type.startswith("video/"))) else "image"
+                    item = await asyncio.to_thread(
+                        store.register_media,
+                        file_path=file_path,
+                        collection="user",
+                        media_type=media_type,
+                        session_id=session_id,
+                        message_id=message_id,
+                        mime_type=mime_type,
+                        probe_metadata={"origin": origin, "name": Path(file_path).name},
+                    )
+                    if ws:
+                        try:
+                            await ws.send_text(Event(
+                                type=EventType.MEDIA_RECORDED,
+                                payload=item,
+                            ).to_json())
+                        except Exception:  # noqa: BLE001, S110
+                            pass
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Failed to auto-register message attachments into MediaStore: {e}")
 
 
 @router.websocket("/ws/tasks")
@@ -605,6 +690,8 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         await asyncio.to_thread(
                             session_store.add_message, steer_session, "user",
                             steer_prompt, None, msg.payload.get("message_id"), steer_attachments)
+                        await _register_message_attachments(
+                            steer_session, msg.payload.get("message_id"), steer_attachments, ws)
                     except Exception as e:  # noqa: BLE001 — best-effort persistence, same as START_TASK: a save failure must not lose the steer
                         logger.error(f"Failed to save steering message: {e}")
                     enqueue_steer(
@@ -694,6 +781,8 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     await asyncio.to_thread(
                         session_store.add_message, session_id, "user", prompt,
                         None, msg.payload.get("message_id"), attachments)
+                    await _register_message_attachments(
+                        session_id, msg.payload.get("message_id"), attachments, ws)
                 except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not block the task
                     logger.error(f"Failed to save user message: {e}")
 
@@ -1294,6 +1383,11 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         await asyncio.to_thread(get_artifact_store().delete_by_session, sess_id)
                     except Exception as cascade_err:  # noqa: BLE001
                         logger.warning(f"Failed to cascade delete artifacts for session {sess_id}: {cascade_err}")
+                    try:
+                        from aether_engine.media.store import get_media_store
+                        await asyncio.to_thread(get_media_store().delete_by_session, sess_id)
+                    except Exception as media_err:  # noqa: BLE001
+                        logger.warning(f"Failed to cascade delete media for session {sess_id}: {media_err}")
                 await ws.send_text(Event(
                     type=EventType.SESSION_DELETE_RESPONSE,
                     request_id=req_id,
@@ -1637,6 +1731,60 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     type=EventType.USAGE_LEDGER_QUERY_RESPONSE,
                     request_id=req_id,
                     payload=result,
+                ).to_json())
+
+            # -----------------------------------------------------------
+            # Media Store & Library (Epic 8, E8-4.2)
+            # -----------------------------------------------------------
+            elif msg.type == EventType.MEDIA_LIST_REQUEST:
+                from aether_engine.media.store import get_media_store
+                media_store = get_media_store()
+                collection = msg.payload.get("collection", "all")
+                sess_id = msg.payload.get("session_id")
+                limit = msg.payload.get("limit")
+                offset = msg.payload.get("offset")
+                query = msg.payload.get("query")
+                media_items, total = await asyncio.to_thread(
+                    media_store.list_media,
+                    collection=collection,
+                    session_id=sess_id,
+                    limit=limit,
+                    offset=offset,
+                    query=query,
+                )
+                await ws.send_text(Event(
+                    type=EventType.MEDIA_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"media": media_items, "total": total},
+                ).to_json())
+
+            elif msg.type == EventType.MEDIA_DELETE_REQUEST:
+                from aether_engine.media.store import get_media_store
+                media_store = get_media_store()
+                mid = msg.payload.get("media_id", "")
+                del_file = bool(msg.payload.get("delete_underlying_file", False))
+                deleted, file_deleted = await asyncio.to_thread(
+                    media_store.delete_media, mid, delete_underlying_file=del_file
+                )
+                await ws.send_text(Event(
+                    type=EventType.MEDIA_DELETE_RESPONSE,
+                    request_id=req_id,
+                    payload={"deleted": deleted, "media_id": mid, "file_deleted": file_deleted},
+                ).to_json())
+
+            elif msg.type == EventType.MEDIA_METADATA_UPDATE_REQUEST:
+                from aether_engine.media.store import get_media_store
+                media_store = get_media_store()
+                mid = msg.payload.get("media_id", "")
+                tags = msg.payload.get("tags")
+                notes = msg.payload.get("notes")
+                updated = await asyncio.to_thread(
+                    media_store.update_metadata, mid, tags=tags, notes=notes
+                )
+                await ws.send_text(Event(
+                    type=EventType.MEDIA_METADATA_UPDATE_RESPONSE,
+                    request_id=req_id,
+                    payload=updated,
                 ).to_json())
 
             # -----------------------------------------------------------

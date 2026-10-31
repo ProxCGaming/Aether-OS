@@ -15,17 +15,20 @@ import {
   FolderGit2
 } from 'lucide-react';
 import '../chat.css';
+import MediaLibrary from './MediaLibrary';
 
 export default function GlobalArtifactsView({
   artifacts: controlledArtifacts,
   initialArtifacts,
   sessions = [],
   wsRef,
-  onNavigateToSession = () => {}
+  onNavigateToSession = () => {},
+  initialSection = 'artifacts'
 }) {
   const [internalArtifacts, setInternalArtifacts] = useState(
     () => initialArtifacts || []
   );
+  const [activeSection, setActiveSection] = useState(initialSection); // 'artifacts' | 'media'
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedKind, setSelectedKind] = useState('all');
   const [viewMode, setViewMode] = useState('table'); // 'table' | 'grid'
@@ -207,66 +210,136 @@ export default function GlobalArtifactsView({
           </div>
         </div>
 
-        {/* View mode toggle (Table / Grid) */}
-        <div
-          style={{
-            display: 'flex',
-            background: 'rgba(255, 255, 255, 0.05)',
-            borderRadius: '8px',
-            padding: '3px',
-            border: '1px solid rgba(255, 255, 255, 0.1)'
-          }}
-        >
-          <button
-            type="button"
-            data-testid="switch-view-table"
-            onClick={() => setViewMode('table')}
-            title="Table View"
+        {/* Controls: Section Nav + View Mode Toggle */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {/* Section Navigation: Deliverables vs Media Library */}
+          <div
             style={{
-              background: viewMode === 'table' ? 'rgba(255, 255, 255, 0.12)' : 'transparent',
-              border: 'none',
-              color: viewMode === 'table' ? '#fff' : '#94a3b8',
-              borderRadius: '6px',
-              padding: '6px 10px',
-              cursor: 'pointer',
               display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              fontSize: '12px',
-              fontWeight: viewMode === 'table' ? 600 : 400,
-              transition: 'all 0.2s'
+              background: 'rgba(255, 255, 255, 0.05)',
+              borderRadius: '10px',
+              padding: '3px',
+              border: '1px solid rgba(255, 255, 255, 0.1)',
+              gap: '4px'
             }}
           >
-            <TableIcon size={14} />
-            <span>Table</span>
-          </button>
-          <button
-            type="button"
-            data-testid="switch-view-grid"
-            onClick={() => setViewMode('grid')}
-            title="Grid View"
-            style={{
-              background: viewMode === 'grid' ? 'rgba(255, 255, 255, 0.12)' : 'transparent',
-              border: 'none',
-              color: viewMode === 'grid' ? '#fff' : '#94a3b8',
-              borderRadius: '6px',
-              padding: '6px 10px',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              fontSize: '12px',
-              fontWeight: viewMode === 'grid' ? 600 : 400,
-              transition: 'all 0.2s'
-            }}
-          >
-            <LayoutGrid size={14} />
-            <span>Grid</span>
-          </button>
+            <button
+              type="button"
+              data-testid="section-tab-artifacts"
+              onClick={() => setActiveSection('artifacts')}
+              style={{
+                background: activeSection === 'artifacts' ? 'rgba(139, 92, 246, 0.25)' : 'transparent',
+                border: activeSection === 'artifacts' ? '1px solid rgba(139, 92, 246, 0.45)' : '1px solid transparent',
+                color: activeSection === 'artifacts' ? '#fff' : '#94a3b8',
+                borderRadius: '8px',
+                padding: '5px 12px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '12px',
+                fontWeight: activeSection === 'artifacts' ? 600 : 400,
+                transition: 'all 0.15s'
+              }}
+            >
+              <Layers size={13} />
+              <span>Deliverables</span>
+            </button>
+            <button
+              type="button"
+              data-testid="section-tab-media"
+              onClick={() => setActiveSection('media')}
+              style={{
+                background: activeSection === 'media' ? 'rgba(139, 92, 246, 0.25)' : 'transparent',
+                border: activeSection === 'media' ? '1px solid rgba(139, 92, 246, 0.45)' : '1px solid transparent',
+                color: activeSection === 'media' ? '#fff' : '#94a3b8',
+                borderRadius: '8px',
+                padding: '5px 12px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '12px',
+                fontWeight: activeSection === 'media' ? 600 : 400,
+                transition: 'all 0.15s'
+              }}
+            >
+              <ImageIcon size={13} />
+              <span>Media Library</span>
+            </button>
+          </div>
+
+          {/* View mode toggle (Table / Grid) - visible for artifacts section */}
+          {activeSection === 'artifacts' && (
+            <div
+              style={{
+                display: 'flex',
+                background: 'rgba(255, 255, 255, 0.05)',
+                borderRadius: '8px',
+                padding: '3px',
+                border: '1px solid rgba(255, 255, 255, 0.1)'
+              }}
+            >
+              <button
+                type="button"
+                data-testid="switch-view-table"
+                onClick={() => setViewMode('table')}
+                title="Table View"
+                style={{
+                  background: viewMode === 'table' ? 'rgba(255, 255, 255, 0.12)' : 'transparent',
+                  border: 'none',
+                  color: viewMode === 'table' ? '#fff' : '#94a3b8',
+                  borderRadius: '6px',
+                  padding: '6px 10px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  fontSize: '12px',
+                  fontWeight: viewMode === 'table' ? 600 : 400,
+                  transition: 'all 0.2s'
+                }}
+              >
+                <TableIcon size={14} />
+                <span>Table</span>
+              </button>
+              <button
+                type="button"
+                data-testid="switch-view-grid"
+                onClick={() => setViewMode('grid')}
+                title="Grid View"
+                style={{
+                  background: viewMode === 'grid' ? 'rgba(255, 255, 255, 0.12)' : 'transparent',
+                  border: 'none',
+                  color: viewMode === 'grid' ? '#fff' : '#94a3b8',
+                  borderRadius: '6px',
+                  padding: '6px 10px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  fontSize: '12px',
+                  fontWeight: viewMode === 'grid' ? 600 : 400,
+                  transition: 'all 0.2s'
+                }}
+              >
+                <LayoutGrid size={14} />
+                <span>Grid</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Toolbar: Search input & Kind filter chips */}
+      {activeSection === 'media' ? (
+        <MediaLibrary
+          wsRef={wsRef}
+          sessions={sessions}
+          onNavigateToSession={onNavigateToSession}
+        />
+      ) : (
+        <>
+          {/* Toolbar: Search input & Kind filter chips */}
       <div
         style={{
           display: 'flex',
@@ -782,6 +855,8 @@ export default function GlobalArtifactsView({
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 }

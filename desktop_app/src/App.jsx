@@ -1363,6 +1363,7 @@ function AppContent() {
   };
 
   // Epic 8, E8-2.3: navigate from Global Artifacts view into session with canvas open
+  // Epic 8, E8-4.2: scroll directly to message if jumping from Media Library
   const handleNavigateToArtifactSession = useCallback((artifact) => {
     if (!artifact) return;
     if (artifact.session_id && artifact.session_id !== activeSession) {
@@ -1382,6 +1383,18 @@ function AppContent() {
       }));
     }
     setActiveTab('Chat');
+
+    if (artifact.message_id) {
+      setTimeout(() => {
+        const el =
+          document.getElementById(`message-${artifact.message_id}`) ||
+          document.querySelector(`[data-message-id="${artifact.message_id}"]`) ||
+          document.querySelector(`[data-msg-id="${artifact.message_id}"]`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 150);
+    }
   }, [activeSession, wsRef]);
 
   const handleNewChat = () => {

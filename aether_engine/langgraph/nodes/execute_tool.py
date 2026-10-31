@@ -232,6 +232,36 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                                 },
                             ),
                         )
+
+                    # Epic 8, E8-4.2: Auto-register agent-generated media into MediaStore
+                    if file_p:
+                        ext = file_p.suffix.lower()
+                        is_img = ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp")
+                        is_vid = ext in (".mp4", ".webm", ".mkv", ".mov", ".avi")
+                        if is_img or is_vid:
+                            try:
+                                from aether_engine.media.store import get_media_store
+                                m_store = get_media_store()
+                                m_type = "video" if is_vid else "image"
+                                med_item = m_store.register_media(
+                                    file_path=str(file_path),
+                                    collection="generated",
+                                    media_type=m_type,
+                                    session_id=sess_id,
+                                    message_id=None,
+                                    probe_metadata={"origin": "agent_generated", "tool": tool_name},
+                                )
+                                if t_id:
+                                    event_bus.publish(
+                                        t_id,
+                                        Event(
+                                            type=EventType.MEDIA_RECORDED,
+                                            request_id=t_id,
+                                            payload=med_item,
+                                        ),
+                                    )
+                            except Exception:
+                                logger.exception("Failed to auto-register generated media into MediaStore")
                 except Exception:
                     logger.exception(f"Failed to record artifact for {tool_name}")
 

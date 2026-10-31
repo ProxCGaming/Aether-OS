@@ -312,4 +312,31 @@ describe('GlobalArtifactsView Component', () => {
     expect(screen.getByTestId('empty-artifacts-state')).toBeInTheDocument();
     expect(screen.getByText(/No artifacts found/i)).toBeInTheDocument();
   });
+
+  test('switches between Deliverables and Media Library sections', () => {
+    render(
+      <GlobalArtifactsView
+        artifacts={sampleArtifacts}
+        sessions={sampleSessions}
+        onNavigateToSession={jest.fn()}
+      />
+    );
+
+    // Initial section is artifacts / deliverables
+    expect(screen.getByTestId('section-tab-artifacts')).toBeInTheDocument();
+    const mediaTab = screen.getByTestId('section-tab-media');
+    expect(mediaTab).toBeInTheDocument();
+    expect(screen.getByTestId('view-mode-table')).toBeInTheDocument();
+
+    // Switch to Media Library section
+    fireEvent.click(mediaTab);
+    expect(screen.getByTestId('media-library-view')).toBeInTheDocument();
+    expect(screen.queryByTestId('view-mode-table')).not.toBeInTheDocument();
+
+    // Switch back to Deliverables section
+    const artifactsTab = screen.getByTestId('section-tab-artifacts');
+    fireEvent.click(artifactsTab);
+    expect(screen.queryByTestId('media-library-view')).not.toBeInTheDocument();
+    expect(screen.getByTestId('view-mode-table')).toBeInTheDocument();
+  });
 });
