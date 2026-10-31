@@ -5,7 +5,7 @@ import { SocketProvider, useAetherSocket } from './contexts/SocketContext';
 // interactivity don't wait on it. The Suspense fallback paints the
 // same background colour, so the graph simply fades in when ready.
 const ForceGraph3D = React.lazy(() => import('react-force-graph-3d'));
-import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu, Pencil, Upload } from 'lucide-react';
+import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu, Pencil, Upload, Layers } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
 import SettingsPanel from './SettingsPanel';
 import Dashboard from './Dashboard';
@@ -13,6 +13,7 @@ import Projects from './Projects';
 import Onboarding from './components/Onboarding';
 import CommandPalette from './components/CommandPalette';
 import ArtifactsCanvas from './components/ArtifactsCanvas';
+import GlobalArtifactsView from './components/GlobalArtifactsView';
 import './chat.css';
 
 // Decorative background graph (branding, not live data — see Phase 9 B3)
@@ -132,7 +133,7 @@ function AppContent() {
       payload: { session_id: sessionId },
     }));
   }, [wsRef]);
-  const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Projects', 'Settings'
+  const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Artifacts', 'Projects', 'Settings'
   const [initialInput, setInitialInput] = useState('');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [slashCommands, setSlashCommands] = useState([]);
@@ -790,6 +791,10 @@ function AppContent() {
           const pluginArr = Array.isArray(plugins) ? plugins : Object.values(plugins || {});
           setPluginCount(pluginArr.filter(p => p.enabled !== false).length);
         } else if (data.type === 'ARTIFACT_LIST_RESPONSE') {
+          // Epic 8, E8-2.3: ignore global requests meant for GlobalArtifactsView
+          if (data.request_id && data.request_id.startsWith('global_artifacts_')) {
+            return;
+          }
           const list = data.payload?.artifacts || [];
           setCanvasArtifacts(list);
           const savedId = activeSession ? localStorage.getItem(`aether_canvas_selected_${activeSession}`) : null;
@@ -951,7 +956,7 @@ function AppContent() {
       wsRef.current.send(JSON.stringify({
         type: 'ARTIFACT_LIST_REQUEST',
         schema_version: 1,
-        request_id: Date.now().toString(),
+        request_id: `session_artifacts_${activeSession}_${Date.now()}`,
         payload: { session_id: activeSession, global: false }
       }));
       const savedId = localStorage.getItem(`aether_canvas_selected_${activeSession}`);
@@ -1024,7 +1029,7 @@ function AppContent() {
       wsRef.current.send(JSON.stringify({
         type: 'ARTIFACT_LIST_REQUEST',
         schema_version: 1,
-        request_id: Date.now().toString(),
+        request_id: `session_artifacts_${activeSession}_${Date.now()}`,
         payload: { session_id: activeSession, global: false }
       }));
     }
@@ -1109,6 +1114,28 @@ function AppContent() {
     }
   };
 
+  // Epic 8, E8-2.3: navigate from Global Artifacts view into session with canvas open
+  const handleNavigateToArtifactSession = useCallback((artifact) => {
+    if (!artifact) return;
+    if (artifact.session_id && artifact.session_id !== activeSession) {
+      handleSessionSwitch(artifact.session_id);
+    }
+    if (artifact.session_id && artifact.id) {
+      localStorage.setItem(`aether_canvas_selected_${artifact.session_id}`, artifact.id);
+    }
+    setSelectedArtifactId(artifact.id);
+    setIsCanvasOpen(true);
+    if (artifact.id && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'ARTIFACT_GET_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { artifact_id: artifact.id }
+      }));
+    }
+    setActiveTab('Chat');
+  }, [activeSession, wsRef]);
+
   const handleNewChat = () => {
     setRewindManifest(null); // E8-1.1a: a fresh chat has no points yet
     setChatMessages([]); // Clear immediately for instant feel
@@ -1141,6 +1168,7 @@ function AppContent() {
       { id: 'act-new-chat', kind: 'action', label: 'New chat', run: () => { handleNewChat(); setActiveTab('Chat'); } },
       { id: 'act-tab-chat', kind: 'action', label: 'Go to Chat', run: () => setActiveTab('Chat') },
       { id: 'act-tab-dashboard', kind: 'action', label: 'Go to Dashboard', run: () => setActiveTab('Dashboard') },
+      { id: 'act-tab-artifacts', kind: 'action', label: 'Go to Artifacts', run: () => setActiveTab('Artifacts') },
       { id: 'act-tab-projects', kind: 'action', label: 'Go to Projects', run: () => setActiveTab('Projects') },
       { id: 'act-tab-settings', kind: 'action', label: 'Go to Settings', run: () => setActiveTab('Settings') },
       { id: 'act-shortcuts', kind: 'action', label: 'Keyboard shortcuts', run: () => setShortcutsOpen(true) },
@@ -1580,6 +1608,7 @@ function AppContent() {
             <nav style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '0 12px' }}>
               <NavItem icon={<MessageSquare size={18} />} label="Chat" activeTab={activeTab} setActiveTab={setActiveTab} />
               <NavItem icon={<LayoutDashboard size={18} />} label="Dashboard" activeTab={activeTab} setActiveTab={setActiveTab} />
+              <NavItem icon={<Layers size={18} />} label="Artifacts" activeTab={activeTab} setActiveTab={setActiveTab} />
               <NavItem icon={<Folder size={18} />} label="Projects" activeTab={activeTab} setActiveTab={setActiveTab} />
               <NavItem icon={<Settings size={18} />} label="Settings" activeTab={activeTab} setActiveTab={setActiveTab} />
             </nav>
@@ -1845,6 +1874,13 @@ function AppContent() {
                </div>
             )}
             {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} providerHealth={providerHealth} wsRef={wsRef} onStartWorkflow={() => setActiveTab('Chat')} />}
+            {activeTab === 'Artifacts' && (
+              <GlobalArtifactsView
+                wsRef={wsRef}
+                sessions={sessions}
+                onNavigateToSession={handleNavigateToArtifactSession}
+              />
+            )}
             {activeTab === 'Projects' && <Projects wsRef={wsRef} />}
             {!isFloating && engineConfig && !engineConfig.onboarding_completed && providersLoaded
               && !(Array.isArray(providers) && providers.some(p => p.has_key)) && (
@@ -1873,7 +1909,7 @@ function AppContent() {
                 </div>
               </div>
             )}
-            {activeTab !== 'Settings' && activeTab !== 'Dashboard' && activeTab !== 'Projects' && (
+            {activeTab !== 'Settings' && activeTab !== 'Dashboard' && activeTab !== 'Artifacts' && activeTab !== 'Projects' && (
                <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: '#9090a0' }}>
                  <h2>{activeTab} view coming soon.</h2>
                </div>

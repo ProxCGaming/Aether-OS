@@ -131,6 +131,96 @@ def test_session_cascade_delete(store):
 
 
 # ==============================================================================
+# Epic 8, E8-2.3: Global Cross-Session Listing, Kind Filtering & Search
+# ==============================================================================
+
+def test_cross_session_listing_and_filtering_by_kind(store):
+    store.record_artifact("sess_a", "task_1", "file", "alpha.py", "/alpha.py")
+    store.record_artifact("sess_a", "task_2", "diff", "alpha.py", "/alpha.py", content="diff")
+    store.record_artifact("sess_b", "task_3", "file", "beta.md", "/beta.md")
+    store.record_artifact("sess_b", "task_4", "report", "summary.md", "/summary.md")
+    store.record_artifact("sess_c", "task_5", "file", "gamma.json", "/gamma.json")
+
+    # 1. Global list returns artifacts from all sessions with proper attribution
+    all_arts, total_all = store.list_artifacts(is_global=True)
+    assert total_all == 5
+    assert len(all_arts) == 5
+    sessions_found = {a["session_id"] for a in all_arts}
+    assert sessions_found == {"sess_a", "sess_b", "sess_c"}
+    tasks_found = {a["task_id"] for a in all_arts}
+    assert tasks_found == {"task_1", "task_2", "task_3", "task_4", "task_5"}
+
+    # 2. Filter by kind across sessions
+    file_arts, file_total = store.list_artifacts(is_global=True, kind="file")
+    assert file_total == 3
+    assert all(a["kind"] == "file" for a in file_arts)
+    assert {a["title"] for a in file_arts} == {"alpha.py", "beta.md", "gamma.json"}
+
+    diff_arts, diff_total = store.list_artifacts(is_global=True, kind="diff")
+    assert diff_total == 1
+    assert diff_arts[0]["kind"] == "diff"
+    assert diff_arts[0]["session_id"] == "sess_a"
+
+    report_arts, report_total = store.list_artifacts(is_global=True, kind="report")
+    assert report_total == 1
+    assert report_arts[0]["title"] == "summary.md"
+
+    # 3. Filter by session_id and kind combined
+    sess_a_files, sess_a_total = store.list_artifacts(session_id="sess_a", kind="file")
+    assert sess_a_total == 1
+    assert sess_a_files[0]["title"] == "alpha.py"
+
+
+def test_search_artifacts_in_store(store):
+    store.record_artifact("sess_login", "task_auth", "file", "auth_controller.py", "/src/auth_controller.py")
+    store.record_artifact("sess_payment", "task_stripe", "diff", "checkout.js", "/src/checkout.js")
+    store.record_artifact("sess_reports", "task_metrics", "file", "analytics.json", "/data/analytics.json")
+
+    # Search by title
+    res_title, total_title = store.list_artifacts(is_global=True, search="auth_controller")
+    assert total_title == 1
+    assert res_title[0]["title"] == "auth_controller.py"
+
+    # Search by session_id
+    res_sess, total_sess = store.list_artifacts(is_global=True, search="sess_payment")
+    assert total_sess == 1
+    assert res_sess[0]["session_id"] == "sess_payment"
+
+    # Search by task_id
+    res_task, total_task = store.list_artifacts(is_global=True, search="task_metrics")
+    assert total_task == 1
+    assert res_task[0]["task_id"] == "task_metrics"
+
+    # Search with no match
+    res_none, total_none = store.list_artifacts(is_global=True, search="nonexistent")
+    assert total_none == 0
+    assert len(res_none) == 0
+
+
+def test_session_delete_cascades_only_target_session_globally(store):
+    store.record_artifact("session_one", "task_1", "file", "file1.txt", "/file1.txt")
+    store.record_artifact("session_one", "task_2", "diff", "file1.txt", "/file1.txt")
+    store.record_artifact("session_two", "task_3", "file", "file2.txt", "/file2.txt")
+    store.record_artifact("session_three", "task_4", "file", "file3.txt", "/file3.txt")
+
+    # Before delete: 4 total across 3 sessions
+    _, before_total = store.list_artifacts(is_global=True)
+    assert before_total == 4
+
+    # Delete session_one
+    deleted = store.delete_by_session("session_one")
+    assert deleted == 2
+
+    # After delete: session_one is gone, session_two and session_three are completely untouched
+    after_arts, after_total = store.list_artifacts(is_global=True)
+    assert after_total == 2
+    assert len(after_arts) == 2
+    remaining_sessions = {a["session_id"] for a in after_arts}
+    assert remaining_sessions == {"session_two", "session_three"}
+    assert all(a["session_id"] != "session_one" for a in after_arts)
+
+
+# ==============================================================================
 # Auto-collection from execute_tool_node tests
 # ==============================================================================
 

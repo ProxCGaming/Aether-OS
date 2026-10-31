@@ -138,19 +138,32 @@ class ArtifactStore:
         self,
         session_id: str | None = None,
         is_global: bool = False,
+        kind: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
+        search: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
-        """List artifacts, optionally filtered by session_id, ordered newest-first."""
+        """List artifacts, optionally filtered by session_id and kind, ordered newest-first."""
         self.init_db()
         with self._get_conn() as conn:
             cur = conn.cursor()
             params: list[Any] = []
-            where_clause = ""
+            clauses: list[str] = []
 
             if not is_global and session_id:
-                where_clause = "WHERE session_id = ?"
+                clauses.append("session_id = ?")
                 params.append(session_id)
+
+            if kind:
+                clauses.append("kind = ?")
+                params.append(kind)
+
+            if search:
+                clauses.append("(title LIKE ? OR file_path LIKE ? OR session_id LIKE ? OR task_id LIKE ?)")
+                term = f"%{search}%"
+                params.extend([term, term, term, term])
+
+            where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
             count_query = f"SELECT COUNT(*) FROM artifacts {where_clause}"
             cur.execute(count_query, params)
