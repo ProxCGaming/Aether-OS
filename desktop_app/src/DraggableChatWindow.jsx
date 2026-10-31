@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-import { Globe, Play, Pause, Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download, MoreHorizontal, CircleDollarSign, Mic } from 'lucide-react';
+import { Globe, Play, Pause, Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download, MoreHorizontal, CircleDollarSign, Mic, Volume2, VolumeX } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
 import UndoToast from './components/UndoToast';
@@ -1457,7 +1457,7 @@ export default function DraggableChatWindow({
   messages, 
   onSendMessage, 
   onStopTask,
-  status, 
+  status = 'Online',
   isThinking,
   onApproveTool,
   onApprovePlugin,
@@ -1501,7 +1501,14 @@ export default function DraggableChatWindow({
   voicePlaybackCut = 0,
   onVoiceStart = () => {},
   onVoiceStop = () => {},
-  onVoiceDismissError = () => {}
+  onVoiceDismissError = () => {},
+  dictationState = null,
+  readAloudState = null,
+  onDictationStart = null,
+  onDictationChunk = null,
+  onDictationStop = null,
+  onReadAloudStart = null,
+  onReadAloudStop = null
 }) {
   const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
@@ -1524,6 +1531,152 @@ export default function DraggableChatWindow({
   const [openStepMenu, setOpenStepMenu] = useState(null);
   const [attachments, setAttachments] = useState(initialAttachments || []);
   const [isSnipOverlayOpen, setIsSnipOverlayOpen] = useState(false);
+  const [isDictating, setIsDictating] = useState(false);
+  const [dictationError, setDictationError] = useState(null);
+  const [playingMessageId, setPlayingMessageId] = useState(null);
+  const [readAloudError, setReadAloudError] = useState(null);
+
+  const dictationStreamRef = useRef(null);
+  const baseInputRef = useRef('');
+  const readAloudAudioCtxRef = useRef(null);
+  const readAloudSourcesRef = useRef(new Set());
+  const readAloudPlayHeadRef = useRef(0);
+
+  useEffect(() => {
+    if (dictationState?.error) {
+      setDictationError(dictationState.error);
+      setIsDictating(false);
+      if (dictationStreamRef.current) {
+        try { dictationStreamRef.current.getTracks().forEach((t) => t.stop()); } catch {} 
+        dictationStreamRef.current = null;
+      }
+    }
+  }, [dictationState?.error]);
+
+  useEffect(() => {
+    if (dictationState?.status === 'active') {
+      const startCapture = async () => {
+        if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+          setDictationError('Microphone is not available in this environment.');
+          return;
+        }
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          dictationStreamRef.current = stream;
+          setIsDictating(true);
+        } catch (err) {
+          setDictationError(`Microphone unavailable: ${err && err.message ? err.message : err}`);
+        }
+      };
+      startCapture();
+    }
+  }, [dictationState?.status]);
+
+  useEffect(() => {
+    if (dictationState?.text !== undefined && dictationState?.text !== null) {
+      const base = baseInputRef.current;
+      setInput(base ? `${base} ${dictationState.text}` : dictationState.text);
+    }
+  }, [dictationState?.text]);
+
+  useEffect(() => {
+    if (readAloudState?.error) {
+      setReadAloudError(readAloudState.error);
+      setPlayingMessageId(null);
+    } else if (readAloudState?.status === 'playing') {
+      setPlayingMessageId(readAloudState.messageId);
+    } else if (!readAloudState || readAloudState.status === 'idle') {
+      setPlayingMessageId(null);
+    }
+  }, [readAloudState]);
+
+  const handleMicStart = async (e) => {
+    if (e) {
+      if (typeof e.preventDefault === 'function') e.preventDefault();
+      if (typeof e.stopPropagation === 'function') e.stopPropagation();
+    }
+    if (isDictating) return;
+    setDictationError(null);
+    baseInputRef.current = input;
+
+    if (onDictationStart) {
+      onDictationStart();
+      return;
+    }
+
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      setDictationError('Microphone is not available in this environment.');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      dictationStreamRef.current = stream;
+      setIsDictating(true);
+    } catch (err) {
+      setDictationError(`Microphone unavailable: ${err && err.message ? err.message : err}`);
+    }
+  };
+
+  const handleMicEnd = (e) => {
+    if (e) {
+      if (typeof e.preventDefault === 'function') e.preventDefault();
+      if (typeof e.stopPropagation === 'function') e.stopPropagation();
+    }
+    if (dictationStreamRef.current) {
+      try {
+        dictationStreamRef.current.getTracks().forEach((t) => t.stop());
+      } catch {} 
+      dictationStreamRef.current = null;
+    }
+    setIsDictating(false);
+    if (onDictationStop) {
+      onDictationStop();
+    }
+  };
+
+  const handleMicKeyDown = (e) => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      handleMicStart(e);
+    }
+  };
+
+  const handleMicKeyUp = (e) => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      handleMicEnd(e);
+    }
+  };
+
+  const stopReadAloudPlayback = () => {
+    readAloudSourcesRef.current.forEach((src) => {
+      try { src.stop(); } catch {}
+    });
+    readAloudSourcesRef.current.clear();
+    if (readAloudAudioCtxRef.current) {
+      readAloudPlayHeadRef.current = readAloudAudioCtxRef.current.currentTime;
+    } else {
+      readAloudPlayHeadRef.current = 0;
+    }
+  };
+
+  const handleToggleReadAloud = (msg, idx) => {
+    const mid = msg.id || String(idx);
+    setReadAloudError(null);
+
+    if (playingMessageId === mid) {
+      stopReadAloudPlayback();
+      setPlayingMessageId(null);
+      if (onReadAloudStop) onReadAloudStop(mid);
+    } else {
+      stopReadAloudPlayback();
+      setPlayingMessageId(mid);
+      if (onReadAloudStart) {
+        onReadAloudStart(mid, msg.content || '');
+      }
+    }
+  };
 
   // Epic 8, E8-6.1: agent-browser control and activity tracking
   const [localControlState, setLocalControlState] = useState(null);
@@ -2602,6 +2755,47 @@ export default function DraggableChatWindow({
                           Queued
                         </div>
                       )}
+                      {(msg.role === 'agent' || msg.role === 'assistant') && msg.content && (
+                        <button
+                          type="button"
+                          className={`msg-read-aloud-btn ${playingMessageId === String(msg.id || i) ? 'playing' : ''}`}
+                          data-testid={`read-aloud-btn-${msg.id || i}`}
+                          title={playingMessageId === String(msg.id || i) ? 'Stop read aloud' : (readAloudError && playingMessageId === String(msg.id || i) ? readAloudError : 'Read aloud')}
+                          aria-label={playingMessageId === String(msg.id || i) ? 'Stop read aloud' : 'Read message aloud'}
+                          aria-pressed={playingMessageId === String(msg.id || i) ? 'true' : 'false'}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleToggleReadAloud(msg, i);
+                          }}
+                          style={{
+                            background: playingMessageId === String(msg.id || i) ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.06)',
+                            border: playingMessageId === String(msg.id || i) ? '1px solid rgba(167, 139, 250, 0.4)' : '1px solid rgba(255, 255, 255, 0.1)',
+                            borderRadius: '6px',
+                            color: playingMessageId === String(msg.id || i) ? '#c4b5fd' : 'rgba(255, 255, 255, 0.7)',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            fontSize: '11px',
+                            padding: '3px 8px',
+                            marginTop: '6px',
+                            marginRight: '6px',
+                            transition: 'all 0.15s ease',
+                          }}
+                        >
+                          {playingMessageId === String(msg.id || i) ? <VolumeX size={12} color="#c4b5fd" /> : <Volume2 size={12} />}
+                          <span>{playingMessageId === String(msg.id || i) ? 'Stop' : 'Read'}</span>
+                        </button>
+                      )}
+                      {readAloudError && (
+                        <div
+                          data-testid="read-aloud-error"
+                          style={{ color: '#ef4444', fontSize: '11px', marginTop: '4px', padding: '4px 8px', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '4px' }}
+                        >
+                          {readAloudError}
+                        </div>
+                      )}
                       {i === lastFinalAgentIndex && !isThinking && onRegenerate && (
                         <button
                           type="button"
@@ -2815,6 +3009,40 @@ export default function DraggableChatWindow({
                   }}
                   rows={1}
                 />
+                <button
+                  type="button"
+                  data-testid="composer-mic-btn"
+                  className={`composer-mic-btn ${isDictating ? 'recording' : ''}`}
+                  title={dictationError || (isDictating ? 'Release to finish dictation' : 'Hold to dictate')}
+                  aria-label={dictationError || (isDictating ? 'Release to finish dictation' : 'Hold to dictate')}
+                  aria-pressed={isDictating ? 'true' : 'false'}
+                  onMouseDown={handleMicStart}
+                  onMouseUp={handleMicEnd}
+                  onMouseLeave={handleMicEnd}
+                  onTouchStart={handleMicStart}
+                  onTouchEnd={handleMicEnd}
+                  onTouchCancel={handleMicEnd}
+                  onKeyDown={handleMicKeyDown}
+                  onKeyUp={handleMicKeyUp}
+                  style={{
+                    background: isDictating ? 'rgba(239, 68, 68, 0.25)' : 'rgba(255, 255, 255, 0.08)',
+                    border: isDictating ? '1px solid rgba(239, 68, 68, 0.5)' : '1px solid rgba(255, 255, 255, 0.12)',
+                    borderRadius: '50%',
+                    width: '32px',
+                    height: '32px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: isDictating ? '#ef4444' : '#cbd5e1',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s',
+                    marginLeft: '8px',
+                    flexShrink: 0,
+                    boxShadow: isDictating ? '0 0 10px rgba(239, 68, 68, 0.35)' : 'none',
+                  }}
+                >
+                  <Mic size={14} color={isDictating ? '#ef4444' : '#cbd5e1'} />
+                </button>
                 {isThinking ? (
                   <>
                   {input.trim() && (
@@ -2892,6 +3120,31 @@ export default function DraggableChatWindow({
                 )}
                 </div>
               </form>
+              {dictationError && (
+                <div
+                  data-testid="dictation-error"
+                  style={{
+                    color: '#ef4444',
+                    fontSize: '11px',
+                    marginTop: '6px',
+                    padding: '4px 8px',
+                    background: 'rgba(239, 68, 68, 0.1)',
+                    borderRadius: '4px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <span>{dictationError}</span>
+                  <button
+                    type="button"
+                    onClick={() => setDictationError(null)}
+                    style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '0 4px' }}
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
               <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.3)', textAlign: 'center', marginTop: '8px' }}>
                 Press Enter to send, Shift+Enter for new line
               </div>

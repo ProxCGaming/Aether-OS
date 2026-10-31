@@ -331,6 +331,63 @@ function AppContent() {
     applyVoiceState(null);
   }, [applyVoiceState]);
 
+  // Epic 8, E8-5.3: Push-to-talk dictation + assistant message read-aloud
+  const [dictationState, setDictationState] = useState(null);
+  const [readAloudState, setReadAloudState] = useState(null);
+  const readAloudAudioCtxRef = useRef(null);
+  const readAloudSourcesRef = useRef(new Set());
+  const readAloudPlayHeadRef = useRef(0);
+
+  const handleDictationStart = useCallback(() => {
+    const sessionId = activeSessionRef.current;
+    if (!sendVoiceRequest('DICTATION_START_REQUEST', { session_id: sessionId })) {
+      setDictationState({
+        status: 'error',
+        error: 'voice unavailable: the engine is not connected',
+        text: '',
+      });
+      return;
+    }
+    setDictationState({ status: 'starting', error: null, text: '' });
+  }, [sendVoiceRequest]);
+
+  const handleDictationStop = useCallback(() => {
+    const sessionId = activeSessionRef.current;
+    sendVoiceRequest('DICTATION_STOP_REQUEST', { session_id: sessionId });
+    setDictationState(prev => (prev ? { ...prev, status: 'idle' } : null));
+  }, [sendVoiceRequest]);
+
+  const stopAppReadAloud = useCallback(() => {
+    readAloudSourcesRef.current.forEach((src) => {
+      try { src.stop(); } catch {}
+    });
+    readAloudSourcesRef.current.clear();
+    if (readAloudAudioCtxRef.current) {
+      readAloudPlayHeadRef.current = readAloudAudioCtxRef.current.currentTime;
+    } else {
+      readAloudPlayHeadRef.current = 0;
+    }
+  }, []);
+
+  const handleReadAloudStart = useCallback((messageId, text) => {
+    stopAppReadAloud();
+    if (!sendVoiceRequest('READ_ALOUD_START_REQUEST', { message_id: messageId, text })) {
+      setReadAloudState({
+        messageId,
+        status: 'error',
+        error: 'voice unavailable: the engine is not connected',
+      });
+      return;
+    }
+    setReadAloudState({ messageId, status: 'starting', error: null });
+  }, [sendVoiceRequest, stopAppReadAloud]);
+
+  const handleReadAloudStop = useCallback((messageId) => {
+    stopAppReadAloud();
+    sendVoiceRequest('READ_ALOUD_STOP_REQUEST', { message_id: messageId });
+    setReadAloudState(null);
+  }, [sendVoiceRequest, stopAppReadAloud]);
+
   // Leaving the voice session's chat ends voice mode without
   // committing the provisional bubbles here — the engine already
   // persisted the finals to that session's store.
@@ -1259,6 +1316,85 @@ function AppContent() {
           // A local stop already tore the UI down; this only lands
           // for a stop we did not initiate.
           if (voiceStateRef.current) applyVoiceState(null);
+        } else if (data.type === 'DICTATION_START_RESPONSE') {
+          const p = data.payload || {};
+          if (p.ok) {
+            setDictationState({ status: 'active', error: null, text: '' });
+          } else {
+            setDictationState({
+              status: 'error',
+              error: p.error || 'Dictation unavailable',
+              text: '',
+            });
+          }
+        } else if (data.type === 'DICTATION_CHUNK_RESPONSE') {
+          const p = data.payload || {};
+          if (p.text !== undefined && p.text !== null) {
+            setDictationState(prev => ({
+              ...(prev || {}),
+              text: p.text,
+            }));
+          }
+        } else if (data.type === 'DICTATION_STOP_RESPONSE') {
+          const p = data.payload || {};
+          if (p.text !== undefined && p.text !== null) {
+            setDictationState(prev => ({
+              ...(prev || {}),
+              status: 'idle',
+              text: p.text,
+            }));
+          }
+        } else if (data.type === 'READ_ALOUD_START_RESPONSE') {
+          const p = data.payload || {};
+          if (p.ok) {
+            setReadAloudState({
+              messageId: p.message_id,
+              status: 'playing',
+              error: null,
+            });
+          } else {
+            setReadAloudState({
+              messageId: p.message_id,
+              status: 'error',
+              error: p.error || 'TTS unavailable',
+            });
+          }
+        } else if (data.type === 'READ_ALOUD_CHUNK') {
+          const p = data.payload || {};
+          if (p.audio_chunk) {
+            try {
+              const Ctx = window.AudioContext || window.webkitAudioContext;
+              if (Ctx) {
+                if (!readAloudAudioCtxRef.current) readAloudAudioCtxRef.current = new Ctx();
+                const ctx = readAloudAudioCtxRef.current;
+                const binary = window.atob(p.audio_chunk);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+                const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+                const decoded = ctx.decodeAudioData(buffer);
+                if (decoded && typeof decoded.then === 'function') {
+                  decoded.then((audioBuffer) => {
+                    const source = ctx.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(ctx.destination);
+                    source.onended = () => { readAloudSourcesRef.current.delete(source); };
+                    readAloudSourcesRef.current.add(source);
+                    const startAt = Math.max(ctx.currentTime, readAloudPlayHeadRef.current);
+                    source.start(startAt);
+                    readAloudPlayHeadRef.current = startAt + (audioBuffer.duration || 0);
+                  });
+                }
+              }
+            } catch (err) {
+              console.error('Failed to decode read-aloud chunk:', err);
+            }
+          }
+          if (p.is_final) {
+            // Finished playback
+          }
+        } else if (data.type === 'READ_ALOUD_STOP_RESPONSE') {
+          stopAppReadAloud();
+          setReadAloudState(null);
         } else if (data.type === 'USAGE_LEDGER_QUERY_RESPONSE') {
           // Epic 8, E8-A8.1a: rebuild the cost surfaces from the
           // ledger rows themselves, so the header total and the
@@ -2386,6 +2522,12 @@ function AppContent() {
           onVoiceStart={handleVoiceStart}
           onVoiceStop={handleVoiceStop}
           onVoiceDismissError={handleVoiceDismissError}
+          dictationState={dictationState}
+          readAloudState={readAloudState}
+          onDictationStart={handleDictationStart}
+          onDictationStop={handleDictationStop}
+          onReadAloudStart={handleReadAloudStart}
+          onReadAloudStop={handleReadAloudStop}
         />
       )}
 

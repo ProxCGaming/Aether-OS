@@ -217,6 +217,31 @@ class EventType(str, Enum):
     VOICE_PARTIAL_TRANSCRIPT = "VOICE_PARTIAL_TRANSCRIPT"
     VOICE_OUTPUT_CHUNK = "VOICE_OUTPUT_CHUNK"
     VOICE_BARGE_IN = "VOICE_BARGE_IN"
+    # Epic 8, E8-5.3: push-to-talk dictation. START_REQUEST payload:
+    # {"session_id": str | None}; START_RESPONSE: {"ok": bool, "error": str | None}.
+    # CHUNK_REQUEST payload: {"session_id": str | None, "audio": str,
+    # "sample_rate": int, "is_final": bool}; CHUNK_RESPONSE: {"ok": bool,
+    # "text": str, "is_final": bool, "error": str | None}.
+    # STOP_REQUEST payload: {"session_id": str | None, "audio": str | None,
+    # "sample_rate": int}; STOP_RESPONSE: {"ok": bool, "text": str, "error": str | None}.
+    DICTATION_START_REQUEST = "DICTATION_START_REQUEST"
+    DICTATION_START_RESPONSE = "DICTATION_START_RESPONSE"
+    DICTATION_CHUNK_REQUEST = "DICTATION_CHUNK_REQUEST"
+    DICTATION_CHUNK_RESPONSE = "DICTATION_CHUNK_RESPONSE"
+    DICTATION_STOP_REQUEST = "DICTATION_STOP_REQUEST"
+    DICTATION_STOP_RESPONSE = "DICTATION_STOP_RESPONSE"
+    # Epic 8, E8-5.3: assistant message read-aloud (TTS). START_REQUEST
+    # payload: {"message_id": str | None, "text": str, "voice": str | None};
+    # START_RESPONSE: {"ok": bool, "message_id": str | None, "error": str | None}.
+    # READ_ALOUD_CHUNK is an outbound push for synthesized speech:
+    # {"message_id": str | None, "audio_chunk": str | None, "is_final": bool}.
+    # STOP_REQUEST payload: {"message_id": str | None};
+    # STOP_RESPONSE: {"ok": bool, "message_id": str | None}.
+    READ_ALOUD_START_REQUEST = "READ_ALOUD_START_REQUEST"
+    READ_ALOUD_START_RESPONSE = "READ_ALOUD_START_RESPONSE"
+    READ_ALOUD_CHUNK = "READ_ALOUD_CHUNK"
+    READ_ALOUD_STOP_REQUEST = "READ_ALOUD_STOP_REQUEST"
+    READ_ALOUD_STOP_RESPONSE = "READ_ALOUD_STOP_RESPONSE"
     # Epic 1, E1-16: model thinking, streamed apart from the answer
     THINKING = "THINKING"
     # Epic 1, E1-17: agent scratchpad content for the display-only panel

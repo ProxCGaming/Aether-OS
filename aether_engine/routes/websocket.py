@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 import re
 import time
@@ -127,6 +128,18 @@ def _audit_approval_arguments_edited(
             "changed_fields": changed,
         })
     return changed
+
+
+def create_stt_engine():
+    """Factory for local STT engine (E8-5.3 push-to-talk dictation)."""
+    from aether_engine.voice.stt import FasterWhisperStt
+    return FasterWhisperStt()
+
+
+def create_tts_engine():
+    """Factory for local TTS engine (E8-5.3 assistant read-aloud)."""
+    from aether_engine.voice.tts import KokoroTts
+    return KokoroTts()
 
 
 def _extract_token(ws: WebSocket, query_token: str | None) -> str | None:
@@ -403,7 +416,12 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
     # Epic 8, E8-5.1a: this connection's voice session, if any. The
     # pipeline runs as its own task — the talker lane never queues
     # behind task_runner (grill Q28/Q29).
-    voice_state: dict[str, Any] = {"pipeline": None, "task": None}
+    voice_state: dict[str, Any] = {
+        "pipeline": None,
+        "task": None,
+        "read_aloud_task": None,
+        "read_aloud_id": None,
+    }
 
     async def _send_validation_result(resp_type, req_id_, pname_, key_, base_url_):
         """Answer a provider Test request from a background task.
@@ -546,6 +564,20 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 await task
             except asyncio.CancelledError:
                 pass
+
+    async def _stop_read_aloud() -> None:
+        """Stop any running read-aloud synthesis task (Epic 8, E8-5.3)."""
+        ra_task = voice_state.get("read_aloud_task")
+        voice_state["read_aloud_task"] = None
+        voice_state["read_aloud_id"] = None
+        if ra_task is not None and not ra_task.done():
+            ra_task.cancel()
+            try:
+                await ra_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("read-aloud task cancel failed", exc_info=True)
 
     async def _run_voice_background_task(text: str, session_id: str, provider) -> None:
         """One voice-escalated job (Epic 8, E8-5.1b): a normal
@@ -3539,11 +3571,149 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     payload={"ok": True},
                 ).to_json())
 
+            # -----------------------------------------------------------
+            # Push-to-talk dictation + TTS read-aloud (Epic 8, E8-5.3)
+            # -----------------------------------------------------------
+            elif msg.type == EventType.DICTATION_START_REQUEST:
+                stt = create_stt_engine()
+                reason = stt.unavailable_reason()
+                if reason is not None:
+                    await ws.send_text(Event(
+                        type=EventType.DICTATION_START_RESPONSE,
+                        request_id=req_id,
+                        payload={"ok": False, "error": f"voice unavailable: {reason}"},
+                    ).to_json())
+                else:
+                    await ws.send_text(Event(
+                        type=EventType.DICTATION_START_RESPONSE,
+                        request_id=req_id,
+                        payload={"ok": True, "error": None},
+                    ).to_json())
+
+            elif msg.type == EventType.DICTATION_CHUNK_REQUEST:
+                stt = create_stt_engine()
+                reason = stt.unavailable_reason()
+                if reason is not None:
+                    await ws.send_text(Event(
+                        type=EventType.DICTATION_CHUNK_RESPONSE,
+                        request_id=req_id,
+                        payload={"ok": False, "text": "", "is_final": False, "error": f"voice unavailable: {reason}"},
+                    ).to_json())
+                else:
+                    raw_b64 = msg.payload.get("audio") or ""
+                    sample_rate = int(msg.payload.get("sample_rate") or 16000)
+                    is_final = bool(msg.payload.get("is_final", False))
+                    try:
+                        audio_bytes = base64.b64decode(raw_b64)
+                        if hasattr(stt, "open"):
+                            try:
+                                await stt.open()
+                            except Exception:
+                                logger.debug("STT open error", exc_info=True)
+                        text = await stt.transcribe(audio_bytes, sample_rate=sample_rate)
+                        await ws.send_text(Event(
+                            type=EventType.DICTATION_CHUNK_RESPONSE,
+                            request_id=req_id,
+                            payload={"ok": True, "text": text, "is_final": is_final, "error": None},
+                        ).to_json())
+                    except Exception as e:  # noqa: BLE001
+                        await ws.send_text(Event(
+                            type=EventType.DICTATION_CHUNK_RESPONSE,
+                            request_id=req_id,
+                            payload={"ok": False, "text": "", "is_final": is_final, "error": str(e)},
+                        ).to_json())
+
+            elif msg.type == EventType.DICTATION_STOP_REQUEST:
+                stt = create_stt_engine()
+                raw_b64 = msg.payload.get("audio")
+                sample_rate = int(msg.payload.get("sample_rate") or 16000)
+                text = ""
+                if raw_b64:
+                    try:
+                        audio_bytes = base64.b64decode(raw_b64)
+                        if hasattr(stt, "open"):
+                            try:
+                                await stt.open()
+                            except Exception:
+                                logger.debug("STT open error on stop", exc_info=True)
+                        text = await stt.transcribe(audio_bytes, sample_rate=sample_rate)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"Dictation stop transcribe error: {e}")
+                await ws.send_text(Event(
+                    type=EventType.DICTATION_STOP_RESPONSE,
+                    request_id=req_id,
+                    payload={"ok": True, "text": text, "error": None},
+                ).to_json())
+
+            elif msg.type == EventType.READ_ALOUD_START_REQUEST:
+                await _stop_read_aloud()
+                tts = create_tts_engine()
+                reason = tts.unavailable_reason()
+                msg_id = msg.payload.get("message_id")
+                text_to_speak = msg.payload.get("text") or ""
+                voice_name = msg.payload.get("voice") or "af_heart"
+                if reason is not None:
+                    await ws.send_text(Event(
+                        type=EventType.READ_ALOUD_START_RESPONSE,
+                        request_id=req_id,
+                        payload={"ok": False, "message_id": msg_id, "error": f"voice unavailable: {reason}"},
+                    ).to_json())
+                else:
+                    await ws.send_text(Event(
+                        type=EventType.READ_ALOUD_START_RESPONSE,
+                        request_id=req_id,
+                        payload={"ok": True, "message_id": msg_id, "error": None},
+                    ).to_json())
+
+                    async def _run_read_aloud(mid: str | None, text: str, voice: str, tts_inst: Any, target_ws: WebSocket) -> None:
+                        try:
+                            if hasattr(tts_inst, "open"):
+                                try:
+                                    await tts_inst.open()
+                                except Exception:
+                                    logger.debug("TTS open error", exc_info=True)
+                            async for chunk in tts_inst.synthesize(text, voice=voice):
+                                b64_chunk = base64.b64encode(chunk).decode("ascii")
+                                await target_ws.send_text(Event(
+                                    type=EventType.READ_ALOUD_CHUNK,
+                                    payload={"message_id": mid, "audio_chunk": b64_chunk, "is_final": False},
+                                ).to_json())
+                            await target_ws.send_text(Event(
+                                type=EventType.READ_ALOUD_CHUNK,
+                                payload={"message_id": mid, "audio_chunk": None, "is_final": True},
+                            ).to_json())
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as e:  # noqa: BLE001
+                            logger.error(f"Read-aloud synthesis error: {e}")
+                            try:
+                                await target_ws.send_text(Event(
+                                    type=EventType.READ_ALOUD_CHUNK,
+                                    payload={"message_id": mid, "audio_chunk": None, "is_final": True, "error": str(e)},
+                                ).to_json())
+                            except Exception:
+                                logger.debug("Failed to send error event", exc_info=True)
+
+                    voice_state["read_aloud_id"] = msg_id
+                    voice_state["read_aloud_task"] = asyncio.ensure_future(
+                        _run_read_aloud(msg_id, text_to_speak, voice_name, tts, ws)
+                    )
+
+            elif msg.type == EventType.READ_ALOUD_STOP_REQUEST:
+                msg_id = msg.payload.get("message_id")
+                await _stop_read_aloud()
+                await ws.send_text(Event(
+                    type=EventType.READ_ALOUD_STOP_RESPONSE,
+                    request_id=req_id,
+                    payload={"ok": True, "message_id": msg_id},
+                ).to_json())
+
     except WebSocketDisconnect:
         logger.info(f"Client disconnected from {ip}:{port}")
         if task_runner and not task_runner.done():
             task_runner.cancel()
         await _stop_voice_session()
+        await _stop_read_aloud()
         await _cancel_voice_background_tasks()
         engine_state.audit_logger.log_event("CLIENT_DISCONNECTED", {"client_ip": ip})
     except Exception as e:  # noqa: BLE001 — top-level socket boundary: any session failure is logged and the task is cancelled, never propagated
@@ -3551,6 +3721,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
         if task_runner and not task_runner.done():
             task_runner.cancel()
         await _stop_voice_session()
+        await _stop_read_aloud()
         await _cancel_voice_background_tasks()
 
 # --- Legacy unauthenticated HTTP management routes: REMOVED (Phase 9, A1) ---
