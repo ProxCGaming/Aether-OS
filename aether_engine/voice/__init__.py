@@ -1,10 +1,14 @@
-"""Streaming voice conversation (Epic 8, E8-5.1a).
+"""Streaming voice conversation (Epic 8, E8-5.1a + E8-5.1b).
 
 Voice mode is fast chat with ears and a mouth: an owned cascade —
 Silero VAD + endpointing (``vad.py``) -> local STT (``stt.py``) ->
 the fast-chat talker -> local Kokoro TTS (``tts.py``) — coordinated
 by ``pipeline.VoicePipeline``. STT and TTS are local; the brain is
 the already-configured chat model behind ``run_fast_chat``.
+E8-5.1b adds full-duplex barge-in (playback stops at once, only
+actually-heard words are committed) and supervisor escalation:
+work turns launch background tasks from the voice session, and a
+finished task's summary is spoken back as an announcement.
 
 Every stage sits behind a small protocol and lazy-imports its
 runtime dependency, so this package imports cleanly on machines

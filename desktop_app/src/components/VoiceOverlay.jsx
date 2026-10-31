@@ -9,6 +9,12 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 // or unmounting stops every mic track and closes the peer
 // connection. TTS audio chunks (base64 WAV, VOICE_OUTPUT_CHUNK)
 // are decoded and played back-to-back through one AudioContext.
+//
+// E8-5.1b: a barge-in (VOICE_BARGE_IN) bumps `playbackCut` — every
+// scheduled-but-unplayed source stops at once, the play head
+// resets so the next speech starts immediately, and a chunk whose
+// decode finishes after the cut is dropped (it belongs to the
+// reply the user just talked over).
 
 const STATUS_LABELS = {
   starting: 'Starting…',
@@ -26,6 +32,7 @@ export default function VoiceOverlay({
   error = null,
   webrtcConfig = null,
   audioChunk = null,
+  playbackCut = 0,
   onStop = () => {},
   onDismiss = () => {},
 }) {
@@ -35,6 +42,9 @@ export default function VoiceOverlay({
   const pcRef = useRef(null);
   const audioCtxRef = useRef(null);
   const playHeadRef = useRef(0);
+  const sourcesRef = useRef(new Set());
+  const cutEpochRef = useRef(0);
+  const lastCutRef = useRef(playbackCut);
   const webrtcConfigRef = useRef(webrtcConfig);
   useEffect(() => {
     webrtcConfigRef.current = webrtcConfig;
@@ -93,6 +103,28 @@ export default function VoiceOverlay({
     };
   }, [open, active, teardownCapture]);
 
+  // Playback cut (E8-5.1b): stop every scheduled source, reset
+  // the play head to now, and invalidate decodes still in flight.
+  const stopPlayback = useCallback(() => {
+    cutEpochRef.current += 1;
+    sourcesRef.current.forEach((source) => {
+      try { source.stop(); } catch { /* already ended */ }
+    });
+    sourcesRef.current.clear();
+    if (audioCtxRef.current) {
+      playHeadRef.current = audioCtxRef.current.currentTime;
+    } else {
+      playHeadRef.current = 0;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (playbackCut !== lastCutRef.current) {
+      lastCutRef.current = playbackCut;
+      stopPlayback();
+    }
+  }, [playbackCut, stopPlayback]);
+
   // Playback: decode each TTS chunk and queue it after the last.
   const playChunk = useCallback((b64) => {
     try {
@@ -100,6 +132,7 @@ export default function VoiceOverlay({
       if (!Ctx || !b64) return;
       if (!audioCtxRef.current) audioCtxRef.current = new Ctx();
       const ctx = audioCtxRef.current;
+      const epoch = cutEpochRef.current;
       const binary = window.atob(b64);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
@@ -107,9 +140,14 @@ export default function VoiceOverlay({
       const decoded = ctx.decodeAudioData(buffer);
       if (decoded && typeof decoded.then === 'function') {
         decoded.then((audioBuffer) => {
+          // A cut landed while this chunk decoded: it belongs to
+          // the interrupted reply — drop it, never schedule it.
+          if (epoch !== cutEpochRef.current) return;
           const source = ctx.createBufferSource();
           source.buffer = audioBuffer;
           source.connect(ctx.destination);
+          source.onended = () => { sourcesRef.current.delete(source); };
+          sourcesRef.current.add(source);
           const startAt = Math.max(ctx.currentTime, playHeadRef.current || 0);
           source.start(startAt);
           playHeadRef.current = startAt + (audioBuffer.duration || 0);

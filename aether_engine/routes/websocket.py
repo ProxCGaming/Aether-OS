@@ -537,6 +537,89 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
             except asyncio.CancelledError:
                 pass
 
+    async def _run_voice_background_task(text: str, session_id: str, provider) -> None:
+        """One voice-escalated job (Epic 8, E8-5.1b): a normal
+        supervisor task, built exactly like a typed work message
+        (same central registry builder, same execute_task_generator
+        pump), but running FREE in the background — the talker lane
+        never waits on it. Its events stream to the socket, so the
+        task shows in chat with every detail exactly as tasks show
+        today; an approval pauses it for the normal in-chat
+        approval (the resume path is keyed by thread, not by this
+        pump — and nothing in the voice path can approve). When it
+        lands, the final summary is spoken through the live voice
+        pipeline; if voice mode has ended by then, the summary
+        simply stands in chat as the task's own message (the pump
+        already persisted it)."""
+        cfg = engine_state.user_config
+        req_id = f"voice-task-{uuid.uuid4().hex[:12]}"
+        terminal: dict[str, Any] = {}
+        try:
+            from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
+            reqs = infer_task_requirements(text)
+            tools = build_tool_registry(
+                mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(
+                    risk_overrides=cfg.mcp_tool_risk_overrides),
+                include_file_tools=reqs.wants_code,
+            )
+            generator = run_langgraph_task(
+                prompt=text,
+                provider=provider,
+                tools=tools,
+                request_id=req_id,
+                approval_handler=None,
+                workspace_roots=cfg.workspace_roots or [str(Path.home() / "AetherWorkspace")],
+                disabled_nodes=engine_state.disabled_nodes,
+                session_id=session_id,
+                agent_models=cfg.agent_models,
+                agent_tools=cfg.agent_tools,
+                secret_store=secret_store,
+                user_config=cfg,
+                forced_agent=None,
+                active_skills=[],
+                plan_mode=False,
+                attachments=None,
+            )
+
+            async def _observed():
+                async for ev in generator:
+                    if ev.type == EventType.TASK_COMPLETED:
+                        terminal["response"] = ev.payload.get("response")
+                    elif ev.type == EventType.TASK_FAILED:
+                        terminal["error"] = ev.payload.get("error") or "unknown error"
+                    yield ev
+
+            await execute_task_generator(
+                _observed(), cfg.default_provider, cfg.default_model,
+                req_id, session_id=session_id,
+                routing_reason="Voice escalation: spoken request classified as work",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # a background job must never wedge the socket
+            logger.warning("voice background task failed to run", exc_info=True)
+            terminal.setdefault("error", "the background task could not be started")
+        pipeline = voice_state.get("pipeline")
+        if pipeline is None:
+            return
+        if terminal.get("response"):
+            await pipeline.speak_announcement(str(terminal["response"]))
+        elif terminal.get("error"):
+            await pipeline.speak_announcement(
+                f"That background task failed: {terminal['error']}")
+
+    async def _cancel_voice_background_tasks() -> None:
+        """Disconnect teardown for escalated jobs: their event
+        stream dies with the socket, so they stop with it. (Voice
+        STOP alone does NOT cancel them — they run free; only
+        their spoken summary is skipped.)"""
+        tasks = voice_state.get("background_tasks") or set()
+        voice_state["background_tasks"] = set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+
     async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str, session_id: str | None = None, *, routing_reason: str = "Default Routing", routing_capabilities: list | None = None, retry_factory=None):
         """Stream one task's events to the client.
 
@@ -3192,6 +3275,28 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                             payload={"message": f"Voice reply failed: {message}"},
                         ))
 
+                    async def _voice_should_escalate(text: str, _provider=voice_provider) -> bool:
+                        """E8-5.1b: the same E1-04 split the typed
+                        path uses — classify_intent decides; chat
+                        stays with the talker, work escalates to
+                        the supervisor graph."""
+                        try:
+                            intent = await classify_intent(text, provider=_provider)
+                        except Exception:  # a routing failure keeps the turn with the talker
+                            logger.debug("voice intent classification failed", exc_info=True)
+                            return False
+                        return not intent.is_chat
+
+                    async def _voice_escalation_launch(text: str, _sid: str = voice_session_id, _provider=voice_provider) -> None:
+                        """Launch (never await) the background job:
+                        the task lane is a separate execution, so
+                        the talker stays free while it runs."""
+                        task = asyncio.ensure_future(
+                            _run_voice_background_task(text, _sid, _provider))
+                        background = voice_state.setdefault("background_tasks", set())
+                        background.add(task)
+                        task.add_done_callback(background.discard)
+
                     voice_pipeline, voice_error = create_voice_pipeline(
                         session_id=voice_session_id,
                         talker=fast_chat_talker(
@@ -3200,6 +3305,8 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         on_user_final=_persist_voice_user,
                         on_assistant_final=_persist_voice_assistant,
                         on_turn_error=_voice_turn_error,
+                        escalation_classifier=_voice_should_escalate,
+                        on_escalation=_voice_escalation_launch,
                     )
                     if voice_pipeline is not None:
                         try:
@@ -3235,12 +3342,14 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
         if task_runner and not task_runner.done():
             task_runner.cancel()
         await _stop_voice_session()
+        await _cancel_voice_background_tasks()
         engine_state.audit_logger.log_event("CLIENT_DISCONNECTED", {"client_ip": ip})
     except Exception as e:  # noqa: BLE001 — top-level socket boundary: any session failure is logged and the task is cancelled, never propagated
         logger.error(f"WebSocket session error: {e}")
         if task_runner and not task_runner.done():
             task_runner.cancel()
         await _stop_voice_session()
+        await _cancel_voice_background_tasks()
 
 # --- Legacy unauthenticated HTTP management routes: REMOVED (Phase 9, A1) ---
 # The seven HTTP routes that used to live here (GET/POST/DELETE/PATCH on

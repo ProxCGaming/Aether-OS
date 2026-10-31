@@ -1,4 +1,4 @@
-"""Voice cascade coordinator (Epic 8, E8-5.1a).
+"""Voice cascade coordinator (Epic 8, E8-5.1a + E8-5.1b).
 
 ``VoicePipeline`` runs one voice session:
 
@@ -21,14 +21,28 @@
   before touching the transport; ``stop()`` closes the transport
   and every stage, idempotently.
 
-The loop is half-duplex in this slice: frames arriving while a
-reply is being spoken are not consumed (the frame source simply
-isn't pulled), because interruption *detection* is E8-5.1b. The
-barge-in support the pipeline itself owes lives in
-``interrupt_output()``: it stops the in-flight reply cooperatively
-and reports the committed text — only the words actually spoken —
-which is what history keeps (``on_assistant_final`` receives
-exactly that), plus the VOICE_BARGE_IN push payload.
+The loop is full-duplex (E8-5.1b): frames keep flowing while a
+reply plays, into a dedicated barge-in endpointer. Sustained user
+speech — past the endpointer's minimum-speech guard, so a cough
+or a backchannel doesn't count — is a barge-in: playback stops at
+once via ``interrupt_output()``, the captured frames are replayed
+into the main path as the next utterance, and history keeps only
+the words actually heard. Heard words are tracked at word
+granularity: a sentence's audio is fully synthesized before
+emission so the chunk total is known, and a sentence interrupted
+mid-emission contributes the chunk-proportional prefix of its
+words.
+
+Turns route two ways (grill Q27/Q28): the talker answers chat;
+a turn the optional escalation classifier calls work launches a
+background supervisor task through ``on_escalation`` — a launch,
+never a wait: the task lane is a separate async execution and the
+talker lane never queues behind it — and a spoken acknowledgement
+is the turn's reply. Results come back out of band:
+``speak_announcement()`` speaks a finished task's summary at the
+next quiet moment, under the same barge-in rules, without
+committing it (the task machinery already persisted it as the
+task's own message).
 
 The transport is the SmallWebRTC seam: audio frames come from a
 ``VoiceTransport``, never from a device the engine opens itself.
@@ -57,8 +71,18 @@ logger = logging.getLogger("aether_engine.voice.pipeline")
 Talker = Callable[[str], AsyncIterator[str]]
 EmitFn = Callable[[Event], Awaitable[None]]
 TurnCallback = Callable[[str], Awaitable[None]]
+EscalationClassifier = Callable[[str], Awaitable[bool]]
+
+#: The spoken acknowledgement for an escalated turn (E8-5.1b): it
+#: masks the supervisor's latency — the job is already running by
+#: the time this is heard — and it is the turn's committed reply.
+DEFAULT_ESCALATION_ACK = (
+    "On it — I'll run that in the background "
+    "and let you know when it's done."
+)
 
 _SENTENCE_BOUNDARY = re.compile(r"[.!?…]+[\"'”’)\]]*\s+")
+_WORD = re.compile(r"\S+")
 
 
 def _split_sentences(buffer: str) -> tuple[list[str], str]:
@@ -70,6 +94,52 @@ def _split_sentences(buffer: str) -> tuple[list[str], str]:
         sentences.append(buffer[start:match.end()])
         start = match.end()
     return sentences, buffer[start:]
+
+
+def _heard_prefix(sentence: str, emitted: int, total: int) -> str:
+    """The heard part of a sentence whose audio was interrupted:
+    the chunk-proportional prefix of its words (E8-5.1b word
+    granularity for the only-actually-heard commit rule)."""
+    if total <= 0 or emitted <= 0:
+        return ""
+    if emitted >= total:
+        return sentence
+    words = list(_WORD.finditer(sentence))
+    if not words:
+        return sentence
+    heard_words = (len(words) * emitted) // total
+    if heard_words <= 0:
+        return ""
+    if heard_words >= len(words):
+        return sentence
+    end = words[heard_words - 1].end()
+    if end < len(sentence) and sentence[end] == " ":
+        end += 1
+    return sentence[:end]
+
+
+def _word_deltas(text: str) -> list[str]:
+    """Split text into word deltas, each carrying its trailing
+    whitespace, so the deltas rejoin into the exact original."""
+    deltas: list[str] = []
+    pos = 0
+    for match in _WORD.finditer(text):
+        end = match.end()
+        while end < len(text) and text[end] == " ":
+            end += 1
+        deltas.append(text[pos:end])
+        pos = end
+    if pos < len(text):
+        deltas.append(text[pos:])
+    return deltas
+
+
+async def _static_deltas(text: str) -> AsyncIterator[str]:
+    """Word-sized deltas for text that already exists whole (an
+    escalation acknowledgement, an announcement): the transcript
+    still renders it word by word, as Q28 requires."""
+    for delta in _word_deltas(text):
+        yield delta
 
 
 class VoiceTransport(Protocol):
@@ -145,6 +215,9 @@ class VoicePipeline:
         tts_voice: str = DEFAULT_VOICE,
         sample_rate: int = 16000,
         partial_min_audio_ms: int = 250,
+        escalation_classifier: EscalationClassifier | None = None,
+        on_escalation: TurnCallback | None = None,
+        escalation_ack: str = DEFAULT_ESCALATION_ACK,
     ):
         self.session_id = session_id
         self._vad = vad
@@ -160,6 +233,12 @@ class VoicePipeline:
         self._tts_voice = tts_voice
         self._sample_rate = sample_rate
         self._partial_min_audio_ms = partial_min_audio_ms
+        # E8-5.1b escalation seams: both must be wired for a turn to
+        # escalate; either missing keeps every turn with the talker
+        # (the 5.1a behaviour).
+        self._escalation_classifier = escalation_classifier
+        self._on_escalation = on_escalation
+        self._escalation_ack = escalation_ack
 
         self._started = False
         self._stopping = False
@@ -169,8 +248,46 @@ class VoicePipeline:
         self._since_partial_ms = 0
         self._pending_partial_done = False
         self._turn_active = False
+        self._turn_task: asyncio.Task | None = None
+        self._announcing = False
         self._interrupt_requested = False
-        self._spoken_text = ""
+        # Heard-words tracking (E8-5.1b): _heard_text holds the
+        # fully-heard sentences of the current output activity; the
+        # in-flight sentence contributes its chunk-proportional
+        # word prefix until it completes.
+        self._heard_text = ""
+        self._inflight_sentence: str | None = None
+        self._inflight_total = 0
+        self._inflight_emitted = 0
+        # Barge-in detection state (E8-5.1b): a separate endpointer
+        # watches frames while output plays, so the main
+        # endpointer's utterance state is never corrupted.
+        self._barge_endpointer = Endpointer(self._endpointer.config)
+        self._barge_frames: list[bytes] = []
+        self._barge_speech_ms = 0
+
+    @property
+    def _output_active(self) -> bool:
+        """A reply turn or an announcement is currently speaking."""
+        return self._turn_active or self._announcing
+
+    def _reset_heard(self) -> None:
+        self._heard_text = ""
+        self._inflight_sentence = None
+        self._inflight_total = 0
+        self._inflight_emitted = 0
+
+    def _heard_text_now(self) -> str:
+        """Everything the listener has actually heard of the
+        current output: completed sentences plus the in-flight
+        sentence's heard word prefix."""
+        if self._inflight_sentence is None:
+            return self._heard_text
+        return self._heard_text + _heard_prefix(
+            self._inflight_sentence,
+            self._inflight_emitted,
+            self._inflight_total,
+        )
 
     # -- availability --------------------------------------------------
 
@@ -222,6 +339,9 @@ class VoicePipeline:
         """Close the transport and every stage. Idempotent."""
         self._stopping = True
         self._interrupt_requested = True
+        self._barge_frames = []
+        self._barge_speech_ms = 0
+        self._barge_endpointer.reset()
         try:
             await self._transport.close()
         except Exception:  # a broken transport must not strand the stages
@@ -233,33 +353,36 @@ class VoicePipeline:
                 logger.debug("voice stage close failed", exc_info=True)
         self._started = False
 
-    # -- barge-in seam (E8-5.1b builds detection on this) ---------------
+    # -- barge-in -------------------------------------------------------
 
     async def interrupt_output(self) -> dict:
-        """Stop the in-flight reply; report what was actually heard.
+        """Stop the in-flight output (a reply turn or an
+        announcement); report what was actually heard.
 
         Returns the VOICE_BARGE_IN payload fields:
         ``{"stopped_at_char", "committed_text"}``. The committed
-        text — only the words whose audio was fully emitted — is
-        also what ``on_assistant_final`` commits for the turn.
+        text — only the words actually heard, at word granularity —
+        is also what ``on_assistant_final`` commits for the turn.
         """
-        if self._turn_active:
+        if self._output_active:
             self._interrupt_requested = True
             for _ in range(2000):
-                if not self._turn_active:
+                if not self._output_active:
                     break
                 await asyncio.sleep(0.002)
+            heard = self._heard_text_now()
             await self._emit(Event(
                 type=EventType.VOICE_BARGE_IN,
                 payload={
                     "session_id": self.session_id,
-                    "stopped_at_char": len(self._spoken_text),
-                    "committed_text": self._spoken_text,
+                    "stopped_at_char": len(heard),
+                    "committed_text": heard,
                 },
             ))
+        heard = self._heard_text_now()
         return {
-            "stopped_at_char": len(self._spoken_text),
-            "committed_text": self._spoken_text,
+            "stopped_at_char": len(heard),
+            "committed_text": heard,
         }
 
     # -- main loop -------------------------------------------------------
@@ -274,9 +397,81 @@ class VoicePipeline:
                     break
                 await self._consume_frame(data)
         finally:
+            # Turns run as their own tasks (the frame loop must stay
+            # free for barge-in detection); never orphan one.
+            if self._turn_task is not None and not self._turn_task.done():
+                self._turn_task.cancel()
             self._turn_active = False
 
     async def _consume_frame(self, data: bytes) -> None:
+        if self._output_active:
+            await self._consume_frame_during_output(data)
+            return
+        if self._barge_frames:
+            # The reply ended while the user was mid-interruption:
+            # their captured speech starts the next utterance.
+            frames = self._barge_frames
+            self._barge_frames = []
+            self._barge_speech_ms = 0
+            self._barge_endpointer.reset()
+            for captured in frames:
+                if self._stopping:
+                    return
+                await self._consume_frame(captured)
+            if self._stopping:
+                return
+            if self._output_active:
+                # The replay itself started the next turn.
+                await self._consume_frame_during_output(data)
+                return
+        await self._consume_main_frame(data)
+
+    async def _consume_frame_during_output(self, data: bytes) -> None:
+        """Full-duplex watch (E8-5.1b): while output plays, frames
+        feed the barge-in endpointer instead of the main path.
+        Sustained speech is a barge-in — playback stops at once
+        and the captured frames replay into the main path as the
+        next utterance. Anything shorter than the min-speech
+        guard (a cough, a backchannel) is discarded."""
+        probability = await self._vad.probability(data, self._sample_rate)
+        frame_ms = round(len(data) / 2 / self._sample_rate * 1000)
+        endpointer = self._barge_endpointer
+        event = endpointer.feed(probability, frame_ms)
+        if event == "speech_started":
+            self._barge_frames = [data]
+            self._barge_speech_ms = frame_ms
+            return
+        if event == "utterance_discarded":
+            self._barge_frames = []
+            self._barge_speech_ms = 0
+            return
+        if event == "utterance_end":
+            # The user spoke a whole short utterance over the reply.
+            self._barge_frames.append(data)
+            await self._trigger_barge_in()
+            return
+        if not endpointer.in_speech:
+            return
+        self._barge_frames.append(data)
+        if probability >= endpointer.config.speech_threshold:
+            self._barge_speech_ms += frame_ms
+        if self._barge_speech_ms >= endpointer.config.min_speech_ms:
+            await self._trigger_barge_in()
+
+    async def _trigger_barge_in(self) -> None:
+        frames = self._barge_frames
+        self._barge_frames = []
+        self._barge_speech_ms = 0
+        self._barge_endpointer.reset()
+        await self.interrupt_output()
+        if self._stopping:
+            return
+        for captured in frames:
+            if self._stopping:
+                return
+            await self._consume_frame(captured)
+
+    async def _consume_main_frame(self, data: bytes) -> None:
         probability = await self._vad.probability(data, self._sample_rate)
         frame_ms = round(len(data) / 2 / self._sample_rate * 1000)
         endpointer = self._endpointer
@@ -353,67 +548,188 @@ class VoicePipeline:
         ))
         if self._on_user_final is not None:
             await self._on_user_final(text)
-        await self._run_turn(text)
-
-    async def _run_turn(self, text: str) -> None:
+        # Route the turn (E8-5.1b). Turn state initialises HERE,
+        # synchronously, before the turn task is scheduled: the
+        # frame loop keeps running (full-duplex), and a barge-in
+        # detected before the task's first slice must not be lost
+        # to a reset inside the task.
         self._turn_active = True
         self._interrupt_requested = False
-        self._spoken_text = ""
-        parts: list[str] = []
-        sentence_buffer = ""
-        interrupted = False
+        self._reset_heard()
+        if await self._should_escalate(text):
+            self._turn_task = asyncio.ensure_future(
+                self._run_escalation_turn(text))
+        else:
+            self._turn_task = asyncio.ensure_future(self._run_turn(text))
+
+    async def _should_escalate(self, text: str) -> bool:
+        """Ask the wired classifier whether this turn is work.
+        Both seams must be present, and a classifier failure
+        degrades to the talker — the turn is never lost to a
+        routing error."""
+        if self._escalation_classifier is None or self._on_escalation is None:
+            return False
         try:
-            async for delta in self._talker(text):
-                if self._interrupt_requested or self._stopping:
-                    interrupted = True
-                    break
-                if not delta:
-                    continue
-                parts.append(delta)
-                await self._emit_chunk(text_delta=delta, audio_chunk=None)
-                sentence_buffer += delta
-                sentences, sentence_buffer = _split_sentences(sentence_buffer)
-                for sentence in sentences:
-                    await self._speak(sentence)
-                    if self._interrupt_requested or self._stopping:
-                        interrupted = True
-                        break
-                if interrupted:
-                    break
-            if not interrupted and sentence_buffer.strip():
-                await self._speak(sentence_buffer)
-                if self._interrupt_requested or self._stopping:
-                    interrupted = True
+            return bool(await self._escalation_classifier(text))
+        except Exception:  # degrade to chat, never drop the turn
+            logger.warning(
+                "voice escalation classification failed; "
+                "keeping the turn with the talker", exc_info=True)
+            return False
+
+    async def _run_turn(self, text: str) -> None:
+        """One talker turn. Turn state was initialised by
+        ``_finish_utterance`` before this task was scheduled."""
+        try:
+            await self._deliver_reply(self._talker(text))
         except Exception as e:  # noqa: BLE001 — the talker failing must not kill the session
             logger.warning(f"voice turn failed: {e}")
             if self._on_turn_error is not None:
                 await self._on_turn_error(str(e))
+        finally:
             self._turn_active = False
+
+    async def _run_escalation_turn(self, text: str) -> None:
+        """Escalation turn (E8-5.1b): the job launches FIRST —
+        the background task lane is a separate execution and never
+        waits on this lane — then the spoken acknowledgement masks
+        its latency as this turn's reply. If the launch itself
+        fails, the talker answers instead: the user is never left
+        with silence where an answer was possible."""
+        try:
+            launched = False
+            try:
+                await self._on_escalation(text)
+                launched = True
+            except Exception:  # fall back, never strand the turn
+                logger.warning(
+                    "voice escalation launch failed; "
+                    "falling back to the talker", exc_info=True)
+            if launched:
+                await self._deliver_reply(_static_deltas(self._escalation_ack))
+            else:
+                await self._deliver_reply(self._talker(text))
+        except Exception as e:  # noqa: BLE001 — a failed turn must not kill the session
+            logger.warning(f"voice escalation turn failed: {e}")
+            if self._on_turn_error is not None:
+                await self._on_turn_error(str(e))
+        finally:
+            self._turn_active = False
+
+    async def speak_announcement(self, text: str) -> bool:
+        """Speak out-of-turn text — a finished background task's
+        summary (E8-5.1b). Waits for a quiet moment (no reply
+        playing, the user not mid-utterance), then speaks with the
+        same word-by-word streaming and barge-in rules as a reply.
+        Never commits to history: the task machinery already
+        persisted the summary as the task's own message. Returns
+        False when the session is not live — the summary still
+        stands in chat either way."""
+        text = (text or "").strip()
+        if not text or not self._started or self._stopping:
+            return False
+        while not self._stopping and (
+            self._output_active
+            or self._endpointer.in_speech
+            or self._barge_endpointer.in_speech
+        ):
+            await asyncio.sleep(0.005)
+        if self._stopping or not self._started:
+            return False
+        self._announcing = True
+        self._interrupt_requested = False
+        self._reset_heard()
+        try:
+            await self._deliver_reply(_static_deltas(text), commit=False)
+        except Exception:  # a failed announcement must not kill the session
+            logger.warning("voice announcement failed", exc_info=True)
+        finally:
+            self._announcing = False
+        return True
+
+    async def _deliver_reply(
+        self, deltas: AsyncIterator[str], *, commit: bool = True,
+    ) -> None:
+        """Stream text deltas word by word and speak each completed
+        sentence. On interruption the committed text is the heard
+        text (word granularity); otherwise it is the full reply.
+        ``commit=False`` (announcements) streams and speaks without
+        touching history."""
+        parts: list[str] = []
+        sentence_buffer = ""
+        interrupted = False
+        async for delta in deltas:
+            if self._interrupt_requested or self._stopping:
+                interrupted = True
+                break
+            if not delta:
+                continue
+            parts.append(delta)
+            await self._emit_chunk(text_delta=delta, audio_chunk=None)
+            sentence_buffer += delta
+            sentences, sentence_buffer = _split_sentences(sentence_buffer)
+            for sentence in sentences:
+                await self._speak(sentence)
+                if self._interrupt_requested or self._stopping:
+                    interrupted = True
+                    break
+            if interrupted:
+                break
+        if not interrupted and sentence_buffer.strip():
+            await self._speak(sentence_buffer)
+            if self._interrupt_requested or self._stopping:
+                interrupted = True
+        if not commit:
             return
-        committed = self._spoken_text if interrupted else "".join(parts)
+        committed = self._heard_text_now() if interrupted else "".join(parts)
         if committed.strip() and self._on_assistant_final is not None:
             await self._on_assistant_final(committed.strip())
-        self._turn_active = False
 
     async def _speak(self, sentence: str) -> None:
         """Synthesize one sentence and push its audio chunks.
 
-        The sentence joins the spoken text only once its audio is
-        fully emitted — that is the barge-in committed-text rule.
-        A TTS failure degrades the turn to text-only, never fatal.
+        The sentence's audio is fully synthesized BEFORE emission
+        so the chunk total is known: the heard-words tracker can
+        then credit exactly the words whose chunks were emitted
+        when a barge-in lands mid-sentence (E8-5.1b). The sentence
+        joins the heard text only for the audio actually emitted —
+        fully, or as its heard word prefix. A TTS failure degrades
+        the turn to text-only, never fatal.
         """
+        chunks: list[bytes] = []
         try:
             async for audio in self._tts.synthesize(sentence, voice=self._tts_voice):
                 if self._interrupt_requested or self._stopping:
-                    return
-                await self._emit_chunk(
-                    text_delta="",
-                    audio_chunk=base64.b64encode(audio).decode("ascii"),
-                )
+                    return  # nothing of this sentence was emitted
+                chunks.append(audio)
         except Exception:  # the mouth failing must not kill the conversation
             logger.warning("voice TTS failed; continuing text-only", exc_info=True)
             return
-        self._spoken_text += sentence
+        if not chunks:
+            # A silent synthesis still "says" the sentence (the
+            # transcript streamed it): count it as heard, as 5.1a did.
+            self._heard_text += sentence
+            return
+        self._inflight_sentence = sentence
+        self._inflight_total = len(chunks)
+        self._inflight_emitted = 0
+        for audio in chunks:
+            if self._interrupt_requested or self._stopping:
+                self._heard_text += _heard_prefix(
+                    sentence, self._inflight_emitted, self._inflight_total)
+                self._inflight_sentence = None
+                self._inflight_total = 0
+                self._inflight_emitted = 0
+                return
+            await self._emit_chunk(
+                text_delta="",
+                audio_chunk=base64.b64encode(audio).decode("ascii"),
+            )
+            self._inflight_emitted += 1
+        self._heard_text += sentence
+        self._inflight_sentence = None
+        self._inflight_total = 0
+        self._inflight_emitted = 0
 
     async def _emit_chunk(self, *, text_delta: str, audio_chunk: str | None) -> None:
         await self._emit(Event(
@@ -472,6 +788,9 @@ def create_voice_pipeline(
     stt: SttEngine | None = None,
     tts: TtsEngine | None = None,
     transport: VoiceTransport | None = None,
+    escalation_classifier: EscalationClassifier | None = None,
+    on_escalation: TurnCallback | None = None,
+    escalation_ack: str = DEFAULT_ESCALATION_ACK,
 ) -> tuple[VoicePipeline | None, str | None]:
     """Build a pipeline from the production stages (or injected
     ones). Returns ``(pipeline, None)`` when every stage can run,
@@ -489,6 +808,9 @@ def create_voice_pipeline(
         on_user_final=on_user_final,
         on_assistant_final=on_assistant_final,
         on_turn_error=on_turn_error,
+        escalation_classifier=escalation_classifier,
+        on_escalation=on_escalation,
+        escalation_ack=escalation_ack,
     )
     reasons = pipeline.unavailable_reasons()
     if reasons:

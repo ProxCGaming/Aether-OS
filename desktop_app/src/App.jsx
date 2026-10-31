@@ -258,6 +258,9 @@ function AppContent() {
   // not close over render-scoped state.
   const [voiceState, setVoiceState] = useState(null);
   const [voiceAudioChunk, setVoiceAudioChunk] = useState(null);
+  // E8-5.1b: bumped on every VOICE_BARGE_IN; the overlay cuts its
+  // scheduled playback when this changes.
+  const [voicePlaybackCut, setVoicePlaybackCut] = useState(0);
   const voiceStateRef = useRef(null);
   const voiceChunkSeqRef = useRef(0);
 
@@ -1211,9 +1214,11 @@ function AppContent() {
             }
           }
         } else if (data.type === 'VOICE_BARGE_IN') {
-          // E8-5.1b emits this; the client honours the committed-
-          // words rule by replacing the streaming bubble with
-          // exactly the text that was actually heard.
+          // E8-5.1b: the client honours the committed-words rule
+          // by replacing the streaming bubble with exactly the
+          // text that was actually heard, and cuts the overlay's
+          // scheduled playback so the unheard tail never plays.
+          setVoicePlaybackCut(c => c + 1);
           const p = data.payload || {};
           const current = voiceStateRef.current;
           if (current && p.session_id === current.sessionId) {
@@ -2333,6 +2338,7 @@ function AppContent() {
           onBrowserControl={handleBrowserControl}
           voiceState={voiceState}
           voiceAudioChunk={voiceAudioChunk}
+          voicePlaybackCut={voicePlaybackCut}
           onVoiceStart={handleVoiceStart}
           onVoiceStop={handleVoiceStop}
           onVoiceDismissError={handleVoiceDismissError}

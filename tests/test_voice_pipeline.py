@@ -650,6 +650,18 @@ class TestVoiceWebsocketHandlers:
             stack.enter_context(patch(
                 "aether_engine.voice.pipeline.create_voice_pipeline",
                 side_effect=factory))
+            # E8-5.1b wired the E1-04 intent split into the voice
+            # path: this scenario is a CHAT turn, so pin the
+            # classifier's verdict (the real classifier biases
+            # ambiguous phrases like "the red bicycle" to work).
+            from aether_engine.routing.intent import IntentDecision
+
+            async def _chat_verdict(prompt, provider=None):
+                return IntentDecision(
+                    route="chat", reason="test verdict", source="model")
+
+            stack.enter_context(patch.object(
+                ws_module, "classify_intent", side_effect=_chat_verdict))
             with TestClient(app) as client, client.websocket_connect(
                     f"/ws/tasks?token={engine_state.auth_token}") as ws:
                 ws.receive_text()  # HELLO

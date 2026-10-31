@@ -1494,6 +1494,7 @@ export default function DraggableChatWindow({
   onBrowserControl = null,
   voiceState = null,
   voiceAudioChunk = null,
+  voicePlaybackCut = 0,
   onVoiceStart = () => {},
   onVoiceStop = () => {},
   onVoiceDismissError = () => {}
@@ -2834,6 +2835,7 @@ export default function DraggableChatWindow({
             error={voiceState.error || null}
             webrtcConfig={voiceState.webrtcConfig || null}
             audioChunk={voiceAudioChunk}
+            playbackCut={voicePlaybackCut}
             onStop={onVoiceStop}
             onDismiss={onVoiceDismissError}
           />
