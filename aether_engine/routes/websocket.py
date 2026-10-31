@@ -607,6 +607,20 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
 
                 workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
 
+                # Epic 1, E1-14 config layers, computed for BOTH paths:
+                # the graph branch uses it for the task, and the Epic 5
+                # retry-factory snapshot below reads it unconditionally
+                # — when it lived only in the graph branch, every
+                # fast-chat task died here with an UnboundLocalError
+                # and the client waited forever for a reply.
+                from aether_engine.config_layers import effective_user_config
+
+                task_user_config = effective_user_config(
+                    engine_state.user_config,
+                    workspace_root=workspace_roots[0] if workspace_roots else None,
+                    overlay=msg.payload.get("config_overlay"),
+                )
+
                 slash_cmd_str = msg.payload.get("slash_command")
                 if not slash_cmd_str and prompt.startswith("/"):
                     slash_cmd_str = prompt.split(" ")[0]
@@ -663,18 +677,8 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         include_file_tools=reqs.wants_code or (requested_model is not None),
                     )
 
-                    # Epic 1, E1-14: config layers — global → project
-                    # (.aether/config.json in the workspace) → per-task
-                    # overlay. engine_state.user_config is never mutated;
-                    # the layered copy serves only this task.
-                    from aether_engine.config_layers import effective_user_config
-
-                    task_user_config = effective_user_config(
-                        engine_state.user_config,
-                        workspace_root=workspace_roots[0] if workspace_roots else None,
-                        overlay=msg.payload.get("config_overlay"),
-                    )
-
+                    # Config layers were resolved above for both paths
+                    # (E1-14); engine_state.user_config is never mutated.
                     task_generator = run_langgraph_task(
                         prompt=prompt,
                         provider=provider_instance,
