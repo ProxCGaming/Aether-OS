@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { SocketProvider, useAetherSocket } from './contexts/SocketContext';
-import ForceGraph3D from 'react-force-graph-3d';
+// Epic 9: the 3D graph (three.js + force-graph, ~1 MB) is the ambient
+// background, not the app shell — load it lazily so first paint and
+// interactivity don't wait on it. The Suspense fallback paints the
+// same background colour, so the graph simply fades in when ready.
+const ForceGraph3D = React.lazy(() => import('react-force-graph-3d'));
 import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu, Pencil } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
 import SettingsPanel from './SettingsPanel';
@@ -1561,6 +1565,7 @@ function AppContent() {
       {/* 3D Knowledge Graph Background */}
       {!isFloating && (
         <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1 }}>
+          <React.Suspense fallback={<div style={{ position: 'absolute', inset: 0, background: '#05050f' }} />}>
           <ForceGraph3D
             ref={graphRef}
             graphData={initGraphData}
@@ -1578,6 +1583,7 @@ function AppContent() {
             enableNodeDrag={false}
             showNavInfo={false}
           />
+          </React.Suspense>
         </div>
       )}
 
