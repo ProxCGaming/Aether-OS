@@ -123,6 +123,43 @@ class ArtifactStore:
             "updated_at": now,
         }
 
+    def record_summary_artifact(
+        self,
+        session_id: str,
+        task_id: str,
+        summary: str,
+        title: str = "Task Summary",
+        metadata: dict[str, Any] | None = None,
+        artifact_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Record a task's final summary as an artifact document (kind = 'report') with direct text storage (Epic 8, E8-2.4)."""
+        self.init_db()
+        art_id = artifact_id
+        if not art_id:
+            with self._get_conn() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT id FROM artifacts WHERE session_id = ? AND task_id = ? AND kind = 'report'",
+                    (session_id, task_id),
+                )
+                row = cur.fetchone()
+                if row:
+                    art_id = row[0]
+
+        meta = {"type": "summary_document"}
+        if metadata:
+            meta.update(metadata)
+        return self.record_artifact(
+            session_id=session_id,
+            task_id=task_id,
+            kind="report",
+            title=title,
+            file_path=None,
+            content=summary,
+            metadata=meta,
+            artifact_id=art_id,
+        )
+
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
         """Fetch an artifact by id."""
         self.init_db()

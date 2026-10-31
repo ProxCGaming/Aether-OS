@@ -28,6 +28,7 @@ from aether_common.contracts import (
     TaskState,
     validate_transition,
 )
+from aether_engine.artifacts.store import get_artifact_store
 from aether_engine.event_bus import event_bus
 from aether_engine.langgraph.checkpointer import DEFAULT_CHECKPOINT_DB
 from aether_engine.langgraph.compaction import (
@@ -737,6 +738,47 @@ async def run_langgraph_task(
                         except Exception as mem_e:  # noqa: BLE001 — best-effort fact extraction (provider + DB): failure is logged and must not fail the completed task
                             logger.warning(f"Memory storage failed: {mem_e}")
 
+                # Epic 8, E8-2.4: auto-record task final summary as a report document artifact
+                final_summary_text = full_response or "(task completed)"
+                try:
+                    art_store = get_artifact_store()
+                    summary_art = art_store.record_summary_artifact(
+                        session_id=session_id or "default",
+                        task_id=task_id,
+                        summary=final_summary_text,
+                    )
+                    event_bus.publish(
+                        task_id,
+                        Event(
+                            type=EventType.ARTIFACT_RECORDED,
+                            request_id=task_id,
+                            payload={
+                                "artifact_id": summary_art["id"],
+                                "session_id": summary_art["session_id"],
+                                "task_id": summary_art["task_id"],
+                                "kind": summary_art["kind"],
+                                "title": summary_art["title"],
+                                "path": summary_art.get("file_path"),
+                                "created_at": summary_art["created_at"],
+                            },
+                        ),
+                    )
+                    yield emit_event(Event(
+                        type=EventType.ARTIFACT_RECORDED,
+                        request_id=request_id,
+                        payload={
+                            "artifact_id": summary_art["id"],
+                            "session_id": summary_art["session_id"],
+                            "task_id": summary_art["task_id"],
+                            "kind": summary_art["kind"],
+                            "title": summary_art["title"],
+                            "path": summary_art.get("file_path"),
+                            "created_at": summary_art["created_at"],
+                        },
+                    ))
+                except Exception as art_err:  # noqa: BLE001 — summary artifact store is best-effort and must not fail the completed task
+                    logger.warning(f"Failed to record summary artifact: {art_err}")
+
                 yield Event(
                     type=EventType.TASK_COMPLETED,
                     request_id=request_id,
@@ -1056,6 +1098,48 @@ async def resume_langgraph_task(
                         )
                     except Exception as mem_e:  # noqa: BLE001 — best-effort memory store on the resume path: failure is logged and must not fail the completed task
                         logger.warning(f"Memory storage failed: {mem_e}")
+
+                # Epic 8, E8-2.4: auto-record task final summary as a report document artifact
+                final_summary_text = full_response or "(task completed)"
+                sess_id = state_obj.values.get("session_id") or "default"
+                try:
+                    art_store = get_artifact_store()
+                    summary_art = art_store.record_summary_artifact(
+                        session_id=sess_id,
+                        task_id=task_id,
+                        summary=final_summary_text,
+                    )
+                    event_bus.publish(
+                        task_id,
+                        Event(
+                            type=EventType.ARTIFACT_RECORDED,
+                            request_id=task_id,
+                            payload={
+                                "artifact_id": summary_art["id"],
+                                "session_id": summary_art["session_id"],
+                                "task_id": summary_art["task_id"],
+                                "kind": summary_art["kind"],
+                                "title": summary_art["title"],
+                                "path": summary_art.get("file_path"),
+                                "created_at": summary_art["created_at"],
+                            },
+                        ),
+                    )
+                    yield Event(
+                        type=EventType.ARTIFACT_RECORDED,
+                        request_id=thread_id,
+                        payload={
+                            "artifact_id": summary_art["id"],
+                            "session_id": summary_art["session_id"],
+                            "task_id": summary_art["task_id"],
+                            "kind": summary_art["kind"],
+                            "title": summary_art["title"],
+                            "path": summary_art.get("file_path"),
+                            "created_at": summary_art["created_at"],
+                        },
+                    )
+                except Exception as art_err:  # noqa: BLE001 — summary artifact store is best-effort and must not fail the completed task
+                    logger.warning(f"Failed to record summary artifact on resume: {art_err}")
 
                 yield Event(
                     type=EventType.TASK_COMPLETED,

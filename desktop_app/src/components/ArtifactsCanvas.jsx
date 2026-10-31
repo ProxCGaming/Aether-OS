@@ -11,10 +11,23 @@ import ProjectPreview from './renderers/ProjectPreview';
 // the Code tab; everything else stays code-only.
 const isWebArtifact = (art) => {
   if (!art) return false;
+  if (art.kind === 'report') return false;
   if (art.kind === 'html') return true;
   const name = (art.file_path || art.title || '').toLowerCase();
   return /\.(html|htm)$/.test(name);
 };
+
+// Epic 8, E8-2.4: render summary documents with Markdown viewer
+export function SummaryDocumentRenderer({ content = '', _title = '' }) {
+  return (
+    <div
+      data-testid="summary-document-renderer"
+      style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+    >
+      <MarkdownRenderer content={content} />
+    </div>
+  );
+}
 
 const projectDirOf = (filePath) => {
   if (!filePath) return null;
@@ -93,7 +106,10 @@ export default function ArtifactsCanvas({
 
   const handleSaveCopy = () => {
     const content = activeArtifactContent?.content || activeArtifactContent?.diff || '';
-    const filename = currentArtifact?.title || 'artifact.txt';
+    let filename = currentArtifact?.title || 'artifact.txt';
+    if (currentArtifact?.kind === 'report' && !filename.includes('.')) {
+      filename = `${filename}.md`;
+    }
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -172,6 +188,10 @@ export default function ArtifactsCanvas({
       return <DiffRenderer diff={diff || content} filePath={currentArtifact.file_path} />;
     }
 
+    if (kind === 'report') {
+      return <SummaryDocumentRenderer content={content} title={currentArtifact.title} />;
+    }
+
     if (title.endsWith('.md') || title.endsWith('.markdown')) {
       return <MarkdownRenderer content={content} />;
     }
@@ -205,6 +225,7 @@ export default function ArtifactsCanvas({
 
   const getArtifactIcon = (art) => {
     if (art.kind === 'diff') return <GitCommit size={14} color="#c084fc" />;
+    if (art.kind === 'report') return <FileText size={14} color="#60a5fa" />;
     const t = (art.title || '').toLowerCase();
     if (t.endsWith('.md')) return <FileText size={14} color="#60a5fa" />;
     if (t.endsWith('.json') || t.endsWith('.csv')) return <Database size={14} color="#f59e0b" />;
@@ -360,8 +381,16 @@ export default function ArtifactsCanvas({
                             fontWeight: 600,
                             padding: '1px 6px',
                             borderRadius: '999px',
-                            background: art.kind === 'diff' ? 'rgba(192, 132, 252, 0.2)' : 'rgba(255, 255, 255, 0.08)',
-                            color: art.kind === 'diff' ? '#c084fc' : '#94a3b8',
+                            background: art.kind === 'diff'
+                              ? 'rgba(192, 132, 252, 0.2)'
+                              : art.kind === 'report'
+                              ? 'rgba(56, 189, 248, 0.2)'
+                              : 'rgba(255, 255, 255, 0.08)',
+                            color: art.kind === 'diff'
+                              ? '#c084fc'
+                              : art.kind === 'report'
+                              ? '#38bdf8'
+                              : '#94a3b8',
                             textTransform: 'uppercase'
                           }}
                         >
