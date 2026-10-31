@@ -256,6 +256,123 @@
   padding: 4px 2px 0;
 }
 
+.step-menu-action:not(:disabled) {
+  cursor: pointer;
+}
+
+.step-menu-action:not(:disabled):hover {
+  background: rgba(124, 58, 237, 0.35);
+}
+
+/* Epic 8, E8-1.1b: rewind confirmation modal + 5-second undo toast. */
+.rewind-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 8, 14, 0.66);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.rewind-confirm-dialog {
+  background: rgba(24, 24, 32, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  padding: 20px 22px;
+  max-width: 440px;
+  width: calc(100% - 48px);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  color: #e2e8f0;
+}
+
+.rewind-confirm-title {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.rewind-confirm-body {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #b9b9c9;
+}
+
+.rewind-confirm-files {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 12px;
+  color: #fca5a5;
+  word-break: break-all;
+}
+
+.rewind-confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.rewind-confirm-btn {
+  background: #7c3aed;
+  border: 1px solid rgba(167, 139, 250, 0.6);
+  border-radius: 8px;
+  padding: 7px 16px;
+  font-size: 13px;
+  color: #fff;
+  cursor: pointer;
+}
+
+.rewind-confirm-btn:hover {
+  background: #8b5cf6;
+}
+
+.rewind-cancel-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 7px 16px;
+  font-size: 13px;
+  color: #e2e8f0;
+  cursor: pointer;
+}
+
+.rewind-undo-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 108px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(24, 24, 32, 0.97);
+  border: 1px solid rgba(167, 139, 250, 0.5);
+  border-radius: 999px;
+  padding: 8px 8px 8px 16px;
+  font-size: 12px;
+  color: #e2e8f0;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  z-index: 60;
+  white-space: nowrap;
+}
+
+.rewind-undo-toast button {
+  background: #7c3aed;
+  border: none;
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  cursor: pointer;
+}
+
+.rewind-undo-toast button:hover {
+  background: #8b5cf6;
+}
+
 /* Epic 1 UI batch (E1-08): regenerate, shown under the last final
    agent bubble (errors included) while no task is running. */
 .msg-regenerate-btn {

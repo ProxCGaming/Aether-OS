@@ -39,6 +39,7 @@ from aether_engine.orchestration.core import (
 )
 from aether_engine.providers.discovery import fetch_available_models
 from aether_engine.rewind import manifest as rewind_manifest
+from aether_engine.rewind import service as rewind_service
 from aether_engine.routing.intent import classify_intent
 from aether_engine.routing.policy import (
     RoutingDecision,
@@ -634,6 +635,12 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                             ).to_json())
                         except Exception:  # best-effort notification: a failed send must not abort task start
                             logger.debug("Could not send session list event to client", exc_info=True)
+                # Epic 8, E8-1.1b: a new message in a session with a
+                # staged rewind commits it — the undo window closes
+                # and the discarded steps are pruned now, before the
+                # new task builds on the rewound state.
+                await rewind_service.commit(session_id)
+
                 # Issue 007: ``/mcp:<server>:<prompt>`` runs a prompt
                 # template into the chat instead of starting a graph task.
                 # No arguments in the slash form (use the MCP tab for
@@ -1424,6 +1431,67 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     type=EventType.REWIND_MANIFEST_GET_RESPONSE,
                     request_id=req_id,
                     payload=manifest_payload,
+                ).to_json())
+
+            elif msg.type == EventType.TASK_REWIND_REQUEST:
+                # Epic 8, E8-1.1b: execute a rewind against the
+                # manifest. Refused while this session's task is live
+                # or paused for approval — the points describe the
+                # last task, and rolling back under a running one
+                # would corrupt both. The service validates the rest
+                # (last task only, step exists, checkpoint matches).
+                sess_id = msg.payload.get("session_id")
+                rewind_busy = bool(
+                    sess_id
+                    and task_runner is not None
+                    and not task_runner.done()
+                    and (task_session_id is None or task_session_id == sess_id)
+                )
+                if sess_id and not rewind_busy:
+                    try:
+                        pending = await get_pending_approvals()
+                        rewind_busy = any(
+                            p.get("thread_id") == sess_id for p in pending)
+                    except Exception:  # noqa: BLE001 — best-effort scan, same doctrine as steering: a failed scan degrades to the service's own validation
+                        rewind_busy = False
+                if rewind_busy:
+                    rewind_result = {
+                        "ok": False,
+                        "session_id": sess_id,
+                        "rewound_to_step": msg.payload.get("step_index")
+                        if isinstance(msg.payload.get("step_index"), int) else -1,
+                        "undo_expires_at": 0.0,
+                        "files_not_reverted": [],
+                        "error": "Cannot rewind while a task is running or waiting for approval in this session.",
+                    }
+                else:
+                    rewind_result = await rewind_service.rewind(
+                        sess_id,
+                        msg.payload.get("task_id"),
+                        msg.payload.get("step_index"),
+                        msg.payload.get("checkpoint_id"),
+                    )
+                await ws.send_text(Event(
+                    type=EventType.TASK_REWIND_RESPONSE,
+                    request_id=req_id,
+                    payload=rewind_result,
+                ).to_json())
+
+            elif msg.type == EventType.TASK_REWIND_UNDO_REQUEST:
+                # Epic 8, E8-1.1b: restore the steps a staged rewind
+                # discarded — only inside the 5-second window.
+                sess_id = msg.payload.get("session_id")
+                if isinstance(sess_id, str) and sess_id:
+                    undo_result = await rewind_service.undo(sess_id)
+                else:
+                    undo_result = {
+                        "ok": False, "restored": False,
+                        "error": "A session_id is required.",
+                    }
+                await ws.send_text(Event(
+                    type=EventType.TASK_REWIND_UNDO_RESPONSE,
+                    request_id=req_id,
+                    payload=undo_result,
                 ).to_json())
 
             elif msg.type == EventType.APPROVAL_GRANTS_REQUEST:

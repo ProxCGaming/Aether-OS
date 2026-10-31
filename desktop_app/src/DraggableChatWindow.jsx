@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 
 import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download, MoreHorizontal } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import Dropdown from './Dropdown';
+import Dropdown from './Dropdown';
+import UndoToast from './components/UndoToast';
 import './chat.css';
 
 export function getNodeStyle(nodeName = '') {
@@ -1181,6 +1182,10 @@ export default function DraggableChatWindow({
   onExportSession = () => {},
   sessionId = null,
   rewindManifest = null,
+  onRewindRequest = null,
+  rewindUndo = null,
+  onRewindUndo = null,
+  onRewindUndoExpire = null,
   artifactsCount = 0,
   isCanvasOpen = false,
   onToggleCanvas = () => {},
@@ -1917,14 +1922,30 @@ export default function DraggableChatWindow({
                               )}
                             </div>
                           )}
-                          <button type="button" className="step-menu-action" data-testid="rewind-action" disabled>
-                            Rewind to here
-                          </button>
-                          <div className="step-menu-hint" data-testid="rewind-hint">
-                            {rewindPoint.scope === 'current'
-                              ? 'Rewind execution arrives with E8-1.1b.'
-                              : 'Rewind is available for the current task only.'}
-                          </div>
+                          {rewindPoint.scope === 'current' && rewindPoint.entry ? (
+                            <button
+                              type="button"
+                              className="step-menu-action"
+                              data-testid="rewind-action"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setOpenStepMenu(null);
+                                if (onRewindRequest) onRewindRequest(rewindPoint.entry);
+                              }}
+                            >
+                              Rewind to here
+                            </button>
+                          ) : (
+                            <>
+                              <button type="button" className="step-menu-action" data-testid="rewind-action" disabled>
+                                Rewind to here
+                              </button>
+                              <div className="step-menu-hint" data-testid="rewind-hint">
+                                Rewind is available for the current task only.
+                              </div>
+                            </>
+                          )}
                           <button type="button" className="step-menu-action" data-testid="fork-action" disabled>
                             Fork from here
                           </button>
@@ -2173,6 +2194,17 @@ export default function DraggableChatWindow({
               </div>
             </div>
           </>
+        )}
+
+        {/* Epic 8, E8-1.1b: 5-second rewind undo window. Expiry is
+            reported through onRewindUndoExpire so App can tell an
+            expiry apart from an Undo click. */}
+        {rewindUndo && (
+          <UndoToast
+            expiresAt={rewindUndo.expiresAt}
+            onUndo={() => { if (onRewindUndo) onRewindUndo(); }}
+            onExpire={() => { if (onRewindUndoExpire) onRewindUndoExpire(); }}
+          />
         )}
 
         {/* Copy Success Floating Toast */}

@@ -40,9 +40,11 @@ function renderChat(props = {}) {
 
 // Epic 8, E8-1.1a: the step ⋯ menu surfaces the recorded rewind point
 // for the CURRENT task's steps (label, checkpoint, files written so
-// far) with rewind/fork execution honestly disabled — execution is
-// E8-1.1b / E8-1.2. Older tasks' steps show the disabled hint instead.
-describe('DraggableChatWindow rewind step menu (E8-1.1a)', () => {
+// far). E8-1.1b makes "Rewind to here" live on those points (it hands
+// the entry to onRewindRequest; App owns the confirm modal + engine
+// call). Fork stays honestly disabled until E8-1.2, and older tasks'
+// steps keep the disabled current-task-only hint.
+describe('DraggableChatWindow rewind step menu (E8-1.1a/1.1b)', () => {
   const messages = [
     { id: 'u1', role: 'user', content: 'first task', isFinal: true, thoughts: [] },
     { id: 'a1', role: 'agent', content: 'first answer', isFinal: true, thoughts: [] },
@@ -68,7 +70,7 @@ describe('DraggableChatWindow rewind step menu (E8-1.1a)', () => {
     expect(screen.getAllByTestId('step-menu-btn')).toHaveLength(4);
   });
 
-  it('current task user step shows the opening point metadata, execution disabled', () => {
+  it('current task user step shows the opening point metadata, rewind live', () => {
     renderChat({ messages, rewindManifest: manifest });
     fireEvent.click(screen.getAllByTestId('step-menu-btn')[2]);
 
@@ -76,8 +78,8 @@ describe('DraggableChatWindow rewind step menu (E8-1.1a)', () => {
     const meta = within(menu).getByTestId('rewind-point-meta');
     expect(meta).toHaveTextContent('Before this task began');
     expect(meta).toHaveTextContent('cp0000aa');
-    expect(within(menu).getByTestId('rewind-action')).toBeDisabled();
-    expect(within(menu).getByTestId('rewind-hint')).toHaveTextContent('E8-1.1b');
+    expect(within(menu).getByTestId('rewind-action')).not.toBeDisabled();
+    expect(within(menu).queryByTestId('rewind-hint')).not.toBeInTheDocument();
     expect(within(menu).getByTestId('fork-action')).toBeDisabled();
     expect(within(menu).getByTestId('fork-hint')).toHaveTextContent('E8-1.2');
   });
@@ -90,7 +92,18 @@ describe('DraggableChatWindow rewind step menu (E8-1.1a)', () => {
     const meta = within(menu).getByTestId('rewind-point-meta');
     expect(meta).toHaveTextContent('After planner');
     expect(meta).toHaveTextContent('notes/out.txt');
-    expect(within(menu).getByTestId('rewind-action')).toBeDisabled();
+    expect(within(menu).getByTestId('rewind-action')).not.toBeDisabled();
+  });
+
+  it('clicking Rewind hands the recorded entry to onRewindRequest and closes the menu', () => {
+    const onRewindRequest = jest.fn();
+    renderChat({ messages, rewindManifest: manifest, onRewindRequest });
+    fireEvent.click(screen.getAllByTestId('step-menu-btn')[2]);
+    fireEvent.click(within(screen.getByTestId('step-menu')).getByTestId('rewind-action'));
+
+    expect(onRewindRequest).toHaveBeenCalledTimes(1);
+    expect(onRewindRequest).toHaveBeenCalledWith(manifest.entries[0]);
+    expect(screen.queryByTestId('step-menu')).not.toBeInTheDocument();
   });
 
   it('older task steps show no point metadata, only the current-task-only hint', () => {
@@ -102,6 +115,31 @@ describe('DraggableChatWindow rewind step menu (E8-1.1a)', () => {
     expect(within(menu).getByTestId('rewind-action')).toBeDisabled();
     expect(within(menu).getByTestId('rewind-hint')).toHaveTextContent(
       'Rewind is available for the current task only');
+  });
+});
+
+// Epic 8, E8-1.1b: the undo toast renders inside the chat window
+// while App holds the staged rewind; its Undo button delegates back.
+describe('DraggableChatWindow rewind undo toast (E8-1.1b)', () => {
+  const messages = [
+    { id: 'u1', role: 'user', content: 'task', isFinal: true, thoughts: [] },
+  ];
+
+  it('renders no toast without a staged rewind', () => {
+    renderChat({ messages });
+    expect(screen.queryByTestId('rewind-undo-toast')).not.toBeInTheDocument();
+  });
+
+  it('renders the toast and delegates Undo to onRewindUndo', () => {
+    const onRewindUndo = jest.fn();
+    renderChat({
+      messages,
+      rewindUndo: { sessionId: 's1', expiresAt: Date.now() + 5000 },
+      onRewindUndo,
+    });
+    expect(screen.getByTestId('rewind-undo-toast')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('rewind-undo-btn'));
+    expect(onRewindUndo).toHaveBeenCalledTimes(1);
   });
 });
 

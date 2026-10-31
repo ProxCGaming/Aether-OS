@@ -14,6 +14,7 @@ import Onboarding from './components/Onboarding';
 import CommandPalette from './components/CommandPalette';
 import ArtifactsCanvas from './components/ArtifactsCanvas';
 import GlobalArtifactsView from './components/GlobalArtifactsView';
+import RewindConfirmModal from './components/RewindConfirmModal';
 import './chat.css';
 
 // Decorative background graph (branding, not live data — see Phase 9 B3)
@@ -133,6 +134,71 @@ function AppContent() {
       payload: { session_id: sessionId },
     }));
   }, [wsRef]);
+  // Epic 8, E8-1.1b: rewind execution state. rewindConfirm holds the
+  // point awaiting confirmation ({entry, filesNotReverted}) for the
+  // RewindConfirmModal; rewindUndo holds the staged rewind's undo
+  // window ({sessionId, expiresAt}) for the toast in the chat window.
+  // The engine prunes on its own timer at expiry — the local timeout
+  // only clears the display and refetches the (now pruned) manifest.
+  const [rewindConfirm, setRewindConfirm] = useState(null);
+  const [rewindUndo, setRewindUndo] = useState(null);
+  const rewindUndoTimerRef = useRef(null);
+  const clearRewindUndo = useCallback(() => {
+    if (rewindUndoTimerRef.current) {
+      clearTimeout(rewindUndoTimerRef.current);
+      rewindUndoTimerRef.current = null;
+    }
+    setRewindUndo(null);
+  }, []);
+  const handleRewindRequest = useCallback((entry) => {
+    // Files written after the chosen point = the trail's final
+    // cumulative list minus the point's own (the engine recomputes
+    // the same difference for the response; this is the modal's
+    // pre-confirmation copy).
+    if (!rewindManifest || !entry) return;
+    const entries = Array.isArray(rewindManifest.entries) ? rewindManifest.entries : [];
+    const finalEntry = entries[entries.length - 1];
+    const atPoint = new Set(Array.isArray(entry.files_written) ? entry.files_written : []);
+    const filesNotReverted = finalEntry
+      ? (finalEntry.files_written || []).filter((path) => !atPoint.has(path))
+      : [];
+    setRewindConfirm({ entry, filesNotReverted });
+  }, [rewindManifest]);
+  const handleRewindConfirm = useCallback(() => {
+    if (!rewindConfirm || !rewindManifest) return;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'TASK_REWIND_REQUEST',
+        schema_version: 1,
+        request_id: `task_rewind_${Date.now()}`,
+        payload: {
+          session_id: rewindManifest.session_id,
+          task_id: rewindManifest.task_id,
+          step_index: rewindConfirm.entry.step_index,
+          checkpoint_id: rewindConfirm.entry.checkpoint_id,
+        },
+      }));
+    }
+    setRewindConfirm(null);
+  }, [rewindConfirm, rewindManifest, wsRef]);
+  const handleRewindUndoClick = useCallback(() => {
+    if (!rewindUndo) return;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'TASK_REWIND_UNDO_REQUEST',
+        schema_version: 1,
+        request_id: `task_rewind_undo_${Date.now()}`,
+        payload: { session_id: rewindUndo.sessionId },
+      }));
+    }
+  }, [rewindUndo, wsRef]);
+  const handleRewindUndoExpire = useCallback(() => {
+    // The window closed (toast countdown or the local timer): the
+    // engine has pruned; drop the display and refetch the manifest.
+    const sessionId = rewindUndo?.sessionId || activeSessionRef.current;
+    clearRewindUndo();
+    if (sessionId) requestRewindManifest(sessionId);
+  }, [rewindUndo, clearRewindUndo, requestRewindManifest]);
   const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Artifacts', 'Projects', 'Settings'
   const [initialInput, setInitialInput] = useState('');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -612,6 +678,56 @@ function AppContent() {
               entries,
             } : null);
           }
+        } else if (data.type === 'TASK_REWIND_RESPONSE') {
+          // E8-1.1b: the engine rolled the session back. Mirror it
+          // locally with the same structural cut the engine applies
+          // to session_messages (the task starts at the last
+          // non-steering user message): step 0 removes the task's
+          // messages entirely, a later point keeps the prompt and
+          // drops what followed it. Then arm the undo window.
+          if (data.payload?.session_id === activeSessionRef.current) {
+            if (data.payload.ok) {
+              const step = data.payload.rewound_to_step;
+              setChatMessages(prev => {
+                let taskStart = -1;
+                prev.forEach((m, j) => {
+                  if (m && m.role === 'user' && !m.steering) taskStart = j;
+                });
+                if (taskStart === -1) return prev;
+                return step === 0 ? prev.slice(0, taskStart) : prev.slice(0, taskStart + 1);
+              });
+              const expiresAt = (data.payload.undo_expires_at || 0) * 1000;
+              setRewindUndo({ sessionId: data.payload.session_id, expiresAt });
+              if (rewindUndoTimerRef.current) clearTimeout(rewindUndoTimerRef.current);
+              rewindUndoTimerRef.current = setTimeout(() => {
+                handleRewindUndoExpire();
+              }, Math.max(0, expiresAt - Date.now()));
+            } else if (data.payload.error) {
+              console.warn('Rewind refused:', data.payload.error);
+            }
+          }
+        } else if (data.type === 'TASK_REWIND_UNDO_RESPONSE') {
+          // E8-1.1b: the discarded steps are back in the store; the
+          // rendered list is rebuilt from it via a session fetch
+          // (the SESSION_GET_RESPONSE handler owns that rebuild and
+          // only honours the request id registered here).
+          if (data.payload?.ok && data.payload?.restored) {
+            const sessionId = activeSessionRef.current;
+            clearRewindUndo();
+            if (sessionId && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              const reqId = `rewind_restore_${Date.now()}`;
+              pendingSessionSwitchRef.current = reqId;
+              wsRef.current.send(JSON.stringify({
+                type: 'SESSION_GET_REQUEST',
+                schema_version: 1,
+                request_id: reqId,
+                payload: { session_id: sessionId }
+              }));
+              requestRewindManifest(sessionId);
+            }
+          } else {
+            clearRewindUndo();
+          }
         } else if (data.type === 'FALLBACK_STARTED') {
           setChatMessages(prev => [...prev, { 
             id: Date.now().toString(),
@@ -1036,6 +1152,13 @@ function AppContent() {
   }, [canvasArtifacts, handleSelectArtifact, activeSession, wsRef]);
 
   const handleSendMessage = (text) => {
+    // E8-1.1b: sending a message while the rewind undo toast is up
+    // dismisses it and commits the rewind — the engine does the
+    // pruning when this START_TASK arrives; here we only drop the
+    // display state.
+    if (rewindUndo && rewindUndo.sessionId === activeSessionRef.current) {
+      clearRewindUndo();
+    }
     // One stable id for this message, shared by the rendered bubble and
     // the stored row (the engine saves it under this id), so a later
     // edit-and-resend addresses the exact message — never a content
@@ -1095,6 +1218,12 @@ function AppContent() {
     // E8-1.1a: never show one session's rewind points in another;
     // the fresh manifest is fetched on SESSION_GET_RESPONSE.
     setRewindManifest(null);
+    // E8-1.1b: a staged rewind belongs to the session it rewound;
+    // its toast (and confirm modal) must not follow the user into
+    // another session. The engine-side window keeps running and
+    // prunes on expiry.
+    setRewindConfirm(null);
+    if (rewindUndo && rewindUndo.sessionId !== id) clearRewindUndo();
     setChatMessages(prev => {
       if (activeSessionRef.current) {
         sessionCacheRef.current[activeSessionRef.current] = prev;
@@ -1808,6 +1937,10 @@ function AppContent() {
           onTogglePlanMode={handleTogglePlanMode}
           scratchpad={scratchpadBySession[activeSession || '__pending'] || null}
           rewindManifest={rewindManifest}
+          onRewindRequest={handleRewindRequest}
+          rewindUndo={rewindUndo && rewindUndo.sessionId === activeSession ? rewindUndo : null}
+          onRewindUndo={handleRewindUndoClick}
+          onRewindUndoExpire={handleRewindUndoExpire}
           onDetach={(state) => {
             localStorage.setItem('floating_transfer_state', JSON.stringify({
               messages: chatMessages,
@@ -1824,6 +1957,15 @@ function AppContent() {
           isCanvasOpen={isCanvasOpen}
           onToggleCanvas={handleToggleCanvas}
           onOpenArtifact={handleOpenArtifact}
+        />
+      )}
+
+      {rewindConfirm && (
+        <RewindConfirmModal
+          entry={rewindConfirm.entry}
+          filesNotReverted={rewindConfirm.filesNotReverted}
+          onConfirm={handleRewindConfirm}
+          onCancel={() => setRewindConfirm(null)}
         />
       )}
 

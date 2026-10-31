@@ -125,6 +125,15 @@ class EventType(str, Enum):
     # contracts arrive with E8-1.1b.
     REWIND_MANIFEST_GET_REQUEST = "REWIND_MANIFEST_GET_REQUEST"
     REWIND_MANIFEST_GET_RESPONSE = "REWIND_MANIFEST_GET_RESPONSE"
+    # Epic 8, E8-1.1b: rewind execution. TASK_REWIND rolls the last
+    # task back to a manifest point (state-only — files are never
+    # reverted), holding the discarded steps for a 5-second undo
+    # window; TASK_REWIND_UNDO restores them inside the window, and
+    # expiry (or a new message) prunes them outright.
+    TASK_REWIND_REQUEST = "TASK_REWIND_REQUEST"
+    TASK_REWIND_RESPONSE = "TASK_REWIND_RESPONSE"
+    TASK_REWIND_UNDO_REQUEST = "TASK_REWIND_UNDO_REQUEST"
+    TASK_REWIND_UNDO_RESPONSE = "TASK_REWIND_UNDO_RESPONSE"
     # Epic 8, E8-2.1: Canvas A - artifact store + per-session panel
     ARTIFACT_LIST_REQUEST = "ARTIFACT_LIST_REQUEST"
     ARTIFACT_LIST_RESPONSE = "ARTIFACT_LIST_RESPONSE"
