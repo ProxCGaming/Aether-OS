@@ -7,8 +7,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import litellm
-
 from aether_engine.audit import AuditLogger
 from aether_engine.config import UserConfig, load_config
 
@@ -44,6 +42,28 @@ DEFAULT_QUERY_BACKFILL_LIMIT = 5
 # path, that the one-time dedupe migration has already run for in this
 # process. A fresh tmp DB in tests gets its own key, so the migration
 # still runs there on first init.
+# Epic 9: litellm imported lazily via module __getattr__ (PEP 562) —
+# the real import costs ~4s and is only needed when an embedding
+# actually happens. First ``litellm`` reference loads and caches the
+# real module in globals; tests patching ``episodic.litellm`` still
+# land on the real module object; inside this module, call sites
+# bind ``litellm = _load_litellm()`` locally as their first step.
+
+
+def _load_litellm():
+    import litellm as real
+
+    real.suppress_debug_info = True
+    real.set_verbose = False
+    globals()["litellm"] = real
+    return real
+
+
+def __getattr__(name: str):
+    if name == "litellm":
+        return _load_litellm()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 _DEDUPED_DB_PATHS = set()
 
 # Database paths
@@ -96,6 +116,7 @@ async def _embed_text(text: str, task_id: str | None = None,
     silently: every failure is logged distinctly (model, error, episode id)
     to the audit log and the module logger. No retry/backfill here
     (Phase 10.3); callers must treat ``None`` as "not embedded"."""
+    litellm = _load_litellm()  # Epic 9: deferred import, bound locally
     try:
         response = await asyncio.wait_for(
             litellm.aembedding(

@@ -15,6 +15,19 @@ logger = logging.getLogger("aether_engine.app")
 
 async def lifespan(_app: FastAPI):
     engine_state.initialize()
+
+    # Epic 9: warm the deferred litellm import in a background thread.
+    # The import costs ~4s; paying it here (overlapped with the rest
+    # of startup) keeps engine start fast AND keeps the first real
+    # provider call from paying it either.
+    try:
+        import threading
+
+        from aether_engine.providers.litellm_provider import warm_litellm
+
+        threading.Thread(target=warm_litellm, daemon=True, name="litellm-warmup").start()
+    except Exception as e:  # noqa: BLE001 — startup boundary: warm-up is best-effort; the lazy import still happens on first use
+        logger.warning(f"LiteLLM warm-up failed to start: {e}")
     logger.info(
         f"AETHER Engine initialized. Active: {engine_state.active_provider}/{engine_state.active_model}. "
         f"Auth token written to {engine_state.token_path}"

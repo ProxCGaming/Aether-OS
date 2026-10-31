@@ -10,8 +10,6 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
 
-import litellm
-
 from aether_engine.providers.base import (
     AuthenticationError,
     BaseProvider,
@@ -31,10 +29,40 @@ logger = logging.getLogger("aether_engine.providers.litellm_provider")
 # fetch (one short request to a provider endpoint), so it gets the same bound.
 VALIDATION_TIMEOUT = DISCOVERY_TIMEOUT
 
-# Suppress litellm's noisy debug logs in production
-litellm.suppress_debug_info = True
-litellm.set_verbose = False
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
+
+# Epic 9: litellm is imported lazily via module __getattr__ (PEP 562).
+# The real import costs ~4s (it eagerly builds the OpenAI type tree)
+# and every engine start paid it, although no provider call can
+# happen until a key is configured and a task runs. The first
+# ``litellm`` reference in this module loads and caches the real
+# module in globals; ``warm_litellm()`` lets startup pay the cost in
+# a background thread instead. Tests patching
+# ``litellm_provider.litellm.acompletion`` still land on the real
+# module object; inside this module, call sites bind
+# ``litellm = _load_litellm()`` locally as their first step.
+
+
+def _load_litellm():
+    import litellm as real
+
+    # Suppress litellm's noisy debug logs in production.
+    real.suppress_debug_info = True
+    real.set_verbose = False
+    globals()["litellm"] = real
+    return real
+
+
+def __getattr__(name: str):
+    if name == "litellm":
+        return _load_litellm()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def warm_litellm() -> None:
+    """Force the deferred litellm import (background startup warm-up)."""
+    _load_litellm()
 
 # ---------------------------------------------------------------------------
 # LiteLLM model-name mapping
@@ -417,6 +445,7 @@ class LiteLLMProvider(BaseProvider):
         Logs NODE_FALLBACK_TRIGGERED (distinct from task-level FALLBACK_TRIGGERED)
         when a fallback model succeeds.
         """
+        litellm = _load_litellm()  # Epic 9: deferred import, bound locally
         # Build the list of models to try: primary first, then fallbacks
         # Each entry is a tuple of (model_string, api_key, base_url, provider_name)
         models_to_try: list[tuple] = [
@@ -673,6 +702,8 @@ async def validate_api_key(
     the bound holds even if LiteLLM drops or ignores the kwarg for a provider.
     """
     import time
+
+    litellm = _load_litellm()  # Epic 9: deferred import, bound locally
 
     # Pick a cheap model for the validation ping
     if not model:
