@@ -222,4 +222,12 @@ describe('SettingsPanel tool policy dropdown (Phase 10.3 C2)', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SettingsPanel.jsx'), 'utf8');
     expect(source).not.toContain('default_unset');
   });
+
+  it('switches to Workspace Indexing tab when clicked', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Workspace Indexing'));
+    expect(screen.getByRole('heading', { level: 2, name: 'Workspace Indexing' })).toBeInTheDocument();
+  });
 });

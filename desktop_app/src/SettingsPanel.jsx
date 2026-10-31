@@ -6,6 +6,7 @@ import './chat.css';
 import ProviderSettings from './components/Settings/ProviderSettings';
 import MemoryManagement from './components/Settings/MemoryManagement';
 import DiagnosticsPanel from './components/Settings/DiagnosticsPanel';
+import WorkspaceIndexingPanel from './components/Settings/WorkspaceIndexingPanel';
 
 export default function SettingsPanel({ wsRef, providers = [], providerHealth = {}, localModels = [], activeSession = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
@@ -478,6 +479,7 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
     { keywords: 'mcp servers tools resources prompts', id: 'MCP', icon: <Server size={18} />, label: 'MCP Servers' },
     { keywords: 'plugins install enable disable', id: 'Plugins', icon: <Plug size={18} />, label: 'Plugins' },
     { keywords: 'skills slash commands enable disable', id: 'Skills', icon: <Box size={18} />, label: 'Skills' },
+    { keywords: 'workspace indexing rag prose embedder files pause resume search watcher exclusions', id: 'WorkspaceIndexing', icon: <Layers size={18} />, label: 'Workspace Indexing' },
     { keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
     { keywords: 'capabilities diagnostics environment scheduler', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
     { keywords: 'advanced routing fallbacks reset defaults developer', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' }
@@ -1008,6 +1010,10 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
 
         {activeMenu === 'Memory' && (
           <MemoryManagement />
+        )}
+
+        {activeMenu === 'WorkspaceIndexing' && (
+          <WorkspaceIndexingPanel wsRef={wsRef} />
         )}
 
         {activeMenu === 'Advanced' && (

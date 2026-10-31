@@ -477,10 +477,16 @@ class ProseIndexer:
             status = "indexing"
         else:
             status = "idle"
+        indexed_docs = [
+            {"file_path": d["file_path"], "file_size": d["file_size"], "status": d["status"]}
+            for d in (self.store.list_documents(root_s) if root is not None else self.store.list_documents(None))
+            if d["status"] in ("indexed", "pending")
+        ]
         return {
             "status": status,
             "total_files": counts["total_files"],
             "indexed_files": counts["indexed_files"],
+            "indexed_docs": indexed_docs,
             "excluded_files": excluded,
             "total_chunks": counts["total_chunks"],
             "embedder": self.embedder,
@@ -495,6 +501,13 @@ class ProseIndexer:
         }
         for entry in self._last_excluded.get(root_s, []):
             by_path[entry["file_path"]] = entry
+        if not by_path and Path(root_s).is_dir():
+            scan = scan_workspace(root_s)
+            self._last_excluded[root_s] = [
+                {"file_path": e.rel_path, "reason": e.reason} for e in scan.excluded
+            ]
+            for entry in self._last_excluded[root_s]:
+                by_path[entry["file_path"]] = entry
         return [by_path[k] for k in sorted(by_path)]
 
     # -- watcher -----------------------------------------------------------

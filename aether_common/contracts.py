@@ -315,15 +315,21 @@ class EventType(str, Enum):
     WORKSPACE_SET_ACTIVE_REQUEST = "WORKSPACE_SET_ACTIVE_REQUEST"
     WORKSPACE_SET_ACTIVE_RESPONSE = "WORKSPACE_SET_ACTIVE_RESPONSE"
 
-    # Workspace RAG prose index (Epic 8, E8-3.2): consent-first
+    # Workspace RAG prose index (Epic 8, E8-3.2, E8-3.3): consent-first
     # indexing lifecycle. START without confirm answers with the
     # estimate + embedder + destination (the consent preview); with
     # confirm it starts indexing and pushes PROGRESS events.
+    # PAUSE toggles incremental watching; CONFIG switches embedder
+    # and requires full re-index.
     WORKSPACE_INDEX_START_REQUEST = "WORKSPACE_INDEX_START_REQUEST"
     WORKSPACE_INDEX_START_RESPONSE = "WORKSPACE_INDEX_START_RESPONSE"
     WORKSPACE_INDEX_STATUS_REQUEST = "WORKSPACE_INDEX_STATUS_REQUEST"
     WORKSPACE_INDEX_STATUS_RESPONSE = "WORKSPACE_INDEX_STATUS_RESPONSE"
     WORKSPACE_INDEX_PROGRESS = "WORKSPACE_INDEX_PROGRESS"
+    WORKSPACE_INDEX_PAUSE_REQUEST = "WORKSPACE_INDEX_PAUSE_REQUEST"
+    WORKSPACE_INDEX_PAUSE_RESPONSE = "WORKSPACE_INDEX_PAUSE_RESPONSE"
+    WORKSPACE_INDEX_CONFIG_REQUEST = "WORKSPACE_INDEX_CONFIG_REQUEST"
+    WORKSPACE_INDEX_CONFIG_RESPONSE = "WORKSPACE_INDEX_CONFIG_RESPONSE"
 
     # Browser core (Epic 8, E8-6.1): dedicated-profile agent
     # browser. BROWSER_TASK_PAUSE_REQUEST is the browser control

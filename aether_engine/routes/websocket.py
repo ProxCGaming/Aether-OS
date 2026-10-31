@@ -3080,6 +3080,40 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     payload=status_payload,
                 ).to_json())
 
+            elif msg.type == EventType.WORKSPACE_INDEX_PAUSE_REQUEST:
+                from aether_engine.rag.prose_indexer import get_prose_indexer
+
+                indexer = get_prose_indexer()
+                pause = bool(msg.payload.get("pause", False))
+                if pause:
+                    indexer.pause()
+                else:
+                    indexer.resume()
+                await ws.send_text(Event(
+                    type=EventType.WORKSPACE_INDEX_PAUSE_RESPONSE,
+                    request_id=req_id,
+                    payload={"paused": indexer.paused},
+                ).to_json())
+
+            elif msg.type == EventType.WORKSPACE_INDEX_CONFIG_REQUEST:
+                from aether_engine.rag.prose_indexer import get_prose_indexer
+
+                indexer = get_prose_indexer()
+                req_embedder = msg.payload.get("embedder")
+                old_embedder = indexer.embedder
+                reindex_required = False
+                if req_embedder and req_embedder != old_embedder:
+                    reindex_required = True
+                    await asyncio.to_thread(indexer.set_embedder, req_embedder)
+                    if hasattr(engine_state, "user_config") and engine_state.user_config:
+                        engine_state.user_config.embedding_model = req_embedder
+                        save_config(engine_state.user_config)
+                await ws.send_text(Event(
+                    type=EventType.WORKSPACE_INDEX_CONFIG_RESPONSE,
+                    request_id=req_id,
+                    payload={"ok": True, "reindex_required": reindex_required},
+                ).to_json())
+
             elif msg.type == EventType.WORKSPACE_SET_ACTIVE_REQUEST:
                 # Epic 6, E6-04: the active workspace is the first
                 # root (containment, skills, and task defaults all
