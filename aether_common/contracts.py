@@ -176,6 +176,11 @@ class EventType(str, Enum):
     MEDIA_METADATA_UPDATE_REQUEST = "MEDIA_METADATA_UPDATE_REQUEST"
     MEDIA_METADATA_UPDATE_RESPONSE = "MEDIA_METADATA_UPDATE_RESPONSE"
     MEDIA_RECORDED = "MEDIA_RECORDED"
+    # Epic 8, E8-4.3: background media analysis pushes. PROGRESS
+    # payload: {"media_id", "status", ...} as analysis starts/fails;
+    # ANALYZED payload: the full updated media item dict.
+    MEDIA_ANALYSIS_PROGRESS = "MEDIA_ANALYSIS_PROGRESS"
+    MEDIA_ANALYZED = "MEDIA_ANALYZED"
     # Epic 1, E1-16: model thinking, streamed apart from the answer
     THINKING = "THINKING"
     # Epic 1, E1-17: agent scratchpad content for the display-only panel

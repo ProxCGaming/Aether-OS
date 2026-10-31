@@ -284,6 +284,12 @@ def build_tool_registry(
     from aether_engine.tools.workspace_search import create_workspace_search_tool
 
     registry.register(create_workspace_search_tool())
+    # Epic 8, E8-4.3: content-based recall over the media index
+    # (media/). READ_ONLY and self-limiting — with no analysed
+    # media it answers "no matches" instead of failing.
+    from aether_engine.tools.media_recall import create_media_recall_tool
+
+    registry.register(create_media_recall_tool())
     if include_file_tools:
         for tool in create_file_tools():
             registry.register(tool)

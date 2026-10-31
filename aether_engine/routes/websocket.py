@@ -332,6 +332,14 @@ async def _register_message_attachments(
                             ).to_json())
                         except Exception:  # noqa: BLE001, S110
                             pass
+                    # Epic 8, E8-4.3: analyse on arrival — detached
+                    # background task, never blocks the message flow.
+                    try:
+                        from aether_engine.media.analyzer import schedule_media_analysis
+
+                        schedule_media_analysis(item["id"])
+                    except Exception:  # noqa: BLE001, S110
+                        pass
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Failed to auto-register message attachments into MediaStore: {e}")
 

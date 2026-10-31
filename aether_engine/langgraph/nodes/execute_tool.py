@@ -260,6 +260,16 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                                             payload=med_item,
                                         ),
                                     )
+                                # Epic 8, E8-4.3: analyse on arrival —
+                                # detached, never blocks the tool call.
+                                try:
+                                    from aether_engine.media.analyzer import (
+                                        schedule_media_analysis,
+                                    )
+
+                                    schedule_media_analysis(med_item["id"])
+                                except Exception:  # noqa: BLE001, S110
+                                    pass
                             except Exception:
                                 logger.exception("Failed to auto-register generated media into MediaStore")
                 except Exception:

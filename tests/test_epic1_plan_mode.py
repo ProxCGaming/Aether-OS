@@ -72,6 +72,9 @@ async def test_plan_mode_offers_only_read_only_tools(monkeypatch):
         # Epic 8, E8-3.2: workspace_search is READ_ONLY prose
         # retrieval, so plan mode offers it like the other readers.
         "workspace_search",
+        # Epic 8, E8-4.3: media_recall is READ_ONLY media-index
+        # retrieval, offered on the same basis.
+        "media_recall",
     }
 
 

@@ -65,6 +65,17 @@ async def lifespan(_app: FastAPI):
     except Exception as e:  # noqa: BLE001 — startup boundary: backfill is best-effort and must never block engine startup
         logger.warning(f"Episodic embedding backfill failed to start: {e}")
 
+    # Epic 8, E8-4.3: backfill analysis for media registered before
+    # the analysis pipeline shipped (or left unanalysed while the
+    # vision model was unavailable). Detached and best-effort, same
+    # pattern as the episodic backfill above — startup never waits.
+    try:
+        from aether_engine.media.analyzer import schedule_media_backfill
+
+        schedule_media_backfill()
+    except Exception as e:  # noqa: BLE001 — startup boundary: media backfill is best-effort and must never block engine startup
+        logger.warning(f"Media analysis backfill failed to start: {e}")
+
     # Run background model discovery for configured providers on startup
     secret_store = SecretStore()
     stored = set(secret_store.list_providers())

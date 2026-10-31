@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import mimetypes
 import os
+import pickle
+import re
 import sqlite3
 import time
 import uuid
@@ -21,6 +24,31 @@ _DEFAULT_DB_PATH = Path.home() / ".aether" / "media.db"
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".tiff", ".ico"}
 _VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".flv", ".wmv", ".m4v"}
+
+# Epic 8, E8-4.3: hybrid recall ranking mirrors episodic memory /
+# workspace search — a lexical leg and a semantic leg merged with
+# RRF. The semantic leg only admits cosine >= 0.3, the same floor
+# episodic recall uses (EPISODIC_SIMILARITY_THRESHOLD): with the
+# unified embedder, genuinely related media scores well above it
+# while unrelated items stay below.
+MEDIA_SIMILARITY_THRESHOLD = 0.3
+_RRF_K = 60
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokens(text: str) -> list[str]:
+    return _TOKEN_RE.findall((text or "").lower())
+
+
+def _cosine(vec1: list[float], vec2: list[float]) -> float:
+    if not vec1 or not vec2 or len(vec1) != len(vec2):
+        return 0.0
+    dot = sum(a * b for a, b in zip(vec1, vec2))
+    n1 = math.sqrt(sum(a * a for a in vec1))
+    n2 = math.sqrt(sum(b * b for b in vec2))
+    if n1 == 0.0 or n2 == 0.0:
+        return 0.0
+    return dot / (n1 * n2)
 
 
 class MediaStore:
@@ -308,6 +336,194 @@ class MediaStore:
             "tags": item.get("tags", []),
             "notes": item.get("user_notes", ""),
         }
+
+    # ------------------------------------------------------------------
+    # Epic 8, E8-4.3: analysis results, embeddings, and hybrid recall.
+    # The media_embeddings table itself was created by E8-4.2 as the
+    # seam for this slice.
+    # ------------------------------------------------------------------
+
+    def store_embedding(self, media_id: str, embedding: list[float]) -> None:
+        """Persist (or replace) the metadata embedding for a media item."""
+        self.init_db()
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO media_embeddings (media_id, embedding) VALUES (?, ?)",
+                (media_id, pickle.dumps([float(x) for x in embedding])),
+            )
+            conn.commit()
+
+    def get_embedding(self, media_id: str) -> list[float] | None:
+        """Fetch the stored embedding for a media item, or None."""
+        self.init_db()
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT embedding FROM media_embeddings WHERE media_id = ?", (media_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            try:
+                vec = pickle.loads(row[0])
+            except Exception:  # noqa: BLE001 — a corrupt blob reads as "no embedding"
+                return None
+            return [float(x) for x in vec]
+
+    def update_analysis(
+        self,
+        media_id: str,
+        status: str | None = None,
+        summary_text: str | None = None,
+        tags: list[str] | None = None,
+        probe_metadata: dict[str, Any] | None = None,
+        analyzed_at: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Apply analysis outcome fields to a media item.
+
+        Only the fields passed are written; returns the refreshed
+        item dict (or None when the id is unknown).
+        """
+        self.init_db()
+        updates: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        if summary_text is not None:
+            updates.append("summary_text = ?")
+            params.append(summary_text)
+        if tags is not None:
+            updates.append("tags_json = ?")
+            params.append(json.dumps(list(tags)))
+        if probe_metadata is not None:
+            updates.append("probe_metadata_json = ?")
+            params.append(json.dumps(probe_metadata))
+        if analyzed_at is not None:
+            updates.append("analyzed_at = ?")
+            params.append(analyzed_at)
+        if updates:
+            params.append(media_id)
+            with self._get_conn() as conn:
+                conn.execute(
+                    f"UPDATE media_items SET {', '.join(updates)} WHERE id = ?",
+                    params,
+                )
+                conn.commit()
+        return self.get_media(media_id)
+
+    def list_by_status(
+        self,
+        statuses: list[str] | tuple[str, ...],
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """List media items whose status is in ``statuses``, oldest first."""
+        self.init_db()
+        if not statuses:
+            return []
+        placeholders = ", ".join("?" for _ in statuses)
+        sql = (
+            f"SELECT * FROM media_items WHERE status IN ({placeholders}) "
+            "ORDER BY created_at ASC"
+        )
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(sql, list(statuses))
+            return [self._row_to_dict(r) for r in cur.fetchall()]
+
+    def _embeddings_for(self, media_ids: list[str]) -> dict[str, list[float]]:
+        if not media_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in media_ids)
+        out: dict[str, list[float]] = {}
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT media_id, embedding FROM media_embeddings WHERE media_id IN ({placeholders})",
+                media_ids,
+            )
+            for media_id, blob in cur.fetchall():
+                try:
+                    out[media_id] = [float(x) for x in pickle.loads(blob)]
+                except Exception:  # noqa: BLE001 — skip corrupt blobs
+                    logger.debug(f"Skipping corrupt embedding blob for {media_id}")
+                    continue
+        return out
+
+    def search_media(
+        self,
+        query: str = "",
+        query_vec: list[float] | None = None,
+        limit: int = 10,
+        collection: str = "all",
+    ) -> list[dict[str, Any]]:
+        """Hybrid recall over the media index (E8-4.3).
+
+        A lexical leg (distinct query tokens found in the summary,
+        tags, notes, or file name) and — when ``query_vec`` is given —
+        a semantic leg (cosine over stored metadata embeddings,
+        floored at MEDIA_SIMILARITY_THRESHOLD) are merged with RRF,
+        the same ranking shape as episodic recall and workspace
+        search. Returned dicts are full media items plus ``score``.
+        With no query vector the lexical leg alone answers, which is
+        how recall degrades while the embedding endpoint is down.
+        """
+        self.init_db()
+        limit = max(1, int(limit or 10))
+        candidates, _total = self.list_media(collection=collection, limit=None)
+        if not candidates:
+            return []
+
+        query_tokens = set(_tokens(query))
+
+        def _lexical_text(item: dict[str, Any]) -> str:
+            return " ".join([
+                item.get("summary_text") or "",
+                " ".join(item.get("tags") or []),
+                item.get("user_notes") or "",
+                Path(item.get("file_path") or "").name,
+            ])
+
+        lexical_ranked = sorted(
+            (it for it in candidates
+             if query_tokens and len(query_tokens & set(_tokens(_lexical_text(it)))) > 0),
+            key=lambda it: (
+                -len(query_tokens & set(_tokens(_lexical_text(it)))),
+                it.get("created_at") or 0,
+            ),
+        )
+
+        semantic_ranked: list[dict[str, Any]] = []
+        if query_vec is not None:
+            embeddings = self._embeddings_for([it["id"] for it in candidates])
+            scored = []
+            for it in candidates:
+                emb = embeddings.get(it["id"])
+                if emb is None:
+                    continue
+                sim = _cosine(query_vec, emb)
+                if sim >= MEDIA_SIMILARITY_THRESHOLD:
+                    scored.append((sim, it))
+            semantic_ranked = [
+                it for _sim, it in sorted(
+                    scored, key=lambda p: (-p[0], p[1].get("created_at") or 0))
+            ]
+
+        merged: dict[str, dict[str, Any]] = {}
+        for leg in (lexical_ranked, semantic_ranked):
+            for rank, it in enumerate(leg):
+                entry = merged.setdefault(it["id"], {"item": it, "score": 0.0})
+                entry["score"] += 1.0 / (_RRF_K + rank + 1)
+        ordered = sorted(
+            merged.values(),
+            key=lambda e: (-e["score"], e["item"].get("created_at") or 0),
+        )
+        results: list[dict[str, Any]] = []
+        for entry in ordered[:limit]:
+            item = dict(entry["item"])
+            item["score"] = entry["score"]
+            results.append(item)
+        return results
 
     def delete_media(self, media_id: str, delete_underlying_file: bool = False) -> tuple[bool, bool]:
         """Delete media entry and embedding from database.
