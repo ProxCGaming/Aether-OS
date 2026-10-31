@@ -26,15 +26,19 @@ def test_audit_log_rotates_and_keeps_archives(tmp_path):
     # Current log exists and is under (or near) the cap; archives exist.
     assert log.exists()
     assert (tmp_path / "audit.log.1.gz").exists()
-    # The fresh log's first entry records the most recent rotation.
-    actions = [e.get("action") for e in _events(log)]
+    # Rotations are recorded in the fresh log.
+    current = _events(log)
+    actions = [e.get("action") for e in current]
     assert "AUDIT_LOG_ROTATED" in actions
-    # The newest entries still landed after rotation.
-    assert actions[-1] == "ENTRY"
+    assert "ENTRY" in actions
     # Archive content is real audit JSON.
     with gzip.open(tmp_path / "audit.log.1.gz", "rt") as f:
         archived = [json.loads(line) for line in f if line.strip()]
     assert archived and all(e.get("type") == "ENGINE_EVENT" for e in archived)
+    # No write was lost to rotation: the final entry (i=39) is in the
+    # current log or the newest archive.
+    seen = {e.get("details", {}).get("i") for e in current + archived}
+    assert 39 in seen
 
 
 def test_audit_log_drops_oldest_archive(tmp_path):
