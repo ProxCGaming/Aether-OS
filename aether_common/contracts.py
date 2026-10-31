@@ -148,6 +148,18 @@ class EventType(str, Enum):
     ARTIFACT_GET_REQUEST = "ARTIFACT_GET_REQUEST"
     ARTIFACT_GET_RESPONSE = "ARTIFACT_GET_RESPONSE"
     ARTIFACT_RECORDED = "ARTIFACT_RECORDED"
+    # Epic 8, E8-A8.1a: cost ledger query + live per-call cost push.
+    # USAGE_LEDGER_QUERY_RESPONSE payload: {"entries": [...],
+    # "totals": {"total_cost_usd", "input_tokens", "output_tokens",
+    # "by_model", "by_agent"}} — totals aggregate the returned
+    # entries. TASK_COST_UPDATE is an outbound push per recorded call:
+    # {"session_id", "task_id", "delta_cost_usd",
+    # "task_total_cost_usd", "input_tokens", "output_tokens",
+    # "model"}. The context-breakdown and daily-budget contracts
+    # arrive with E8-A8.1b, which owns those surfaces.
+    USAGE_LEDGER_QUERY_REQUEST = "USAGE_LEDGER_QUERY_REQUEST"
+    USAGE_LEDGER_QUERY_RESPONSE = "USAGE_LEDGER_QUERY_RESPONSE"
+    TASK_COST_UPDATE = "TASK_COST_UPDATE"
     # Epic 1, E1-16: model thinking, streamed apart from the answer
     THINKING = "THINKING"
     # Epic 1, E1-17: agent scratchpad content for the display-only panel

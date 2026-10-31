@@ -22,6 +22,7 @@ from aether_engine.config import (
     UserConfig,
     save_config,
 )
+from aether_engine.cost.ledger import reset_usage_context, set_usage_context
 from aether_engine.langgraph.checkpointer import delete_thread_checkpoints
 from aether_engine.langgraph.executor import (
     get_pending_approvals,
@@ -417,6 +418,12 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
         event is delivered as before. The resume path passes no
         factory: a resumed task has history, so §6.4 forbids it.
         """
+        # Epic 8, E8-A8.1a: attribute the provider calls made while
+        # this task streams to the usage ledger. The session is known
+        # now; the task id is refined in the event loop below, once
+        # TASK_CREATED flows past. Reset when the pump finishes so a
+        # later task on this connection starts clean.
+        usage_token = set_usage_context(session_id=session_id)
         try:
             attempt = 0
             current_reason = routing_reason
@@ -429,6 +436,18 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 task_prompt: str | None = None
 
                 async for ev in generator:
+                    # Epic 8, E8-A8.1a: keep the usage attribution
+                    # current — provider calls record against the
+                    # task id as soon as any event names it
+                    # (TASK_CREATED is always first for fresh tasks).
+                    if isinstance(ev.payload, dict):
+                        _ev_task_id = ev.payload.get("task_id")
+                        if _ev_task_id:
+                            set_usage_context(task_id=_ev_task_id)
+                        if ev.type == EventType.TASK_CREATED:
+                            set_usage_context(
+                                task_class=ev.payload.get("path")
+                                or ev.payload.get("task_class"))
                     if ev.type in (EventType.TOOL_ACTIVITY, EventType.TOOL_APPROVAL_REQUEST):
                         saw_tool_activity = True
                     if ev.type == EventType.TASK_CREATED:
@@ -541,6 +560,8 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 ).to_json())
             except Exception:  # the socket is already broken; nothing further can be signalled
                 logger.debug("Could not send task error event to client", exc_info=True)
+        finally:
+            reset_usage_context(usage_token)
 
     try:
         while True:
@@ -1596,6 +1617,24 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 result = await handle_artifact_get(art_id)
                 await ws.send_text(Event(
                     type=EventType.ARTIFACT_GET_RESPONSE,
+                    request_id=req_id,
+                    payload=result,
+                ).to_json())
+
+            elif msg.type == EventType.USAGE_LEDGER_QUERY_REQUEST:
+                # Epic 8, E8-A8.1a: the header cost popover and (with
+                # E8-A8.1b) Settings → Usage read the ledger here.
+                from aether_engine.cost.ledger import get_usage_ledger
+
+                result = await asyncio.to_thread(
+                    get_usage_ledger().query,
+                    session_id=msg.payload.get("session_id"),
+                    task_id=msg.payload.get("task_id"),
+                    start_ts=msg.payload.get("start_ts"),
+                    end_ts=msg.payload.get("end_ts"),
+                )
+                await ws.send_text(Event(
+                    type=EventType.USAGE_LEDGER_QUERY_RESPONSE,
                     request_id=req_id,
                     payload=result,
                 ).to_json())

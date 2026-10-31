@@ -14,6 +14,7 @@ import Onboarding from './components/Onboarding';
 import CommandPalette from './components/CommandPalette';
 import ArtifactsCanvas from './components/ArtifactsCanvas';
 import GlobalArtifactsView from './components/GlobalArtifactsView';
+import { groupEntriesByTask } from './components/CostHeaderPopover';
 import RewindConfirmModal from './components/RewindConfirmModal';
 import './chat.css';
 
@@ -234,6 +235,30 @@ function AppContent() {
   const [selectedArtifactId, setSelectedArtifactId] = useState(null);
   const [activeArtifactContent, setActiveArtifactContent] = useState(null);
   const importFileInputRef = useRef(null);
+  // Epic 8, E8-A8.1a: cost ledger surfaces. costTasks is the
+  // popover's per-task/per-model shape, built from ledger rows
+  // (USAGE_LEDGER_QUERY_RESPONSE) and kept live by TASK_COST_UPDATE
+  // pushes; the header total is their sum, so it always reconciles
+  // with what the popover shows.
+  const [costTasks, setCostTasks] = useState([]);
+  const [lastCostTaskId, setLastCostTaskId] = useState(null);
+  const sessionCostUsd = costTasks.reduce((sum, t) => sum + (t.cost_usd || 0), 0);
+  const runningCostTaskIds = isThinking && lastCostTaskId ? [lastCostTaskId] : [];
+
+  // Takes the session explicitly (or reads the ref) because the
+  // engine-message handler is registered once and must not close
+  // over render-scoped state — the requestRewindManifest pattern.
+  const requestCostBreakdown = useCallback((sessionId) => {
+    const target = sessionId || activeSessionRef.current;
+    if (target && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'USAGE_LEDGER_QUERY_REQUEST',
+        schema_version: 1,
+        request_id: `session_cost_${target}_${Date.now()}`,
+        payload: { session_id: target }
+      }));
+    }
+  }, [wsRef]);
   
   useEffect(() => {
     if (isFloating) {
@@ -535,6 +560,10 @@ function AppContent() {
           setIsThinking(false);
           // E8-1.1a: the finished task's manifest is complete now.
           requestRewindManifest(data.payload?.session_id || activeTaskSessionRef.current || activeSessionRef.current);
+          // E8-A8.1a: reconcile the cost surfaces with the ledger
+          // now the task's calls are all recorded (also covers the
+          // fast-chat path, whose calls publish no live bus events).
+          requestCostBreakdown(data.payload?.session_id || activeSessionRef.current);
           // Remove from active tasks for Dashboard
           if (data.payload?.task_id || data.request_id) {
             setActiveTaskIds(prev => { const next = new Set(prev); next.delete(data.payload?.task_id || data.request_id); return next; });
@@ -983,6 +1012,49 @@ function AppContent() {
           }
         } else if (data.type === 'ARTIFACT_GET_RESPONSE') {
           setActiveArtifactContent(data.payload);
+        } else if (data.type === 'USAGE_LEDGER_QUERY_RESPONSE') {
+          // Epic 8, E8-A8.1a: rebuild the cost surfaces from the
+          // ledger rows themselves, so the header total and the
+          // popover always reconcile with the recorded calls.
+          setCostTasks(groupEntriesByTask(data.payload?.entries || []));
+        } else if (data.type === 'TASK_COST_UPDATE') {
+          // Epic 8, E8-A8.1a: live tick. The engine read these
+          // figures back from the ledger row it just recorded, so
+          // merging them keeps the header in step with usage.db.
+          const p = data.payload || {};
+          if (p.session_id && p.session_id === activeSessionRef.current) {
+            setLastCostTaskId(p.task_id);
+            setCostTasks(prev => {
+              const existing = prev.find(t => t.task_id === p.task_id);
+              const base = existing || {
+                task_id: p.task_id, cost_usd: 0, input_tokens: 0,
+                output_tokens: 0, last_ts: 0, by_model: {},
+              };
+              const byModel = { ...base.by_model };
+              const model = { ...(byModel[p.model] || {
+                cost_usd: 0, input_tokens: 0, output_tokens: 0,
+                calls: 0, is_local: false, unpriced: false,
+              }) };
+              model.cost_usd += p.delta_cost_usd || 0;
+              model.input_tokens += p.input_tokens || 0;
+              model.output_tokens += p.output_tokens || 0;
+              model.calls += 1;
+              if (p.is_local) model.is_local = true;
+              if (p.pricing_status === 'unpriced') model.unpriced = true;
+              byModel[p.model] = model;
+              const updated = {
+                ...base,
+                cost_usd: typeof p.task_total_cost_usd === 'number'
+                  ? p.task_total_cost_usd
+                  : base.cost_usd + (p.delta_cost_usd || 0),
+                input_tokens: base.input_tokens + (p.input_tokens || 0),
+                output_tokens: base.output_tokens + (p.output_tokens || 0),
+                last_ts: Date.now() / 1000,
+                by_model: byModel,
+              };
+              return [updated, ...prev.filter(t => t.task_id !== p.task_id)];
+            });
+          }
         } else if (data.type === 'ERROR') {
           setIsThinking(false);
           setChatMessages(prev => {
@@ -1132,6 +1204,13 @@ function AppContent() {
       setActiveArtifactContent(null);
     }
   }, [activeSession, isConnected, wsRef]);
+
+  // Epic 8, E8-A8.1a: sync the cost surfaces when the session changes
+  useEffect(() => {
+    setCostTasks([]);
+    setLastCostTaskId(null);
+    requestCostBreakdown();
+  }, [activeSession, isConnected, requestCostBreakdown]);
 
   const handleToggleCanvas = useCallback(() => {
     setIsCanvasOpen(prev => {
@@ -1998,6 +2077,10 @@ function AppContent() {
           isCanvasOpen={isCanvasOpen}
           onToggleCanvas={handleToggleCanvas}
           onOpenArtifact={handleOpenArtifact}
+          sessionCostUsd={sessionCostUsd}
+          costTasks={costTasks}
+          runningCostTaskIds={runningCostTaskIds}
+          onRequestCostBreakdown={requestCostBreakdown}
         />
       )}
 

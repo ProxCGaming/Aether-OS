@@ -493,8 +493,18 @@ class LiteLLMProvider(BaseProvider):
                 response = await litellm.acompletion(**kwargs)
 
                 accumulated_tool_calls: dict[int, dict[str, Any]] = {}
+                # Epic 8, E8-A8.1a: per-attempt usage capture for the
+                # cost ledger. Providers report token usage on the
+                # stream's chunks (typically the last one); text is
+                # accumulated only so token counts can be estimated —
+                # and labelled estimated — when none are reported.
+                call_usage: tuple[int, int] | None = None
+                call_text_parts: list[str] = []
 
                 async for chunk in response:
+                    parsed_usage = _parse_usage(getattr(chunk, "usage", None))
+                    if parsed_usage is not None:
+                        call_usage = parsed_usage
                     delta = chunk.choices[0].delta if chunk.choices else None
                     finish_reason = chunk.choices[0].finish_reason if chunk.choices else None
 
@@ -531,6 +541,8 @@ class LiteLLMProvider(BaseProvider):
 
                     # Emit text chunks as they arrive (thinking rides
                     # along on its own field, never inside the text)
+                    if text:
+                        call_text_parts.append(text)
                     if text or thinking:
                         # Epic 7, E7-02: TTSR rules vet the text
                         # before it leaves the provider. A block rule
@@ -592,6 +604,18 @@ class LiteLLMProvider(BaseProvider):
                         f"NODE_FALLBACK_TRIGGERED: primary model '{self.litellm_model}' failed, "
                         f"succeeded with fallback model '{current_model}'"
                     )
+                # Epic 8, E8-A8.1a: one ledger row per completed
+                # call, attributed to the model that actually ran
+                # (the fallback's own id when a fallback succeeded).
+                self._record_usage(
+                    model_name=self.model if model_idx == 0 else current_model,
+                    pricing_model=current_model,
+                    provider_name=current_provider,
+                    usage=call_usage,
+                    messages=messages,
+                    output_text="".join(call_text_parts),
+                    node_name=node_name,
+                )
                 return  # Success — exit the retry loop
 
             except litellm.AuthenticationError as e:
@@ -675,6 +699,37 @@ class LiteLLMProvider(BaseProvider):
         # All models exhausted
         if last_error:
             raise NetworkError(f"All models failed. Last error: {last_error}") from last_error
+
+    def _record_usage(
+        self,
+        *,
+        model_name: str,
+        pricing_model: str,
+        provider_name: str,
+        usage: tuple[int, int] | None,
+        messages: list[dict[str, Any]],
+        output_text: str,
+        node_name: str | None,
+    ) -> None:
+        """Epic 8, E8-A8.1a: record one completed call in the usage
+        ledger (see aether_engine.cost.ledger). Observational only —
+        a recording failure must never break the call that produced
+        it, so this never raises."""
+        try:
+            from aether_engine.cost.ledger import record_provider_call
+
+            record_provider_call(
+                model_name=model_name,
+                pricing_model=pricing_model,
+                provider_name=provider_name,
+                input_tokens=usage[0] if usage else None,
+                output_tokens=usage[1] if usage else None,
+                agent_name=node_name,
+                messages=messages,
+                output_text=output_text,
+            )
+        except Exception:  # usage recording is observational only.
+            logger.debug("Usage recording failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +827,35 @@ async def validate_api_key(
         }
     except Exception as e:  # noqa: BLE001 — validation boundary: any provider failure becomes a structured network_error result, never a crash.
         return {"status": "network_error", "message": f"Validation failed: {e}", "code": None}
+
+
+# ---------------------------------------------------------------------------
+# Usage helpers (Epic 8, E8-A8.1a)
+# ---------------------------------------------------------------------------
+
+
+def _usage_value(usage: Any, *names: str) -> int | None:
+    for name in names:
+        value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _parse_usage(usage: Any) -> tuple[int, int] | None:
+    """Extract (input_tokens, output_tokens) from a LiteLLM usage
+    payload (object or dict; providers spell the fields both ways).
+    Returns None when the payload carries no token counts at all."""
+    if usage is None:
+        return None
+    input_tokens = _usage_value(usage, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_value(usage, "completion_tokens", "output_tokens")
+    if input_tokens is None and output_tokens is None:
+        return None
+    return (input_tokens or 0, output_tokens or 0)
 
 
 # ---------------------------------------------------------------------------

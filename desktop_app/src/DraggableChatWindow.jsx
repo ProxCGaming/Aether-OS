@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download, MoreHorizontal } from 'lucide-react';
+import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download, MoreHorizontal, CircleDollarSign } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
 import UndoToast from './components/UndoToast';
-import SnipOverlay from './components/SnipOverlay';
+import SnipOverlay from './components/SnipOverlay';
+import CostHeaderPopover, { formatUsd } from './components/CostHeaderPopover';
 import './chat.css';
 
 export function getNodeStyle(nodeName = '') {
@@ -1193,12 +1194,18 @@ export default function DraggableChatWindow({
   onToggleCanvas = () => {},
   onOpenArtifact = () => {},
   onTriggerSnip,
-  initialAttachments = []
+  initialAttachments = [],
+  sessionCostUsd = 0,
+  costTasks = [],
+  runningCostTaskIds = [],
+  onRequestCostBreakdown = () => {}
 }) {
   const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportMenuRef = useRef(null);
+  const [showCostPopover, setShowCostPopover] = useState(false);
+  const costMenuRef = useRef(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [toastMessage, setToastMessage] = useState('');  // Epic 8, E8-1.3: per-approval argument editor state for the
   // inline approval cards, keyed by message id: { text, error }.
@@ -1283,12 +1290,16 @@ export default function DraggableChatWindow({
       setOpenStepMenu(null);
       if (exportMenuRef.current && !exportMenuRef.current.contains(e.target)) {
         setShowExportMenu(false);
+      if (costMenuRef.current && !costMenuRef.current.contains(e.target)) {
+        setShowCostPopover(false);
+      }
       }
     };
     const handleGlobalKeyDown = (e) => {
       if (e.key === 'Escape') {
         setContextMenu(null);
         setShowExportMenu(false);
+        setShowCostPopover(false);
       }
     };
     window.addEventListener('click', handleGlobalClick);
@@ -1554,6 +1565,43 @@ export default function DraggableChatWindow({
             </div>
           </div>
           <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+            {/* Cost Ledger (Epic 8, E8-A8.1a) */}
+            <div ref={costMenuRef} style={{ position: 'relative' }}>
+              <button
+                type="button"
+                data-testid="cost-header-btn"
+                onClick={() => {
+                  setShowCostPopover(prev => !prev);
+                  if (!showCostPopover) onRequestCostBreakdown();
+                }}
+                title="Session cost"
+                aria-label="Session cost"
+                style={{
+                  background: showCostPopover ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                  border: showCostPopover ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                  color: '#fff',
+                  cursor: 'pointer',
+                  padding: '6px 10px',
+                  borderRadius: '999px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'all 0.2s',
+                  fontSize: '12px',
+                  fontWeight: 500
+                }}
+              >
+                <CircleDollarSign size={14} />
+                <span data-testid="cost-header-total">{formatUsd(sessionCostUsd)}</span>
+              </button>
+              {showCostPopover && (
+                <CostHeaderPopover
+                  tasks={costTasks}
+                  totalCostUsd={sessionCostUsd}
+                  runningTaskIds={runningCostTaskIds}
+                />
+              )}
+            </div>
             {/* Artifacts Canvas Toggle (Epic 8, E8-2.1) */}
             <button
               type="button"
