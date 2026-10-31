@@ -156,6 +156,9 @@ class PlaywrightDriver:
     async def fill(self, selector: str, text: str) -> None:
         await self._page.fill(selector, text)
 
+    async def input_value(self, selector: str) -> str:
+        return str(await self._page.input_value(selector, timeout=5000))
+
     async def extract_text(self, selector: str | None = None) -> str:
         return await self._page.inner_text(selector or "body")
 
@@ -333,6 +336,26 @@ class BrowserSession:
         driver = await self._ensure_driver()
         await driver.fill(selector, text)
         return {"url": self.current_url}
+
+    async def field_value(self, selector: str) -> str:
+        """Read a form field's current value (agent state only).
+
+        Exists for exactly one caller: the credential vault's
+        agent-save flow (E8-6.3), which stores the password an agent
+        just created in a signup form. No tool exposes this — a
+        value read here goes into the vault, never into a
+        transcript. Driver failures are normalised to BrowserError.
+        """
+        self._require_agent()
+        driver = await self._ensure_driver()
+        try:
+            return str(await driver.input_value(selector))
+        except BrowserError:
+            raise
+        except Exception as exc:
+            raise BrowserError(
+                f"Could not read the field {selector!r}."
+            ) from exc
 
     async def extract(self, selector: str | None = None) -> str:
         self._require_agent()

@@ -1,6 +1,6 @@
 """Browser tools + CAPTCHA/2FA detection (Epic 8, E8-6.1).
 
-The four browser tools are ordinary :class:`Tool` entries: they are
+The browser tools are ordinary :class:`Tool` entries: they are
 registered in the one ToolRegistry, carry risk levels, and pass the
 same policy → pre-flight → hooks pipeline as every other tool
 (grill Q34 — browser actions are policy-checked like any risky
@@ -12,7 +12,17 @@ Risk levels: ``browser_extract`` only reads the page (READ_ONLY,
 like ``fetch_url``). ``browser_navigate`` / ``browser_click`` /
 ``browser_type`` change browser and page state — WRITE, so the
 default policy asks for approval; the per-category confirmation
-taxonomy that relaxes ordinary browsing arrives with E8-6.2.
+taxonomy that relaxes ordinary browsing arrived with E8-6.2.
+
+E8-6.3 adds the credential vault's two mediated tools.
+``browser_fill_login`` takes NO secret argument and returns no
+secret: the vault service checks the autofill toggle, binds the
+fill to the page's registrable domain, asks the owner first for
+ask-every-time entries, and types the password into the form
+itself. ``browser_save_login`` stores the credentials sitting in
+the current signup form as an agent-created entry for the owner's
+review. Neither tool can read a credential back, and no tool
+exists for TOTP secrets — agents never handle them.
 
 Detection (:func:`detect_challenge`) is deliberately simple marker
 matching over the URL, title and HTML: well-known CAPTCHA widgets
@@ -94,11 +104,44 @@ def _challenge_note(challenge: dict[str, Any] | None) -> str:
 
 def create_browser_tools(
     manager: BrowserSessionManager | None = None,
+    vault_service: Any = None,
 ) -> list[Tool]:
-    """The four browser tools, bound to *manager* (default: global)."""
+    """The browser tools, bound to *manager* (default: global).
+
+    ``vault_service`` binds the E8-6.3 vault tools to a specific
+    :class:`~aether_engine.vault.service.VaultFillService` (tests);
+    by default they resolve the process-wide service lazily, so
+    importing or registering the tools never touches the vault.
+    """
 
     def _manager() -> BrowserSessionManager:
         return manager if manager is not None else get_browser_manager()
+
+    def _vault_service() -> Any:
+        if vault_service is not None:
+            return vault_service
+        from aether_engine.vault.service import get_vault_service
+
+        return get_vault_service()
+
+    async def _fill_login(username: str | None = None) -> str:
+        session = _manager().get_or_create_active()
+        try:
+            result = await _vault_service().fill_login(
+                session, username=username)
+        except BrowserError as exc:
+            raise ToolExecutionError(str(exc)) from exc
+        # The result is a sentence with metadata only — the service
+        # guarantees the password is never in it.
+        return str(result["message"])
+
+    async def _save_login() -> str:
+        session = _manager().get_or_create_active()
+        try:
+            result = await _vault_service().save_login_from_page(session)
+        except BrowserError as exc:
+            raise ToolExecutionError(str(exc)) from exc
+        return str(result["message"])
 
     async def _navigate(url: str) -> str:
         session = _manager().get_or_create_active()
@@ -203,6 +246,50 @@ def create_browser_tools(
             },
             execute_fn=_extract,
             risk=ToolRisk.READ_ONLY,
+            source="browser",
+        ),
+        Tool(
+            name="browser_fill_login",
+            description=(
+                "Fill the current page's login form with the credential "
+                "the user saved for THIS site in their vault (Settings → "
+                "Password Vault). The password travels vault → form field "
+                "directly: you never see it, and you must never ask the "
+                "user to reveal it or type it with browser_type. Fills "
+                "only on the saved site itself (subdomains included; "
+                "lookalike domains are refused), only while vault "
+                "autofill is enabled, and entries marked ask-every-time "
+                "prompt the user before filling. If several usernames "
+                "are saved for the site, ask the user which one and "
+                "pass it as 'username'."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "username": {
+                        "type": "string",
+                        "description": "Optional: which saved username to use when the site has several",
+                    },
+                },
+            },
+            execute_fn=_fill_login,
+            risk=ToolRisk.WRITE,
+            source="browser",
+        ),
+        Tool(
+            name="browser_save_login",
+            description=(
+                "Save the username and password currently sitting in "
+                "this page's form (e.g. the account you just created in "
+                "a signup task) into the user's credential vault. The "
+                "entry is marked as added by an agent and waits in "
+                "Settings → Password Vault for the user's review. It "
+                "never overwrites an entry the user saved themselves, "
+                "and it cannot read credentials back out of the vault."
+            ),
+            input_schema={"type": "object", "properties": {}},
+            execute_fn=_save_login,
+            risk=ToolRisk.WRITE,
             source="browser",
         ),
     ]

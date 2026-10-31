@@ -377,6 +377,32 @@ class EventType(str, Enum):
     BROWSER_POLICY_SET_REQUEST = "BROWSER_POLICY_SET_REQUEST"
     BROWSER_POLICY_SET_RESPONSE = "BROWSER_POLICY_SET_RESPONSE"
 
+    # Credential vault (Epic 8 — E8-6.3). Entries live encrypted in
+    # ~/.aether/vault.db (the DPAPI / keychain BaseProtector, same as
+    # provider keys) and are bound to their site. Listing is METADATA
+    # ONLY — a password is never in any payload; retrieval is
+    # mediated by the engine's fill service (vault -> form field),
+    # never to the model. LIST_RESPONSE payload: {"entries":
+    # [{"id", "site", "username", "ask_every_time", "created_at": int,
+    # "created_by": "user"|"agent", "last_used_at": int|None}]}.
+    # SAVE_REQUEST payload: {"id": str|None, "site": str,
+    # "username": str, "password": str, "ask_every_time": bool,
+    # "totp_secret": str (optional; the owner's own manual use only —
+    # agents never receive TOTP secrets)}. SAVE_RESPONSE /
+    # DELETE_RESPONSE payloads: {"success": bool, "id": str}.
+    # VAULT_FILL_APPROVAL_REQUEST is an outbound push for an
+    # ask-every-time entry: {"request_id", "entry_id", "site",
+    # "username", "task_id"}; the desktop answers with
+    # VAULT_FILL_APPROVAL_RESPONSE {"request_id", "approved"}.
+    VAULT_ENTRY_LIST_REQUEST = "VAULT_ENTRY_LIST_REQUEST"
+    VAULT_ENTRY_LIST_RESPONSE = "VAULT_ENTRY_LIST_RESPONSE"
+    VAULT_ENTRY_SAVE_REQUEST = "VAULT_ENTRY_SAVE_REQUEST"
+    VAULT_ENTRY_SAVE_RESPONSE = "VAULT_ENTRY_SAVE_RESPONSE"
+    VAULT_ENTRY_DELETE_REQUEST = "VAULT_ENTRY_DELETE_REQUEST"
+    VAULT_ENTRY_DELETE_RESPONSE = "VAULT_ENTRY_DELETE_RESPONSE"
+    VAULT_FILL_APPROVAL_REQUEST = "VAULT_FILL_APPROVAL_REQUEST"
+    VAULT_FILL_APPROVAL_RESPONSE = "VAULT_FILL_APPROVAL_RESPONSE"
+
     # Agent Management
     AGENT_LIST_REQUEST = "AGENT_LIST_REQUEST"
     AGENT_LIST_RESPONSE = "AGENT_LIST_RESPONSE"

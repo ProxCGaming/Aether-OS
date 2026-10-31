@@ -72,6 +72,12 @@ MODES = (MODE_ALWAYS_CONFIRM, MODE_ALLOW_WITH_ENVELOPE, MODE_ALLOW_FREELY)
 
 BROWSER_TOOL_NAMES = frozenset({
     "browser_navigate", "browser_click", "browser_type", "browser_extract",
+    # E8-6.3: the credential vault's mediated tools. They route
+    # through this gate like every browser write, but classify FREE
+    # (see classify_browser_action): their authorisation lives in
+    # the vault service itself — the autofill toggle, site binding,
+    # and ask-every-time approvals — which fails closed on its own.
+    "browser_fill_login", "browser_save_login",
 })
 
 DEFAULT_ENVELOPE_TTL_SECONDS = 3600.0
@@ -451,6 +457,27 @@ def classify_browser_action(
                                content=content, site=site, make=_action)
     if tool_name == "browser_type":
         return _classify_type(args, content=content, site=site, make=_action)
+    if tool_name == "browser_fill_login":
+        # E8-6.3: FREE at this gate — not because filling a login is
+        # harmless, but because the vault service is the gate for it:
+        # the autofill toggle, registrable-domain binding, and the
+        # ask-every-time approval all run inside the fill and fail
+        # closed. A category prompt here would double-prompt
+        # ask-every-time entries and could not name the entry being
+        # filled anyway (the tool's args deliberately carry no
+        # credential identity beyond an optional username hint). The
+        # master switch in evaluate_browser_action still denies the
+        # tool outright when the browser agent is disabled.
+        return _action(
+            CATEGORY_FREE,
+            f"Fill the saved login for {site} from the credential vault")
+    if tool_name == "browser_save_login":
+        # Saving is likewise mediated: the service reads only the
+        # current site's form, marks the entry agent-created for the
+        # owner's review, and never overwrites a user-saved entry.
+        return _action(
+            CATEGORY_FREE,
+            f"Save the login just created on {site} to the credential vault")
     # A browser-named tool this taxonomy does not know: fail closed.
     return _action(CATEGORY_UNKNOWN,
                    f"Unrecognised browser action ({tool_name}) on {site}")

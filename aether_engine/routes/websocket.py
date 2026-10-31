@@ -2008,6 +2008,99 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     payload=response_payload,
                 ).to_json())
 
+            elif msg.type == EventType.VAULT_ENTRY_LIST_REQUEST:
+                # Epic 8, E8-6.3: Settings → Password Vault lists
+                # entries METADATA ONLY (the store's list never
+                # selects a secret column, so no payload can carry a
+                # password). Agent-created entries appear here for
+                # the owner's review like any other.
+                from aether_engine.vault.store import get_credential_vault
+
+                entries = await asyncio.to_thread(
+                    get_credential_vault().list_entries)
+                await ws.send_text(Event(
+                    type=EventType.VAULT_ENTRY_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"entries": entries},
+                ).to_json())
+
+            elif msg.type == EventType.VAULT_ENTRY_SAVE_REQUEST:
+                # Create/update one entry from the Settings form.
+                # A blank password on an update means "keep the
+                # stored one" (the form never receives the current
+                # password, so it cannot send it back). The response
+                # echoes only success + id — never the fields.
+                from aether_engine.vault.store import (
+                    VaultError,
+                    get_credential_vault,
+                )
+
+                password = msg.payload.get("password") or None
+                if password is not None and not str(password).strip():
+                    password = None
+                totp = msg.payload.get("totp_secret")
+                if totp is not None and not str(totp).strip():
+                    # Blank mirrors the password rule: on update it
+                    # keeps the stored secret (the form never
+                    # receives it, so it cannot send it back); on
+                    # create it simply means "no TOTP secret".
+                    totp = None
+                try:
+                    entry_id = await asyncio.to_thread(
+                        get_credential_vault().save_entry,
+                        site=str(msg.payload.get("site", "")),
+                        username=str(msg.payload.get("username", "")),
+                        password=password,
+                        ask_every_time=bool(
+                            msg.payload.get("ask_every_time", False)),
+                        created_by="user",
+                        totp_secret=totp,
+                        entry_id=msg.payload.get("id") or None,
+                    )
+                    vault_payload: dict = {"success": True, "id": entry_id}
+                    engine_state.audit_logger.log_event(
+                        "VAULT_ENTRY_SAVED", {"entry_id": entry_id})
+                except VaultError as exc:
+                    vault_payload = {
+                        "success": False,
+                        "id": msg.payload.get("id") or "",
+                        "error": str(exc),
+                    }
+                await ws.send_text(Event(
+                    type=EventType.VAULT_ENTRY_SAVE_RESPONSE,
+                    request_id=req_id,
+                    payload=vault_payload,
+                ).to_json())
+
+            elif msg.type == EventType.VAULT_ENTRY_DELETE_REQUEST:
+                from aether_engine.vault.store import get_credential_vault
+
+                entry_id = str(msg.payload.get("id", ""))
+                removed = await asyncio.to_thread(
+                    get_credential_vault().delete_entry, entry_id)
+                if removed:
+                    engine_state.audit_logger.log_event(
+                        "VAULT_ENTRY_DELETED", {"entry_id": entry_id})
+                await ws.send_text(Event(
+                    type=EventType.VAULT_ENTRY_DELETE_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": removed, "id": entry_id},
+                ).to_json())
+
+            elif msg.type == EventType.VAULT_FILL_APPROVAL_RESPONSE:
+                # The desktop's answer to an ask-every-time fill
+                # prompt (VAULT_FILL_APPROVAL_REQUEST). No reply
+                # event — the fill itself reports through the task.
+                # Unknown/stale request ids are tolerated silently:
+                # the service already failed that fill closed on its
+                # timeout if the answer never mattered.
+                from aether_engine.vault.service import get_vault_service
+
+                get_vault_service().resolve_fill_approval(
+                    str(msg.payload.get("request_id", "")),
+                    bool(msg.payload.get("approved", False)),
+                )
+
             # -----------------------------------------------------------
             # Media Store & Library (Epic 8, E8-4.2)
             # -----------------------------------------------------------

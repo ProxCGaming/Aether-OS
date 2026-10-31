@@ -9,6 +9,7 @@ import DiagnosticsPanel from './components/Settings/DiagnosticsPanel';
 import WorkspaceIndexingPanel from './components/Settings/WorkspaceIndexingPanel';
 import BrowserPolicyPanel from './components/Settings/BrowserPolicyPanel';
 import UsageSettingsPanel from './components/Settings/UsageSettingsPanel';
+import VaultPanel from './components/Settings/VaultPanel';
 
 export default function SettingsPanel({ wsRef, providers = [], providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
@@ -484,6 +485,7 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
     { keywords: 'workspace indexing rag prose embedder files pause resume search watcher exclusions', id: 'WorkspaceIndexing', icon: <Layers size={18} />, label: 'Workspace Indexing' },
     { keywords: 'browser agent policy payments envelopes confirmation autofill categories', id: 'BrowserPolicy', icon: <Globe size={18} />, label: 'Browser Agent' },
     { keywords: 'usage cost budget tokens spend ledger models agents daily alert', id: 'Usage', icon: <CircleDollarSign size={18} />, label: 'Usage' },
+    { keywords: 'password vault credentials logins totp ask every time autofill', id: 'PasswordVault', icon: <Lock size={18} />, label: 'Password Vault' },
     { keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
     { keywords: 'capabilities diagnostics environment scheduler', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
     { keywords: 'advanced routing fallbacks reset defaults developer', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' }
@@ -1026,6 +1028,10 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
 
         {activeMenu === 'Usage' && (
           <UsageSettingsPanel wsRef={wsRef} dailyBudget={dailyBudget} budgetAlert={budgetAlert} budgetExceeded={!!budgetAlert} />
+        )}
+
+        {activeMenu === 'PasswordVault' && (
+          <VaultPanel wsRef={wsRef} />
         )}
 
         {activeMenu === 'Advanced' && (
