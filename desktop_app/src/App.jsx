@@ -5,7 +5,7 @@ import { SocketProvider, useAetherSocket } from './contexts/SocketContext';
 // interactivity don't wait on it. The Suspense fallback paints the
 // same background colour, so the graph simply fades in when ready.
 const ForceGraph3D = React.lazy(() => import('react-force-graph-3d'));
-import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu, Pencil } from 'lucide-react';
+import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu, Pencil, Upload } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
 import SettingsPanel from './SettingsPanel';
 import Dashboard from './Dashboard';
@@ -120,6 +120,9 @@ function AppContent() {
   const [initialInput, setInitialInput] = useState('');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [slashCommands, setSlashCommands] = useState([]);
+  const [importStatus, setImportStatus] = useState(null);
+  const [_exportStatus, setExportStatus] = useState(null);
+  const importFileInputRef = useRef(null);
   
   useEffect(() => {
     if (isFloating) {
@@ -675,8 +678,44 @@ function AppContent() {
             }
             return next;
           });
+        } else if (data.type === 'SESSION_EXPORT_RESPONSE') {
+          if (data.payload?.error) {
+            setExportStatus({ type: 'error', message: `Export failed: ${data.payload.error}` });
+          } else {
+            if (data.payload?.content) {
+              const mime = data.payload.format === 'markdown' ? 'text/markdown;charset=utf-8' : 'application/json;charset=utf-8';
+              const blob = new Blob([data.payload.content], { type: mime });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = data.payload.filename || `session.${data.payload.format === 'markdown' ? 'md' : 'json'}`;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+            }
+            setExportStatus({
+              type: 'success',
+              message: `Exported ${data.payload?.filename || data.payload?.format || 'session'}`
+            });
+          }
+        } else if (data.type === 'SESSION_IMPORT_RESPONSE') {
+          if (data.payload?.ok) {
+            if (wsRef.current) {
+              wsRef.current.send(JSON.stringify({
+                type: 'SESSION_LIST_REQUEST',
+                schema_version: 1,
+                request_id: Date.now().toString()
+              }));
+            }
+            if (data.payload.session_id) {
+              handleSessionSwitch(data.payload.session_id);
+            }
+            setImportStatus({ type: 'success', message: `Restored session: ${data.payload.title}` });
+          } else {
+            setImportStatus({ type: 'error', message: data.payload?.error || 'Failed to import session' });
+          }
         } else if (data.type === 'PROVIDER_LIST_RESPONSE') {
-          // Phase 10.3 C1: providers is an ARRAY everywhere. The engine
           // sends a list; an object payload is normalised via Object.values
           // and a missing one becomes []. Never store an object here — the
           // old `|| {}` fallback is what made MODEL_DEFAULT_CHANGED below
@@ -1003,6 +1042,67 @@ function AppContent() {
     }
   };
 
+  const handleExportSession = (format) => {
+    if (!activeSession) return;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'SESSION_EXPORT_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { session_id: activeSession, format }
+      }));
+    }
+  };
+
+  const handleTriggerImport = () => {
+    if (importFileInputRef.current) {
+      importFileInputRef.current.value = '';
+      importFileInputRef.current.click();
+    }
+  };
+
+  const handleImportFileChange = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const isZip = file.name.endsWith('.zip');
+    const reader = new FileReader();
+    if (isZip) {
+      reader.onload = (event) => {
+        const raw = event.target.result;
+        const b64 = typeof raw === 'string' && raw.includes(',') ? raw.split(',')[1] : raw;
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            type: 'SESSION_IMPORT_REQUEST',
+            schema_version: 1,
+            request_id: Date.now().toString(),
+            payload: {
+              format: 'zip',
+              content: b64,
+              file_path: file.path || null
+            }
+          }));
+        }
+      };
+      reader.readAsDataURL(file);
+    } else {
+      reader.onload = (event) => {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            type: 'SESSION_IMPORT_REQUEST',
+            schema_version: 1,
+            request_id: Date.now().toString(),
+            payload: {
+              format: 'json',
+              content: event.target.result,
+              file_path: file.path || null
+            }
+          }));
+        }
+      };
+      reader.readAsText(file);
+    }
+  };
+
   const handleToolApproval = (requestId, approved, approvalKey, scope, editedArgs) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const key = approvalKey || requestId;
@@ -1323,6 +1423,25 @@ function AppContent() {
             <div style={{ flex: 1, marginTop: '32px', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
               <div style={{ padding: '0 24px', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#9090a0', letterSpacing: '1px', margin: 0 }}>Chats</h3>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <button 
+                    onClick={handleTriggerImport}
+                    title="Import Session"
+                    aria-label="Import Session"
+                    style={{ 
+                      background: 'rgba(255,255,255,0.05)', 
+                      border: 'none', 
+                      color: '#fff',
+                      borderRadius: '6px',
+                      padding: '4px 8px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      cursor: 'pointer',
+                      fontSize: '11px'
+                    }}>
+                    <Upload size={12} /> Import
+                  </button>
                 <button 
                   onClick={handleNewChat}
                   style={{ 
@@ -1340,6 +1459,20 @@ function AppContent() {
                   <Plus size={12} /> New
                 </button>
               </div>
+              </div>
+              <input
+                type="file"
+                ref={importFileInputRef}
+                style={{ display: 'none' }}
+                accept=".json,.zip"
+                onChange={handleImportFileChange}
+              />
+              {importStatus?.type === 'error' && (
+                <div style={{ margin: '0 24px 12px', padding: '8px 10px', background: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '6px', color: '#fca5a5', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>{importStatus.message}</span>
+                  <button onClick={() => setImportStatus(null)} style={{ background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', padding: 0 }}><X size={12} /></button>
+                </div>
+              )}
               
               {/* Epic 1 UI batch (E1-08): session search. A non-empty
                   query swaps the list for engine search results. */}
@@ -1465,6 +1598,8 @@ function AppContent() {
       {activeTab === 'Chat' && !isChatDetached && (
         <DraggableChatWindow 
           messages={chatMessages} 
+          sessionId={activeSession}
+          onExportSession={handleExportSession}
           onSendMessage={handleSendMessage} 
           onStopTask={handleStopTask}
           onApproveTool={handleToolApproval}

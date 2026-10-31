@@ -1249,6 +1249,88 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     payload={"query": query, "results": results},
                 ).to_json())
 
+            elif msg.type == EventType.SESSION_EXPORT_REQUEST:
+                sess_id = msg.payload.get("session_id")
+                fmt = (msg.payload.get("format") or "json").lower()
+                content = None
+                zip_path = None
+                filename = ""
+                err = None
+                try:
+                    from aether_engine.session_export.exporter import (
+                        _safe_filename,
+                        export_session_json,
+                        export_session_markdown,
+                        export_session_zip,
+                    )
+                    sess = await asyncio.to_thread(session_store.get_session, sess_id)
+                    if not sess:
+                        raise ValueError(f"Session '{sess_id}' not found")
+                    title = sess.get("title", "Session")
+                    if fmt == "markdown":
+                        content = await asyncio.to_thread(export_session_markdown, sess_id)
+                        filename = _safe_filename(title, sess_id, "md")
+                    elif fmt == "zip":
+                        z_dest = await asyncio.to_thread(export_session_zip, sess_id)
+                        zip_path = str(z_dest)
+                        filename = z_dest.name
+                    else:
+                        fmt = "json"
+                        content = await asyncio.to_thread(export_session_json, sess_id)
+                        filename = _safe_filename(title, sess_id, "json")
+                except Exception as e:
+                    logger.exception(f"Session export failed for {sess_id}")
+                    err = str(e)
+
+                await ws.send_text(Event(
+                    type=EventType.SESSION_EXPORT_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "format": fmt,
+                        "content": content,
+                        "zip_path": zip_path,
+                        "filename": filename,
+                        "error": err,
+                    },
+                ).to_json())
+
+            elif msg.type == EventType.SESSION_IMPORT_REQUEST:
+                fmt = (msg.payload.get("format") or "json").lower()
+                raw_content = msg.payload.get("content")
+                fpath = msg.payload.get("file_path")
+                try:
+                    from aether_engine.session_export.importer import (
+                        import_session_archive,
+                        import_session_json,
+                    )
+                    if fmt == "zip" or (fpath and str(fpath).endswith(".zip")):
+                        result = await asyncio.to_thread(
+                            import_session_archive,
+                            archive_path=fpath,
+                            content=raw_content,
+                        )
+                    else:
+                        result = await asyncio.to_thread(
+                            import_session_json,
+                            content=raw_content,
+                            file_path=fpath,
+                        )
+                except Exception as e:
+                    logger.exception("Session import failed")
+                    result = {
+                        "ok": False,
+                        "session_id": "",
+                        "title": "",
+                        "message_count": 0,
+                        "error": str(e),
+                    }
+
+                await ws.send_text(Event(
+                    type=EventType.SESSION_IMPORT_RESPONSE,
+                    request_id=req_id,
+                    payload=result,
+                ).to_json())
+
             elif msg.type == EventType.APPROVAL_GRANTS_REQUEST:
                 from aether_engine.tools.approval_cache import get_default_cache
 

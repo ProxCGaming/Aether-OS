@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw } from 'lucide-react';
+import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
 import './chat.css';
@@ -1128,10 +1128,14 @@ export default function DraggableChatWindow({
   isFloating,
   initialInput = '',
   slashCommands = [],
-  isSidebarCollapsed = false
+  isSidebarCollapsed = false,
+  onExportSession = () => {},
+  sessionId = null
 }) {
   const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const exportMenuRef = useRef(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [toastMessage, setToastMessage] = useState('');  // Epic 8, E8-1.3: per-approval argument editor state for the
   // inline approval cards, keyed by message id: { text, error }.
@@ -1176,9 +1180,17 @@ export default function DraggableChatWindow({
   };
 
   useEffect(() => {
-    const handleGlobalClick = () => setContextMenu(null);
+    const handleGlobalClick = (e) => {
+      setContextMenu(null);
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target)) {
+        setShowExportMenu(false);
+      }
+    };
     const handleGlobalKeyDown = (e) => {
-      if (e.key === 'Escape') setContextMenu(null);
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+        setShowExportMenu(false);
+      }
     };
     window.addEventListener('click', handleGlobalClick);
     window.addEventListener('scroll', handleGlobalClick, true);
@@ -1437,7 +1449,65 @@ export default function DraggableChatWindow({
 
             </div>
           </div>
-          <div style={{ display: 'flex', gap: '12px' }}>
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+            {/* Session Export menu */}
+            <div ref={exportMenuRef} style={{ position: 'relative' }}>
+              <button
+                onClick={() => setShowExportMenu(prev => !prev)}
+                title="Export Session"
+                aria-label="Export Session"
+                style={{
+                  background: showExportMenu ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  color: '#fff',
+                  cursor: 'pointer',
+                  padding: '6px',
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'all 0.2s'
+                }}
+              >
+                <Download size={14} />
+              </button>
+              {showExportMenu && (
+                <div style={{
+                  position: 'absolute',
+                  top: '100%',
+                  right: 0,
+                  marginTop: '6px',
+                  background: 'rgba(23, 23, 30, 0.95)',
+                  backdropFilter: 'blur(20px)',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  borderRadius: '8px',
+                  padding: '4px',
+                  minWidth: '140px',
+                  zIndex: 1100,
+                  boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)'
+                }}>
+                  <button
+                    onClick={() => { setShowExportMenu(false); onExportSession('markdown'); }}
+                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: '#fff', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                  >
+                    Markdown (.md)
+                  </button>
+                  <button
+                    onClick={() => { setShowExportMenu(false); onExportSession('json'); }}
+                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: '#fff', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                  >
+                    JSON (.json)
+                  </button>
+                  <button
+                    onClick={() => { setShowExportMenu(false); onExportSession('zip'); }}
+                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: '#fff', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                  >
+                    ZIP (.zip)
+                  </button>
+                </div>
+              )}
+            </div>
+
             {/* Phase 10.3 C2: isMinimized used to be settable by nothing —
                 the state existed, the control did not. This toggle wires
                 it: minimise collapses the feed + input to the header bar,
