@@ -116,6 +116,21 @@ function AppContent() {
   const [activeSession, setActiveSession] = useState(initialSession || null);
   const activeSessionRef = useRef(initialSession || null);
   useEffect(() => { activeSessionRef.current = activeSession; }, [activeSession]);
+  // Epic 8, E8-1.1a: the active session's rewind manifest — the LAST
+  // task's recorded points (label, checkpoint, files written so far),
+  // fetched via REWIND_MANIFEST_GET when a session is shown and when
+  // a task starts or reaches a terminal state. Null = no points to
+  // surface (the step menus stay hidden).
+  const [rewindManifest, setRewindManifest] = useState(null);
+  const requestRewindManifest = useCallback((sessionId) => {
+    if (!sessionId || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({
+      type: 'REWIND_MANIFEST_GET_REQUEST',
+      schema_version: 1,
+      request_id: `rewind_${Date.now()}`,
+      payload: { session_id: sessionId },
+    }));
+  }, [wsRef]);
   const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Projects', 'Settings'
   const [initialInput, setInitialInput] = useState('');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -172,6 +187,10 @@ function AppContent() {
             setActiveTaskIds(prev => new Set(prev).add(data.payload?.task_id || data.request_id));
           }
           activeTaskSessionRef.current = data.payload?.session_id || activeSessionRef.current;
+          // E8-1.1a: a new task supersedes the session's manifest;
+          // fetch now (points land as it runs) and again at the
+          // terminal event, which carries the complete trail.
+          requestRewindManifest(activeTaskSessionRef.current);
           setIsThinking(true);
           setChatMessages(prev => {
             // E1-16: flush any THINKING deltas buffered before this
@@ -418,6 +437,8 @@ function AppContent() {
           }
         } else if (data.type === 'TASK_COMPLETED') {
           setIsThinking(false);
+          // E8-1.1a: the finished task's manifest is complete now.
+          requestRewindManifest(data.payload?.session_id || activeTaskSessionRef.current || activeSessionRef.current);
           // Remove from active tasks for Dashboard
           if (data.payload?.task_id || data.request_id) {
             setActiveTaskIds(prev => { const next = new Set(prev); next.delete(data.payload?.task_id || data.request_id); return next; });
@@ -469,6 +490,8 @@ function AppContent() {
           }
         } else if (data.type === 'TASK_FAILED' || data.type === 'TASK_CANCELLED') {
           setIsThinking(false);
+          // E8-1.1a: failed/cancelled tasks still recorded points.
+          requestRewindManifest(data.payload?.session_id || activeTaskSessionRef.current || activeSessionRef.current);
           if (data.payload?.task_id || data.request_id) {
             setActiveTaskIds(prev => { const next = new Set(prev); next.delete(data.payload?.task_id || data.request_id); return next; });
           }
@@ -568,6 +591,19 @@ function AppContent() {
               }
               return backendMessages;
             });
+            // E8-1.1a: surface the switched-to session's points.
+            requestRewindManifest(sess?.id || activeSessionRef.current);
+          }
+        } else if (data.type === 'REWIND_MANIFEST_GET_RESPONSE') {
+          // E8-1.1a: only the active session's manifest is surfaced;
+          // an empty trail clears it (the step menus stay hidden).
+          if (data.payload?.session_id === activeSessionRef.current) {
+            const entries = Array.isArray(data.payload.entries) ? data.payload.entries : [];
+            setRewindManifest(entries.length ? {
+              session_id: data.payload.session_id,
+              task_id: data.payload.task_id,
+              entries,
+            } : null);
           }
         } else if (data.type === 'FALLBACK_STARTED') {
           setChatMessages(prev => [...prev, { 
@@ -926,6 +962,9 @@ function AppContent() {
   };
 
   const handleSessionSwitch = (id) => {
+    // E8-1.1a: never show one session's rewind points in another;
+    // the fresh manifest is fetched on SESSION_GET_RESPONSE.
+    setRewindManifest(null);
     setChatMessages(prev => {
       if (activeSessionRef.current) {
         sessionCacheRef.current[activeSessionRef.current] = prev;
@@ -946,6 +985,7 @@ function AppContent() {
   };
 
   const handleNewChat = () => {
+    setRewindManifest(null); // E8-1.1a: a fresh chat has no points yet
     setChatMessages([]); // Clear immediately for instant feel
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
@@ -1613,6 +1653,7 @@ function AppContent() {
           planMode={planMode}
           onTogglePlanMode={handleTogglePlanMode}
           scratchpad={scratchpadBySession[activeSession || '__pending'] || null}
+          rewindManifest={rewindManifest}
           onDetach={(state) => {
             localStorage.setItem('floating_transfer_state', JSON.stringify({
               messages: chatMessages,

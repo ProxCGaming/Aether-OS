@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download } from 'lucide-react';
+import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download, MoreHorizontal } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import Dropdown from './Dropdown';
 import './chat.css';
@@ -248,7 +248,30 @@ export function ApprovalPreview({ preview }) {
 export function approvalScopePath(args) {
   if (args && typeof args.path === 'string' && args.path.length > 0) return args.path;
   return null;
-}
+}
+// Epic 8, E8-1.1a: map a message to the rewind point its step menu
+// shows. The manifest holds points for the session's LAST task only
+// (grill Q5), and the rendered transcript does not carry task ids —
+// the current task is therefore identified structurally: it starts
+// at the last user message that is not a steering message (steering
+// continues the running task rather than starting one). The task's
+// opening message maps to point 0 ("Before this task began"); every
+// later message in the task maps to the latest recorded point (the
+// manifest is a per-step trail, not a per-message one). Messages
+// before the current task begins are 'older': no point is offered
+// for them. Returns null only when there is no manifest at all.
+export function getRewindPointForMessage(messages, index, manifest) {
+  if (!manifest) return null;
+  const entries = Array.isArray(manifest.entries) ? manifest.entries : [];
+  let taskStart = -1;
+  (messages || []).forEach((m, j) => {
+    if (m && m.role === 'user' && !m.steering) taskStart = j;
+  });
+  if (taskStart === -1 || index < taskStart) return { scope: 'older', entry: null };
+  if (index === taskStart) return { scope: 'current', entry: entries[0] || null };
+  return { scope: 'current', entry: entries[entries.length - 1] || null };
+}
+
 // Epic 8, E8-1.3: parse the approval drawer's argument editor.
 // Returns { editedArgs } only when the parsed JSON is a plain object
 // that actually differs from the proposed args; { editedArgs: null }
@@ -1130,7 +1153,8 @@ export default function DraggableChatWindow({
   slashCommands = [],
   isSidebarCollapsed = false,
   onExportSession = () => {},
-  sessionId = null
+  sessionId = null,
+  rewindManifest = null
 }) {
   const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
@@ -1141,6 +1165,9 @@ export default function DraggableChatWindow({
   // inline approval cards, keyed by message id: { text, error }.
   // Presence of an entry means that card's editor is open.
   const [approvalArgEdits, setApprovalArgEdits] = useState({});
+  // Epic 8, E8-1.1a: which message's step menu is open (index into
+  // messages), or null. One menu at a time.
+  const [openStepMenu, setOpenStepMenu] = useState(null);
 
   const approveToolWithEdits = (msg, scope) => {
     if (!onApproveTool) return;
@@ -1182,6 +1209,7 @@ export default function DraggableChatWindow({
   useEffect(() => {
     const handleGlobalClick = (e) => {
       setContextMenu(null);
+      setOpenStepMenu(null);
       if (exportMenuRef.current && !exportMenuRef.current.contains(e.target)) {
         setShowExportMenu(false);
       }
@@ -1734,6 +1762,12 @@ export default function DraggableChatWindow({
                   );
                 }
 
+                // Epic 8, E8-1.1a: this message's recorded rewind
+                // point for the step menu (null without a manifest).
+                const rewindPoint = rewindManifest
+                  ? getRewindPointForMessage(messages, i, rewindManifest)
+                  : null;
+
                 return (
                   <div key={i} className={`chat-message ${msg.role === 'user' ? 'user' : 'agent'}`} style={{
                     display: 'flex',
@@ -1781,6 +1815,53 @@ export default function DraggableChatWindow({
                         >
                           <Edit2 size={12} />
                         </button>
+                      )}
+                      {rewindManifest && (
+                        <button
+                          type="button"
+                          className="msg-step-menu-btn"
+                          data-testid="step-menu-btn"
+                          title="Step actions"
+                          aria-label="Step actions for this message"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setOpenStepMenu(openStepMenu === i ? null : i);
+                          }}
+                        >
+                          <MoreHorizontal size={12} />
+                        </button>
+                      )}
+                      {rewindManifest && openStepMenu === i && rewindPoint && (
+                        <div className="step-menu" data-testid="step-menu">
+                          {rewindPoint.scope === 'current' && rewindPoint.entry && (
+                            <div className="rewind-point-meta" data-testid="rewind-point-meta">
+                              <div className="rewind-point-label">{rewindPoint.entry.label}</div>
+                              <div className="rewind-point-detail">
+                                Checkpoint {String(rewindPoint.entry.checkpoint_id || '').slice(0, 8)}
+                              </div>
+                              {Array.isArray(rewindPoint.entry.files_written) && rewindPoint.entry.files_written.length > 0 && (
+                                <div className="rewind-point-detail">
+                                  Files written: {rewindPoint.entry.files_written.join(', ')}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          <button type="button" className="step-menu-action" data-testid="rewind-action" disabled>
+                            Rewind to here
+                          </button>
+                          <div className="step-menu-hint" data-testid="rewind-hint">
+                            {rewindPoint.scope === 'current'
+                              ? 'Rewind execution arrives with E8-1.1b.'
+                              : 'Rewind is available for the current task only.'}
+                          </div>
+                          <button type="button" className="step-menu-action" data-testid="fork-action" disabled>
+                            Fork from here
+                          </button>
+                          <div className="step-menu-hint" data-testid="fork-hint">
+                            Forking arrives with E8-1.2.
+                          </div>
+                        </div>
                       )}
                       {(msg.role === 'agent' || msg.role === 'assistant') && (
                         <ThinkingAccordion 

@@ -29,6 +29,7 @@ from aether_common.contracts import Event, EventType, TaskState, validate_transi
 from aether_engine.langgraph.executor import _is_retriable_error
 from aether_engine.memory import session_store
 from aether_engine.providers.base import BaseProvider
+from aether_engine.rewind import manifest as rewind_manifest
 
 logger = logging.getLogger("aether_engine.langgraph.fast_chat")
 
@@ -110,6 +111,24 @@ async def learn_fast_chat_exchange(
         logger.warning(f"Fast-chat memory learn failed for {task_id}: {e}")
 
 
+async def _record_message_point(
+    session_id: str | None, task_id: str, step_index: int, label: str
+) -> None:
+    """Epic 8, E8-1.1a: append a message-level rewind point for a
+    fast-chat task. Fast chat has no graph checkpoint, so the point's
+    checkpoint_id is "" — honest, never invented. Best-effort: a
+    manifest failure must never break the chat turn."""
+    if not session_id:
+        return
+    try:
+        await asyncio.to_thread(
+            rewind_manifest.record_point,
+            session_id, task_id, step_index, "", label, [],
+        )
+    except Exception:  # best-effort by doctrine (see docstring)
+        logger.debug("Fast-chat rewind manifest recording failed", exc_info=True)
+
+
 async def run_fast_chat(
     prompt: str,
     provider: BaseProvider,
@@ -136,6 +155,13 @@ async def run_fast_chat(
             "path": "fast_chat",
         },
     )
+
+    # E8-1.1a: step 0 of this task's rewind manifest — the boundary
+    # before this exchange. The closing point lands at step 1 on both
+    # the completion and failure paths below; a cancelled turn records
+    # neither (no partial reply is persisted, matching the runner's
+    # cancellation contract).
+    await _record_message_point(session_id, task_id, 0, "Before this task began")
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}]
     messages.extend(history or [])
@@ -177,6 +203,7 @@ async def run_fast_chat(
         raise
     except Exception as e:  # Provider boundary: any failure becomes a TASK_FAILED event, mirroring the graph runner's contract.
         logger.exception("Fast chat failed")
+        await _record_message_point(session_id, task_id, 1, "Task failed")
         yield Event(
             type=EventType.TASK_FAILED,
             request_id=request_id,
@@ -191,6 +218,7 @@ async def run_fast_chat(
         return
 
     full_text = "".join(parts).strip()
+    await _record_message_point(session_id, task_id, 1, "Reply complete")
     yield Event(
         type=EventType.TASK_COMPLETED,
         request_id=request_id,

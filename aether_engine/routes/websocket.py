@@ -38,6 +38,7 @@ from aether_engine.orchestration.core import (
     validate_provider_key_shared,
 )
 from aether_engine.providers.discovery import fetch_available_models
+from aether_engine.rewind import manifest as rewind_manifest
 from aether_engine.routing.intent import classify_intent
 from aether_engine.routing.policy import (
     RoutingDecision,
@@ -1329,6 +1330,25 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     type=EventType.SESSION_IMPORT_RESPONSE,
                     request_id=req_id,
                     payload=result,
+                ).to_json())
+
+            elif msg.type == EventType.REWIND_MANIFEST_GET_REQUEST:
+                # Epic 8, E8-1.1a: the session's last task's rewind
+                # points (recorded by the task runners). An explicit
+                # task_id that is not the last task answers with no
+                # entries — points exist only for the last task (Q5).
+                sess_id = msg.payload.get("session_id")
+                req_task_id = msg.payload.get("task_id")
+                if sess_id:
+                    manifest_payload = await asyncio.to_thread(
+                        rewind_manifest.get_manifest, sess_id, req_task_id)
+                else:
+                    manifest_payload = {
+                        "session_id": sess_id, "task_id": None, "entries": []}
+                await ws.send_text(Event(
+                    type=EventType.REWIND_MANIFEST_GET_RESPONSE,
+                    request_id=req_id,
+                    payload=manifest_payload,
                 ).to_json())
 
             elif msg.type == EventType.APPROVAL_GRANTS_REQUEST:

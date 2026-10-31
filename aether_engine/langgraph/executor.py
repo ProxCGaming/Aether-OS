@@ -51,9 +51,110 @@ from aether_engine.providers.base import (
     RateLimitError,
     TimeoutError,
 )
+from aether_engine.rewind import manifest as rewind_manifest
 from aether_engine.tools.registry import ToolRegistry
 
 logger = logging.getLogger("aether_engine.langgraph.executor")
+
+# ---------------------------------------------------------------------------
+# Epic 8, E8-1.1a: rewind manifest recording. As a graph task runs, each
+# landed superstep appends a point (step -> checkpoint, label,
+# files-written-so-far) to the session's manifest for THIS task. The
+# tracker is a plain dict threaded through a run (and re-seeded from
+# the manifest on resume):
+#   {"step_index": int, "last_checkpoint_id": str, "files_written": [str]}
+# Recording is best-effort by doctrine — like compaction and completion
+# memory, a manifest failure is logged and never fails the task.
+# ---------------------------------------------------------------------------
+
+_WRITE_TOOL_NAMES = frozenset({"write_file", "edit_file"})
+
+_SUPERSTEP_LABELS = {
+    "supervisor": "Supervisor",
+    "planner": "Planner",
+    "coder": "Coder",
+    "researcher": "Researcher",
+    "execute_tool": "Tool execution",
+}
+
+
+def _new_manifest_tracker(prior_checkpoint_id: str = "") -> dict[str, Any]:
+    return {
+        "step_index": 0,
+        "last_checkpoint_id": prior_checkpoint_id,
+        "files_written": [],
+    }
+
+
+def _note_manifest_file_write(
+    tracker: dict[str, Any], msg: dict[str, Any], is_failed: bool
+) -> None:
+    """Track a completed file write from a tool message's args."""
+    if is_failed or msg.get("name") not in _WRITE_TOOL_NAMES:
+        return
+    args = msg.get("args") or {}
+    path = args.get("path") or args.get("file_path")
+    if path and path not in tracker["files_written"]:
+        tracker["files_written"].append(path)
+
+
+async def _record_manifest_point(
+    session_id: str,
+    task_id: str,
+    step_index: int,
+    checkpoint_id: str,
+    label: str,
+    files_written: list[str],
+) -> None:
+    try:
+        await asyncio.to_thread(
+            rewind_manifest.record_point,
+            session_id, task_id, step_index, checkpoint_id, label,
+            list(files_written),
+        )
+    except Exception:  # best-effort by doctrine (see block comment above)
+        logger.debug("Rewind manifest recording failed", exc_info=True)
+
+
+async def _advance_manifest_to_checkpoint(
+    graph,
+    config,
+    tracker: dict[str, Any],
+    *,
+    session_id: str | None,
+    task_id: str,
+    label: str,
+) -> None:
+    """Append a point if the graph's checkpoint advanced past the
+    tracker's last recorded one (one point per landed superstep)."""
+    if not session_id:
+        return
+    try:
+        snapshot = await graph.aget_state(config)
+        checkpoint_id = (
+            (snapshot.config or {}).get("configurable", {}).get("checkpoint_id")
+            or ""
+        )
+    except Exception:  # noqa: BLE001 — best-effort by doctrine (see block comment above)
+        return
+    if not checkpoint_id or checkpoint_id == tracker["last_checkpoint_id"]:
+        return
+    tracker["last_checkpoint_id"] = checkpoint_id
+    tracker["step_index"] += 1
+    await _record_manifest_point(
+        session_id, task_id, tracker["step_index"], checkpoint_id, label,
+        tracker["files_written"],
+    )
+
+
+def _superstep_label(event: dict, step_index: int) -> str:
+    for key in event:
+        if not key.startswith("__"):
+            pretty = _SUPERSTEP_LABELS.get(
+                key, key.replace("_", " ").capitalize())
+            return f"After {pretty}"
+    return f"Step {step_index}"
+
 
 def _is_retriable_error(exc: Exception) -> bool:
     """Check if an exception is retriable (should trigger fallback)."""
@@ -175,9 +276,14 @@ async def run_langgraph_task(
         # only the two summary fields are written, and only when a new
         # fold actually happened. Compaction is best-effort: any failure
         # logs and the run proceeds with the uncompacted history.
+        prior_checkpoint_id = ""
         try:
             prior_snapshot = await graph.aget_state(config)
             prior_values = prior_snapshot.values or {}
+            prior_checkpoint_id = (
+                (prior_snapshot.config or {}).get("configurable", {}).get("checkpoint_id")
+                or ""
+            )
         except Exception:  # noqa: BLE001 — a fresh or unreadable thread has no history to compact; real checkpointer failures surface in the run itself.
             prior_values = {}
         if not prior_values.get("messages") and session_id:
@@ -229,6 +335,16 @@ async def run_langgraph_task(
                     # Audit is best-effort and must not fail the run
                     # (same doctrine as the registry's TOOL_EXECUTED).
                     logger.debug("CONTEXT_COMPACTED audit write failed", exc_info=True)
+
+        # Epic 8, E8-1.1a: open this task's rewind manifest. Step 0 is
+        # the "before this task began" point, anchored at the thread's
+        # pre-run checkpoint ("" on a fresh thread — the first landed
+        # superstep's checkpoint becomes step 1).
+        manifest_tracker = _new_manifest_tracker(prior_checkpoint_id)
+        if session_id:
+            await _record_manifest_point(
+                session_id, task_id, 0, prior_checkpoint_id,
+                "Before this task began", manifest_tracker["files_written"])
 
         start_time = time.time()
         elapsed_ms = 0.0
@@ -519,7 +635,12 @@ async def run_langgraph_task(
                                 
                                 is_failed = isinstance(tool_result, str) and tool_result.startswith(("Error", "Validation failed"))
                                 status_str = "failed" if is_failed else "completed"
-                                
+                                # E8-1.1a: a landed write joins the
+                                # manifest's files-written-so-far before
+                                # this superstep's point is recorded.
+                                _note_manifest_file_write(
+                                    manifest_tracker, msg, is_failed)
+
                                 thinking_log.append(f"[TOOL] {tool_name}({json.dumps(tool_args)}) -> {status_str}")
                                 
                                 yield emit_event(Event(
@@ -539,8 +660,24 @@ async def run_langgraph_task(
                                     },
                                 ))
                     
+                # Epic 8, E8-1.1a: the superstep landed — record its
+                # rewind point (deduped on checkpoint id inside).
+                await _advance_manifest_to_checkpoint(
+                    graph, config, manifest_tracker,
+                    session_id=session_id, task_id=task_id,
+                    label=_superstep_label(
+                        event, manifest_tracker["step_index"] + 1))
+
                 if interrupted:
                     break
+
+            if not interrupted:
+                # Final point at the run's end checkpoint (a no-op if
+                # the last superstep already recorded it).
+                await _advance_manifest_to_checkpoint(
+                    graph, config, manifest_tracker,
+                    session_id=session_id, task_id=task_id,
+                    label="Task complete")
 
             if interrupted:
                 # Phase 10.1 A2: an interrupted task is paused for approval,
@@ -685,6 +822,30 @@ async def resume_langgraph_task(
             messages_seen = len(state_obj.values.get("messages") or [])
             delegation_seen = len(state_obj.values.get("delegation_log") or [])
 
+            # Epic 8, E8-1.1a: the resumed task's manifest continues —
+            # seed the tracker from its last recorded point so step
+            # indexes and files-written-so-far carry over the pause.
+            resume_session_id = (
+                state_obj.values.get("session_id") or kwargs.get("session_id"))
+            manifest_tracker = _new_manifest_tracker()
+            if resume_session_id:
+                try:
+                    existing_entries = await asyncio.to_thread(
+                        rewind_manifest.get_entries, resume_session_id, task_id)
+                except Exception:  # noqa: BLE001 — best-effort by doctrine (see the recording block comment)
+                    existing_entries = []
+                if existing_entries:
+                    last_entry = existing_entries[-1]
+                    manifest_tracker["step_index"] = last_entry["step_index"]
+                    manifest_tracker["last_checkpoint_id"] = (
+                        last_entry["checkpoint_id"])
+                    manifest_tracker["files_written"] = list(
+                        last_entry["files_written"])
+                else:
+                    # A thread with no recorded points (pre-manifest
+                    # task): its first resumed point becomes step 0.
+                    manifest_tracker["step_index"] = -1
+
             # Steering (Epic 1, E1-07): steers queued while the task
             # waited for approval are drained now, but they cannot ride
             # the resume Command itself — the paused specialist resumes
@@ -785,6 +946,10 @@ async def resume_langgraph_task(
                                     # marker for approval-time arg edits.
                                     tool_result = msg.get("content", "")
                                     is_failed = isinstance(tool_result, str) and tool_result.startswith(("Error", "Validation failed"))
+                                    # E8-1.1a: same files-written tracking
+                                    # as the run path.
+                                    _note_manifest_file_write(
+                                        manifest_tracker, msg, is_failed)
                                     yield Event(
                                         type=EventType.TOOL_ACTIVITY,
                                         request_id=thread_id,
@@ -812,6 +977,13 @@ async def resume_langgraph_task(
                                             "node": node_name,
                                         },
                                     )
+                    # Epic 8, E8-1.1a: record the resumed segment's
+                    # landed superstep in the same task's manifest.
+                    await _advance_manifest_to_checkpoint(
+                        graph, config, manifest_tracker,
+                        session_id=resume_session_id, task_id=task_id,
+                        label=_superstep_label(
+                            event, manifest_tracker["step_index"] + 1))
                     if interrupted:
                         break
 

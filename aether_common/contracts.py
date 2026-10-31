@@ -117,6 +117,14 @@ class EventType(str, Enum):
     SESSION_EXPORT_RESPONSE = "SESSION_EXPORT_RESPONSE"
     SESSION_IMPORT_REQUEST = "SESSION_IMPORT_REQUEST"
     SESSION_IMPORT_RESPONSE = "SESSION_IMPORT_RESPONSE"
+    # Epic 8, E8-1.1a: per-task rewind manifest query. The response
+    # carries the session's LAST task's recorded rewind points
+    # ({step_index, checkpoint_id, label, files_written, timestamp});
+    # asking for an older task returns no entries — rewind points
+    # exist only for the last task (grill Q5). Rewind execution
+    # contracts arrive with E8-1.1b.
+    REWIND_MANIFEST_GET_REQUEST = "REWIND_MANIFEST_GET_REQUEST"
+    REWIND_MANIFEST_GET_RESPONSE = "REWIND_MANIFEST_GET_RESPONSE"
     # Epic 1, E1-16: model thinking, streamed apart from the answer
     THINKING = "THINKING"
     # Epic 1, E1-17: agent scratchpad content for the display-only panel

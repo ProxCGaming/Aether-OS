@@ -148,6 +148,114 @@
   transform: scale(0.95);
 }
 
+/* Epic 8, E8-1.1a: per-step ⋯ menu. The button mirrors the edit
+   button's hover-reveal at the bubble's top-right corner; the menu
+   surfaces the step's recorded rewind point (label, checkpoint,
+   files written so far) with rewind/fork honestly disabled until
+   E8-1.1b / E8-1.2 land their execution. */
+.msg-container .msg-step-menu-btn {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  background: rgba(124, 58, 237, 0.9);
+  border: 1px solid rgba(167, 139, 250, 0.5);
+  border-radius: 50%;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  z-index: 10;
+}
+
+.msg-container:hover .msg-step-menu-btn {
+  opacity: 1;
+}
+
+.msg-container:focus-within .msg-step-menu-btn,
+.msg-step-menu-btn:focus-visible {
+  opacity: 1;
+}
+
+.msg-step-menu-btn:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.85);
+  outline-offset: 2px;
+}
+
+@media (hover: none) {
+  .msg-container .msg-step-menu-btn {
+    opacity: 0.85;
+  }
+}
+
+.msg-step-menu-btn:hover {
+  transform: scale(1.15);
+  background: #7c3aed;
+}
+
+.step-menu {
+  position: absolute;
+  top: 22px;
+  right: 0;
+  min-width: 230px;
+  max-width: 300px;
+  background: rgba(24, 24, 32, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  z-index: 30;
+  text-align: left;
+}
+
+.rewind-point-meta {
+  padding: 2px 4px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 8px;
+}
+
+.rewind-point-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.rewind-point-detail {
+  font-size: 11px;
+  color: #a5a5b8;
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+.step-menu-action {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #e2e8f0;
+  margin-top: 6px;
+}
+
+.step-menu-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.step-menu-hint {
+  font-size: 11px;
+  color: #8b8b9e;
+  padding: 4px 2px 0;
+}
+
 /* Epic 1 UI batch (E1-08): regenerate, shown under the last final
    agent bubble (errors included) while no task is running. */
 .msg-regenerate-btn {
