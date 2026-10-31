@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any
 
@@ -156,6 +157,66 @@ def _build_provider_list(store: SecretStore) -> list:
     return result
 
 async def _validate_provider_key(
+    provider_name: str,
+    api_key: str,
+    base_url: str | None = None,
+    persist_models: bool = True,
+    budget_s: float = 30.0,
+) -> dict:
+    """Validate a provider key, hard-capped at ``budget_s`` seconds.
+
+    Discovery plus up to MAX_VALIDATION_PINGS sequential pings could
+    previously take ~60s; a caller that awaited it inline (the Test
+    button) wedged for the whole scan. Past the budget the caller gets
+    an honest timeout result instead of silence.
+    """
+    try:
+        return await asyncio.wait_for(
+            _validate_provider_key_inner(provider_name, api_key, base_url=base_url, persist_models=persist_models),
+            timeout=budget_s,
+        )
+    except TimeoutError:
+        logger.warning(f"Provider validation for {provider_name} exceeded the {budget_s:.0f}s budget")
+        return {
+            "status": "network_error",
+            "message": f"Validation timed out after {budget_s:.0f}s — the provider did not answer in time. Try again.",
+            "models": [],
+            "excluded_models": [],
+            "latency_ms": budget_s * 1000.0,
+        }
+
+
+# In-flight validations, keyed by (provider, key, base_url, persist):
+# duplicate Test clicks attach to the SAME run instead of queueing a
+# second full discovery+ping scan behind the first.
+_inflight_validations: dict[tuple, asyncio.Task] = {}
+
+
+async def validate_provider_key_shared(
+    provider_name: str,
+    api_key: str,
+    base_url: str | None = None,
+    persist_models: bool = False,
+) -> dict:
+    """``_validate_provider_key`` with in-flight dedupe.
+
+    A repeat request for the identical provider+key while one is
+    running awaits the running task; every waiter gets a copy of the
+    same result. The cache entry is dropped when the run finishes, so
+    a later Test always re-validates for real.
+    """
+    cache_key = (provider_name, api_key, base_url or "", persist_models)
+    task = _inflight_validations.get(cache_key)
+    if task is None or task.done():
+        task = asyncio.create_task(
+            _validate_provider_key(provider_name, api_key, base_url=base_url, persist_models=persist_models)
+        )
+        _inflight_validations[cache_key] = task
+        task.add_done_callback(lambda _t, k=cache_key: _inflight_validations.pop(k, None))
+    return dict(await task)
+
+
+async def _validate_provider_key_inner(
     provider_name: str,
     api_key: str,
     base_url: str | None = None,

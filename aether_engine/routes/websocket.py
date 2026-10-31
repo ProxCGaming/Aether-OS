@@ -34,7 +34,7 @@ from aether_engine.memory.facade import backend_or_none
 from aether_engine.orchestration.core import (
     _build_provider_list_async,
     _create_provider_instance,
-    _validate_provider_key,
+    validate_provider_key_shared,
 )
 from aether_engine.providers.discovery import fetch_available_models
 from aether_engine.routing.intent import classify_intent
@@ -205,6 +205,34 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
     task_session_id: str | None = None
     active_downloads: dict[str, asyncio.Task] = {}
     secret_store = SecretStore()
+
+    async def _send_validation_result(resp_type, req_id_, pname_, key_, base_url_):
+        """Answer a provider Test request from a background task.
+
+        Validation (discovery + pings) used to be awaited inline in
+        the message loop, so one slow Test wedged the whole socket —
+        chat, cancellations, everything queued behind it, and a
+        double-click doubled the freeze. Now the loop stays free;
+        duplicate clicks attach to the same in-flight run via
+        validate_provider_key_shared and each requester still gets
+        its own response.
+        """
+        try:
+            result = await validate_provider_key_shared(pname_, key_, base_url=base_url_, persist_models=False)
+            result["provider"] = pname_
+            result["success"] = result.get("status") == "connected"
+        except Exception as e:  # noqa: BLE001 — a validation failure must still produce a response, never silence
+            logger.warning(f"Provider validation for {pname_} raised: {e}")
+            result = {
+                "provider": pname_,
+                "status": "network_error",
+                "message": f"Validation failed unexpectedly: {e}",
+                "success": False,
+            }
+        try:
+            await ws.send_text(Event(type=resp_type, request_id=req_id_, payload=result).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-validation; nothing else to do
+            logger.debug(f"Could not send validation result for {pname_}: {e}")
 
     # Epic 2, E2-10: install the web-search seam for this connection —
     # keys resolve through the encrypted secret store (provider name =
@@ -900,17 +928,10 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         payload={"provider": pname, "status": "invalid_key", "message": "API key cannot be empty."},
                     ).to_json())
                 else:
-                    result = await _validate_provider_key(
-                        pname, key, base_url=base_url, persist_models=False
-                    )
-                    result["provider"] = pname
-                    # The UI keys its success/error styling off this flag.
-                    result["success"] = result.get("status") == "connected"
-                    await ws.send_text(Event(
-                        type=resp_type,
-                        request_id=req_id,
-                        payload=result,
-                    ).to_json())
+                    # Off the message loop (see _send_validation_result):
+                    # the Test no longer blocks the socket, and repeat
+                    # clicks share the in-flight validation.
+                    asyncio.create_task(_send_validation_result(resp_type, req_id, pname, key, base_url))
 
             elif msg.type == EventType.PROVIDER_SAVE_REQUEST:
                 pname = msg.payload.get("provider", "")
