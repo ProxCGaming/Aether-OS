@@ -64,7 +64,7 @@ from aether_common.contracts import Event, EventType
 from aether_engine.voice import VoiceTalkerError, VoiceUnavailableError
 from aether_engine.voice.stt import FasterWhisperStt, SttEngine
 from aether_engine.voice.tts import DEFAULT_VOICE, KokoroTts, TtsEngine
-from aether_engine.voice.vad import Endpointer, SileroVad, VadEngine
+from aether_engine.voice.vad import Endpointer, EndpointerConfig, SileroVad, VadEngine
 
 logger = logging.getLogger("aether_engine.voice.pipeline")
 
@@ -212,6 +212,7 @@ class VoicePipeline:
         on_assistant_final: TurnCallback | None = None,
         on_turn_error: TurnCallback | None = None,
         endpointer: Endpointer | None = None,
+        endpointer_config: EndpointerConfig | None = None,
         tts_voice: str = DEFAULT_VOICE,
         sample_rate: int = 16000,
         partial_min_audio_ms: int = 250,
@@ -229,7 +230,12 @@ class VoicePipeline:
         self._on_user_final = on_user_final
         self._on_assistant_final = on_assistant_final
         self._on_turn_error = on_turn_error
-        self._endpointer = endpointer or Endpointer()
+        if endpointer is not None:
+            self._endpointer = endpointer
+        elif endpointer_config is not None:
+            self._endpointer = Endpointer(endpointer_config)
+        else:
+            self._endpointer = Endpointer()
         self._tts_voice = tts_voice
         self._sample_rate = sample_rate
         self._partial_min_audio_ms = partial_min_audio_ms
@@ -265,6 +271,11 @@ class VoicePipeline:
         self._barge_endpointer = Endpointer(self._endpointer.config)
         self._barge_frames: list[bytes] = []
         self._barge_speech_ms = 0
+
+    @property
+    def endpointer(self) -> Endpointer:
+        """The turn-taking endpointer driving this session."""
+        return self._endpointer
 
     @property
     def _output_active(self) -> bool:
@@ -791,6 +802,8 @@ def create_voice_pipeline(
     escalation_classifier: EscalationClassifier | None = None,
     on_escalation: TurnCallback | None = None,
     escalation_ack: str = DEFAULT_ESCALATION_ACK,
+    endpointer: Endpointer | None = None,
+    endpointer_config: EndpointerConfig | None = None,
 ) -> tuple[VoicePipeline | None, str | None]:
     """Build a pipeline from the production stages (or injected
     ones). Returns ``(pipeline, None)`` when every stage can run,
@@ -808,6 +821,8 @@ def create_voice_pipeline(
         on_user_final=on_user_final,
         on_assistant_final=on_assistant_final,
         on_turn_error=on_turn_error,
+        endpointer=endpointer,
+        endpointer_config=endpointer_config,
         escalation_classifier=escalation_classifier,
         on_escalation=on_escalation,
         escalation_ack=escalation_ack,

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock, Scissors, Globe, CircleDollarSign } from 'lucide-react';
+import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock, Scissors, Globe, CircleDollarSign, Mic } from 'lucide-react';
 import Dropdown from './Dropdown';
 import LocalModelsTab from './LocalModelsTab';
 import './chat.css';
@@ -48,6 +48,9 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
   const [disableFallbacks, setDisableFallbacks] = useState(false);
   const [fallbackChain, setFallbackChain] = useState('');
   const [snipHotkey, setSnipHotkey] = useState('CommandOrControl+Shift+S');
+  // Voice Tuning State (E8-5.2)
+  const [vadThreshold, setVadThreshold] = useState(0.5);
+  const [silenceDurationMs, setSilenceDurationMs] = useState(700);
   
   // A5: State for Reasoning Effort and Node model override
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem('reasoning_effort') || 'standard');
@@ -286,6 +289,12 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
             if (data.payload.config.snip_hotkey) {
               setSnipHotkey(data.payload.config.snip_hotkey);
             }
+            if (data.payload.config.vad_threshold !== undefined && data.payload.config.vad_threshold !== null) {
+              setVadThreshold(data.payload.config.vad_threshold);
+            }
+            if (data.payload.config.silence_duration_ms !== undefined && data.payload.config.silence_duration_ms !== null) {
+              setSilenceDurationMs(data.payload.config.silence_duration_ms);
+            }
             // Phase 9, B1/B2: engine-persisted auxiliary models and reasoning effort.
             setAuxModels(data.payload.config.auxiliary_models || {});
             const serverEffort = data.payload.config.reasoning_effort;
@@ -377,7 +386,7 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
         request_id: Date.now().toString(),
         payload: {}
       }));
-    } else if ((activeMenu === 'Advanced' || activeMenu === 'Models') && wsRef.current?.readyState === WebSocket.OPEN) {
+    } else if ((activeMenu === 'Advanced' || activeMenu === 'Models' || activeMenu === 'Voice') && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'CONFIG_GET_REQUEST',
         schema_version: 1,
@@ -488,6 +497,7 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
     { keywords: 'password vault credentials logins totp ask every time autofill', id: 'PasswordVault', icon: <Lock size={18} />, label: 'Password Vault' },
     { keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
     { keywords: 'capabilities diagnostics environment scheduler', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
+    { keywords: 'voice tuning audio vad endpointing silence threshold mic speech', id: 'Voice', icon: <Mic size={18} />, label: 'Voice Tuning' },
     { keywords: 'advanced routing fallbacks reset defaults developer', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' }
   ];
 
@@ -1255,6 +1265,100 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                   fontSize: '13px'
                 }}
               />
+            </div>
+          </div>
+        )}
+
+        {activeMenu === 'Voice' && (
+          <div style={{ color: '#f0f0f5' }}>
+            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Voice Tuning</h2>
+            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>
+              Fine-tune speech detection and endpointing thresholds. Changes take effect on the next voice session.
+            </p>
+
+            <div style={{
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px solid rgba(255,255,255,0.05)',
+              borderRadius: '12px',
+              padding: '24px',
+              marginBottom: '20px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+                <Sliders size={18} style={{ color: '#a78bfa' }} />
+                <h3 style={{ fontSize: '16px', fontWeight: 500, color: '#fff', margin: 0 }}>Endpointing Thresholds</h3>
+              </div>
+
+              <div style={{ marginBottom: '24px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                  <label htmlFor="vad-threshold-slider" style={{ fontWeight: 500, fontSize: '14px', color: '#fff' }}>
+                    VAD Speech Threshold
+                  </label>
+                  <span data-testid="vad-threshold-value" style={{ fontSize: '13px', color: '#a78bfa', fontWeight: 600 }}>
+                    {vadThreshold.toFixed(2)}
+                  </span>
+                </div>
+                <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '10px' }}>
+                  Confidence threshold for Silero VAD to register voice activity (default: 0.50). Higher values reduce false triggers from background noise; lower values catch softer speech.
+                </div>
+                <input
+                  id="vad-threshold-slider"
+                  data-testid="vad-threshold-slider"
+                  type="range"
+                  min="0.1"
+                  max="0.9"
+                  step="0.05"
+                  value={vadThreshold}
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value);
+                    setVadThreshold(val);
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({
+                        type: 'CONFIG_UPDATE_REQUEST',
+                        schema_version: 1,
+                        request_id: Date.now().toString(),
+                        payload: { config: { vad_threshold: val } }
+                      }));
+                    }
+                  }}
+                  style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
+                />
+              </div>
+
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                  <label htmlFor="silence-duration-slider" style={{ fontWeight: 500, fontSize: '14px', color: '#fff' }}>
+                    Silence Duration
+                  </label>
+                  <span data-testid="silence-duration-value" style={{ fontSize: '13px', color: '#a78bfa', fontWeight: 600 }}>
+                    {silenceDurationMs} ms
+                  </span>
+                </div>
+                <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '10px' }}>
+                  Trailing silence window required before the turn is marked complete (default: 700 ms). Lower values produce faster turn-taking; higher values allow natural pauses while speaking.
+                </div>
+                <input
+                  id="silence-duration-slider"
+                  data-testid="silence-duration-slider"
+                  type="range"
+                  min="200"
+                  max="2000"
+                  step="50"
+                  value={silenceDurationMs}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    setSilenceDurationMs(val);
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({
+                        type: 'CONFIG_UPDATE_REQUEST',
+                        schema_version: 1,
+                        request_id: Date.now().toString(),
+                        payload: { config: { silence_duration_ms: val } }
+                      }));
+                    }
+                  }}
+                  style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
+                />
+              </div>
             </div>
           </div>
         )}

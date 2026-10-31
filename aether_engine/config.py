@@ -241,6 +241,11 @@ class UserConfig:
     # in the cost panel and as a notification, without interrupting tasks.
     # None = no budget / alert disabled.
     daily_budget_usd: float | None = None
+    # Epic 8, E8-5.2: voice activity detection and endpointing thresholds.
+    # vad_threshold: Silero VAD confidence threshold to register speech [0.1, 0.9].
+    # silence_duration_ms: trailing silence required to trigger utterance_end.
+    vad_threshold: float = 0.5
+    silence_duration_ms: int = 700
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -295,6 +300,8 @@ class UserConfig:
             "browser_envelopes_enabled": self.browser_envelopes_enabled,
             "browser_category_modes": dict(self.browser_category_modes),
             "daily_budget_usd": self.daily_budget_usd,
+            "vad_threshold": self.vad_threshold,
+            "silence_duration_ms": self.silence_duration_ms,
         }
 
     @classmethod
@@ -396,6 +403,8 @@ class UserConfig:
             browser_envelopes_enabled=bool(d.get("browser_envelopes_enabled", True)),
             browser_category_modes=_clean_browser_category_modes(d.get("browser_category_modes")),
             daily_budget_usd=float(d["daily_budget_usd"]) if d.get("daily_budget_usd") is not None else None,
+            vad_threshold=_as_float(d.get("vad_threshold"), 0.5),
+            silence_duration_ms=_as_int(d.get("silence_duration_ms"), 700),
         )
 
 

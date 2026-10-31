@@ -239,3 +239,90 @@ describe('SettingsPanel tool policy dropdown (Phase 10.3 C2)', () => {
     expect(screen.getByRole('heading', { level: 2, name: 'Usage & Budget' })).toBeInTheDocument();
   });
 });
+
+describe('SettingsPanel Voice Tuning (E8-5.2)', () => {
+  function makeWsRef() {
+    let messageHandler = null;
+    const wsRef = {
+      current: {
+        readyState: 1,
+        send: jest.fn(),
+        addEventListener: jest.fn((event, handler) => { messageHandler = handler; }),
+        removeEventListener: jest.fn(),
+      },
+    };
+    return { wsRef, getHandler: () => messageHandler };
+  }
+
+  it('switches to Voice Tuning tab and renders endpointing sliders', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Voice Tuning'));
+    expect(screen.getByRole('heading', { level: 2, name: 'Voice Tuning' })).toBeInTheDocument();
+    expect(screen.getByText('Endpointing Thresholds')).toBeInTheDocument();
+
+    const vadSlider = screen.getByTestId('vad-threshold-slider');
+    const silenceSlider = screen.getByTestId('silence-duration-slider');
+    expect(vadSlider).toBeInTheDocument();
+    expect(silenceSlider).toBeInTheDocument();
+    expect(screen.getByTestId('vad-threshold-value')).toHaveTextContent('0.50');
+    expect(screen.getByTestId('silence-duration-value')).toHaveTextContent('700 ms');
+  });
+
+  it('moving the VAD threshold slider dispatches CONFIG_UPDATE_REQUEST', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Voice Tuning'));
+    const vadSlider = screen.getByTestId('vad-threshold-slider');
+
+    fireEvent.change(vadSlider, { target: { value: '0.35' } });
+    expect(screen.getByTestId('vad-threshold-value')).toHaveTextContent('0.35');
+
+    const sent = wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
+    const update = sent.find(m => m.type === 'CONFIG_UPDATE_REQUEST' && m.payload?.config?.vad_threshold !== undefined);
+    expect(update).toBeDefined();
+    expect(update.payload.config.vad_threshold).toBe(0.35);
+  });
+
+  it('moving the silence duration slider dispatches CONFIG_UPDATE_REQUEST', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Voice Tuning'));
+    const silenceSlider = screen.getByTestId('silence-duration-slider');
+
+    fireEvent.change(silenceSlider, { target: { value: '450' } });
+    expect(screen.getByTestId('silence-duration-value')).toHaveTextContent('450 ms');
+
+    const sent = wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
+    const update = sent.find(m => m.type === 'CONFIG_UPDATE_REQUEST' && m.payload?.config?.silence_duration_ms !== undefined);
+    expect(update).toBeDefined();
+    expect(update.payload.config.silence_duration_ms).toBe(450);
+  });
+
+  it('populates thresholds from CONFIG_GET_RESPONSE', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Voice Tuning'));
+
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'CONFIG_GET_RESPONSE',
+          payload: {
+            config: {
+              vad_threshold: 0.40,
+              silence_duration_ms: 550,
+            },
+          },
+        }),
+      });
+    });
+
+    expect(screen.getByTestId('vad-threshold-value')).toHaveTextContent('0.40');
+    expect(screen.getByTestId('silence-duration-value')).toHaveTextContent('550 ms');
+  });
+});

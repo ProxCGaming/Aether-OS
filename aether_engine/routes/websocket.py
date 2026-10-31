@@ -2524,6 +2524,18 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     engine_state.user_config.onboarding_completed = bool(config_data["onboarding_completed"])
                 if "fallback_chain" in config_data:
                     engine_state.user_config.fallback_chain = config_data["fallback_chain"]
+                if "vad_threshold" in config_data:
+                    try:
+                        engine_state.user_config.vad_threshold = float(config_data["vad_threshold"])
+                    except (TypeError, ValueError):
+                        pass
+                if "silence_duration_ms" in config_data:
+                    try:
+                        engine_state.user_config.silence_duration_ms = int(config_data["silence_duration_ms"])
+                    except (TypeError, ValueError):
+                        pass
+                if "snip_hotkey" in config_data:
+                    engine_state.user_config.snip_hotkey = str(config_data["snip_hotkey"])
                 save_config(engine_state.user_config)
                 await ws.send_text(Event(
                     type=EventType.CONFIG_UPDATE_RESPONSE,
@@ -3486,6 +3498,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         create_voice_pipeline,
                         fast_chat_talker,
                     )
+                    from aether_engine.voice.vad import EndpointerConfig
 
                     async def _persist_voice_user(text: str, _sid: str = voice_session_id) -> None:
                         try:
@@ -3541,6 +3554,10 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         on_turn_error=_voice_turn_error,
                         escalation_classifier=_voice_should_escalate,
                         on_escalation=_voice_escalation_launch,
+                        endpointer_config=EndpointerConfig(
+                            speech_threshold=cfg.vad_threshold,
+                            silence_duration_ms=cfg.silence_duration_ms,
+                        ),
                     )
                     if voice_pipeline is not None:
                         try:
