@@ -34,6 +34,10 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
   // Epic 2: approval mode ('ask' | 'write', from TOOL_LIST_RESPONSE) and
   // the remembered scoped-approval grants (E2-09 approval cache).
   const [approvalMode, setApprovalMode] = useState('ask');
+  // FUP-1 (xref S2-M1): approval binding for hook-rewritten calls
+  // ('rebind' | 'carry', from the engine config). 'rebind' is the
+  // strict default: an approval covers only the pre-hook arguments.
+  const [approvalBindingMode, setApprovalBindingMode] = useState('rebind');
   // Epic 6, E6-06: settings search + reset-to-defaults state.
   const [settingsQuery, setSettingsQuery] = useState('');
   const [resetArmed, setResetArmed] = useState(false);
@@ -251,6 +255,15 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
     }
   };
 
+  const handleApprovalBindingChange = (mode) => {
+    // FUP-1: optimistic like the approval-mode selector, and sent
+    // through the one CONFIG_UPDATE flow (sendConfigUpdate queues
+    // while offline and flushes on reconnect, E6-F15). The engine
+    // applies it live — the next tool call reads the new value.
+    setApprovalBindingMode(mode);
+    sendConfigUpdate({ approval_binding_mode: mode });
+  };
+
   const handleRevokeGrant = (id) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
@@ -300,6 +313,9 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
       }
       if (config.silence_duration_ms !== undefined && config.silence_duration_ms !== null) {
         setSilenceDurationMs(config.silence_duration_ms);
+      }
+      if (config.approval_binding_mode) {
+        setApprovalBindingMode(config.approval_binding_mode);
       }
       // Phase 9, B1/B2: engine-persisted auxiliary models and reasoning effort.
       setAuxModels(config.auxiliary_models || {});
@@ -1117,6 +1133,43 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                   style={{ width: '220px' }}
                   align="right"
                 />
+              </div>
+            </div>
+
+            <div data-testid="approval-binding" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', marginBottom: '12px' }}>
+              <h4 style={{ fontSize: '15px', fontWeight: 500 }}>Approval binding</h4>
+              <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px', marginBottom: '12px' }}>
+                Hooks can rewrite a tool call after you approve it. Choose what your approval covers.
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <label style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', cursor: 'pointer' }}>
+                  <input
+                    type="radio"
+                    name="approval-binding-mode"
+                    value="rebind"
+                    checked={approvalBindingMode === 'rebind'}
+                    onChange={() => handleApprovalBindingChange('rebind')}
+                    style={{ marginTop: '3px', accentColor: '#7c3aed', cursor: 'pointer' }}
+                  />
+                  <span>
+                    <span style={{ fontSize: '14px', fontWeight: 500, display: 'block' }}>Rebind approval to final arguments (strict)</span>
+                    <span style={{ fontSize: '13px', color: '#9090a0', display: 'block', marginTop: '2px' }}>If a hook changes a call you approved and the changed call needs approval, you are asked again on the final version.</span>
+                  </span>
+                </label>
+                <label style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', cursor: 'pointer' }}>
+                  <input
+                    type="radio"
+                    name="approval-binding-mode"
+                    value="carry"
+                    checked={approvalBindingMode === 'carry'}
+                    onChange={() => handleApprovalBindingChange('carry')}
+                    style={{ marginTop: '3px', accentColor: '#7c3aed', cursor: 'pointer' }}
+                  />
+                  <span>
+                    <span style={{ fontSize: '14px', fontWeight: 500, display: 'block' }}>Carry my approval to rewritten arguments</span>
+                    <span style={{ fontSize: '13px', color: '#9090a0', display: 'block', marginTop: '2px' }}>Your approval of the original call also covers hook-rewritten versions, unless the rewrite is denied.</span>
+                  </span>
+                </label>
               </div>
             </div>
 

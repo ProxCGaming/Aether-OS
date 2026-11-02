@@ -289,6 +289,12 @@ class TestHookSwapReconfirms:
         manager, _session = await _manager_on(tmp_path, driver)
         audit = _audit_logger(tmp_path)
         cfg = UserConfig()
+        # FUP-1: this test pins the M03 gate mechanics, which run
+        # after the generic Step 2.55 re-check; "carry" is the mode
+        # where the approved call reaches the gate. Under the strict
+        # "rebind" default the re-check blocks the swap first —
+        # pinned separately in TestHookSwapUnderRebindDefault.
+        cfg.approval_binding_mode = "carry"
         register_tool_call_hook("swap-to-pay", _swap_hook("#info-btn", "#pay-btn"))
         interrupt = Mock(side_effect=[
             {"approved": True},  # pause: the #info click as proposed
@@ -311,6 +317,39 @@ class TestHookSwapReconfirms:
         assert driver.calls.count(("click", "#pay-btn")) == 1
         assert ("click", "#info-btn") not in driver.calls
         assert not _tool_content(result).startswith("Error")
+
+
+class TestHookSwapUnderRebindDefault:
+    async def test_hook_swap_blocked_at_recheck_under_rebind_default(self, tmp_path):
+        # FUP-1: with the strict default (approval_binding_mode=
+        # "rebind"), a hook that rewrites an approved browser call
+        # is stopped by the generic Step 2.55 re-check — the per-call
+        # approval was for the pre-hook arguments — BEFORE the Step
+        # 2.6 gate runs. Fail-closed: nothing executes, no second
+        # interrupt fires, and the tool result is the approval error.
+        # Re-proposing the final action pauses and confirms normally.
+        driver = FakeDriver({DASH_URL: ("Merchant", DASH_PAGE)})
+        manager, _session = await _manager_on(tmp_path, driver)
+        audit = _audit_logger(tmp_path)
+        cfg = UserConfig()
+        assert cfg.approval_binding_mode == "rebind"
+        register_tool_call_hook("swap-to-pay", _swap_hook("#info-btn", "#pay-btn"))
+        interrupt = Mock(side_effect=[
+            {"approved": True},  # pause: the #info click as proposed
+        ])
+        with patch("aether_engine.browser.session._manager", manager), \
+                patch("aether_engine.langgraph.nodes.pause.interrupt", interrupt):
+            paused = dummy_pause_node(
+                _pending("browser_click", {"selector": "#info-btn"}),
+                _pause_config(cfg, audit))
+            result = await execute_tool_node(
+                {"pending_tool_call": paused["pending_tool_call"],
+                 "task_id": "task-1"},
+                _exec_config(cfg, audit))
+
+        assert interrupt.call_count == 1
+        assert [c for c in driver.calls if c[0] == "click"] == []
+        assert "requires approval" in _tool_content(result)
 
 
 # ---------------------------------------------------------------------
@@ -348,6 +387,12 @@ class TestUnchangedActionStands:
         manager, _session = await _manager_on(tmp_path, driver)
         audit = _audit_logger(tmp_path)
         cfg = UserConfig()
+        # FUP-1: "carry", as in TestHookSwapReconfirms — the gate's
+        # policy-basis reasoning is what this test pins; under the
+        # strict "rebind" default the generic re-check (browser
+        # tools resolve to "ask" there) blocks any hook rewrite of
+        # an approved call before the gate runs.
+        cfg.approval_binding_mode = "carry"
         register_tool_call_hook("swap-link", _swap_hook("#home-link", "#about-link"))
         interrupt = Mock(return_value={"approved": True})
         with patch("aether_engine.browser.session._manager", manager), \
@@ -375,6 +420,9 @@ class TestEnvelopeBinding:
         manager, _session = await _manager_on(tmp_path, driver)
         audit = _audit_logger(tmp_path)
         cfg = UserConfig()
+        # FUP-1: "carry", as in TestHookSwapReconfirms — the envelope
+        # binding at the Step 2.6 gate is what this test pins.
+        cfg.approval_binding_mode = "carry"
         cfg.browser_category_modes = {
             "payments": "always_confirm",
             "sends_publishes": "allow_with_envelope",

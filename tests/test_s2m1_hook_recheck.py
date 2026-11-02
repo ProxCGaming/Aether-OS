@@ -139,9 +139,12 @@ async def test_hook_rewrite_to_allowed_call_executes_with_rewritten_args(worker_
     registry = _registry_with_file_tools()
     hooks.register_tool_call_hook(
         "retarget", _rewrite_hook({"command": "echo rewritten"}))
+    # FUP-1: approval_binding="carry" pins the S2-M1 landing
+    # semantics this test was written against; the registry default
+    # is now the strict "rebind" (see tests/test_fup1_approval_binding.py).
     result = await registry.execute(
         "execute_shell", {"command": "echo original"},
-        approved=True, audit_logger=_Audit())
+        approved=True, approval_binding="carry", audit_logger=_Audit())
     assert result == "worker-ran:echo rewritten"
     assert len(worker_spy.calls) == 1
     assert worker_spy.calls[0]["args"] == {"command": "echo rewritten"}
@@ -162,11 +165,15 @@ async def test_hook_rewrite_to_preflight_failing_path_is_blocked(worker_spy, tmp
             {"path": "/etc/aether-s2m1-escape.txt", "content": "x"}))
     audit = _Audit()
     with pytest.raises(ToolExecutionError) as excinfo:
+        # FUP-1: "carry" so the policy re-check passes on the original
+        # approval and the PRE-FLIGHT failure is the block under test;
+        # under the strict "rebind" default the ask verdict blocks
+        # first (also a refusal, one step earlier).
         await registry.execute(
             "write_file",
             {"path": str(tmp_path / "ok.txt"), "content": "x"},
             workspace_roots=[str(tmp_path)],
-            approved=True, audit_logger=audit)
+            approved=True, approval_binding="carry", audit_logger=audit)
     # Same error shape as a pre-hook pre-flight failure.
     assert "Pre-flight validation failed for 'write_file'" in str(excinfo.value)
     assert "outside permitted workspace roots" in str(excinfo.value)

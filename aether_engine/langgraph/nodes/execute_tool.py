@@ -373,6 +373,9 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                     if user_config else None
                 ),
                 approval_mode=user_config.approval_mode if user_config else "ask",
+                # FUP-1: read live from the user config on every call,
+                # so a Settings change applies to the next tool call.
+                approval_binding=user_config.approval_binding_mode if user_config else "rebind",
                 approval_cache=get_default_cache(),
                 approved=bool(pending.get("approved")),
                 audit_logger=audit_logger,

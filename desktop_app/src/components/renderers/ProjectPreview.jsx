@@ -1,18 +1,11 @@
 import React, { useState } from 'react';
 import { RefreshCw, Globe, AlertCircle } from 'lucide-react';
+import { toFileUrl } from './fileUrl';
 
 // Epic 8, E8-2.2: sandboxed project preview for web artifacts.
 // Security fix M01 (supersedes the PRD's original sandbox pin):
 // previewed content is untrusted and must never reach this window's
 // Electron bridge (window.electronAPI -> 'engine-send' -> engine).
-//
-// Static mode: a srcDoc iframe whose sandbox is "allow-scripts"
-// WITHOUT "allow-same-origin". Scripts in the preview still run,
-// but the document gets an opaque origin, so it is cross-origin to
-// this app window: reading window.parent.electronAPI throws and
-// top navigation is blocked. (With allow-same-origin, a srcDoc
-// frame shares the embedder's origin — the original pin — and the
-// bridge was reachable; a canary proved it.)
 //
 // Server mode: an Electron <webview> with its own session
 // partition instead of an iframe. The guest is a separate
@@ -22,9 +15,47 @@ import { RefreshCw, Globe, AlertCircle } from 'lucide-react';
 // is also candidate preview port #1). The guest keeps its own
 // origin, so the previewed app's scripts, storage and cookies
 // keep working. Requires webviewTag in main.cjs (see there).
+//
+// Static mode WITH a file on disk (FUP-2, completes the S3-M2
+// consequence): the SAME <webview> guest route as server mode,
+// pointed at a file:// URL built from the artifact's real
+// file_path. This panel's layout is unchanged — only the frame
+// underneath changed. Why: S3-M2 put a strict CSP on the app
+// window (script-src 'self', no inline scripts) and a srcDoc
+// iframe inherits it, so static artifacts' inline scripts stopped
+// running there. The guest session is a separate WebContents NOT
+// governed by the app page's CSP (see electron/securityPolicy.cjs),
+// so the artifact renders exactly as authored: inline scripts
+// run, relative sibling assets (CSS/JS/images next to the HTML)
+// resolve against the real file location, and the rendered bytes
+// are the file's bytes by construction — no content is piped
+// through this component, transformed, sanitised or rewritten on
+// this path. Isolation is the guest boundary itself (separate
+// WebContents, dedicated partition, no preload), exactly as in
+// server mode. The app CSP/sandbox are untouched. Verified with a
+// live Electron 44 probe: a file:// page in this guest ran its
+// inline script and loaded sibling JS/CSS/image assets while the
+// host page carried the production CSP, and the guest had no
+// electronAPI.
+//
+// Static mode WITHOUT a file_path (content-only artifact): there
+// is no file to be faithful to, so the pre-FUP-2 route stays — a
+// srcDoc iframe whose sandbox is "allow-scripts" WITHOUT
+// "allow-same-origin". Scripts in the preview still run, but the
+// document gets an opaque origin, so it is cross-origin to this
+// app window: reading window.parent.electronAPI throws and top
+// navigation is blocked. (With allow-same-origin, a srcDoc frame
+// shares the embedder's origin — the original pin — and the
+// bridge was reachable; a canary proved it.) Note this fallback
+// still inherits the app CSP, so inline scripts in content-only
+// artifacts do not run; that is accepted for this path because
+// there is no on-disk page whose fidelity could be promised.
 const STATIC_PREVIEW_SANDBOX = 'allow-scripts';
 const PREVIEW_PARTITION = 'aether-preview';
 const CANDIDATE_PORTS = [5173, 3000, 8000, 8080];
+
+// The file:// URL for a file-backed static preview is built by
+// ./fileUrl.js (toFileUrl) from the artifact's real file_path.
 
 const normalizeUrl = (raw) => {
   const trimmed = (raw || '').trim();
@@ -54,6 +85,10 @@ export default function ProjectPreview({
   // otherwise the artifact's own HTML as a static preview, otherwise
   // an actionable fallback (never a dead frame).
   const mode = serverUrl ? 'server' : (content ? 'static' : 'empty');
+  // FUP-2: a static artifact with a real file on disk loads through
+  // the webview guest from that file; only a content-only artifact
+  // (no usable file_path) uses the srcDoc iframe.
+  const staticFileUrl = mode === 'static' ? toFileUrl(artifact?.file_path) : null;
   const urlBarValue = urlDraft ?? serverUrl ?? artifact?.file_path ?? '';
 
   const handleGo = (event) => {
@@ -178,7 +213,17 @@ export default function ProjectPreview({
             style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
           />
         )}
-        {mode === 'static' && (
+        {mode === 'static' && staticFileUrl && (
+          <webview
+            key={reloadKey}
+            data-testid="project-preview-iframe"
+            title="Project preview"
+            src={staticFileUrl}
+            partition={PREVIEW_PARTITION}
+            style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
+          />
+        )}
+        {mode === 'static' && !staticFileUrl && (
           <iframe
             key={reloadKey}
             data-testid="project-preview-iframe"

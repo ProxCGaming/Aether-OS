@@ -150,6 +150,13 @@ class UserConfig:
     # DESTRUCTIVE still ask. Explicit Deny / Require Approval, path-rule
     # asks, the sensitive floor, and shell rules all still apply.
     approval_mode: str = "ask"
+    # FUP-1 (xref S2-M1): approval binding for hook-rewritten calls.
+    # "rebind" (strict, default) = an approval covers only the exact
+    # pre-hook arguments; if a hook rewrites the call and the final
+    # args need approval, the user is asked again on the final
+    # version. "carry" = the original approval also covers the
+    # hook-rewritten call (the pre-FUP-1 behaviour).
+    approval_binding_mode: str = "rebind"
     workspace_roots: list[str] = field(default_factory=list)
     # Epic 8, E8-3.1: token budget for the ambient repo map injected
     # into graph-task supervisor context (rag/repo_map.py), rebuilt
@@ -277,6 +284,7 @@ class UserConfig:
             "extra_shell_deny_patterns": self.extra_shell_deny_patterns,
             "extra_shell_ask_patterns": self.extra_shell_ask_patterns,
             "approval_mode": self.approval_mode,
+            "approval_binding_mode": self.approval_binding_mode,
             "search_provider": self.search_provider,
             "search_fallback_to_ddgs": self.search_fallback_to_ddgs,
             "workspace_roots": self.workspace_roots,
@@ -380,6 +388,7 @@ class UserConfig:
             extra_shell_deny_patterns=[p for p in d.get("extra_shell_deny_patterns", []) if isinstance(p, str)] if isinstance(d.get("extra_shell_deny_patterns"), list) else [],
             extra_shell_ask_patterns=[p for p in d.get("extra_shell_ask_patterns", []) if isinstance(p, str)] if isinstance(d.get("extra_shell_ask_patterns"), list) else [],
             approval_mode=d.get("approval_mode") if d.get("approval_mode") in ("ask", "write") else "ask",
+            approval_binding_mode=d.get("approval_binding_mode") if d.get("approval_binding_mode") in ("rebind", "carry") else "rebind",
             search_provider=d.get("search_provider") if d.get("search_provider") in ("ddgs", "exa", "brave", "tavily", "firecrawl") else "ddgs",
             search_fallback_to_ddgs=bool(d.get("search_fallback_to_ddgs", False)),
             workspace_roots=d.get("workspace_roots") if isinstance(d.get("workspace_roots"), list) else [],

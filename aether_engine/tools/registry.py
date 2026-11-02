@@ -422,6 +422,7 @@ class ToolRegistry:
         path_rules: list | None = None,
         shell_extras: dict | None = None,
         approval_mode: str = "ask",
+        approval_binding: str = "rebind",
         approval_cache: Any = None,
         final_args_gate: Callable | None = None,
     ) -> Any:
@@ -435,6 +436,11 @@ class ToolRegistry:
           2.55. Post-hook re-check (S2-M1) — when the hooks changed the
              arguments, Steps 1–2 re-run on the rewritten args: what
              executes is what was vetted, not what was proposed.
+             ``approval_binding`` (FUP-1) decides whether the per-call
+             approval binds to the rewritten call: "rebind" (default,
+             strict) re-runs the policy check WITHOUT honouring
+             ``approved`` — an "ask" on the final args asks again;
+             "carry" honours it, as S2-M1 originally landed.
           2.6. Caller-supplied final-args gate (M03) — vets the exact
              arguments that will execute, post-edit and post-hook.
           3. Sandbox routing (ADR 0010) — non-READ_ONLY tools run in the
@@ -469,7 +475,17 @@ class ToolRegistry:
         # pre-flight error in Step 2 — denied, audited, and surfaced
         # as ToolExecutionError — never a raw exception escaping
         # execute() with no audit record of the refusal.
-        def _enforce_policy(check_args: dict[str, Any]) -> None:
+        def _enforce_policy(check_args: dict[str, Any], *, honor_approval: bool = True) -> None:
+            # FUP-1: honor_approval=False is the Step 2.55 "rebind"
+            # re-check — the per-call ``approved`` flag was consent
+            # for the PRE-hook arguments and must not satisfy an
+            # "ask" verdict on the final args. The approval_cache
+            # covering-grant path below is deliberately NOT gated on
+            # honor_approval: a stored grant is vetted against the
+            # final args by covering_grant itself (prefix + risk
+            # ceiling + the floored-path refusal), so it stays valid
+            # in both binding modes, unchanged.
+            effective_approved = approved and honor_approval
             try:
                 policy = resolve_policy_by_name(name, policies or {}, self, args=check_args, path_rules=path_rules, shell_extras=shell_extras, approval_mode=approval_mode)
             except Exception as e:
@@ -481,7 +497,7 @@ class ToolRegistry:
             # E2-09: a stored approval grant turns this call's "ask" into
             # "allow" — never a "deny", never a floored path (the cache
             # itself refuses those), and the hit is audited with its grant.
-            if policy == "ask" and not approved and approval_cache is not None:
+            if policy == "ask" and not effective_approved and approval_cache is not None:
                 try:
                     grant = approval_cache.covering_grant(risk=tool.risk.value, args=check_args)
                 except Exception:
@@ -510,8 +526,19 @@ class ToolRegistry:
                     payload["rule"] = rule
                 log.log_event("TOOL_BLOCKED_BY_POLICY", payload)
                 raise ToolExecutionError(f"Tool '{name}' is blocked by policy (deny).")
-            if policy == "ask" and not approved:
+            if policy == "ask" and not effective_approved:
                 log.log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": name, "reason": "Bypassed Approval", "via": "registry.execute"})
+                if not honor_approval and approved:
+                    # FUP-1 rebind: the call WAS approved — but for
+                    # the pre-hook arguments. Say exactly that, so
+                    # the fresh approval prompt is not a mystery.
+                    raise ToolExecutionError(
+                        f"Tool '{name}' requires approval (policy=ask): "
+                        "approval was for the pre-hook arguments, but a "
+                        "hook rewrote the call and the final arguments "
+                        "require approval (approval_binding=rebind). "
+                        "Re-approval is required for the final version."
+                    )
                 raise ToolExecutionError(
                     f"Tool '{name}' requires approval (policy=ask). "
                     "Pass approved=True only after explicit user consent."
@@ -575,7 +602,11 @@ class ToolRegistry:
         # these arguments, and re-running would only double-audit
         # (e.g. a second APPROVAL_CACHE_HIT for the same grant).
         if call_args != pre_hook_args:
-            _enforce_policy(call_args)
+            # FUP-1: "carry" honours the original approval on the
+            # rewritten call (the S2-M1 landing behaviour); "rebind"
+            # — and any unrecognised value, failing strict — does
+            # not: the approval was for the pre-hook arguments.
+            _enforce_policy(call_args, honor_approval=(approval_binding == "carry"))
             _enforce_preflight(call_args)
 
         # ── Step 2.6: final-args gate (review finding M03) ───────────

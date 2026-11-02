@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>fup2-fixture</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="sibling.js"></script>
+  <script>
+    window.__inlineRan = 'inline-yes';
+    document.addEventListener('DOMContentLoaded', function () {
+      var el = document.createElement('div');
+      el.id = 'inline-marker';
+      el.textContent = window.__inlineRan;
+      document.body.appendChild(el);
+    });
+  </script>
+</head>
+<body>
+  <h1>fixture</h1>
+  <img id="sibling-img" src="pixel.png" onload="window.__imgLoaded = true" onerror="window.__imgError = true">
+</body>
+</html>

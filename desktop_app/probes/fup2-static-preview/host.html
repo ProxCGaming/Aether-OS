@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <!-- The app window's production CSP, copied verbatim from
+       desktop_app/index.html (S3-M2). The probe proves the preview
+       guest is NOT governed by it. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: file:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
+  <title>fup2-host</title>
+</head>
+<body>
+  <webview id="preview" partition="aether-preview" style="width:800px;height:600px"></webview>
+  <!-- External script: the CSP above (script-src 'self', no
+       'unsafe-inline') would refuse an inline script in the host
+       page itself — exactly as it does in the real app window. -->
+  <script src="host.js"></script>
+</body>
+</html>

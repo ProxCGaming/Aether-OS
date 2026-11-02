@@ -3262,6 +3262,17 @@ async def ws_tasks(ws: WebSocket):
                             1.0, max(0.0, float(config_data["smart_turn_sensitivity"])))
                     except (TypeError, ValueError):
                         pass
+                # FUP-1: only the two literals apply; anything else
+                # is ignored, matching the tuning fields above. The
+                # value is read live per tool call (execute_tool
+                # passes user_config.approval_binding_mode into
+                # registry.execute), so this takes effect on the
+                # next call — no restart, no session rebuild.
+                if (
+                    "approval_binding_mode" in config_data
+                    and config_data["approval_binding_mode"] in ("rebind", "carry")
+                ):
+                    engine_state.user_config.approval_binding_mode = config_data["approval_binding_mode"]
                 if "snip_hotkey" in config_data:
                     engine_state.user_config.snip_hotkey = str(config_data["snip_hotkey"])
                 try:

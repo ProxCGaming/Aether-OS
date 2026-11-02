@@ -105,7 +105,7 @@ describe('ProjectPreview', () => {
     expect(onDetect).toHaveBeenCalled();
   });
 
-  test('static HTML artifact renders via srcDoc inside the sandboxed iframe', () => {
+  test('static HTML artifact WITH a file on disk renders via the isolated webview guest at the file:// URL (FUP-2)', () => {
     const html = '<!DOCTYPE html><html><body><h1>Hello</h1></body></html>';
     render(
       <ProjectPreview
@@ -117,6 +117,92 @@ describe('ProjectPreview', () => {
     );
 
     const frame = screen.getByTestId('project-preview-iframe');
+    // FUP-2: the static preview goes through the SAME guest route as
+    // server mode, pointed at the artifact's real file, so the page
+    // renders exactly as authored (inline scripts run, relative
+    // sibling assets resolve) and the app window's CSP — which a
+    // srcDoc iframe inherits — no longer applies to it.
+    expect(frame.tagName).toBe('WEBVIEW');
+    expect(frame.getAttribute('partition')).toBe(PREVIEW_PARTITION);
+    expect(frame.getAttribute('src')).toBe('file:///site/index.html');
+    // No content is piped through the renderer at all on this path:
+    // no srcDoc, no sandbox attribute, no transformation.
+    expect(frame.getAttribute('srcdoc')).toBeFalsy();
+    expect(frame.getAttribute('sandbox')).toBeFalsy();
+    expect(frame.getAttribute('preload')).toBeNull();
+    // The URL bar still shows the artifact's real path.
+    expect(screen.getByTestId('preview-url-input')).toHaveValue('/site/index.html');
+  });
+
+  test('static file URL percent-encodes path segments (spaces, #) without touching separators', () => {
+    const spaced = { ...htmlArtifact, file_path: '/site/my folder/page #1.html' };
+    render(
+      <ProjectPreview
+        artifact={spaced}
+        content={'<html><body>hi</body></html>'}
+        devServer={{ running: false, port: null, url: null, framework: null }}
+        onDetect={jest.fn()}
+      />
+    );
+
+    const frame = screen.getByTestId('project-preview-iframe');
+    expect(frame.tagName).toBe('WEBVIEW');
+    expect(frame.getAttribute('src')).toBe('file:///site/my%20folder/page%20%231.html');
+  });
+
+  test('static file URL handles Windows-shaped artifact paths (backslashes, drive letter)', () => {
+    const win = { ...htmlArtifact, file_path: 'C:\\Users\\arindam\\site\\index page.html' };
+    render(
+      <ProjectPreview
+        artifact={win}
+        content={'<html><body>hi</body></html>'}
+        devServer={{ running: false, port: null, url: null, framework: null }}
+        onDetect={jest.fn()}
+      />
+    );
+
+    const frame = screen.getByTestId('project-preview-iframe');
+    expect(frame.tagName).toBe('WEBVIEW');
+    expect(frame.getAttribute('src')).toBe('file:///C:/Users/arindam/site/index%20page.html');
+  });
+
+  test('reload remounts the static file webview and re-runs detection', () => {
+    const onDetect = jest.fn();
+    render(
+      <ProjectPreview
+        artifact={htmlArtifact}
+        content={'<html><body>hi</body></html>'}
+        devServer={{ running: false, port: null, url: null, framework: null }}
+        onDetect={onDetect}
+      />
+    );
+
+    const before = screen.getByTestId('project-preview-iframe');
+    fireEvent.click(screen.getByTestId('preview-reload-btn'));
+    const after = screen.getByTestId('project-preview-iframe');
+
+    expect(after).not.toBe(before);
+    expect(after.tagName).toBe('WEBVIEW');
+    expect(after.getAttribute('src')).toBe('file:///site/index.html');
+    expect(onDetect).toHaveBeenCalled();
+  });
+
+  test('static HTML artifact WITHOUT a file_path keeps the srcDoc iframe behaviour (FUP-2 fallback)', () => {
+    const contentOnly = { ...htmlArtifact, file_path: null };
+    const html = '<!DOCTYPE html><html><body><h1>Hello</h1></body></html>';
+    render(
+      <ProjectPreview
+        artifact={contentOnly}
+        content={html}
+        devServer={{ running: false, port: null, url: null, framework: null }}
+        onDetect={jest.fn()}
+      />
+    );
+
+    const frame = screen.getByTestId('project-preview-iframe');
+    // There is no file to be faithful to, so the pre-FUP-2 route
+    // stays: sandboxed srcDoc iframe, scripts on, opaque origin.
+    expect(frame.tagName).toBe('IFRAME');
     expect(frame.getAttribute('sandbox')).toBe(SANDBOX);
     expect(frame.getAttribute('srcdoc')).toBe(html);
     expect(frame.getAttribute('src')).toBeFalsy();
@@ -195,9 +281,13 @@ describe('ArtifactsCanvas Preview tab (E8-2.2)', () => {
 
     fireEvent.click(screen.getByTestId('artifact-tab-preview'));
 
+    // FUP-2: the artifact has a real file_path, so the Preview tab
+    // loads that file through the isolated webview guest.
     const frame = screen.getByTestId('project-preview-iframe');
-    expect(frame.getAttribute('sandbox')).toBe(SANDBOX);
-    expect(frame.getAttribute('srcdoc')).toBe(html);
+    expect(frame.tagName).toBe('WEBVIEW');
+    expect(frame.getAttribute('partition')).toBe(PREVIEW_PARTITION);
+    expect(frame.getAttribute('src')).toBe('file:///site/index.html');
+    expect(frame.getAttribute('srcdoc')).toBeFalsy();
     expect(onDetect).toHaveBeenCalledWith({ workspace_root: null, project_path: '/site' });
   });
 

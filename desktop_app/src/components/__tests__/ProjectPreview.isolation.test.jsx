@@ -47,6 +47,12 @@ const htmlArtifact = {
   created_at: 1000,
 };
 
+// FUP-2: an artifact WITH a file_path previews through the webview
+// guest (see the FUP-2 describe below); the srcDoc route — and so
+// the srcDoc isolation invariants — now applies only to
+// content-only artifacts, which have no file to load.
+const contentOnlyArtifact = { ...htmlArtifact, file_path: null };
+
 const noServer = { running: false, port: null, url: null, framework: null };
 
 const sandboxTokens = (el) =>
@@ -63,7 +69,7 @@ describe('M01: static preview isolation', () => {
   test('canary HTML in a srcDoc preview is not same-origin with the app window', () => {
     render(
       <ProjectPreview
-        artifact={htmlArtifact}
+        artifact={contentOnlyArtifact}
         content={CANARY_HTML}
         devServer={noServer}
         onDetect={jest.fn()}
@@ -80,7 +86,7 @@ describe('M01: static preview isolation', () => {
   test('static preview keeps scripts enabled but drops allow-same-origin', () => {
     render(
       <ProjectPreview
-        artifact={htmlArtifact}
+        artifact={contentOnlyArtifact}
         content={CANARY_HTML}
         devServer={noServer}
         onDetect={jest.fn()}
@@ -156,6 +162,48 @@ describe('M01: server preview isolation', () => {
     expect(frame.tagName).toBe('WEBVIEW');
     expect(frame.getAttribute('partition')).toBe('aether-preview');
     expect(frame.getAttribute('src')).toBe('https://example.com/page');
+  });
+});
+
+describe('FUP-2: static preview with a file on disk stays bridge-isolated', () => {
+  test('file-backed static preview is a webview guest, never an in-window iframe or srcDoc', () => {
+    render(
+      <ProjectPreview
+        artifact={htmlArtifact}
+        content={CANARY_HTML}
+        devServer={noServer}
+        onDetect={jest.fn()}
+      />
+    );
+
+    const frame = screen.getByTestId('project-preview-iframe');
+    // Same guest route as server mode: separate WebContents, own
+    // session partition, no preload — the canary's
+    // window.parent.electronAPI reach does not exist here because
+    // there is no shared window tree and no bridge in the guest.
+    expect(frame.tagName).toBe('WEBVIEW');
+    expect(frame.getAttribute('partition')).toBe('aether-preview');
+    expect(frame.getAttribute('preload')).toBeNull();
+    expect(frame.getAttribute('nodeintegration')).toBeNull();
+    // The artifact content is NOT handed to the frame as a string:
+    // the guest loads the file itself, byte for byte.
+    expect(frame.hasAttribute('srcdoc')).toBe(false);
+    expect(frame.getAttribute('src')).toBe('file:///site/index.html');
+  });
+
+  test('server mode still wins over a file-backed static artifact', () => {
+    render(
+      <ProjectPreview
+        artifact={htmlArtifact}
+        content={CANARY_HTML}
+        devServer={{ running: true, port: 3000, url: 'http://localhost:3000', framework: null }}
+        onDetect={jest.fn()}
+      />
+    );
+
+    const frame = screen.getByTestId('project-preview-iframe');
+    expect(frame.tagName).toBe('WEBVIEW');
+    expect(frame.getAttribute('src')).toBe('http://localhost:3000');
   });
 });
 

@@ -21,8 +21,9 @@ if (typeof URL.revokeObjectURL === 'undefined') {
 
 import ArtifactsCanvas, { SummaryDocumentRenderer } from '../ArtifactsCanvas';
 
-// Static previews: scripts run, origin opaque — no allow-same-origin (M01).
-const PREVIEW_SANDBOX = 'allow-scripts';
+// Static previews: file-backed artifacts render through the
+// isolated webview guest (FUP-2); content-only artifacts keep the
+// M01 srcDoc iframe (scripts run, origin opaque).
 
 describe('SummaryDocumentRenderer & Summary Document Artifacts (E8-2.4)', () => {
   const summaryArtifact = {
@@ -175,7 +176,7 @@ describe('Standalone HTML preview toggle semantics (E8-2.4)', () => {
     expect(screen.getByTestId('artifact-tab-preview')).toBeInTheDocument();
   });
 
-  test('toggling preview renders sandboxed iframe with opaque-origin allow-scripts', () => {
+  test('toggling preview renders the file-backed page through the isolated webview guest (FUP-2)', () => {
     render(
       <ArtifactsCanvas
         isOpen={true}
@@ -198,10 +199,17 @@ describe('Standalone HTML preview toggle semantics (E8-2.4)', () => {
     // Toggle to preview
     fireEvent.click(screen.getByTestId('artifact-tab-preview'));
 
-    const iframe = screen.getByTestId('project-preview-iframe');
-    expect(iframe).toBeInTheDocument();
-    expect(iframe.getAttribute('sandbox')).toBe(PREVIEW_SANDBOX);
-    expect(iframe.getAttribute('srcdoc')).toBe(htmlContent);
+    const frame = screen.getByTestId('project-preview-iframe');
+    expect(frame).toBeInTheDocument();
+    // FUP-2 supersedes the M01 srcDoc pin for file-backed
+    // artifacts: this artifact has a real file_path, so the
+    // preview loads that file in the isolated webview guest
+    // (partition 'aether-preview') — exactly as authored, inline
+    // scripts running — instead of a CSP-inheriting srcDoc iframe.
+    expect(frame.tagName).toBe('WEBVIEW');
+    expect(frame.getAttribute('partition')).toBe('aether-preview');
+    expect(frame.getAttribute('src')).toBe('file:///standalone.html');
+    expect(frame.getAttribute('srcdoc')).toBeFalsy();
     expect(screen.queryByTestId('code-renderer')).not.toBeInTheDocument();
 
     // Toggle back to code
