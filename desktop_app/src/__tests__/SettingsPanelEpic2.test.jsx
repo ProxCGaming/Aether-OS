@@ -102,13 +102,16 @@ describe('SettingsPanel Epic 2 — approval grants', () => {
     expect(screen.getByText('No approval grants remembered.')).toBeInTheDocument();
   });
 
-  it('renders grants with prefix, ceiling and tool name', () => {
+  it('renders grants with prefix, ceiling and originating tool', () => {
     const { wsRef, getHandler } = makeWsRef();
     openTools(wsRef);
     feed(getHandler, 'APPROVAL_GRANTS_RESPONSE', { grants });
     expect(screen.getByText('/home/user/proj')).toBeInTheDocument();
     expect(screen.getByText('up to write')).toBeInTheDocument();
-    expect(screen.getByText('edit_file')).toBeInTheDocument();
+    // S2-N4: the recorded tool is labelled as the grant's origin —
+    // a grant is NOT enforced per-tool, and the bare name implied
+    // it was.
+    expect(screen.getByText('originating tool: edit_file')).toBeInTheDocument();
     expect(screen.getByText('/home/user/notes.txt')).toBeInTheDocument();
     expect(screen.getByText('up to read_only')).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: 'Revoke' })).toHaveLength(2);

@@ -1187,7 +1187,7 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
 
             <div data-testid="approval-grants" style={{ marginBottom: '24px' }}>
               <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '4px' }}>Approval grants</h3>
-              <p style={{ fontSize: '13px', color: '#9090a0', marginBottom: '12px' }}>Files and folders you approved with &quot;remember&quot; — matching tool calls run without asking until you revoke the grant.</p>
+              <p style={{ fontSize: '13px', color: '#9090a0', marginBottom: '12px' }}>Files and folders you approved with &quot;remember&quot; — matching tool calls run without asking until you revoke the grant. A grant covers any tool at or below its risk ceiling under the path; the tool named on each grant is the one it was created from.</p>
               {approvalGrants.length === 0 ? (
                 <div style={{ color: '#9090a0', fontSize: '14px', padding: '16px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
                   No approval grants remembered.
@@ -1200,7 +1200,7 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                         <span style={{ fontFamily: 'monospace', fontSize: '13px' }}>{grant.prefix}</span>
                         <span style={{ fontSize: '11px', background: 'rgba(59, 130, 246, 0.2)', color: '#93c5fd', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px' }}>up to {grant.ceiling}</span>
                         {grant.tool_name && (
-                          <span style={{ fontSize: '11px', color: '#9090a0', marginLeft: '8px' }}>{grant.tool_name}</span>
+                          <span style={{ fontSize: '11px', color: '#9090a0', marginLeft: '8px' }}>originating tool: {grant.tool_name}</span>
                         )}
                       </div>
                       <button
