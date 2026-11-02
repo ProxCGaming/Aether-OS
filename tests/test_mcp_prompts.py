@@ -134,7 +134,7 @@ class TestMCPPromptWebSocketHandlers:
         self.tmp_dir.cleanup()
 
     def _connect(self, client):
-        return client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}")
+        return client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"})
 
     def _send(self, ws, type_, payload):
         ws.send_text(Event(type=type_, payload=payload).to_json())

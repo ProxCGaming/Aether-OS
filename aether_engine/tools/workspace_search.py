@@ -12,7 +12,9 @@ overlap) and a semantic leg (cosine over the unified embedder's
 vectors) merged with RRF. When the embedding endpoint is down the
 semantic leg is skipped and the result says so (``degraded``) —
 lexical matches are still real matches. When nothing is indexed,
-the tool says that plainly instead of inventing hits.
+the tool says that plainly instead of inventing hits. When no
+workspace root is granted for the run, the tool searches nothing
+at all (S2-M2) — it never falls back to every indexed workspace.
 """
 from __future__ import annotations
 
@@ -76,18 +78,25 @@ async def search_workspace(
     config: UserConfig | None = None,
 ) -> dict[str, Any]:
     """Search the prose index. Returns ``{results, degraded,
-    indexed_roots}`` — results carry verified file+line citations.
+    indexed_roots, no_workspace_granted}`` — results carry verified
+    file+line citations.
 
     ``workspace_roots`` scopes the search to the granted roots the
-    caller passes (the tool injects the run's roots); ``None``
-    searches every indexed root in the store.
+    caller passes (the tool injects the run's roots). ``None`` or an
+    empty list means NO workspace was granted for this run (S2-M2):
+    the search returns no results at all — it never falls back to an
+    unscoped search over every indexed root in the store.
     """
     limit = max(1, min(int(limit or 5), _MAX_LIMIT))
-    roots = [str(Path(r).expanduser()) for r in workspace_roots] if workspace_roots else None
+    roots = [str(Path(r).expanduser()) for r in workspace_roots] if workspace_roots else []
+    if not roots:
+        return {"results": [], "degraded": False, "indexed_roots": [],
+                "no_workspace_granted": True}
     candidates = store.search_candidates(roots)
     indexed_roots = sorted({c["workspace_root"] for c in candidates})
     if not candidates:
-        return {"results": [], "degraded": False, "indexed_roots": indexed_roots}
+        return {"results": [], "degraded": False, "indexed_roots": indexed_roots,
+                "no_workspace_granted": False}
 
     query_tokens = set(_tokens(query))
     query_vec = await episodic.embed_text(
@@ -139,12 +148,20 @@ async def search_workspace(
             "verified": verified,
         })
     return {"results": results, "degraded": degraded,
-            "indexed_roots": indexed_roots}
+            "indexed_roots": indexed_roots, "no_workspace_granted": False}
 
 
 def format_search_results(query: str, outcome: dict[str, Any]) -> str:
     """Render a search outcome as the tool's text for the agent."""
     results = outcome["results"]
+    if outcome.get("no_workspace_granted"):
+        return (
+            "No workspace has been granted for this run, so workspace "
+            "search has nothing to search. Grant a workspace folder "
+            "for this run to search its indexed prose (Markdown, docs, "
+            "notes, text); code is covered by the repo map and the "
+            "live file tools."
+        )
     if not outcome["indexed_roots"]:
         return (
             "No workspace prose index is available yet — no workspace "

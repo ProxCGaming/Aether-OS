@@ -39,7 +39,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.config import var_child_runnable_config
 
 from aether_common.contracts import EventType, TaskState
 from aether_engine.config import UserConfig
@@ -47,7 +49,13 @@ from aether_engine.langgraph import executor as executor_module
 from aether_engine.langgraph.nodes import planner as planner_module
 from aether_engine.langgraph.nodes import supervisor as supervisor_module
 from aether_engine.langgraph.nodes.planner import planner_node
-from aether_engine.langgraph.nodes.supervisor import supervisor_node
+from aether_engine.langgraph.nodes.supervisor import (
+    _execute_supervisor_memory_tool,
+)
+from aether_engine.langgraph.supervisor_model import (
+    AetherSupervisorModel,
+    supervisor_post_model_hook,
+)
 from aether_engine.memory import episodic as episodic_module
 from aether_engine.memory import knowledge_graph as kg_module
 from aether_engine.orchestration import core as orchestration_core
@@ -314,24 +322,56 @@ async def test_checkpoint_resume_result_persisted_in_state(graph_env):
 # 3. Memory briefing
 # --------------------------------------------------------------------------
 
-def _supervisor_state(**overrides):
-    state = {
-        "original_prompt": "what is my name?",
-        "messages": [{"role": "user", "content": "what is my name?"}],
-        "session_id": "mem-session",
-        "task_id": "mem-task",
-        "plan": "",
-        "delegation_log": [],
-        "pending_tool_call": None,
-        "active_specialist": None,
-    }
-    state.update(overrides)
-    return state
+async def _supervisor_generate(provider, messages):
+    """One production supervisor model step (S1-M4 migration).
+
+    Drives ``AetherSupervisorModel._agenerate`` — the create_supervisor
+    routing model that replaced the removed hand-written supervisor
+    node — with the run config supplied through langgraph's
+    ``var_child_runnable_config``, the way ``get_config()`` receives
+    it inside a real graph run. Returns the step's AIMessage.
+    """
+    config = {"configurable": {
+        "provider": provider, "session_id": "mem-session"}}
+    token = var_child_runnable_config.set(config)
+    try:
+        result = await AetherSupervisorModel()._agenerate(messages)
+    finally:
+        var_child_runnable_config.reset(token)
+    return result.generations[0].message
+
+
+async def _supervisor_memory_journey(provider):
+    """The production memory-briefing journey, step by step.
+
+    1. The adapter's first step returns the memory tool call as an
+       AIMessage (the live graph's ToolNode would run it next).
+    2. The tool executes through ``_execute_supervisor_memory_tool``
+       — the shared, audited execution path the supervisor's
+       LangChain memory tools wrap.
+    3. The adapter is called again with the tool result in its
+       history (exactly what the ToolNode writes back) and returns
+       its routing decision.
+
+    Returns (first_message, tool_result, decision_message).
+    """
+    human = HumanMessage(content="what is my name?")
+    first = await _supervisor_generate(provider, [human])
+    assert len(first.tool_calls) == 1
+    call = first.tool_calls[0]
+    tool_result = await _execute_supervisor_memory_tool(
+        call["name"], call["args"], "mem-session",
+        "what is my name?", "mem-task")
+    tool_message = ToolMessage(
+        content=tool_result, tool_call_id=call["id"], name=call["name"])
+    decision = await _supervisor_generate(
+        provider, [human, first, tool_message])
+    return first, tool_result, decision
 
 
 @pytest.fixture
 def memory_env(monkeypatch):
-    """Stub the memory layer + audit sink for supervisor-node tests."""
+    """Stub the memory layer + audit sink for supervisor tests."""
     fact = {"entity_name": "user", "entity_type": "Person",
             "fact_text": "The user is called Arindam."}
     monkeypatch.setattr(
@@ -348,12 +388,14 @@ async def test_supervisor_memory_tool_result_feeds_followup_call(memory_env):
     """When memory returns a fact, the supervisor's follow-up model
     call receives that fact as a tool message in its input."""
     provider = MemoryToolProvider()
-    config = RunnableConfig(configurable={
-        "provider": provider, "session_id": "mem-session"})
 
-    result = await supervisor_node(_supervisor_state(), config)
+    first, _tool_result, decision = await _supervisor_memory_journey(provider)
 
-    assert result["next"] == "planner"
+    # The adapter surfaces the memory call instead of executing it
+    # inline (the live graph's ToolNode runs it — see the journey).
+    assert first.tool_calls[0]["name"] == "search_knowledge_graph"
+    assert first.tool_calls[0]["args"] == {"query": "user name"}
+    assert [tc["name"] for tc in decision.tool_calls] == ["transfer_to_planner"]
     assert len(provider.calls) == 2, "expected initial + follow-up call"
     follow_up_messages = provider.calls[1]["messages"]
     tool_msgs = [m for m in follow_up_messages if m.get("role") == "tool"]
@@ -365,14 +407,18 @@ async def test_supervisor_memory_tool_result_feeds_followup_call(memory_env):
 @pytest.mark.asyncio
 async def test_supervisor_briefing_stored_in_state(memory_env):
     """The decision's briefing is stored in state as context_briefing
-    (the channel specialists are supposed to receive it through)."""
+    (the channel specialists are supposed to receive it through) —
+    on the production path that write is supervisor_post_model_hook's."""
     provider = MemoryToolProvider()
-    config = RunnableConfig(configurable={
-        "provider": provider, "session_id": "mem-session"})
 
-    result = await supervisor_node(_supervisor_state(), config)
+    _first, _tool_result, decision = await _supervisor_memory_journey(provider)
 
-    assert result["context_briefing"] == MemoryToolProvider.BRIEFING
+    assert decision.additional_kwargs["aether_decision"]["briefing"] == (
+        MemoryToolProvider.BRIEFING)
+    human = HumanMessage(content="what is my name?")
+    update = supervisor_post_model_hook({"messages": [human, decision]})
+    assert update["context_briefing"] == MemoryToolProvider.BRIEFING
+    assert update["active_specialist"] == "planner"
 
 
 @pytest.mark.asyncio
@@ -426,7 +472,9 @@ async def test_per_agent_model_override_used_for_specialist(monkeypatch):
     override_provider = RecordingProvider(text="override plan")
     default_provider = RecordingProvider(text="default plan")
 
-    def fake_create(provider_name, model, secret_store):
+    def fake_create(provider_name, model, secret_store, **_kwargs):
+        # **_kwargs: the factory contract gained keyword-only
+        # constraint params (local_only / require_vision, M17).
         create_calls.append((provider_name, model))
         return override_provider
 
@@ -454,7 +502,9 @@ async def test_per_agent_model_inherit_and_absent_use_default(monkeypatch):
         planner_module, "save_artifact", lambda *a, **k: "parity/artifact.txt")
     create_calls = []
 
-    def fake_create(provider_name, model, secret_store):
+    def fake_create(provider_name, model, secret_store, **_kwargs):
+        # **_kwargs: the factory contract gained keyword-only
+        # constraint params (local_only / require_vision, M17).
         create_calls.append((provider_name, model))
         return RecordingProvider(text="should not be used")
 

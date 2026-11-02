@@ -1,8 +1,7 @@
 {
-  "name": "ja",
-  "version": "1.0.0",
-  "description": "",
-  "main": "test_ws.js",
+  "name": "aether-os",
+  "version": "0.3.5",
+  "description": "Aether-OS: local AI agent OS",
   "directories": {
     "doc": "docs",
     "test": "tests"

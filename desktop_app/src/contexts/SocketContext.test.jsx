@@ -113,7 +113,15 @@ describe('SocketContext (Phase 10.3 C1: the single engine-message facade)', () =
     expect(electronAPI.sendEngineMessage).toHaveBeenNthCalledWith(2, JSON.stringify({ type: 'SECOND', n: 2 }));
   });
 
-  it('delivers an identical packet only once within the dedup window, then again after it', async () => {
+  // S3-M9: dedup is keyed on the packet's own identity, never on raw
+  // content alone. Engine packets (aether_common/contracts.py Event)
+  // carry a top-level request_id/event_id (mirrored pair, per TASK —
+  // every chunk of a stream shares it) and a per-instance ts stamped
+  // at construction. A genuine duplicate (the StrictMode leaked
+  // subscription redelivering the SAME serialized instance) therefore
+  // repeats id + ts + bytes exactly, while two legitimate packets —
+  // even with byte-identical payloads — differ in id or ts.
+  it('suppresses a true duplicate delivery of the same packet identity within the window, then delivers it again after it', async () => {
     let now = 10000;
     jest.spyOn(Date, 'now').mockImplementation(() => now);
 
@@ -132,28 +140,116 @@ describe('SocketContext (Phase 10.3 C1: the single engine-message facade)', () =
     // One addEventListener call adds exactly one underlying subscription.
     expect(electronAPI.onEngineMessage).toHaveBeenCalledTimes(2); // status listener + this one
 
-    const packet = JSON.stringify({ type: 'TASK_PROGRESS', payload: { text_delta: 'hello' } });
-    const other = JSON.stringify({ type: 'TASK_PROGRESS', payload: { text_delta: 'world' } });
+    const packet = JSON.stringify({
+      type: 'TASK_PROGRESS',
+      request_id: 'req-1',
+      event_id: 'req-1',
+      ts: 1700000000.5,
+      payload: { task_id: 'task-1', text_delta: 'hello' },
+    });
 
     emitEngineMessage(packet);
-    emitEngineMessage(packet); // identical duplicate in the same tick
+    emitEngineMessage(packet); // same instance delivered twice (StrictMode leak)
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith({ data: packet });
 
+    // An interleaved distinct packet does not reset the suppression:
+    // identity is remembered per packet, not just "same as the last one".
+    const other = JSON.stringify({
+      type: 'TASK_PROGRESS',
+      request_id: 'req-2',
+      event_id: 'req-2',
+      ts: 1700000000.6,
+      payload: { task_id: 'task-2', text_delta: 'world' },
+    });
     emitEngineMessage(other);
     expect(handler).toHaveBeenCalledTimes(2);
 
-    // The window is measured against the last DELIVERED packet: a packet
-    // that differs from its predecessor is new, even inside the window.
-    now += 149;
+    now += 149; // still inside the retention window: still a duplicate
     emitEngineMessage(packet);
-    expect(handler).toHaveBeenCalledTimes(3);
-    emitEngineMessage(packet); // identical to the packet just delivered
-    expect(handler).toHaveBeenCalledTimes(3);
+    expect(handler).toHaveBeenCalledTimes(2);
 
-    now += 150; // 150ms since the last delivery of this packet: new again
+    now += 150; // window expired since this identity was last delivered
     emitEngineMessage(packet);
-    expect(handler).toHaveBeenCalledTimes(4);
+    expect(handler).toHaveBeenCalledTimes(3);
+  });
+
+  it('delivers two identical payloads with different request_ids (distinct packet identities)', async () => {
+    let socket = null;
+    render(
+      <SocketProvider>
+        <Probe onSocket={(s) => { socket = s; }} />
+      </SocketProvider>
+    );
+    await flushPromises();
+
+    const handler = jest.fn();
+    act(() => {
+      socket.wsRef.current.addEventListener('message', handler);
+    });
+
+    // Same type, same ts, byte-identical payload — only the packet
+    // identity differs. Content-identity dedup dropped one of these;
+    // identity-based dedup must deliver BOTH.
+    const payload = { task_id: 'task-1', text_delta: 'hello', full_text: 'hello' };
+    const first = JSON.stringify({ type: 'TASK_PROGRESS', request_id: 'req-a', event_id: 'req-a', ts: 1700000000.5, payload });
+    const second = JSON.stringify({ type: 'TASK_PROGRESS', request_id: 'req-b', event_id: 'req-b', ts: 1700000000.5, payload });
+
+    emitEngineMessage(first);
+    emitEngineMessage(second);
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(handler).toHaveBeenNthCalledWith(1, { data: first });
+    expect(handler).toHaveBeenNthCalledWith(2, { data: second });
+  });
+
+  it('delivers successive stream chunks that share a request_id but have distinct timestamps', async () => {
+    let socket = null;
+    render(
+      <SocketProvider>
+        <Probe onSocket={(s) => { socket = s; }} />
+      </SocketProvider>
+    );
+    await flushPromises();
+
+    const handler = jest.fn();
+    act(() => {
+      socket.wsRef.current.addEventListener('message', handler);
+    });
+
+    // Real engine streams reuse ONE request_id for every chunk of a
+    // task (fast_chat.py / executor.py), and repeated tokens make
+    // payloads repeat exactly. Only ts separates the instances, so
+    // keying on request_id alone would eat the stream.
+    const payload = { task_id: 'task-1', text_delta: ' the', turn: 0, node: 'assistant' };
+    const chunk1 = JSON.stringify({ type: 'TASK_PROGRESS', request_id: 'req-1', event_id: 'req-1', ts: 1700000000.001, payload });
+    const chunk2 = JSON.stringify({ type: 'TASK_PROGRESS', request_id: 'req-1', event_id: 'req-1', ts: 1700000000.002, payload });
+
+    emitEngineMessage(chunk1);
+    emitEngineMessage(chunk2);
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it('delivers anonymous packets with identical content (no identity field, no content dedup fallback)', async () => {
+    let socket = null;
+    render(
+      <SocketProvider>
+        <Probe onSocket={(s) => { socket = s; }} />
+      </SocketProvider>
+    );
+    await flushPromises();
+
+    const handler = jest.fn();
+    act(() => {
+      socket.wsRef.current.addEventListener('message', handler);
+    });
+
+    // No request_id/event_id and no ts: there is nothing that could
+    // distinguish a duplicate delivery from a distinct packet, so the
+    // facade must not guess from content — both are delivered.
+    const packet = JSON.stringify({ type: 'TASK_PROGRESS', payload: { text_delta: 'hello' } });
+    emitEngineMessage(packet);
+    emitEngineMessage(packet);
+    expect(handler).toHaveBeenCalledTimes(2);
   });
 
   it('stops delivering to a handler after removeEventListener', async () => {

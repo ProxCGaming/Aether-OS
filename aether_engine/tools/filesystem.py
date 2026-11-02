@@ -20,6 +20,7 @@ from aether_engine.tools.paths import (
     looks_binary,
     resolve_contained,
 )
+from aether_engine.tools.policy import is_sensitive_floor_path, path_rule_denies
 from aether_engine.tools.registry import Tool, ToolRisk
 
 #: Default and maximum line-window sizes for read_file.
@@ -226,6 +227,7 @@ def _search_text_fn(
     include_hidden: bool = False,
     file_pattern: str | None = None,
     workspace_roots: list | None = None,
+    path_rules: list | None = None,
 ) -> str:
     if not query:
         return "Error: search_text needs a non-empty query."
@@ -238,12 +240,21 @@ def _search_text_fn(
     # (file, display path) pairs — display is relative to the searched
     # base where feasible, the path as given for a single-file target.
     candidates: list[tuple[Path, str]] = []
+    # E2-F03: policy judged the call's starting path, and ONLY that
+    # path. An explicit single-file target is that judged path itself
+    # (a Deny rule blocks the call outright; the sensitive floor
+    # forces its approval) — the read loop below trusts the judgement
+    # for it. Everything the walk DISCOVERS was never judged, so each
+    # discovered file is checked against the floor and the path-Deny
+    # rules before it is opened.
+    judged_target: Path | None = None
     if path:
         target = resolve_contained(path, workspace_roots)
         if not target.exists():
             return f"Error: path does not exist: {path}"
         if target.is_file():
             candidates = [(target, path)]
+            judged_target = target
         else:
             candidates = [
                 (f, f.relative_to(target).as_posix())
@@ -276,6 +287,18 @@ def _search_text_fn(
         # prove the RESOLVED file is contained before opening it.
         resolved = candidate.resolve()
         if not any(resolved.is_relative_to(r) for r in resolved_roots):
+            continue
+        # E2-F03: containment is the sandbox boundary, not the whole
+        # policy. A discovered descendant under a sensitive-floor
+        # prefix (~/.ssh, ~/.aether) or an explicit path-Deny rule is
+        # skipped: policy never judged it, and a search cannot pause
+        # per file, so exclusion is the fail-closed verdict.
+        if resolved != judged_target and (
+            is_sensitive_floor_path(resolved)
+            or path_rule_denies(
+                resolved, path_rules, tool_name="search_text", risk=ToolRisk.READ_ONLY
+            )
+        ):
             continue
         try:
             data = candidate.read_bytes()
@@ -316,7 +339,8 @@ def create_search_text_tool() -> Tool:
             "Returns matches as 'path:line: text'. Search one file or directory "
             "with path, restrict to file types with file_pattern (e.g. '*.py'). "
             "Binary files are skipped; hidden files and .git are skipped unless "
-            f"include_hidden is set. Capped at {SEARCH_MAX_MATCHES} matching lines."
+            "include_hidden is set. Sensitive system locations and paths the "
+            f"user has denied are never searched. Capped at {SEARCH_MAX_MATCHES} matching lines."
         ),
         input_schema={
             "type": "object",
@@ -331,6 +355,7 @@ def create_search_text_tool() -> Tool:
         execute_fn=_search_text_fn,
         risk=ToolRisk.READ_ONLY,
         wants_workspace_roots=True,
+        wants_path_rules=True,
     )
 
 

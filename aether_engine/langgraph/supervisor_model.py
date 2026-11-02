@@ -18,11 +18,14 @@ not LangChain chat models, so this module adapts them:
     (the long-standing prompt protocol) are translated into handoff
     tool calls, so routing behaviour is identical for models without
     native tool calling;
-  - when a specialist has already produced the task's answer, the
-    adapter ends the run locally instead of asking the provider to
-    route again (the old node's ``_should_end_task`` guard, applied
-    adapter-side because this langgraph-prebuilt version has no
-    model-level jump_to support).
+  - after a specialist responds, the provider is consulted again
+    with that response in view and its decision rules — delegate on
+    (multi-specialist chains), or finish (an END decision, or the
+    tool-mode plain-text finish). The old node's ``_should_end_task``
+    guard, which ended the run on ANY specialist text, broke
+    planner -> coder journeys (E1-F01) and survives only for forced
+    runs and empty post-specialist replies, where the specialist's
+    answer stands as the result.
 
 - ``supervisor_post_model_hook`` reproduces the supervisor node's
   state bookkeeping (delegation_log entry, context_briefing, plan,
@@ -99,8 +102,16 @@ def _handoff_result(target: str, decision: dict, memory_calls: list | None = Non
 
 
 def _langchain_tool_call(provider_call: Any) -> dict:
-    """Convert an Aether provider ToolCall to LangChain tool-call shape."""
-    args = provider_call.arguments
+    """Convert an Aether provider ToolCall to LangChain tool-call shape.
+
+    The provider contract (``providers/base.py`` ToolCall) exposes the
+    arguments as ``args`` — normally a dict; a raw JSON string is
+    parsed, anything else degrades to no arguments. (E1-F02: this
+    conversion previously read a non-existent ``.arguments``
+    attribute, so every native supervisor memory call crashed before
+    retrieval.)
+    """
+    args = provider_call.args
     if not isinstance(args, dict):
         try:
             args = json.loads(args) if args else {}
@@ -112,6 +123,51 @@ def _langchain_tool_call(provider_call: Any) -> dict:
         "id": provider_call.call_id,
         "type": "tool_call",
     }
+
+
+def _specialist_end_result() -> ChatResult:
+    """The local end used when a specialist's answer stands as final.
+
+    The message carries no content of its own: the specialist's text
+    already in the history is the task's answer, and the
+    ``aether_end_guard`` marker tells the post-model hook not to
+    overwrite the briefing/plan bookkeeping for it.
+    """
+    decision = {
+        "next": "END",
+        "reason": "Specialist has responded; task complete.",
+        "briefing": "",
+    }
+    message = AIMessage(
+        content="",
+        additional_kwargs={"aether_decision": decision, "aether_end_guard": True},
+    )
+    return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _chain_end_reason(specialist_texts: list, delegation_cap: int) -> str | None:
+    """Why a post-specialist delegation must not run, or None to allow it.
+
+    The no-progress breaker for the consultation the E1-F01 fix
+    introduced. It judges only what this seam can actually see: the
+    specialist answers in the message record. (The supervisor's own
+    handoff messages are consumed by the supervisor framework and
+    never re-enter the model's view, and the spawn-policy hook's
+    delegation count restarts with them — neither can bound the loop
+    from here.) Two shapes mean the chain has stopped progressing:
+
+    - the last two specialist answers are verbatim identical — the
+      chain has converged on an answer; delegating again can only
+      re-ask for what is already the latest input;
+    - the turn has already produced ``delegation_cap`` specialist
+      answers — the same budget the spawn policy puts on delegations,
+      counted in the units this seam can observe.
+    """
+    if len(specialist_texts) >= 2 and specialist_texts[-1] == specialist_texts[-2]:
+        return "the last two specialist answers are identical"
+    if len(specialist_texts) >= delegation_cap:
+        return f"the turn already has {delegation_cap} specialist answers"
+    return None
 
 
 def _tool_name(tool: Any) -> str | None:
@@ -209,27 +265,41 @@ class AetherSupervisorModel(BaseChatModel):
         dict_messages = message_dicts(messages)
         available = _available_specialists(config)
 
-        # A specialist's final text answer (after the last user message)
-        # completes the task: end locally instead of routing again.
+        # Has a specialist already produced a text answer since the
+        # last user message? That answer is NOT automatically the
+        # task's completion (E1-F01): in a multi-specialist chain it
+        # is an intermediate product (the planner's plan), and only
+        # the supervisor's next decision — made with that answer in
+        # view — can say whether the chain continues or is finished.
+        # The provider is therefore consulted below like on any other
+        # step; only its reply is interpreted with end-of-chain
+        # semantics (see _post_specialist_result). The historical
+        # local end survives where the specialist's answer must simply
+        # stand: a forced run (single-specialist by definition), an
+        # empty post-specialist reply, and the no-progress breaker
+        # (_chain_end_reason).
         last_user = max(
             (i for i, m in enumerate(dict_messages) if m.get("role") == "user"),
             default=-1,
         )
-        for msg in dict_messages[last_user + 1:]:
-            if msg.get("role") == "assistant" and msg.get("content") and not msg.get("tool_calls"):
-                decision = {
-                    "next": "END",
-                    "reason": "Specialist has responded; task complete.",
-                    "briefing": "",
-                }
-                message = AIMessage(
-                    content="",
-                    additional_kwargs={"aether_decision": decision, "aether_end_guard": True},
-                )
-                return ChatResult(generations=[ChatGeneration(message=message)])
+        specialist_texts = [
+            msg["content"]
+            for msg in dict_messages[last_user + 1:]
+            if msg.get("role") == "assistant" and msg.get("content") and not msg.get("tool_calls")
+        ]
+        specialist_responded = bool(specialist_texts)
+        # The turn's delegation budget, counted in specialist answers
+        # (the loop breaker's yardstick — see _chain_end_reason). The
+        # value mirrors the spawn policy's cap; the hook enforces that
+        # cap where it can see handoffs, this seam cannot (below).
+        _cap = getattr(configurable.get("user_config"),
+                       "supervisor_delegation_cap", 8)
+        delegation_cap = _cap if isinstance(_cap, int) and _cap >= 0 else 8
 
         forced_agent = configurable.get("forced_agent")
         if forced_agent and forced_agent in available:
+            if specialist_responded:
+                return _specialist_end_result()
             decision = {"next": forced_agent, "reason": "Forced via slash command.", "briefing": ""}
             return _handoff_result(forced_agent, decision)
 
@@ -263,6 +333,14 @@ class AetherSupervisorModel(BaseChatModel):
 
         if transfer_calls:
             target = transfer_calls[0].name[len(HANDOFF_PREFIX):]
+            if specialist_responded:
+                chain_end = _chain_end_reason(specialist_texts, delegation_cap)
+                if chain_end is not None:
+                    logger.warning(
+                        "Post-specialist delegation to %s refused: %s; "
+                        "ending with the latest answer standing.",
+                        target, chain_end)
+                    return _specialist_end_result()
             decision = {"next": target, "reason": (content or "").strip(), "briefing": ""}
             if dropped_calls:
                 decision["dropped_tool_calls"] = dropped_calls
@@ -280,6 +358,11 @@ class AetherSupervisorModel(BaseChatModel):
             )
             return ChatResult(generations=[ChatGeneration(message=message)])
 
+        if specialist_responded:
+            return self._post_specialist_result(
+                content, available, dropped_calls,
+                specialist_texts, delegation_cap)
+
         decision = _decision_from_text(content or "", available)
         if not isinstance(decision, dict):
             decision = {
@@ -293,6 +376,57 @@ class AetherSupervisorModel(BaseChatModel):
         if next_node != "END" and next_node in available:
             return _handoff_result(next_node, decision)
         return _end_result(decision.get("reason") or content or "", decision=decision)
+
+    @staticmethod
+    def _post_specialist_result(content, available, dropped_calls,
+                                specialist_texts, delegation_cap) -> ChatResult:
+        """Interpret the supervisor's reply after a specialist responded.
+
+        The supervisor has the specialist's output in view, so its
+        decision rules (E1-F01): a JSON decision delegates on or ends,
+        exactly as on the first hop; plain text with no tool calls is
+        the tool-mode finish the routing prompt teaches ("reply with
+        plain text and call no tool"); an empty reply keeps the
+        historical local end, with the specialist's answer standing as
+        the result. The first-hop fallback in ``_decision_from_text``
+        (unparseable text delegates to the planner) must NOT apply
+        here — applied after a completed hop it would resurrect the
+        finished chain as a delegation loop.
+
+        Delegations are additionally subject to the no-progress
+        breaker (``_chain_end_reason``): without it, a supervisor
+        stuck delegating onward — classically straight back to the
+        specialist that just answered — ping-pongs until the graph
+        recursion limit fails the whole task.
+        """
+        text = (content or "").strip()
+        if not text:
+            return _specialist_end_result()
+        cleaned = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        parsed = None
+        try:
+            parsed = json.loads(cleaned)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            decision = parsed
+            if dropped_calls:
+                decision["dropped_tool_calls"] = dropped_calls
+            next_node = decision.get("next", "END")
+            if next_node != "END" and next_node in available:
+                chain_end = _chain_end_reason(specialist_texts, delegation_cap)
+                if chain_end is not None:
+                    logger.warning(
+                        "Post-specialist delegation to %s refused: %s; "
+                        "ending with the latest answer standing.",
+                        next_node, chain_end)
+                    return _specialist_end_result()
+                return _handoff_result(next_node, decision)
+            return _end_result(decision.get("reason") or text, decision=decision)
+        decision = {"next": "END", "reason": text, "briefing": ""}
+        if dropped_calls:
+            decision["dropped_tool_calls"] = dropped_calls
+        return _end_result(text, decision=decision)
 
 
 def supervisor_routing_prompt(state: dict) -> list:
@@ -326,9 +460,9 @@ def supervisor_routing_prompt(state: dict) -> list:
     summary_section = context_summary_section(state)
     if summary_section:
         text += f"\n\n{summary_section}"
-    # E8-3.1: ambient repo map (graph tasks only), the same section
-    # supervisor_node appends — built by nodes/supervisor.repo_map_context
-    # from the run's granted workspace roots, ranked toward this task.
+    # E8-3.1: ambient repo map (graph tasks only) — built by
+    # nodes/supervisor.repo_map_context from the run's granted
+    # workspace roots, ranked toward this task.
     repo_section = repo_map_context(
         config,
         state.get("original_prompt", ""),

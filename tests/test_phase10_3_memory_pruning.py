@@ -11,7 +11,6 @@ gone, recent rows remain, the knowledge-graph sole-fact guard holds, and
 pruning is logged to the audit log. All DBs are tmp files — nothing here
 touches the real ~/.aether/*.db.
 """
-import pickle
 import sqlite3
 import time
 import uuid
@@ -22,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from aether_engine.config import UserConfig, load_config, save_config
+from aether_engine.embedding_codec import encode_embedding
 from aether_engine.memory import episodic, knowledge_graph, session_store
 from aether_engine.memory.pruning import prune_all
 from aether_engine.scheduler.capability_jobs import CapabilitySchedulerManager
@@ -108,7 +108,7 @@ def _insert_episode(task_id, age_days, with_thinking=True, with_embedding=True):
         with episodic._get_conn(episodic.EMBEDDINGS_DB_PATH) as e_conn:
             e_conn.execute(
                 "INSERT INTO episodic_embeddings (task_id, embedding) VALUES (?, ?)",
-                (task_id, pickle.dumps([0.1, 0.2, 0.3])),
+                (task_id, encode_embedding([0.1, 0.2, 0.3])),
             )
             e_conn.commit()
 

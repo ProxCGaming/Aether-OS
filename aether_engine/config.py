@@ -15,7 +15,7 @@ from typing import Any
 AUXILIARY_TASK_CLASSES = frozenset({"vision", "compression", "advisor", "title"})
 
 CONFIG_PATH = Path.home() / ".aether" / "config.json"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 
 # ---------------------------------------------------------------------------
 # Base provider registry metadata (URLs, icons, display names)
@@ -88,7 +88,7 @@ class UserConfig:
     default_provider: str = "google_gemini"
     # Epic 6: fresh installs and resets default to the verified
     # working model (see ADR 0033 / the Epic 5 registry fix).
-    default_model: str = "gemini-3.5-flash"
+    default_model: str = DEFAULT_GEMINI_MODEL
     window_width: int = 420
     window_height: int = 680
     provider_models: dict[str, list[str]] = field(default_factory=dict)
@@ -244,8 +244,13 @@ class UserConfig:
     # Epic 8, E8-5.2: voice activity detection and endpointing thresholds.
     # vad_threshold: Silero VAD confidence threshold to register speech [0.1, 0.9].
     # silence_duration_ms: trailing silence required to trigger utterance_end.
+    # smart_turn_sensitivity: Smart Turn turn-completion strength [0.0, 1.0]
+    # (S4-M16). 0.0 = Smart Turn off (silence-only endpointing); higher
+    # values release semantically complete turns earlier and hold
+    # incomplete turns longer. See voice/vad.py.
     vad_threshold: float = 0.5
     silence_duration_ms: int = 700
+    smart_turn_sensitivity: float = 0.5
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -303,13 +308,15 @@ class UserConfig:
             "daily_budget_usd": self.daily_budget_usd,
             "vad_threshold": self.vad_threshold,
             "silence_duration_ms": self.silence_duration_ms,
+            "smart_turn_sensitivity": self.smart_turn_sensitivity,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "UserConfig":
-        def_model = d.get("default_model", "gemini-2.0-flash") or "gemini-2.0-flash"
-        if "2.5" in def_model:
-            def_model = "gemini-2.0-flash"
+        # S1-M1: a persisted default_model loads verbatim — no silent
+        # substring rewrite. Only a missing/empty value falls back to
+        # the verified working default.
+        def_model = d.get("default_model", DEFAULT_GEMINI_MODEL) or DEFAULT_GEMINI_MODEL
 
         def _as_dict(value: Any) -> dict[str, Any]:
             # Older/corrupted config files may contain null for these maps,
@@ -407,6 +414,8 @@ class UserConfig:
             daily_budget_usd=float(d["daily_budget_usd"]) if d.get("daily_budget_usd") is not None else None,
             vad_threshold=_as_float(d.get("vad_threshold"), 0.5),
             silence_duration_ms=_as_int(d.get("silence_duration_ms"), 700),
+            smart_turn_sensitivity=min(1.0, max(0.0, _as_float(
+                d.get("smart_turn_sensitivity"), 0.5))),
         )
 
 

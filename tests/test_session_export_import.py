@@ -307,7 +307,7 @@ def test_websocket_export_and_import_handlers(tmp_path):
     ):
         mock_store.return_value.list_providers.return_value = []
         token = websocket_mod.engine_state.auth_token
-        with client.websocket_connect(f"/ws/tasks?token={token}") as ws:
+        with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {token}"}) as ws:
             ws.receive_text()  # greeting / initial connection event
 
             # Export markdown

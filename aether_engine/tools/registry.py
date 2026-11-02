@@ -42,6 +42,10 @@ class Tool:
     # opt in to receiving the run's workspace_roots as a keyword the
     # model never sees (it is not in the input schema).
     wants_workspace_roots: bool = field(default=False)
+    # E2-F03: tools whose traversal discovers paths policy never judged
+    # (recursive search) opt in to the run's path_rules the same way,
+    # so they can apply per-descendant Deny rules before opening files.
+    wants_path_rules: bool = field(default=False)
 
     def to_definition(self) -> dict[str, Any]:
         return {
@@ -87,7 +91,7 @@ def create_file_tools() -> list[Tool]:
         Path(path).mkdir(parents=True, exist_ok=True)
         return f"Created directory {path}"
 
-    def _edit_file(path: str, expected_hash: str = "", edits: list | None = None) -> str:
+    def _edit_file(path: str, expected_hash: str | None = None, edits: list | None = None) -> str:
         # Epic 2, E2-03: the graph path executes this in the worker; this
         # in-process implementation serves direct registry callers and
         # shares the exact aether_common contract with the worker, so
@@ -106,7 +110,11 @@ def create_file_tools() -> list[Tool]:
             raise ToolExecutionError(f"edit_file failed: '{path}' does not exist or is not a file.")
         data = target.read_bytes()
         actual = content_hash(data)
-        if expected_hash and actual != expected_hash:
+        # E2-F01: a SUPPLIED hash is checked exactly — including an
+        # empty string, which can never match and so refuses like any
+        # stale hash. Only an absent/None hash means "no hash", and
+        # only that skips the check (the normal no-hash flow).
+        if expected_hash is not None and actual != expected_hash:
             raise ToolExecutionError(
                 f"edit_file failed: '{path}' changed since it was read "
                 f"(expected sha256 {expected_hash[:12]}…, found {actual[:12]}…). Re-read the file."
@@ -311,11 +319,19 @@ def build_tool_registry(
     return registry
 
 
-def _call_kwargs(tool: Tool, call_args: dict[str, Any], workspace_roots: list | None) -> dict[str, Any]:
-    """Model args plus engine-injected roots for tools that opt in."""
+def _call_kwargs(
+    tool: Tool,
+    call_args: dict[str, Any],
+    workspace_roots: list | None,
+    path_rules: list | None = None,
+) -> dict[str, Any]:
+    """Model args plus engine-injected context for tools that opt in."""
+    kwargs = dict(call_args)
     if tool.wants_workspace_roots:
-        return {**call_args, "workspace_roots": workspace_roots}
-    return call_args
+        kwargs["workspace_roots"] = workspace_roots
+    if tool.wants_path_rules:
+        kwargs["path_rules"] = path_rules
+    return kwargs
 
 
 class ToolRegistry:
@@ -325,6 +341,18 @@ class ToolRegistry:
         self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> None:
+        existing = self._tools.get(tool.name)
+        if existing is not None and existing.source != tool.source:
+            # E3-F01: a name is an identity. Silently replacing one
+            # owner's tool with another's let a call execute the
+            # wrong server's tool under the first tool's risk
+            # classification. Same-source re-registration (a
+            # refresh of the same owner's tools) stays legal.
+            raise ValueError(
+                f"Tool name {tool.name!r} is already registered by "
+                f"{existing.source!r}; refusing to replace it with "
+                f"a tool from {tool.source!r}."
+            )
         self._tools[tool.name] = tool
 
     def remove_tool(self, name: str) -> None:
@@ -374,6 +402,9 @@ class ToolRegistry:
              unless ``approved=True`` (fail-closed, ADR 0009).
           2. Pre-flight validation (ADR 0009 §2) — failures raise.
           2.5. tool_call hooks (E7-01) — may rewrite args or block.
+          2.55. Post-hook re-check (S2-M1) — when the hooks changed the
+             arguments, Steps 1–2 re-run on the rewritten args: what
+             executes is what was vetted, not what was proposed.
           2.6. Caller-supplied final-args gate (M03) — vets the exact
              arguments that will execute, post-edit and post-hook.
           3. Sandbox routing (ADR 0010) — non-READ_ONLY tools run in the
@@ -393,6 +424,11 @@ class ToolRegistry:
         call_args = args or {}
         log = audit_logger or AuditLogger()
 
+        # Steps 1–2 live in two closures so the post-hook re-check
+        # (Step 2.55, S2-M1) re-runs EXACTLY the same enforcement —
+        # same verdicts, same audit events, same error shapes — on
+        # the rewritten arguments, never a divergent copy of it.
+
         # ── Step 1: policy (ADR 0021; arg/path-aware since E2-06) ─────
         # F-03: policy resolution is part of the validation path (it
         # evaluates the shell safety rules for execute_shell), so an
@@ -400,34 +436,35 @@ class ToolRegistry:
         # pre-flight error in Step 2 — denied, audited, and surfaced
         # as ToolExecutionError — never a raw exception escaping
         # execute() with no audit record of the refusal.
-        try:
-            policy = resolve_policy_by_name(name, policies or {}, self, args=call_args, path_rules=path_rules, shell_extras=shell_extras, approval_mode=approval_mode)
-        except Exception as e:
+        def _enforce_policy(check_args: dict[str, Any]) -> None:
             try:
-                log.log_event("TOOL_VALIDATION_FAILED", {"tool_name": name, "error": f"policy check failed internally: {e}", "via": "registry.execute"})
-            except Exception:  # best-effort audit write
-                logger.debug("Failed to write TOOL_VALIDATION_FAILED audit event", exc_info=True)
-            raise ToolExecutionError(f"Pre-flight validation failed for '{name}': policy check failed internally: {e}") from e
-        # E2-09: a stored approval grant turns this call's "ask" into
-        # "allow" — never a "deny", never a floored path (the cache
-        # itself refuses those), and the hit is audited with its grant.
-        if policy == "ask" and not approved and approval_cache is not None:
-            grant = approval_cache.covering_grant(risk=tool.risk.value, args=call_args)
-            if grant is not None:
-                policy = "allow"
+                policy = resolve_policy_by_name(name, policies or {}, self, args=check_args, path_rules=path_rules, shell_extras=shell_extras, approval_mode=approval_mode)
+            except Exception as e:
                 try:
-                    log.log_event("APPROVAL_CACHE_HIT", {"tool_name": name, "grant_id": grant["id"], "prefix": grant["prefix"]})
-                except Exception:  # best-effort audit, as with TOOL_EXECUTED below
-                    logger.debug("Failed to write APPROVAL_CACHE_HIT audit event", exc_info=True)
-        if policy == "deny":
-            log.log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": name, "reason": "User Deny", "via": "registry.execute"})
-            raise ToolExecutionError(f"Tool '{name}' is blocked by policy (deny).")
-        if policy == "ask" and not approved:
-            log.log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": name, "reason": "Bypassed Approval", "via": "registry.execute"})
-            raise ToolExecutionError(
-                f"Tool '{name}' requires approval (policy=ask). "
-                "Pass approved=True only after explicit user consent."
-            )
+                    log.log_event("TOOL_VALIDATION_FAILED", {"tool_name": name, "error": f"policy check failed internally: {e}", "via": "registry.execute"})
+                except Exception:  # best-effort audit write
+                    logger.debug("Failed to write TOOL_VALIDATION_FAILED audit event", exc_info=True)
+                raise ToolExecutionError(f"Pre-flight validation failed for '{name}': policy check failed internally: {e}") from e
+            # E2-09: a stored approval grant turns this call's "ask" into
+            # "allow" — never a "deny", never a floored path (the cache
+            # itself refuses those), and the hit is audited with its grant.
+            if policy == "ask" and not approved and approval_cache is not None:
+                grant = approval_cache.covering_grant(risk=tool.risk.value, args=check_args)
+                if grant is not None:
+                    policy = "allow"
+                    try:
+                        log.log_event("APPROVAL_CACHE_HIT", {"tool_name": name, "grant_id": grant["id"], "prefix": grant["prefix"]})
+                    except Exception:  # best-effort audit, as with TOOL_EXECUTED below
+                        logger.debug("Failed to write APPROVAL_CACHE_HIT audit event", exc_info=True)
+            if policy == "deny":
+                log.log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": name, "reason": "User Deny", "via": "registry.execute"})
+                raise ToolExecutionError(f"Tool '{name}' is blocked by policy (deny).")
+            if policy == "ask" and not approved:
+                log.log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": name, "reason": "Bypassed Approval", "via": "registry.execute"})
+                raise ToolExecutionError(
+                    f"Tool '{name}' requires approval (policy=ask). "
+                    "Pass approved=True only after explicit user consent."
+                )
 
         # ── Step 2: pre-flight validation (ADR 0009 §2, fail-closed) ────
         # F-03: an internal error inside validation itself is a denial,
@@ -435,32 +472,60 @@ class ToolRegistry:
         # and surface the same ToolExecutionError a validation *verdict*
         # produces below, so the error is logged/shown and no caller
         # can mistake the outcome for anything but a refusal.
-        try:
-            validation = validate_tool_request(name, call_args, workspace_roots=workspace_roots)
-        except Exception as e:
+        def _enforce_preflight(check_args: dict[str, Any]) -> None:
             try:
-                log.log_event("TOOL_VALIDATION_FAILED", {"tool_name": name, "error": f"internal validation error: {e}", "via": "registry.execute"})
-            except Exception:  # best-effort audit write
-                logger.debug("Failed to write TOOL_VALIDATION_FAILED audit event", exc_info=True)
-            raise ToolExecutionError(f"Pre-flight validation failed for '{name}': internal validation error: {e}") from e
-        if not validation.is_valid:
-            # E2-12: containment escapes and other validation failures
-            # belong in the audit trail, not just the error string.
-            try:
-                log.log_event("TOOL_VALIDATION_FAILED", {"tool_name": name, "error": validation.error, "via": "registry.execute"})
-            except Exception:  # best-effort audit write
-                logger.debug("Failed to write TOOL_VALIDATION_FAILED audit event", exc_info=True)
-            raise ToolExecutionError(f"Pre-flight validation failed for '{name}': {validation.error}")
+                validation = validate_tool_request(name, check_args, workspace_roots=workspace_roots)
+            except Exception as e:
+                try:
+                    log.log_event("TOOL_VALIDATION_FAILED", {"tool_name": name, "error": f"internal validation error: {e}", "via": "registry.execute"})
+                except Exception:  # best-effort audit write
+                    logger.debug("Failed to write TOOL_VALIDATION_FAILED audit event", exc_info=True)
+                raise ToolExecutionError(f"Pre-flight validation failed for '{name}': internal validation error: {e}") from e
+            if not validation.is_valid:
+                # E2-12: containment escapes and other validation failures
+                # belong in the audit trail, not just the error string.
+                try:
+                    log.log_event("TOOL_VALIDATION_FAILED", {"tool_name": name, "error": validation.error, "via": "registry.execute"})
+                except Exception:  # best-effort audit write
+                    logger.debug("Failed to write TOOL_VALIDATION_FAILED audit event", exc_info=True)
+                raise ToolExecutionError(f"Pre-flight validation failed for '{name}': {validation.error}")
+
+        _enforce_policy(call_args)
+        _enforce_preflight(call_args)
 
         # ── Step 2.5: tool_call hooks (Epic 7, E7-01) ────────────────
         # Registered guardrails may rewrite args or block the call;
         # a throwing hook fails closed (see tools/hooks.py).
+        import copy
+
         from aether_engine.tools.hooks import HookBlock, apply_tool_call_hooks
 
+        # Snapshot for the Step 2.55 change test (deep copy where
+        # possible: a hook that mutates a nested value in place and
+        # returns the same dict must still count as a rewrite).
+        try:
+            pre_hook_args = copy.deepcopy(call_args)
+        except Exception:  # noqa: BLE001 — uncopyable args: a shallow copy still catches the documented return-a-dict rewrite.
+            pre_hook_args = dict(call_args)
         try:
             call_args = apply_tool_call_hooks(name, call_args, audit_logger=log)
         except HookBlock as block:
             raise ToolExecutionError(f"Tool '{name}' blocked by a hook: {block}") from block
+
+        # ── Step 2.55: re-check the FINAL args (S2-M1) ───────────────
+        # Steps 1–2 vetted the PROPOSED arguments; the hooks may have
+        # replaced them with anything (a benign shell command swapped
+        # for a denied one, a workspace path swapped for a floored or
+        # out-of-roots target). Policy verdicts are arg-aware — shell
+        # content drives the safety rules, paths drive the floor and
+        # the per-path rules — so a changed argument set is a new
+        # call and is vetted as one, for every tool. Unchanged args
+        # skip the re-run: the checks above already judged exactly
+        # these arguments, and re-running would only double-audit
+        # (e.g. a second APPROVAL_CACHE_HIT for the same grant).
+        if call_args != pre_hook_args:
+            _enforce_policy(call_args)
+            _enforce_preflight(call_args)
 
         # ── Step 2.6: final-args gate (review finding M03) ───────────
         # The caller may vet the FINAL arguments — the only point in
@@ -515,9 +580,9 @@ class ToolRegistry:
                     audit_logger=log,
                 )
             elif inspect.iscoroutinefunction(tool.execute_fn):
-                result = await tool.execute_fn(**_call_kwargs(tool, call_args, workspace_roots))
+                result = await tool.execute_fn(**_call_kwargs(tool, call_args, workspace_roots, path_rules))
             else:
-                result = tool.execute_fn(**_call_kwargs(tool, call_args, workspace_roots))
+                result = tool.execute_fn(**_call_kwargs(tool, call_args, workspace_roots, path_rules))
         except ToolExecutionError:
             raise
         except Exception as e:

@@ -341,7 +341,7 @@ def test_ws_steer_without_active_task_starts_a_normal_task(ws_env):
     with (
         _ws_stack(fake_run_langgraph_task),
         TestClient(app) as client,
-        client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}") as ws,
+        client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws,
     ):
         ws.receive_text()  # HELLO
         ws.send_text(Event(
@@ -393,7 +393,7 @@ def test_ws_steer_during_active_task_queues_without_cancelling(ws_env):
     with (
         _ws_stack(fake_run_langgraph_task),
         TestClient(app) as client,
-        client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}") as ws,
+        client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws,
     ):
         ws.receive_text()  # HELLO
         ws.send_text(Event(

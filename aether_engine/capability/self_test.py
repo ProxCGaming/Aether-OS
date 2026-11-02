@@ -21,7 +21,9 @@ async def run_model_self_test(
     latencies = []
     category_scores: dict[str, list[bool]] = {}
 
-    prov = LiteLLMProvider(api_key=api_key, model=model_id, provider_name=provider_name)
+    # R2-NEW-1: self-test traffic is probe traffic, not agent work —
+    # it must not write usage-ledger rows.
+    prov = LiteLLMProvider(api_key=api_key, model=model_id, provider_name=provider_name, record_usage=False)
 
     for test in SELF_TEST_SUITE:
         start = time.time()

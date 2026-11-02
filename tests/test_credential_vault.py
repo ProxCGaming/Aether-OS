@@ -461,6 +461,103 @@ class TestCredentialVaultStore:
         assert CANARY not in blob
         assert TOTP_CANARY not in blob
 
+    def test_list_entries_query_selects_no_secret_columns(
+            self, tmp_path, monkeypatch):
+        # S2-M9: the docstring promises listing is "metadata-only by
+        # construction: list_entries selects no secret column". Trace
+        # the SQL the listing actually runs and pin that promise —
+        # projecting SELECT * through _public afterwards is not the
+        # same thing, because the secrets were still fetched.
+        vault = make_vault(tmp_path)
+        vault.save_entry(site="github.com", username="octocat",
+                         password=CANARY, totp_secret=TOTP_CANARY)
+        statements: list[str] = []
+        original_connect = CredentialVault._connect
+
+        def traced_connect(self):
+            conn = original_connect(self)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        monkeypatch.setattr(CredentialVault, "_connect", traced_connect)
+        entries = vault.list_entries()
+        assert len(entries) == 1
+        selects = [
+            s for s in statements
+            if s.lstrip().upper().startswith("SELECT")
+            and "vault_entries" in s
+        ]
+        assert len(selects) == 1
+        sql = selects[0]
+        selected = sql[
+            sql.upper().index("SELECT") + len("SELECT"):
+            sql.upper().index("FROM")
+        ]
+        columns = {c.strip() for c in selected.split(",")}
+        assert columns == {
+            "id", "site", "username", "ask_every_time", "created_by",
+            "created_at", "last_used_at",
+        }
+        assert "*" not in selected
+        assert "encrypted_password" not in sql
+        assert "encrypted_totp" not in sql
+
+    def test_list_entries_succeeds_when_secret_columns_are_denied(
+            self, tmp_path, monkeypatch):
+        # Behavioural twin of the trace test: an authorizer that
+        # refuses every read of the secret columns must not disturb
+        # the listing at all — if the listing fetched them, SQLite
+        # would raise here instead of returning metadata.
+        vault = make_vault(tmp_path)
+        vault.save_entry(site="github.com", username="octocat",
+                         password=CANARY, totp_secret=TOTP_CANARY)
+        original_connect = CredentialVault._connect
+
+        def authorizer(action, table, column, _db, _trigger):
+            if (action == sqlite3.SQLITE_READ
+                    and table == "vault_entries"
+                    and column in ("encrypted_password", "encrypted_totp")):
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        def guarded_connect(self):
+            conn = original_connect(self)
+            conn.set_authorizer(authorizer)
+            return conn
+
+        monkeypatch.setattr(CredentialVault, "_connect", guarded_connect)
+        entries = vault.list_entries()
+        assert len(entries) == 1
+        assert entries[0]["site"] == "github.com"
+        assert entries[0]["username"] == "octocat"
+
+    def test_list_entries_shape_and_values_unchanged(self, tmp_path):
+        # The listing's output must stay byte-identical in shape and
+        # values to the single-entry projection, stay ordered by
+        # (site, username), and never absorb standalone TOTP rows.
+        vault = make_vault(tmp_path)
+        gitlab_id = vault.save_entry(
+            site="gitlab.com", username="octocat", password=CANARY2)
+        github_id = vault.save_entry(
+            site="github.com", username="octocat", password=CANARY,
+            ask_every_time=True, created_by="agent",
+            totp_secret=TOTP_CANARY)
+        totp_id = vault.save_totp_entry(
+            label="octocat", issuer="GitHub", secret="JBSWY3DPEHPK3PXP")
+        entries = vault.list_entries()
+        expected = sorted(
+            [vault.get_entry(gitlab_id), vault.get_entry(github_id)],
+            key=lambda e: (e["site"], e["username"]))
+        assert entries == expected
+        assert json.dumps(entries) == json.dumps(expected)
+        assert [e["id"] for e in entries] == [github_id, gitlab_id]
+        assert totp_id not in [e["id"] for e in entries]
+        for entry in entries:
+            assert list(entry) == [
+                "id", "site", "username", "ask_every_time",
+                "created_at", "created_by", "last_used_at",
+            ]
+
     def test_password_is_encrypted_at_rest(self, tmp_path):
         vault = make_vault(tmp_path)
         vault.save_entry(site="github.com", username="octocat", password=CANARY)
@@ -1083,7 +1180,7 @@ class TestVaultWebSocket:
         from aether_engine.app import engine_state
 
         token = engine_state.token_path.read_text(encoding="utf-8").strip()
-        return client.websocket_connect(f"/ws/tasks?token={token}")
+        return client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {token}"})
 
     def _send(self, ws, event_type, payload):
         ws.send_text(Event(type=event_type, payload=payload).to_json())

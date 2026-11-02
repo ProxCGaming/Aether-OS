@@ -1,13 +1,29 @@
 # Minimal CI for Aether-OS (Phase 10.3 D1).
 #
 # Runs the repo's real test commands on every push / PR:
-#   - pytest, with the four PySide6 UI test files ignored: those four
-#     files are kept out of the CI selection (the uv install change does
-#     not alter which tests run). The other UI tests either import only
-#     stdlib-only modules (e.g. tests/test_ui_state.py) or self-skip when
-#     PySide6 is absent (tests/test_approval_drawer_override.py), so they
-#     need no ignore flag.
+#   - pytest over the full tests/ selection — the same suite the local
+#     gate runs. There are NO --ignore flags (S5-M6): the four legacy
+#     PySide6 UI test files that used to be ignored
+#     (tests/test_provider_health_badge.py,
+#     tests/test_providers_panel_fixes.py,
+#     tests/test_settings_provider_state.py,
+#     tests/test_ui_window_geometry.py) each self-skip at module level
+#     via pytest.importorskip("PySide6"), and this job installs with a
+#     plain `uv sync` (no legacy-ui extra), so in CI they are skipped,
+#     not failed. The ignore flags only made CI judge a smaller suite
+#     than the local gate for no benefit.
+#     Caveat if the install ever gains --extra legacy-ui: all four
+#     files then pass in a clean environment (locally verified
+#     2 Nov 2026 with QT_QPA_PLATFORM=offscreen: 36 passed). Two tests
+#     in tests/test_providers_panel_fixes.py are nevertheless listed
+#     in scripts/pytest-known-failures.txt: they fail only when the
+#     environment carries a proxy NO_PROXY value that httpx cannot
+#     parse (as in the Muse VM), and pass with a clean env. CI has
+#     no baseline mechanism, so an env-dependent failure like that
+#     would redden this job where the local subset rule tolerates it.
 #   - Jest in desktop_app/ (npm test -- --watchAll=false).
+#   - Coverage on both jobs (S5-M11): measured and uploaded as
+#     artifacts, with NO failing threshold — measurement first.
 #
 # Known limits (do NOT read a green run here as a full release gate):
 #   - The pytest job installs dependencies with `uv sync` from
@@ -37,13 +53,22 @@ jobs:
         uses: astral-sh/setup-uv@v7
       - name: Install dependencies
         run: uv sync
-      - name: Run pytest
+      - name: Run pytest with coverage
         run: >-
           uv run python -m pytest -q
-          --ignore=tests/test_provider_health_badge.py
-          --ignore=tests/test_providers_panel_fixes.py
-          --ignore=tests/test_settings_provider_state.py
-          --ignore=tests/test_ui_window_geometry.py
+          --cov=aether_engine
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
+          --cov-report=html:htmlcov
+      - name: Upload Python coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: |
+            coverage.xml
+            htmlcov/
+          if-no-files-found: ignore
 
   frontend:
     name: Jest (desktop_app)
@@ -62,5 +87,12 @@ jobs:
           cache-dependency-path: desktop_app/package-lock.json
       - name: Install dependencies
         run: npm ci
-      - name: Run Jest
-        run: npm test -- --watchAll=false
+      - name: Run Jest with coverage
+        run: npm run test:coverage
+      - name: Upload Jest coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jest-coverage
+          path: desktop_app/coverage/
+          if-no-files-found: ignore

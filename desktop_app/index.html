@@ -2,6 +2,15 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- S3-M2: production Content-Security-Policy. The built page is
+         loaded from file:// (no response header can deliver a policy
+         there), so the policy ships as this meta tag. Its content is
+         pinned by electron/__tests__/securityPolicy.test.js to
+         buildContentSecurityPolicy({ isDev: false }) in
+         electron/securityPolicy.cjs — edit it there, not here. In
+         dev, vite.config.js strips this tag (Vite HMR needs inline /
+         eval) and main.cjs serves the relaxed dev policy as a header. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: file:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>desktop_app</title>

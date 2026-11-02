@@ -1,4 +1,3 @@
-import json
 import logging
 
 from langchain_core.runnables import RunnableConfig
@@ -8,6 +7,11 @@ from aether_engine.langgraph.advisor import advisor_notes
 from aether_engine.langgraph.compaction import (
     context_summary_section,
     model_facing_messages,
+)
+from aether_engine.langgraph.nodes.tool_calls import (
+    assistant_tool_calls,
+    drain_queued_tool_call,
+    pending_and_queued,
 )
 from aether_engine.langgraph.state import (
     AetherState,
@@ -44,13 +48,35 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
             if len(parts) == 2:
                 p_name, m_name = parts
                 from aether_engine.orchestration.core import _create_provider_instance
-                provider = _create_provider_instance(p_name, m_name, secret_store)
+                # M17 residual: the run's routing constraints (set by
+                # the executor from the routing decision) bind this
+                # construction too — no silent cloud fallback for a
+                # local-only task's images.
+                _cfg = config.get("configurable", {})
+                provider = _create_provider_instance(
+                    p_name, m_name, secret_store,
+                    local_only=bool(_cfg.get("local_only")),
+                    require_vision=bool(_cfg.get("require_vision")),
+                )
         except Exception as e:  # noqa: BLE001 — an unusable per-agent model override falls back to the graph provider.
             logger.warning(f"Researcher agent_models override {agent_model_override!r} unusable, using default provider: {e}")
             
     if not provider or not hasattr(provider, "call_stream"):
         raise RuntimeError("Valid provider not found in graph config")
-    
+
+    # S1-M5: if a previous response queued parallel tool calls, drain
+    # the head into pending_tool_call instead of calling the model —
+    # the assistant message with all the calls is already recorded.
+    drained = drain_queued_tool_call(state)
+    if drained is not None:
+        logger.info(
+            "Researcher draining queued tool call %s (%s); %d still queued",
+            drained["pending_tool_call"].get("call_id"),
+            drained["pending_tool_call"].get("name"),
+            len(drained["queued_tool_calls"]),
+        )
+        return drained
+
     registry = config.get("configurable", {}).get("tool_registry")
     all_tools = registry.get_definitions() if registry else []
     
@@ -138,29 +164,28 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
     content = "".join(content_parts)
     
     if accumulated_tool_calls:
-        # Take the first tool call
-        tc = next(iter(accumulated_tool_calls.values()))
-        args = tc.args if isinstance(tc.args, dict) else {}
-        
+        # S1-M5: the first call is pending for this tool-loop round;
+        # any parallel calls are queued in state (checkpointed, so
+        # they survive the approval pause) and drained one per round
+        # instead of being silently discarded.
+        pending, queued = pending_and_queued(accumulated_tool_calls)
+
         assistant_msg = {
             "role": "assistant",
             "content": content or "",
-            "tool_calls": [
-                {
-                    "id": tc.call_id,
-                    "type": "function",
-                    "function": {"name": tc.name, "arguments": json.dumps(args)}
-                }
-            ]
+            "tool_calls": assistant_tool_calls(accumulated_tool_calls),
         }
-        
+        if queued:
+            logger.info(
+                "Researcher queued %d parallel tool call(s) beyond the first: %s",
+                len(queued),
+                [q["name"] for q in queued],
+            )
+
         return {
             "messages": [assistant_msg],
-            "pending_tool_call": {
-                "name": tc.name,
-                "args": args,
-                "call_id": tc.call_id
-            }
+            "pending_tool_call": pending,
+            "queued_tool_calls": queued,
         }
     
     # E1-10: validate against the researcher's output schema, if set.
@@ -168,16 +193,21 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
         agent="researcher", config=config, provider=provider,
         messages=messages, content=content, node_name="researcher")
 
-    task_id = state.get("task_id", "default_task")
-    artifact_path = save_artifact(task_id, "research", "researcher_output.txt", content)
-
     finding = " ".join((content or "").split())[:200]
     result = {
         "current_phase": "researching",
         "blackboard": {"findings": [finding]} if finding else {},  # E1-15: share the finding
-        "artifact_paths": {"researcher_output": artifact_path},
         "messages": [{"role": "assistant", "content": content}]
     }
+    # S1-M6: plan mode writes nothing to disk — the findings are
+    # already returned inline above (messages, blackboard).
+    # artifact_paths is omitted entirely (no consumer reads it; the
+    # executor seeds the channel with {}), so the channel keeps its
+    # previous value and its dict typing.
+    if not state.get("plan_mode"):
+        task_id = state.get("task_id", "default_task")
+        artifact_path = save_artifact(task_id, "research", "researcher_output.txt", content)
+        result["artifact_paths"] = {"researcher_output": artifact_path}
     if structured_entry is not None:
         result["structured_outputs"] = {"researcher": structured_entry}
     return result

@@ -199,3 +199,36 @@ a:focus-visible,
 /* Provider Test spinner (Test-button hardening) */
 @keyframes aether-spin { to { transform: rotate(360deg); } }
 .aether-spinner { animation: aether-spin 0.8s linear infinite; }
+
+/* Voice overlay waveform + mic indicator (moved from a runtime
+   <style> element in VoiceOverlay.jsx — S3-M2: a <style> element
+   would force style-src 'unsafe-inline' into the app CSP, so the
+   one such block in the app now lives in this stylesheet). */
+@keyframes voiceWavePulse {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}
+@keyframes voiceDotPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.voice-wave-bar {
+  display: inline-block;
+  width: 4px;
+  height: 22px;
+  margin-right: 4px;
+  border-radius: 2px;
+  background: #a78bfa;
+  transform-origin: center;
+}
+.voice-waveform-live .voice-wave-bar {
+  animation: voiceWavePulse 0.9s ease-in-out infinite;
+}
+.voice-mic-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #f87171;
+  animation: voiceDotPulse 1.4s ease-in-out infinite;
+}

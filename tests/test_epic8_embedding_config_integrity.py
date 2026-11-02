@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from aether_engine.config import UserConfig, load_config, save_config
+from aether_engine.embedding_codec import encode_embedding
 from aether_engine.memory import episodic
 from aether_engine.memory.episodic import (
     backfill_episodic_embeddings,
@@ -231,7 +232,10 @@ async def test_same_model_dimension_mismatch_is_excluded_not_truncated(isolated_
         conn.execute(
             "INSERT INTO episodic_embeddings (task_id, embedding, model, dimension)"
             " VALUES (?, ?, ?, ?)",
-            ("t-dim", pickle.dumps([1.0, 0.0]), MODEL_A, 2),
+            # New tagged format (S1-M7): dimension is the only defect
+            # in this row, so the exclusion tested is the dimension
+            # check, not format rejection.
+            ("t-dim", encode_embedding([1.0, 0.0]), MODEL_A, 2),
         )
         conn.commit()
     finally:
@@ -252,6 +256,9 @@ def test_cosine_similarity_never_truncates_mismatched_dimensions():
 async def test_legacy_rows_without_identity_are_unknown_model(isolated_episodic):
     # Build the embeddings DB with the PRE-fix schema (no identity
     # columns) and a row in it, as an existing deployment would have.
+    # The pickle blob below is deliberate: it simulates a legacy row
+    # (S1-M7 — such rows are never unpickled; this one is additionally
+    # ineligible because its model identity is NULL).
     emb_db = isolated_episodic["emb_db"]
     conn = sqlite3.connect(emb_db)
     try:

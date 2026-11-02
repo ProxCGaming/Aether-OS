@@ -373,3 +373,115 @@ async def test_websocket_artifact_get_and_missing_file(tmp_path, monkeypatch):
     assert resp2["content"] is None
     assert "no longer exists" in resp2["error"]
     assert resp2["artifact"]["id"] == art1["id"]
+
+
+# ==============================================================================
+# S4-M9 residual: artifact collection must upsert per (session, task, file)
+# ==============================================================================
+
+def test_s4m9_same_file_repeated_record_upserts_single_row(store):
+    """(a) Same (session, task, file_path) twice -> ONE row, latest content."""
+    first = store.record_artifact(
+        "sess_s4m9", "task_s4m9", "file", "main.py", "/app/main.py",
+        content="v1",
+    )
+    time.sleep(0.01)
+    second = store.record_artifact(
+        "sess_s4m9", "task_s4m9", "file", "main.py", "/app/main.py",
+        content="v2",
+    )
+
+    assert second["id"] == first["id"]
+    items, total = store.list_artifacts(session_id="sess_s4m9")
+    assert total == 1
+    assert len(items) == 1
+    assert items[0]["id"] == first["id"]
+    assert items[0]["content"] == "v2"
+    assert items[0]["created_at"] == first["created_at"]
+    assert items[0]["updated_at"] >= first["created_at"]
+    # updated_at should reflect the second record, not the first insert
+    assert items[0]["updated_at"] >= second["updated_at"] or items[0]["updated_at"] >= first["updated_at"]
+
+
+def test_s4m9_same_path_different_task_mints_separate_rows(store):
+    """(b) Same path but different task_id -> two rows."""
+    store.record_artifact(
+        "sess_s4m9", "task_a", "file", "main.py", "/app/main.py", content="v1",
+    )
+    store.record_artifact(
+        "sess_s4m9", "task_b", "file", "main.py", "/app/main.py", content="v2",
+    )
+
+    items, total = store.list_artifacts(session_id="sess_s4m9")
+    assert total == 2
+    assert {a["task_id"] for a in items} == {"task_a", "task_b"}
+
+
+def test_s4m9_kind_updates_on_upsert_file_to_diff(store):
+    """(c) Same triple, kind changes file->diff -> one row, kind == 'diff'."""
+    store.record_artifact(
+        "sess_s4m9", "task_s4m9", "file", "main.py", "/app/main.py", content="v1",
+    )
+    time.sleep(0.01)
+    store.record_artifact(
+        "sess_s4m9", "task_s4m9", "diff", "main.py", "/app/main.py",
+        content="--- a\n+++ b\n",
+    )
+
+    items, total = store.list_artifacts(session_id="sess_s4m9")
+    assert total == 1
+    assert items[0]["kind"] == "diff"
+    assert items[0]["content"] == "--- a\n+++ b\n"
+
+
+def test_s4m9_none_file_path_does_not_merge(store):
+    """(d) file_path=None recorded twice -> two rows (no accidental merge)."""
+    store.record_artifact(
+        session_id="sess_s4m9",
+        task_id="task_s4m9",
+        kind="file",
+        title="note.txt",
+        file_path=None,
+        content="one",
+    )
+    store.record_artifact(
+        session_id="sess_s4m9",
+        task_id="task_s4m9",
+        kind="file",
+        title="note.txt",
+        file_path=None,
+        content="two",
+    )
+
+    _items, total = store.list_artifacts(session_id="sess_s4m9")
+    assert total == 2
+
+
+def test_s4m9_explicit_artifact_id_still_upserts_by_id(store):
+    """(e) Explicit artifact_id path still upserts by id."""
+    first = store.record_artifact(
+        session_id="sess_s4m9",
+        task_id="task_s4m9",
+        kind="file",
+        title="explicit.py",
+        file_path="/app/explicit.py",
+        content="v1",
+        artifact_id="art-explicit-s4m9",
+    )
+    assert first["id"] == "art-explicit-s4m9"
+    time.sleep(0.01)
+    second = store.record_artifact(
+        session_id="sess_s4m9",
+        task_id="task_s4m9",
+        kind="diff",
+        title="explicit.py",
+        file_path="/app/explicit.py",
+        content="v2",
+        artifact_id="art-explicit-s4m9",
+    )
+    assert second["id"] == "art-explicit-s4m9"
+
+    items, total = store.list_artifacts(session_id="sess_s4m9")
+    assert total == 1
+    assert items[0]["content"] == "v2"
+    assert items[0]["kind"] == "diff"

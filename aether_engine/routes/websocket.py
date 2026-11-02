@@ -2,12 +2,13 @@ import asyncio
 import base64
 import logging
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from aether_common.auth import (
     verify_token,
@@ -32,6 +33,7 @@ from aether_engine.cost.ledger import (
 from aether_engine.langgraph.checkpointer import delete_thread_checkpoints
 from aether_engine.langgraph.executor import (
     get_pending_approvals,
+    get_persisted_run_config,
     resume_langgraph_task,
     run_langgraph_task,
 )
@@ -52,6 +54,7 @@ from aether_engine.routing.intent import classify_intent
 from aether_engine.routing.policy import (
     RoutingDecision,
     infer_task_requirements,
+    local_only_from_vision_override,
 )
 from aether_engine.secrets.dpapi import SecretDecryptionError
 from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
@@ -146,9 +149,19 @@ def create_tts_engine():
     return KokoroTts()
 
 
-def _extract_token(ws: WebSocket, query_token: str | None) -> str | None:
-    if query_token:
-        return query_token
+def _extract_token(ws: WebSocket) -> str | None:
+    # S1-M3: header ONLY. A token in the URL query string (?token=...)
+    # is REFUSED — never read here, and the endpoint declares no query
+    # parameter for it — because URLs land in uvicorn access logs and
+    # proxy/browser histories. Route choice: the connection is owned by
+    # the Electron MAIN process (desktop_app/main.cjs connectEngine,
+    # Node `ws`), which can set a real Authorization header; the
+    # renderer never opens this socket and never holds the token, and
+    # the legacy Python client (aether_ui/ws_client.py) sets the same
+    # header via the `websockets` library. Browser WebSocket cannot set
+    # headers, but no browser/renderer code connects here directly, so
+    # neither a subprotocol carrier nor a first-message auth frame is
+    # needed.
     auth = ws.headers.get("authorization", "")
     return auth[7:].strip() if auth.startswith("Bearer ") else None
 
@@ -269,6 +282,22 @@ async def handle_artifact_get(artifact_id: str) -> dict[str, Any]:
     }
 
 
+def _remove_session_attachments(session_id: str) -> None:
+    """Remove a session's materialised attachments directory (S4-M3).
+
+    Attachments/snips are written under
+    ``~/.aether/attachments/<session_id>/`` by
+    ``_register_message_attachments``; deleting the session must
+    remove that directory too, not just its DB rows. Best-effort:
+    failures are logged, never raised.
+    """
+    try:
+        attach_dir = Path.home() / ".aether" / "attachments" / session_id
+        shutil.rmtree(attach_dir, ignore_errors=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Failed to remove attachments for session {session_id}: {e}")
+
+
 async def _register_message_attachments(
     session_id: str | None,
     message_id: str | None,
@@ -362,11 +391,15 @@ async def _register_message_attachments(
 
 
 @router.websocket("/ws/tasks")
-async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
+async def ws_tasks(ws: WebSocket):
     ip = ws.client.host if ws.client else "unknown"
     port = ws.client.port if ws.client else None
 
-    extracted = _extract_token(ws, token)
+    # S1-M3: the token check stays BEFORE accept / any message
+    # handling, and the only carrier is the Authorization header —
+    # a ?token=... in the URL is ignored here and therefore rejected
+    # by the verify below (no query-auth fallback exists).
+    extracted = _extract_token(ws)
     if not extracted or not verify_token(extracted, engine_state.auth_token):
         engine_state.audit_logger.log_connection(False, ip, port, "Unauthorized")
         logger.warning(f"Rejected unauthenticated connection from {ip}:{port}")
@@ -425,6 +458,14 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
         "task": None,
         "read_aloud_task": None,
         "read_aloud_id": None,
+        # S4-M7: per-connection speech-engine cache. Building a
+        # FasterWhisperStt/KokoroTts loads a model, so dictation and
+        # read-aloud reuse one engine for the connection's lifetime
+        # instead of constructing a fresh one per chunk/request.
+        "dictation_stt": None,
+        "dictation_stt_opened": False,
+        "read_aloud_tts": None,
+        "read_aloud_tts_opened": False,
     }
 
     async def _send_validation_result(resp_type, req_id_, pname_, key_, base_url_):
@@ -607,6 +648,78 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 pass
             except Exception:
                 logger.debug("read-aloud task cancel failed", exc_info=True)
+
+    # ── Cached speech engines (S4-M7) ────────────────────────────────
+    # One STT and one TTS engine per connection, closed only at
+    # connection teardown — NOT on DICTATION_STOP / read-aloud end,
+    # or push-to-talk would reload the model on every utterance.
+
+    def _dictation_stt() -> Any:
+        """The connection's cached dictation STT engine, built once."""
+        engine = voice_state.get("dictation_stt")
+        if engine is None:
+            engine = create_stt_engine()
+            voice_state["dictation_stt"] = engine
+        return engine
+
+    async def _open_dictation_stt() -> Any:
+        """The cached STT engine, opened once. An open failure is
+        logged, not raised — the transcribe call that follows reports
+        the real error to the client (today's per-chunk tolerance),
+        and a later chunk may retry the open."""
+        engine = _dictation_stt()
+        if not voice_state.get("dictation_stt_opened"):
+            if hasattr(engine, "open"):
+                try:
+                    await engine.open()
+                    voice_state["dictation_stt_opened"] = True
+                except Exception:
+                    logger.debug("STT open error", exc_info=True)
+            else:
+                voice_state["dictation_stt_opened"] = True
+        return engine
+
+    def _read_aloud_tts() -> Any:
+        """The connection's cached read-aloud TTS engine, built once."""
+        engine = voice_state.get("read_aloud_tts")
+        if engine is None:
+            engine = create_tts_engine()
+            voice_state["read_aloud_tts"] = engine
+        return engine
+
+    async def _open_read_aloud_tts() -> Any:
+        """The cached TTS engine, opened once. Same failure contract
+        as ``_open_dictation_stt``: logged, not raised."""
+        engine = _read_aloud_tts()
+        if not voice_state.get("read_aloud_tts_opened"):
+            if hasattr(engine, "open"):
+                try:
+                    await engine.open()
+                    voice_state["read_aloud_tts_opened"] = True
+                except Exception:
+                    logger.debug("TTS open error", exc_info=True)
+            else:
+                voice_state["read_aloud_tts_opened"] = True
+        return engine
+
+    async def _close_speech_engines() -> None:
+        """Close both cached speech engines (connection teardown).
+        Guarded and best-effort: a failing close never wedges the
+        disconnect path, and the slots are cleared regardless."""
+        for engine_key, opened_key in (
+            ("dictation_stt", "dictation_stt_opened"),
+            ("read_aloud_tts", "read_aloud_tts_opened"),
+        ):
+            engine = voice_state.get(engine_key)
+            voice_state[engine_key] = None
+            voice_state[opened_key] = False
+            if engine is None:
+                continue
+            try:
+                if hasattr(engine, "close"):
+                    await engine.close()
+            except Exception:
+                logger.debug("speech engine close failed", exc_info=True)
 
     async def _run_voice_background_task(text: str, session_id: str, provider) -> None:
         """One voice-escalated job (Epic 8, E8-5.1b): a normal
@@ -1013,8 +1126,14 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                             steer_session, msg.payload.get("message_id"), steer_attachments, ws)
                     except Exception as e:  # noqa: BLE001 — best-effort persistence, same as START_TASK: a save failure must not lose the steer
                         logger.error(f"Failed to save steering message: {e}")
+                    # PF-1 (xref M16): the attachments ride the steer
+                    # into the queue, so the steered turn presents
+                    # them to the model exactly like an initial turn —
+                    # persisting them with the saved message is not
+                    # enough on its own.
                     enqueue_steer(
-                        steer_session, steer_prompt, msg.payload.get("message_id"))
+                        steer_session, steer_prompt,
+                        msg.payload.get("message_id"), steer_attachments)
                     continue
                 msg.type = EventType.START_TASK
 
@@ -1211,6 +1330,10 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         request_id=req_id,
                         session_id=session_id,
                         attachments=attachments,
+                        # S1-M8: fast chat reads attachment paths only
+                        # inside sanctioned roots — the session
+                        # attachments dir plus these granted roots.
+                        workspace_roots=workspace_roots,
                     )
                 else:
                     # One central builder (PRD Q3) — task start, approval
@@ -1220,7 +1343,14 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
 
                     reqs = infer_task_requirements(prompt)
                     tools = build_tool_registry(
-                        mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
+                        # E3-F02: the MCP risk overrides are the
+                        # task's EFFECTIVE ones (global -> project ->
+                        # per-task overlay, resolved above), exactly
+                        # as the approval-resume path uses the resumed
+                        # task's effective overrides (E1-F04) — not
+                        # the current globals, which would discard a
+                        # task-level tightening or loosening.
+                        mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=task_user_config.mcp_tool_risk_overrides),
                         include_file_tools=reqs.wants_code or (requested_model is not None),
                     )
 
@@ -1247,6 +1377,12 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         # the task generates is registered against it
                         # so "jump to conversation" lands exactly.
                         message_id=msg.payload.get("message_id"),
+                        # M17 residual: the decision's constraints
+                        # travel into the graph run, whose internal
+                        # provider constructions read them from the
+                        # run config.
+                        local_only=decision.local_only,
+                        require_vision=bool(attachments),
                     )
 
                 # Epic 5, E5-02: task-level fallback factory (§6.4).
@@ -1310,7 +1446,8 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         gen = run_fast_chat(
                             _ctx["prompt"], fallback_instance, _ctx["history"],
                             request_id=_ctx["req_id"], session_id=_ctx["session_id"],
-                            task_id=failed_task_id, attachments=_ctx.get("attachments"))
+                            task_id=failed_task_id, attachments=_ctx.get("attachments"),
+                            workspace_roots=_ctx.get("workspace_roots"))
                     else:
                         gen = run_langgraph_task(
                             prompt=_ctx["prompt"],
@@ -1331,6 +1468,10 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                             task_id=failed_task_id,
                             attachments=_ctx.get("attachments"),
                             message_id=_ctx.get("message_id"),
+                            # M17 residual: as at task start, the
+                            # rebuilt run carries the constraints.
+                            local_only=_ctx["local_only"],
+                            require_vision=_ctx["has_images"],
                         )
                     return gen, entry.provider, entry.id
 
@@ -1415,12 +1556,68 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     except Exception:
                         logger.debug("Failed to audit approval argument edits", exc_info=True)
 
-                # We need to construct a provider instance for the resume generator.
-                # In a real system, provider state would be part of the task metadata or checkpointer.
-                # Here we recreate the active provider instance.
+                # E1-F04: the resume rebuilds the PAUSED task's
+                # effective configuration — the run_config snapshot
+                # checkpointed with the thread's state when the task
+                # started: provider/model, per-agent models/tools,
+                # forced agent, workspace roots and the layered user
+                # config including its MCP risk overrides. The
+                # current globals are only the fallback for threads
+                # paused before snapshots existed. E1-F03: the
+                # resumed execution is bound to the paused task's own
+                # session (from that same durable state), never to a
+                # connection-local variable — an approval arriving on
+                # a fresh connection resumes exactly the task that
+                # paused.
+                run_cfg = await get_persisted_run_config(approval_key) or {}
+                resume_session_id = run_cfg.get("session_id") or approval_key
+                resume_user_config = engine_state.user_config
+                if isinstance(run_cfg.get("user_config"), dict):
+                    try:
+                        resume_user_config = UserConfig.from_dict(run_cfg["user_config"])
+                    except Exception:  # a corrupt snapshot degrades to the live config, never blocks an approval
+                        logger.debug("Could not restore task user_config for approval resume", exc_info=True)
+                resume_provider_name = run_cfg.get("provider_name") or engine_state.active_provider
+                resume_model = run_cfg.get("model") or engine_state.active_model
+                resume_agent_models = run_cfg.get(
+                    "agent_models", resume_user_config.agent_models)
+                resume_agent_tools = run_cfg.get(
+                    "agent_tools", resume_user_config.agent_tools)
+                resume_workspace_roots = (
+                    run_cfg.get("workspace_roots")
+                    or resume_user_config.workspace_roots
+                    or [str(Path.home() / "AetherWorkspace")])
+
+                # M17 residual: the recreated instance honours the
+                # run's routing constraints. With a snapshot they are
+                # the original decision's own values; without one they
+                # are re-derived from the same sources that decision
+                # used — local_only from the auxiliary vision override
+                # in user config, and image presence from the thread's
+                # stored messages (the executor re-derives both again
+                # from the checkpoint for the resumed graph config).
+                if run_cfg:
+                    resume_local_only = bool(run_cfg.get("local_only"))
+                    resume_has_images = bool(run_cfg.get("require_vision"))
+                else:
+                    resume_local_only = local_only_from_vision_override(
+                        engine_state.user_config.auxiliary_models)
+                    resume_has_images = False
+                    try:
+                        _thread_session = await asyncio.to_thread(
+                            session_store.get_session, approval_key)
+                        resume_has_images = any(
+                            m.get("attachments")
+                            for m in (_thread_session or {}).get("messages", []))
+                    except Exception:
+                        logger.debug(
+                            "Could not inspect resumed thread attachments "
+                            "for the vision constraint", exc_info=True)
                 try:
                     provider_instance = _create_provider_instance(
-                        engine_state.active_provider, engine_state.active_model, secret_store
+                        resume_provider_name, resume_model, secret_store,
+                        local_only=resume_local_only,
+                        require_vision=resume_has_images,
                     )
                 except Exception:  # provider construction can fail on config/key errors; skipping the resume is the designed degradation
                     logger.debug("Could not instantiate provider for approval resume", exc_info=True)
@@ -1428,11 +1625,13 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
 
                 # Same central builder as task start (PRD Q3) — the resume
                 # path used to register all file tools unconditionally while
-                # task start gated them on coding tasks.
+                # task start gated them on coding tasks. The MCP risk
+                # overrides are the resumed task's effective ones
+                # (E1-F04), not the current globals.
                 from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
 
                 tools = build_tool_registry(
-                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
+                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=resume_user_config.mcp_tool_risk_overrides),
                 )
 
                 # Epic 2, E2-09: a scoped approval ("this file" / "this
@@ -1462,31 +1661,39 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         # Grant recording is best-effort beside an approval already given.
                         logger.debug("Failed to record scoped approval grant", exc_info=True)
 
-                workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
-
-                # Pass the approved decision back into LangGraph
+                # Pass the approved decision back into LangGraph,
+                # with the paused task's session binding and forced
+                # agent restored alongside its configuration (E1-F03
+                # + E1-F04).
                 resume_gen = resume_langgraph_task(
                     thread_id=approval_key,
                     approved=is_approved,
                     provider=provider_instance,
                     tools=tools,
-                    workspace_roots=workspace_roots,
+                    workspace_roots=resume_workspace_roots,
                     disabled_nodes=engine_state.disabled_nodes,
-                    agent_models=engine_state.user_config.agent_models,
-                    agent_tools=engine_state.user_config.agent_tools,
+                    agent_models=resume_agent_models,
+                    agent_tools=resume_agent_tools,
                     secret_store=secret_store,
-                    user_config=engine_state.user_config,
+                    user_config=resume_user_config,
+                    session_id=resume_session_id,
+                    forced_agent=run_cfg.get("forced_agent"),
                     edited_args=edited_args,
                     browser_envelope=browser_envelope,
+                    # M17 residual: the resumed run's graph config
+                    # carries the same constraints (the executor also
+                    # re-derives them from the checkpoint as a net).
+                    local_only=resume_local_only,
+                    require_vision=resume_has_images,
                 )
 
                 if task_runner and not task_runner.done():
                     task_runner.cancel()
-                    
+
                 req_id = msg.request_id or "resume"
                 task_session_id = approval_key
                 task_runner = asyncio.create_task(
-                    execute_task_generator(resume_gen, engine_state.active_provider, engine_state.active_model, req_id, session_id=session_id or engine_state.active_session_id)
+                    execute_task_generator(resume_gen, resume_provider_name, resume_model, req_id, session_id=resume_session_id)
                 )
 
             # -----------------------------------------------------------
@@ -1615,10 +1822,21 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                             engine_state.active_model = default_model
                     elif is_default and pname:
                         engine_state.user_config.default_provider = pname
-                        cur_models = engine_state.user_config.provider_models.get(pname, [])
-                        if cur_models:
-                            engine_state.user_config.default_model = cur_models[0]
-                            engine_state.active_model = cur_models[0]
+                        # F-10 residual: resolve the default through the
+                        # registry's curated priority, never from the raw
+                        # provider_models list's [0] — that list's order
+                        # is not priority and may be stale or
+                        # client-supplied (a pre-fix list with the 404
+                        # gemini-2.5-flash first would otherwise be
+                        # silently re-pinned as the default here).
+                        default_entry = engine_state.model_registry.get_default_model_for_provider(pname)
+                        resolved_default = default_entry.id if default_entry else ""
+                        if not resolved_default:
+                            cur_models = engine_state.user_config.provider_models.get(pname, [])
+                            resolved_default = cur_models[0] if cur_models else ""
+                        if resolved_default:
+                            engine_state.user_config.default_model = resolved_default
+                            engine_state.active_model = resolved_default
                         engine_state.active_provider = pname
 
                     save_config(engine_state.user_config)
@@ -1662,8 +1880,15 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     remaining = [p for p in secret_store.list_providers() if p != pname]
                     new_default = remaining[0] if remaining else "google_gemini"
                     engine_state.user_config.default_provider = new_default
-                    new_models = engine_state.user_config.provider_models.get(new_default, [])
-                    engine_state.user_config.default_model = new_models[0] if new_models else ""
+                    # F-10 residual: as in PROVIDER_SAVE_REQUEST, the
+                    # replacement default model comes from the
+                    # registry's curated priority, not list position.
+                    default_entry = engine_state.model_registry.get_default_model_for_provider(new_default)
+                    if default_entry:
+                        engine_state.user_config.default_model = default_entry.id
+                    else:
+                        new_models = engine_state.user_config.provider_models.get(new_default, [])
+                        engine_state.user_config.default_model = new_models[0] if new_models else ""
                     engine_state.active_provider = new_default
                     engine_state.active_model = engine_state.user_config.default_model
                 save_config(engine_state.user_config)
@@ -1748,6 +1973,10 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         await asyncio.to_thread(get_media_store().delete_by_session, sess_id)
                     except Exception as media_err:  # noqa: BLE001
                         logger.warning(f"Failed to cascade delete media for session {sess_id}: {media_err}")
+                    try:
+                        await asyncio.to_thread(_remove_session_attachments, sess_id)
+                    except Exception as attach_err:  # noqa: BLE001
+                        logger.warning(f"Failed to remove attachments for session {sess_id}: {attach_err}")
                 await ws.send_text(Event(
                     type=EventType.SESSION_DELETE_RESPONSE,
                     request_id=req_id,
@@ -2299,6 +2528,91 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     payload={"success": removed, "id": entry_id},
                 ).to_json())
 
+            elif msg.type == EventType.VAULT_TOTP_LIST_REQUEST:
+                # Open Point 14: Settings → Password Vault's
+                # Authenticator section lists standalone TOTP
+                # entries METADATA ONLY (the store's listing never
+                # selects the secret column).
+                from aether_engine.vault.store import get_credential_vault
+
+                totp_entries = await asyncio.to_thread(
+                    get_credential_vault().list_totp_entries)
+                await ws.send_text(Event(
+                    type=EventType.VAULT_TOTP_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"entries": totp_entries},
+                ).to_json())
+
+            elif msg.type == EventType.VAULT_TOTP_SAVE_REQUEST:
+                # Enrol / update one authenticator entry from the
+                # Settings form. The engine validates the Base32
+                # setup key and stores it normalised + encrypted; a
+                # blank secret on update means "keep the stored
+                # one", exactly like the password rule above. The
+                # response echoes only success + id — never fields.
+                from aether_engine.vault.store import (
+                    VaultError,
+                    get_credential_vault,
+                )
+
+                setup_key = msg.payload.get("secret")
+                if setup_key is not None and not str(setup_key).strip():
+                    setup_key = None
+                try:
+                    totp_id = await asyncio.to_thread(
+                        get_credential_vault().save_totp_entry,
+                        label=str(msg.payload.get("label", "")),
+                        issuer=str(msg.payload.get("issuer", "")),
+                        entry_id=msg.payload.get("id") or None,
+                        **{"secret": setup_key},  # noqa: PIE804 — dict form is deliberate (see tests/test_vault_totp.py)
+                    )
+                    totp_payload: dict = {"success": True, "id": totp_id}
+                    engine_state.audit_logger.log_event(
+                        "VAULT_TOTP_SAVED", {"entry_id": totp_id})
+                except VaultError as exc:
+                    totp_payload = {
+                        "success": False,
+                        "id": msg.payload.get("id") or "",
+                        "error": str(exc),
+                    }
+                await ws.send_text(Event(
+                    type=EventType.VAULT_TOTP_SAVE_RESPONSE,
+                    request_id=req_id,
+                    payload=totp_payload,
+                ).to_json())
+
+            elif msg.type == EventType.VAULT_TOTP_DELETE_REQUEST:
+                from aether_engine.vault.store import get_credential_vault
+
+                totp_id = str(msg.payload.get("id", ""))
+                removed = await asyncio.to_thread(
+                    get_credential_vault().delete_totp_entry, totp_id)
+                if removed:
+                    engine_state.audit_logger.log_event(
+                        "VAULT_TOTP_DELETED", {"entry_id": totp_id})
+                await ws.send_text(Event(
+                    type=EventType.VAULT_TOTP_DELETE_RESPONSE,
+                    request_id=req_id,
+                    payload={"success": removed, "id": totp_id},
+                ).to_json())
+
+            elif msg.type == EventType.VAULT_TOTP_CODES_REQUEST:
+                # The ONLY code-carrying payload in the system,
+                # served on the owner's Settings request. Secrets
+                # never leave the engine: the store computes the
+                # codes in-process from the decrypted secrets, and
+                # each entry's read is audited VAULT_TOTP_ACCESSED
+                # by the owner accessors there.
+                from aether_engine.vault.store import get_credential_vault
+
+                codes_payload = await asyncio.to_thread(
+                    get_credential_vault().totp_codes)
+                await ws.send_text(Event(
+                    type=EventType.VAULT_TOTP_CODES_RESPONSE,
+                    request_id=req_id,
+                    payload=codes_payload,
+                ).to_json())
+
             elif msg.type == EventType.VAULT_FILL_APPROVAL_RESPONSE:
                 # The desktop's answer to an ask-every-time fill
                 # prompt (VAULT_FILL_APPROVAL_REQUEST). No reply
@@ -2649,19 +2963,60 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 agent_id = msg.payload.get("agent_id")
                 model = msg.payload.get("model")
                 tools = msg.payload.get("tools")
-                
-                if agent_id:
+
+                # S1-M9: validate before persisting anything; the
+                # update is atomic and success is only reported when
+                # something was actually saved.
+                _known_agent_ids = {"supervisor", "planner", "coder", "researcher"}
+                _error: str | None = None
+                if not agent_id:
+                    _error = "missing agent_id"
+                elif agent_id not in _known_agent_ids:
+                    _error = f"unknown agent_id: {agent_id}"
+                elif model is None and tools is None:
+                    _error = "nothing to update"
+                elif model is not None and model != "inherit":
+                    if not isinstance(model, str) or ":" not in model:
+                        _error = f"invalid model format: {model!r} (expected 'provider:model' or 'inherit')"
+                    else:
+                        _provider, _model_id = model.split(":", 1)
+                        if not _provider or not _model_id:
+                            _error = f"invalid model format: {model!r} (expected 'provider:model' or 'inherit')"
+                        else:
+                            _known_providers: set[str] = set(
+                                engine_state.configured_providers or []
+                            )
+                            _known_providers.update(
+                                (engine_state.user_config.provider_models or {}).keys()
+                            )
+                            try:
+                                _known_providers.update(
+                                    entry.provider
+                                    for entry in engine_state.model_registry.list_all_models()
+                                )
+                            except Exception:  # noqa: BLE001, S110 — best-effort enrichment: a registry listing failure must not block validation
+                                pass
+                            if _provider not in _known_providers:
+                                _error = f"unknown provider: {_provider}"
+
+                if _error is not None:
+                    await ws.send_text(Event(
+                        type=EventType.AGENT_UPDATE_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": False, "agent_id": agent_id, "error": _error},
+                    ).to_json())
+                else:
                     if model is not None:
                         engine_state.user_config.agent_models[agent_id] = model
                     if tools is not None:
                         engine_state.user_config.agent_tools[agent_id] = tools
                     save_config(engine_state.user_config)
-                
-                await ws.send_text(Event(
-                    type=EventType.AGENT_UPDATE_RESPONSE,
-                    request_id=req_id,
-                    payload={"success": True, "agent_id": agent_id},
-                ).to_json())
+
+                    await ws.send_text(Event(
+                        type=EventType.AGENT_UPDATE_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": True, "agent_id": agent_id},
+                    ).to_json())
 
             elif msg.type == EventType.TOOL_POLICY_SET_REQUEST:
                 tool_name = msg.payload.get("tool_name")
@@ -2748,6 +3103,12 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 if "silence_duration_ms" in config_data:
                     try:
                         engine_state.user_config.silence_duration_ms = int(config_data["silence_duration_ms"])
+                    except (TypeError, ValueError):
+                        pass
+                if "smart_turn_sensitivity" in config_data:
+                    try:
+                        engine_state.user_config.smart_turn_sensitivity = min(
+                            1.0, max(0.0, float(config_data["smart_turn_sensitivity"])))
                     except (TypeError, ValueError):
                         pass
                 if "snip_hotkey" in config_data:
@@ -2853,7 +3214,11 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 if name and config:
                     try:
                         GLOBAL_MCP_REGISTRY.add_server(name, config)
-                    except MCPConfigError as e:
+                    except (MCPConfigError, OSError) as e:
+                        # E3-F04: a storage OSError from the config
+                        # save must answer success:false like a
+                        # validation error — uncaught, it ended the
+                        # websocket session with no response at all.
                         ok, error = False, str(e)
                 else:
                     ok, error = False, "Server name and config are required."
@@ -2882,7 +3247,9 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         # remove_server closes any live session inside the
                         # removal (S5), awaited here in the session-owner task.
                         await GLOBAL_MCP_REGISTRY.remove_server(name)
-                    except MCPConfigError as e:
+                    except (MCPConfigError, OSError) as e:
+                        # OSError: the config save's storage failure
+                        # (E3-F04) — same answer-don't-die rule as above.
                         ok, error = False, str(e)
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_REMOVE_RESPONSE,
@@ -2906,7 +3273,9 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                             auto_connect=msg.payload.get("auto_connect"),
                             enabled=msg.payload.get("enabled"),
                         )
-                    except MCPConfigError as e:
+                    except (MCPConfigError, OSError) as e:
+                        # OSError: the config save's storage failure
+                        # (E3-F04) — same answer-don't-die rule as ADD.
                         ok, error = False, str(e)
                 await ws.send_text(Event(
                     type=EventType.MCP_SERVER_UPDATE_RESPONSE,
@@ -3783,6 +4152,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         endpointer_config=EndpointerConfig(
                             speech_threshold=cfg.vad_threshold,
                             silence_duration_ms=cfg.silence_duration_ms,
+                            smart_turn_sensitivity=cfg.smart_turn_sensitivity,
                         ),
                     )
                     if voice_pipeline is not None:
@@ -3795,6 +4165,19 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     voice_state["pipeline"] = voice_pipeline
                     voice_state["task"] = asyncio.ensure_future(
                         _run_voice_pipeline(voice_pipeline))
+
+                    # F-12a: the engine's own ICE candidates trickle
+                    # back to the renderer as VOICE_RTC_ICE pushes.
+                    async def _push_rtc_ice(candidate, _sid=voice_session_id):
+                        await _emit_voice_event(Event(
+                            type=EventType.VOICE_RTC_ICE,
+                            payload={
+                                "session_id": _sid,
+                                "candidate": candidate,
+                            },
+                        ))
+
+                    voice_pipeline.set_rtc_ice_listener(_push_rtc_ice)
                 await ws.send_text(Event(
                     type=EventType.VOICE_SESSION_START_RESPONSE,
                     request_id=req_id,
@@ -3815,10 +4198,72 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                 ).to_json())
 
             # -----------------------------------------------------------
+            # Voice RTC negotiation (F-12a): the renderer offers,
+            # the live session's transport answers; ICE trickles
+            # both ways. Every failure answers ok=False with the
+            # honest reason — a dead negotiation is never silent.
+            # -----------------------------------------------------------
+            elif msg.type == EventType.VOICE_RTC_OFFER_REQUEST:
+                rtc_pipeline = voice_state.get("pipeline")
+                rtc_answer = None
+                rtc_error: str | None = None
+                if rtc_pipeline is None:
+                    rtc_error = "voice unavailable: no active voice session"
+                else:
+                    from aether_engine.voice import VoiceUnavailableError
+
+                    try:
+                        rtc_answer = await rtc_pipeline.handle_rtc_offer(
+                            msg.payload.get("sdp") or {})
+                    except VoiceUnavailableError as e:
+                        rtc_error = str(e)
+                    except Exception as e:  # noqa: BLE001 — negotiation failure must still produce a response
+                        rtc_error = (
+                            f"voice unavailable: RTC negotiation "
+                            f"failed ({e})")
+                await ws.send_text(Event(
+                    type=EventType.VOICE_RTC_OFFER_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "ok": rtc_answer is not None,
+                        "session_id": msg.payload.get("session_id"),
+                        "answer": rtc_answer,
+                        "error": rtc_error,
+                    },
+                ).to_json())
+
+            elif msg.type == EventType.VOICE_RTC_ICE_REQUEST:
+                rtc_pipeline = voice_state.get("pipeline")
+                rtc_error = None
+                if rtc_pipeline is None:
+                    rtc_error = "voice unavailable: no active voice session"
+                else:
+                    from aether_engine.voice import VoiceUnavailableError
+
+                    try:
+                        await rtc_pipeline.add_rtc_ice_candidate(
+                            msg.payload.get("candidate"))
+                    except VoiceUnavailableError as e:
+                        rtc_error = str(e)
+                    except Exception as e:  # noqa: BLE001 — as above: always answer
+                        rtc_error = (
+                            f"voice unavailable: RTC negotiation "
+                            f"failed ({e})")
+                await ws.send_text(Event(
+                    type=EventType.VOICE_RTC_ICE_RESPONSE,
+                    request_id=req_id,
+                    payload={
+                        "ok": rtc_error is None,
+                        "session_id": msg.payload.get("session_id"),
+                        "error": rtc_error,
+                    },
+                ).to_json())
+
+            # -----------------------------------------------------------
             # Push-to-talk dictation + TTS read-aloud (Epic 8, E8-5.3)
             # -----------------------------------------------------------
             elif msg.type == EventType.DICTATION_START_REQUEST:
-                stt = create_stt_engine()
+                stt = _dictation_stt()
                 reason = stt.unavailable_reason()
                 if reason is not None:
                     await ws.send_text(Event(
@@ -3834,7 +4279,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     ).to_json())
 
             elif msg.type == EventType.DICTATION_CHUNK_REQUEST:
-                stt = create_stt_engine()
+                stt = _dictation_stt()
                 reason = stt.unavailable_reason()
                 if reason is not None:
                     await ws.send_text(Event(
@@ -3848,11 +4293,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                     is_final = bool(msg.payload.get("is_final", False))
                     try:
                         audio_bytes = base64.b64decode(raw_b64)
-                        if hasattr(stt, "open"):
-                            try:
-                                await stt.open()
-                            except Exception:
-                                logger.debug("STT open error", exc_info=True)
+                        stt = await _open_dictation_stt()
                         text = await stt.transcribe(audio_bytes, sample_rate=sample_rate)
                         await ws.send_text(Event(
                             type=EventType.DICTATION_CHUNK_RESPONSE,
@@ -3867,30 +4308,27 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
                         ).to_json())
 
             elif msg.type == EventType.DICTATION_STOP_REQUEST:
-                stt = create_stt_engine()
                 raw_b64 = msg.payload.get("audio")
                 sample_rate = int(msg.payload.get("sample_rate") or 16000)
                 text = ""
+                stop_error: str | None = None
                 if raw_b64:
                     try:
+                        stt = await _open_dictation_stt()
                         audio_bytes = base64.b64decode(raw_b64)
-                        if hasattr(stt, "open"):
-                            try:
-                                await stt.open()
-                            except Exception:
-                                logger.debug("STT open error on stop", exc_info=True)
                         text = await stt.transcribe(audio_bytes, sample_rate=sample_rate)
-                    except Exception as e:  # noqa: BLE001
+                    except Exception as e:  # noqa: BLE001 — S4-M7: a failed final transcription must be distinguishable from silence
                         logger.warning(f"Dictation stop transcribe error: {e}")
+                        stop_error = str(e)
                 await ws.send_text(Event(
                     type=EventType.DICTATION_STOP_RESPONSE,
                     request_id=req_id,
-                    payload={"ok": True, "text": text, "error": None},
+                    payload={"ok": stop_error is None, "text": text if stop_error is None else "", "error": stop_error},
                 ).to_json())
 
             elif msg.type == EventType.READ_ALOUD_START_REQUEST:
                 await _stop_read_aloud()
-                tts = create_tts_engine()
+                tts = _read_aloud_tts()
                 reason = tts.unavailable_reason()
                 msg_id = msg.payload.get("message_id")
                 text_to_speak = msg.payload.get("text") or ""
@@ -3910,11 +4348,9 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
 
                     async def _run_read_aloud(mid: str | None, text: str, voice: str, tts_inst: Any, target_ws: WebSocket) -> None:
                         try:
-                            if hasattr(tts_inst, "open"):
-                                try:
-                                    await tts_inst.open()
-                                except Exception:
-                                    logger.debug("TTS open error", exc_info=True)
+                            # S4-M7: open the cached engine once for
+                            # the connection, not on every start.
+                            tts_inst = await _open_read_aloud_tts()
                             async for chunk in tts_inst.synthesize(text, voice=voice):
                                 b64_chunk = base64.b64encode(chunk).decode("ascii")
                                 await target_ws.send_text(Event(
@@ -3958,6 +4394,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
             task_runner.cancel()
         await _stop_voice_session()
         await _stop_read_aloud()
+        await _close_speech_engines()
         await _cancel_voice_background_tasks()
         engine_state.audit_logger.log_event("CLIENT_DISCONNECTED", {"client_ip": ip})
     except Exception as e:  # noqa: BLE001 — top-level socket boundary: any session failure is logged and the task is cancelled, never propagated
@@ -3967,6 +4404,7 @@ async def ws_tasks(ws: WebSocket, token: str | None = Query(default=None)):
             task_runner.cancel()
         await _stop_voice_session()
         await _stop_read_aloud()
+        await _close_speech_engines()
         await _cancel_voice_background_tasks()
 
 # --- Legacy unauthenticated HTTP management routes: REMOVED (Phase 9, A1) ---

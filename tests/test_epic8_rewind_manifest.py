@@ -361,8 +361,8 @@ def test_ws_rewind_manifest_get_contract(ws_env):
         # The app lifespan rotates the auth token at startup; read it
         # only after the client (and therefore the lifespan) is up.
         # The query is built by concatenation, not an f-string.
-        url = "/ws/tasks?token=" + engine_state.auth_token
-        with client.websocket_connect(url) as ws:
+        url = "/ws/tasks"
+        with client.websocket_connect(url, headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws:
             ws.receive_text()  # HELLO
 
             resp = _get_manifest(ws, sid)

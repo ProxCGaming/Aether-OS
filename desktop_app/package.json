@@ -11,9 +11,11 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "jest",
+    "test:coverage": "jest --coverage --watchAll=false",
     "electron:dev": "concurrently \"vite\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron .\""
   },
   "dependencies": {
+    "dompurify": "^3.4.17",
     "framer-motion": "^13.4.0",
     "lucide-react": "^1.47.0",
     "mermaid": "^12.2.0",

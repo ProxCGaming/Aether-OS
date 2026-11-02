@@ -147,7 +147,7 @@ class TestSettingsWebSocketHandlers:
                 # It also recomputes configured_providers, so set ours after.
                 live_token = engine_state.auth_token
                 engine_state.configured_providers = ["openai", "google_gemini"]
-                with client.websocket_connect(f"/ws/tasks?token={live_token}") as ws:
+                with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {live_token}"}) as ws:
                     from aether_common.contracts import Event
                     hello = Event.from_json(ws.receive_text())
                     assert hello.type == EventType.HELLO

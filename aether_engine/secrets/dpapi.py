@@ -1,8 +1,18 @@
 """
-Windows DPAPI encryption/decryption helpers for Aether secrets.
+Encryption/decryption helpers for Aether secrets.
 
-Uses ctypes to call CryptProtectData / CryptUnprotectData via the Windows API.
-Falls back to a simple XOR obfuscation on non-Windows platforms (dev/test only).
+On Windows, ``protect``/``unprotect`` call CryptProtectData /
+CryptUnprotectData via ctypes (DPAPI, bound to the current user/machine).
+
+On non-Windows platforms, ``protect`` stores the secret in the OS keyring
+(via the ``keyring`` package, service ``"aether-os"``) and returns a
+``keyring:<id>`` reference; ``unprotect`` resolves that reference from
+the keyring.
+
+Any stored value that is neither a genuine DPAPI blob (Windows only) nor
+a ``keyring:`` reference fails closed with :class:`SecretDecryptionError`.
+There is no unauthenticated fallback decoding: a bare base64 / plaintext
+blob is never silently decoded to a secret (S2-M10).
 """
 from __future__ import annotations
 
@@ -26,7 +36,7 @@ class WindowsDPAPIProtector(BaseProtector):
     def protect(self, data: bytes) -> bytes:
         if sys.platform == "win32":
             return _dpapi_encrypt(data)
-        # Non-Windows fallback using keyring
+        # Non-Windows: store in the OS keyring, return a reference to it.
         import uuid
 
         import keyring
@@ -37,22 +47,33 @@ class WindowsDPAPIProtector(BaseProtector):
     def unprotect(self, data: bytes) -> bytes:
         if sys.platform == "win32":
             return _dpapi_decrypt(data)
-        # Non-Windows fallback using keyring
+        # Non-Windows: the only valid stored format is a keyring reference
+        # produced by protect() above. Anything else fails closed — never
+        # silently decode an unauthenticated blob (e.g. bare base64) into
+        # a secret (S2-M10).
         import keyring
-        secret_ref = data.decode("utf-8")
-        if secret_ref.startswith("keyring:"):
-            secret_id = secret_ref.split("keyring:", 1)[1]
-            secret = keyring.get_password("aether-os", secret_id)
-            if secret is None:
-                raise SecretDecryptionError("Secret not found in OS keychain.")
-            return secret.encode("utf-8")
-        else:
-            # Legacy fallback for existing base64 encoded secrets
-            import base64
-            try:
-                return base64.b64decode(data)
-            except Exception as e:
-                raise SecretDecryptionError(f"Failed to decode legacy secret: {e}") from e
+        try:
+            secret_ref = data.decode("utf-8")
+        except (UnicodeDecodeError, AttributeError) as e:
+            raise SecretDecryptionError(
+                "Unsupported secret format: expected a 'keyring:' reference "
+                "on this platform; refusing to decode unprotected data."
+            ) from e
+        if not secret_ref.startswith("keyring:"):
+            raise SecretDecryptionError(
+                "Unsupported secret format: expected a 'keyring:' reference "
+                "on this platform; refusing to decode unprotected data."
+            )
+        secret_id = secret_ref.split("keyring:", 1)[1]
+        if not secret_id:
+            raise SecretDecryptionError(
+                "Unsupported secret format: expected a 'keyring:' reference "
+                "on this platform; refusing to decode unprotected data."
+            )
+        secret = keyring.get_password("aether-os", secret_id)
+        if secret is None:
+            raise SecretDecryptionError("Secret not found in OS keychain.")
+        return secret.encode("utf-8")
 
 
 if sys.platform == "win32":

@@ -19,6 +19,7 @@ fast-chat turns are saved to the store by the shared websocket wrapper,
 and a later graph task retrieves them from there.
 """
 import asyncio
+import base64
 import logging
 import time
 import uuid
@@ -31,6 +32,11 @@ from aether_engine.langgraph.executor import _is_retriable_error
 from aether_engine.memory import session_store
 from aether_engine.providers.base import BaseProvider
 from aether_engine.rewind import manifest as rewind_manifest
+from aether_engine.tools.paths import (
+    PathContainmentError,
+    effective_roots,
+    resolve_contained,
+)
 
 logger = logging.getLogger("aether_engine.langgraph.fast_chat")
 
@@ -48,6 +54,146 @@ _SYSTEM_PROMPT = (
 # the map is a graph-task-only ambient layer, built by
 # rag/repo_map.py and injected by the supervisor. Do not import it
 # here; tests/test_repo_map.py pins this exclusion.
+
+# ---------------------------------------------------------------------------
+# S1-M8: attachment path containment.
+#
+# A client-supplied attachment ``path`` used to be read with a bare
+# ``Path(...).read_bytes()`` and shipped to the cloud provider as image
+# content — any readable local file (``/etc/passwd``, ``~/.ssh/...``)
+# could be exfiltrated through a chat turn. A local path may now be
+# read ONLY when its fully resolved form (symlinks followed, the same
+# resolve-then-check rule ``tools/paths.py`` applies to tool paths)
+# sits inside a sanctioned root:
+#   * the attachments directory the engine itself manages
+#     (``~/.aether/attachments`` — where the websocket handler
+#     materialises uploaded/snipped images per session), and
+#   * the granted workspace roots for the run (``tools/paths.py``
+#     ``effective_roots`` semantics: the configured roots, falling back
+#     to ``~/AetherWorkspace``).
+# The file must also be an image on the allow-list below — judged by
+# extension, and by the declared mime when the client supplies one —
+# and no larger than MAX_ATTACHMENT_BYTES. Anything else rejects the
+# whole turn with an honest TASK_FAILED: never read-and-send, never a
+# silent drop. Inline ``data:`` URLs and remote http(s) URLs keep
+# their long-standing pass-through behaviour (no local read happens).
+# ---------------------------------------------------------------------------
+
+_ATTACHMENT_MIME_BY_EXT = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+}
+_ATTACHMENT_MIMES = frozenset(_ATTACHMENT_MIME_BY_EXT.values())
+
+# No attachment-specific cap existed before S1-M8; 10 MB matches the
+# engine's other byte caps (the audit log's rotation bound) and sits
+# well above any real screenshot while keeping a single turn's payload
+# sane.
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
+
+class AttachmentRejectedError(ValueError):
+    """An attachment path failed containment / type / size validation."""
+
+
+def _attachments_root() -> Path:
+    """The engine-managed attachments directory (sanctioned root).
+
+    The websocket handler materialises data-URL uploads under
+    ``<root>/<session_id>`` (``routes/websocket.py``
+    ``_register_message_attachments``); the whole tree is the
+    attachments directory sessions read back from.
+    """
+    return Path.home() / ".aether" / "attachments"
+
+
+def _sanctioned_attachment_roots(workspace_roots: list[str] | None) -> list[str]:
+    roots = [str(_attachments_root())]
+    roots.extend(str(r) for r in effective_roots(workspace_roots))
+    return roots
+
+
+def _load_path_attachment(
+    raw_path: Any,
+    declared_mime: str | None,
+    roots: list[str],
+) -> str:
+    """Read a local-file attachment into a ``data:`` URL, or raise
+    :class:`AttachmentRejectedError` with an honest, client-safe
+    reason. The file's bytes are read only after containment, type
+    and size have all passed."""
+    label = Path(str(raw_path)).name or str(raw_path)
+    try:
+        resolved = resolve_contained(str(raw_path), roots)
+    except PathContainmentError:
+        raise AttachmentRejectedError(
+            f'Attachment "{label}" was refused: its path is outside the '
+            "folders Aether is allowed to read attachments from."
+        ) from None
+    if not resolved.is_file():
+        raise AttachmentRejectedError(
+            f'Attachment "{label}" was refused: the file does not exist.')
+    mime = _ATTACHMENT_MIME_BY_EXT.get(resolved.suffix.lower())
+    if mime is None:
+        raise AttachmentRejectedError(
+            f'Attachment "{label}" was refused: only image attachments '
+            f"({', '.join(sorted(_ATTACHMENT_MIMES))}) can be sent.")
+    if declared_mime and declared_mime not in _ATTACHMENT_MIMES:
+        raise AttachmentRejectedError(
+            f'Attachment "{label}" was refused: its declared type '
+            f'"{declared_mime}" is not a supported image type.')
+    try:
+        size = resolved.stat().st_size
+    except OSError:
+        raise AttachmentRejectedError(
+            f'Attachment "{label}" was refused: the file could not be read.'
+        ) from None
+    if size > MAX_ATTACHMENT_BYTES:
+        raise AttachmentRejectedError(
+            f'Attachment "{label}" was refused: it is larger than the '
+            f"{MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB attachment limit.")
+    try:
+        data = resolved.read_bytes()
+    except OSError:
+        raise AttachmentRejectedError(
+            f'Attachment "{label}" was refused: the file could not be read.'
+        ) from None
+    if len(data) > MAX_ATTACHMENT_BYTES:  # grew between stat and read
+        raise AttachmentRejectedError(
+            f'Attachment "{label}" was refused: it is larger than the '
+            f"{MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB attachment limit.")
+    return f"data:{declared_mime or mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _resolve_attachment_url(att: Any, roots: list[str]) -> str | None:
+    """Resolve one attachment to an image URL.
+
+    Mirrors the historical resolution order (inline ``data``/``url``
+    first, then a file ``path``): ``data:`` and http(s) URLs pass
+    through untouched, a file path goes through
+    :func:`_load_path_attachment` (raising on refusal), and an
+    attachment carrying neither URL nor path resolves to None,
+    exactly as before.
+    """
+    if isinstance(att, dict):
+        url = att.get("data") or att.get("url")
+        if url:
+            return url
+        path = att.get("path")
+        if not path:
+            return None
+        if isinstance(path, str) and path.startswith("data:"):
+            return path
+        return _load_path_attachment(path, att.get("mime_type"), roots)
+    if isinstance(att, str):
+        if att.startswith(("data:", "http://", "https://")):
+            return att
+        return _load_path_attachment(att, None, roots)
+    return None
 
 
 def load_session_history(
@@ -144,6 +290,7 @@ async def run_fast_chat(
     session_id: str | None = None,
     task_id: str | None = None,
     attachments: list[Any] | None = None,
+    workspace_roots: list[str] | None = None,
 ) -> AsyncGenerator[Event, None]:
     """Stream a direct chat reply for *prompt*, mirroring the graph
     runner's event contract (see module docstring)."""
@@ -173,43 +320,43 @@ async def run_fast_chat(
     messages: list[dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}]
     messages.extend(history or [])
 
+    start_time = time.time()
+
     user_content: Any = prompt
     if attachments:
+        # S1-M8: every local path is validated (containment + image
+        # allow-list + size cap) BEFORE the provider is called; a
+        # refusal fails the whole turn visibly — the attachment is
+        # never read-and-sent, and never silently dropped either.
+        roots = _sanctioned_attachment_roots(workspace_roots)
         parts_list: list[dict[str, Any]] = []
         if prompt:
             parts_list.append({"type": "text", "text": prompt})
-        for att in attachments:
-            url = None
-            if isinstance(att, dict):
-                url = att.get("data") or att.get("url")
-                if not url and att.get("path"):
-                    p = Path(att["path"])
-                    if p.exists() and p.is_file():
-                        import base64
-
-                        mime = att.get("mime_type") or "image/png"
-                        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
-                        url = f"data:{mime};base64,{b64}"
-                    elif str(att["path"]).startswith("data:"):
-                        url = att["path"]
-            elif isinstance(att, str):
-                if att.startswith(("data:", "http")):
-                    url = att
-                else:
-                    p = Path(att)
-                    if p.exists() and p.is_file():
-                        import base64
-
-                        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
-                        url = f"data:image/png;base64,{b64}"
-            if url:
-                parts_list.append({"type": "image_url", "image_url": {"url": url}})
+        try:
+            for att in attachments:
+                url = _resolve_attachment_url(att, roots)
+                if url:
+                    parts_list.append({"type": "image_url", "image_url": {"url": url}})
+        except AttachmentRejectedError as e:
+            logger.warning("Fast chat attachment refused: %s", e)
+            await _record_message_point(session_id, task_id, 1, "Task failed")
+            yield Event(
+                type=EventType.TASK_FAILED,
+                request_id=request_id,
+                payload={
+                    "task_id": task_id,
+                    "state": TaskState.FAILED.value,
+                    "error": str(e),
+                    "retriable": False,
+                    "latency_ms": round((time.time() - start_time) * 1000, 2),
+                },
+            )
+            return
         if parts_list:
             user_content = parts_list
 
     messages.append({"role": "user", "content": user_content})
 
-    start_time = time.time()
     parts: list[str] = []
     try:
         async for chunk in provider.call_stream(messages, tools=None, node_name="fast_chat"):

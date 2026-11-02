@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import math
-import pickle
 import sqlite3
 import time
 from pathlib import Path
@@ -9,6 +8,7 @@ from typing import Any
 
 from aether_engine.audit import AuditLogger
 from aether_engine.config import UserConfig, load_config
+from aether_engine.embedding_codec import decode_embedding, encode_embedding
 
 _audit_logger = AuditLogger()
 logger = logging.getLogger(__name__)
@@ -173,7 +173,7 @@ def _store_embedding_row(task_id: str, embedding: list[float]) -> None:
         conn.execute(
             "INSERT OR REPLACE INTO episodic_embeddings"
             " (task_id, embedding, model, dimension) VALUES (?, ?, ?, ?)",
-            (task_id, pickle.dumps(embedding),
+            (task_id, encode_embedding(embedding),
              resolve_embedder(), len(embedding)),
         )
         conn.commit()
@@ -548,7 +548,14 @@ async def query_episodes(query: str, limit: int = 5,
                     (resolve_embedder(), len(query_embedding)),
                 )
                 for row in e_cur.fetchall():
-                    emb = pickle.loads(row["embedding"])
+                    # S1-M7: rows without the tagged safe format
+                    # (legacy pickle rows included) are never
+                    # deserialised — the embedding reads as missing
+                    # and the row is skipped; it is recomputable via
+                    # backfill under the new format.
+                    emb = decode_embedding(row["embedding"])
+                    if emb is None:
+                        continue
                     sim = _cosine_similarity(query_embedding, emb)
                     # Phase 10.3 A2: below-threshold episodes never enter
                     # RRF — without this, every episode scored ~0 still

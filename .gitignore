@@ -22,7 +22,9 @@ pytest_output.txt
 # Caches
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
+desktop_app/coverage/
 .tox/
 .nox/
 .mypy_cache/

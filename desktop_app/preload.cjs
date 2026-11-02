@@ -20,10 +20,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('chat-detached', handler);
   },
   onChatAttached: (callback) => {
-    const handler = () => callback();
+    // S3-M7: main sends the final transfer snapshot with this event
+    // (its store is cleared at floating-window close), so the
+    // snapshot is passed through to the callback.
+    const handler = (_event, state) => callback(state);
     ipcRenderer.on('chat-attached', handler);
     return () => ipcRenderer.removeListener('chat-attached', handler);
   },
+  setFloatingTransferState: (state) => ipcRenderer.invoke('set-floating-transfer-state', state),
+  getFloatingTransferState: () => ipcRenderer.invoke('get-floating-transfer-state'),
+  clearFloatingTransferState: () => ipcRenderer.invoke('clear-floating-transfer-state'),
   openFloatingChat: (sessionId) => ipcRenderer.invoke('open-floating-chat', sessionId),
   openLogsFolder: () => ipcRenderer.invoke('open-logs-folder'),
   closeFloatingChat: () => ipcRenderer.invoke('close-floating-chat'),

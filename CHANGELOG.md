@@ -152,7 +152,7 @@ Per-epic detail lives in `docs/audits/`; decisions in `docs/adr/`
 ## [2026-09-22]
 ### Added
 - **Memory Graph**: Added single-fact, entity, and full-clear deletion controls to Knowledge Graph UI and backend.
-- **Episodic Memory**: Added episodic deletion controls, context menu, and draggable text selection. Implemented autonomous supervisor memory orchestration (ADR 0019).
+- **Episodic Memory**: Added episodic deletion controls, context menu, and draggable text selection. Implemented autonomous supervisor memory orchestration (ADR 0039).
 - **Hybrid Retrieval**: Implemented RRF hybrid retrieval with local SQLite embeddings database. Added ADR 0020 for documentation.
 - **Workspace UI**: Added true workspace folder persistence and dialog selection to Projects view.
 - **Local Models**: Fetch local model catalog from JSON, added destination path & download cancellation.

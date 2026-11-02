@@ -67,7 +67,7 @@ class TestPhase101PluginInstall(unittest.TestCase):
         # NB: TestClient startup runs the app lifespan, which regenerates
         # engine_state.auth_token — read it fresh here, not the setUp token.
         # Return the session un-entered: the caller's `with` enters it once.
-        return client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}")
+        return client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"})
 
     def _hello(self, ws):
         hello = self._recv_event(ws)

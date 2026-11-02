@@ -7,9 +7,9 @@
 - _validate_provider_key pings only the filtered list; failures surface the
   discovery error with its code.
 """
-import os
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from aether_engine.providers.discovery import (
     DiscoveryError,
@@ -174,7 +174,9 @@ class TestDiscoveryWebSocket:
     @pytest.fixture
     def ws_client(self, tmp_path):
         from unittest.mock import MagicMock, patch
+
         from starlette.testclient import TestClient
+
         from aether_engine.app import app, engine_state
 
         token_file = tmp_path / "engine.token"
@@ -191,10 +193,10 @@ class TestDiscoveryWebSocket:
         mock_store.list_providers.return_value = []
         try:
             with patch("aether_engine.routes.websocket.SecretStore", return_value=mock_store), \
-                 patch("aether_engine.app.SecretStore", return_value=mock_store):
+                 patch("aether_engine.app.SecretStore", return_value=mock_store):  # noqa: SIM117 — nested under a multi-manager patch; combined form lands with the tip cleanup
                 with TestClient(app) as client:
                     live_token = engine_state.auth_token
-                    with client.websocket_connect(f"/ws/tasks?token={live_token}") as ws:
+                    with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {live_token}"}) as ws:
                         from aether_common.contracts import Event, EventType
                         hello = Event.from_json(ws.receive_text())
                         assert hello.type == EventType.HELLO
@@ -211,7 +213,7 @@ class TestDiscoveryWebSocket:
     def test_save_surfaces_discovery_error_with_code(self, ws_client):
         from aether_common.contracts import EventType
 
-        ws, engine_state = ws_client
+        ws, _engine_state = ws_client
         disc = DiscoveryResult(error=DiscoveryError(code=403, message="forbidden"))
         with patch("aether_engine.routes.websocket.fetch_available_models",
                    new=AsyncMock(return_value=disc)):

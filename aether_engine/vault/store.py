@@ -32,6 +32,13 @@ from urllib.parse import urlparse
 from publicsuffix2 import get_tld
 
 from ..secrets.dpapi import BaseProtector, WindowsDPAPIProtector
+from .totp import (
+    PERIOD_SECONDS,
+    TotpValidationError,
+    normalize_base32_secret,
+    seconds_remaining,
+    totp_code,
+)
 
 if TYPE_CHECKING:
     from ..audit import AuditLogger
@@ -140,6 +147,22 @@ CREATE TABLE IF NOT EXISTS vault_entries (
     last_used_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_vault_site ON vault_entries(site);
+
+-- Standalone authenticator entries (Open Point 14, decided YES by
+-- the owner 1 Nov 2026): TOTP secrets enrolled for the codes view
+-- alone, with no login attached. A separate table on purpose —
+-- these rows carry no password and must never become fill
+-- candidates for the mediated fill service, which reads
+-- vault_entries only. Added with IF NOT EXISTS so an existing v1
+-- database gains it in place; the schema version stays 1.
+CREATE TABLE IF NOT EXISTS vault_totp_entries (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    issuer TEXT NOT NULL DEFAULT '',
+    encrypted_secret BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 """
 
 
@@ -293,10 +316,20 @@ class CredentialVault:
         return self._public(row)
 
     def list_entries(self) -> list[dict[str, Any]]:
-        """Every entry, metadata only — passwords are never listed."""
+        """Every entry, metadata only — passwords are never listed.
+
+        Selects exactly the columns :meth:`_public` projects and
+        nothing else (S2-M9): the secret columns
+        (``encrypted_password``, ``encrypted_totp``) are never
+        fetched from the database on this path, so listing is
+        metadata-only by construction, not by after-the-fact
+        projection.
+        """
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM vault_entries ORDER BY site, username",
+                "SELECT id, site, username, ask_every_time, created_at,"
+                " created_by, last_used_at FROM vault_entries"
+                " ORDER BY site, username",
             ).fetchall()
         return [self._public(row) for row in rows]
 
@@ -352,6 +385,175 @@ class CredentialVault:
         secret = self.protector.unprotect(bytes(row[0])).decode("utf-8")
         self._audit("VAULT_TOTP_ACCESSED", {"entry_id": entry_id})
         return secret
+
+    # -- authenticator entries (Open Point 14) --------------------------
+
+    def save_totp_entry(
+        self,
+        *,
+        label: str,
+        issuer: str = "",
+        secret: str | None = None,
+        entry_id: str | None = None,
+    ) -> str:
+        """Create or update a standalone authenticator entry.
+
+        The secret is validated as Base32 and stored in its
+        normalised form, encrypted with the same protector as every
+        other vault secret; a malformed secret raises
+        VaultValidationError and stores nothing. On update,
+        ``secret=None`` keeps the stored secret (the Settings edit
+        form never receives it, so it cannot send it back); a
+        provided secret is re-validated before it replaces
+        anything. A label is required — it is how the owner tells
+        codes apart in the authenticator view.
+        """
+        if not (label or "").strip():
+            raise VaultValidationError("A label is required.")
+        now = int(time.time())
+        with self._connect() as conn:
+            existing = None
+            if entry_id is not None:
+                existing = conn.execute(
+                    "SELECT * FROM vault_totp_entries WHERE id = ?",
+                    (entry_id,),
+                ).fetchone()
+                if existing is None:
+                    raise VaultEntryNotFound(
+                        f"No TOTP entry {entry_id!r}.")
+            if secret is None:
+                if existing is None:
+                    raise VaultValidationError("A TOTP secret is required.")
+                encrypted_secret = existing["encrypted_secret"]
+            else:
+                try:
+                    normalized = normalize_base32_secret(secret)
+                except TotpValidationError as exc:
+                    raise VaultValidationError(str(exc)) from exc
+                encrypted_secret = self.protector.protect(
+                    normalized.encode("utf-8"))
+            if existing is None:
+                new_id = uuid.uuid4().hex
+                conn.execute(
+                    "INSERT INTO vault_totp_entries (id, label, issuer,"
+                    " encrypted_secret, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (new_id, label.strip(), (issuer or "").strip(),
+                     encrypted_secret, now, now),
+                )
+                return new_id
+            conn.execute(
+                "UPDATE vault_totp_entries SET label = ?, issuer = ?,"
+                " encrypted_secret = ?, updated_at = ? WHERE id = ?",
+                (label.strip(), (issuer or "").strip(),
+                 encrypted_secret, now, entry_id),
+            )
+            return entry_id
+
+    @staticmethod
+    def _public_totp(row: sqlite3.Row) -> dict[str, Any]:
+        """The contract shape for one authenticator entry — the
+        secret column is never selected into a listing."""
+        return {
+            "id": row["id"],
+            "label": row["label"],
+            "issuer": row["issuer"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def list_totp_entries(self) -> list[dict[str, Any]]:
+        """Every authenticator entry, metadata only."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM vault_totp_entries"
+                " ORDER BY issuer, label",
+            ).fetchall()
+        return [self._public_totp(row) for row in rows]
+
+    def delete_totp_entry(self, entry_id: str) -> bool:
+        """Delete an authenticator entry; True when a row went."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM vault_totp_entries WHERE id = ?",
+                (entry_id,))
+            return cursor.rowcount > 0
+
+    def get_totp_entry_secret(self, entry_id: str) -> str:
+        """Decrypt one authenticator entry's secret — OWNER PATH ONLY.
+
+        The standalone-entry mirror of :meth:`get_totp_secret`: the
+        Settings authenticator surface is the only caller, the
+        access is audited, and no agent path can reach it.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT encrypted_secret FROM vault_totp_entries"
+                " WHERE id = ?",
+                (entry_id,),
+            ).fetchone()
+        if row is None:
+            raise VaultEntryNotFound(f"No TOTP entry {entry_id!r}.")
+        secret = self.protector.unprotect(bytes(row[0])).decode("utf-8")
+        self._audit("VAULT_TOTP_ACCESSED", {"entry_id": entry_id})
+        return secret
+
+    def totp_codes(
+        self, at_time: float | None = None,
+    ) -> dict[str, Any]:
+        """Current codes for every TOTP the owner holds — OWNER ONLY.
+
+        Covers standalone authenticator entries and login entries
+        carrying a TOTP secret. Codes are computed here, engine
+        side; only the code, its period and the countdown leave
+        this method — never a secret. Each secret read goes through
+        the owner accessors above, so every view is audited
+        (VAULT_TOTP_ACCESSED, one line per entry). A stored login
+        secret that is not valid Base32 is skipped: the login form
+        historically stored the raw string unchecked, and this view
+        must neither crash on it nor fabricate a code from it.
+        """
+        when = int(time.time()) if at_time is None else int(at_time)
+        remaining = seconds_remaining(when)
+        codes: list[dict[str, Any]] = []
+        for row in self.list_totp_entries():
+            secret = self.get_totp_entry_secret(row["id"])
+            codes.append({
+                "entry_id": row["id"],
+                "kind": "authenticator",
+                "label": row["label"],
+                "issuer": row["issuer"],
+                "code": totp_code(secret, when),
+                "period": PERIOD_SECONDS,
+                "seconds_remaining": remaining,
+            })
+        with self._connect() as conn:
+            login_ids = [r[0] for r in conn.execute(
+                "SELECT id FROM vault_entries"
+                " WHERE encrypted_totp IS NOT NULL"
+                " ORDER BY site, username",
+            ).fetchall()]
+        by_id = {e["id"]: e for e in self.list_entries()}
+        for login_id in login_ids:
+            secret = self.get_totp_secret(login_id)
+            if secret is None:
+                continue
+            try:
+                code = totp_code(secret, when)
+            except TotpValidationError:
+                continue
+            meta = by_id.get(login_id, {})
+            codes.append({
+                "entry_id": login_id,
+                "kind": "login",
+                "label": meta.get("site", ""),
+                "issuer": "",
+                "username": meta.get("username", ""),
+                "code": code,
+                "period": PERIOD_SECONDS,
+                "seconds_remaining": remaining,
+            })
+        return {"generated_at": when, "codes": codes}
 
 
 _vault: CredentialVault | None = None

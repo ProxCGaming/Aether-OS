@@ -197,3 +197,148 @@ class TestStartupDiscoveryDoesNotOverwritePersistedDefault:
         )
         assert cfg_default == "gemini-2.0-flash-lite"
         assert persisted_on_disk == "gemini-2.0-flash-lite"
+
+
+# ---------------------------------------------------------------------------
+# (c) F-10 residual: the WebSocket provider handlers must resolve the
+# default through the registry, never from raw list position [0].
+#
+# PROVIDER_SAVE_REQUEST (is_default, no explicit model) and
+# PROVIDER_REMOVE_REQUEST (replacing a removed default provider) both
+# assigned ``default_model`` from ``provider_models[...][0]`` — a raw,
+# possibly stale/client-supplied list whose order is NOT registry
+# priority. With a pre-fix persisted list (2.5-flash first) in a
+# discovery-less session, either handler silently re-pinned the 404
+# model as the default, bypassing the registry protection above.
+# ---------------------------------------------------------------------------
+
+class TestProviderHandlersResolveDefaultViaRegistry:
+    @pytest.fixture
+    def _ws_env(self, tmp_path):
+        from aether_engine.state import engine_state
+
+        orig_cfg = engine_state.user_config
+        orig_active_provider = engine_state.active_provider
+        orig_active_model = engine_state.active_model
+        orig_configured = list(engine_state.configured_providers)
+        orig_registry_models = list(engine_state.model_registry._models)
+        orig_token_path = engine_state.token_path
+        orig_audit_path = engine_state.audit_logger.log_path
+
+        engine_state.token_path = tmp_path / "engine.token"
+        engine_state.audit_logger.log_path = tmp_path / "audit.log"
+        engine_state.initialize_auth()
+        try:
+            yield engine_state
+        finally:
+            engine_state.user_config = orig_cfg
+            engine_state.active_provider = orig_active_provider
+            engine_state.active_model = orig_active_model
+            engine_state.configured_providers = orig_configured
+            engine_state.model_registry._models = orig_registry_models
+            engine_state.model_registry._by_id = {
+                m.id: m for m in orig_registry_models
+            }
+            engine_state.token_path = orig_token_path
+            engine_state.audit_logger.log_path = orig_audit_path
+
+    def test_save_as_default_uses_registry_priority_not_list_order(self, _ws_env):
+        from unittest.mock import MagicMock, patch
+
+        from aether_common.contracts import Event, EventType
+
+        engine_state = _ws_env
+        mock_store = MagicMock()
+        mock_store.list_providers.return_value = ["google_gemini"]
+        mock_store.load_provider.return_value = "fake-key"
+
+        with patch("aether_engine.routes.websocket.SecretStore",
+                   return_value=mock_store):
+            from starlette.testclient import TestClient
+
+            from aether_engine.app import app
+
+            with TestClient(app) as client, client.websocket_connect(
+                    "/ws/tasks",
+                    headers={
+                        "Authorization":
+                            f"Bearer {engine_state.auth_token}",
+                    }) as ws:
+                ws.receive_text()  # HELLO
+                # Stale, unsorted persisted list: the 404 model
+                # first. The registry knows curated priority.
+                cfg = engine_state.user_config
+                cfg.provider_models["google_gemini"] = [
+                    "gemini-2.5-flash", "gemini-3.5-flash",
+                ]
+                engine_state.model_registry.update_provider_models(
+                    "google_gemini",
+                    ["gemini-2.5-flash", "gemini-3.5-flash"],
+                )
+                ws.send_text(Event(
+                    type=EventType.PROVIDER_SAVE_REQUEST,
+                    payload={
+                        "provider": "google_gemini",
+                        "api_key": "",
+                        "is_default": True,
+                        "default_model": "",
+                        "models": [],
+                    },
+                ).to_json())
+                resp = Event.from_json(ws.receive_text())
+
+        assert resp.type == EventType.PROVIDER_SAVE_RESPONSE
+        assert resp.payload["success"] is True
+        assert engine_state.user_config.default_provider == "google_gemini"
+        assert engine_state.user_config.default_model == "gemini-3.5-flash"
+        assert engine_state.active_model == "gemini-3.5-flash"
+
+    def test_remove_default_provider_uses_registry_priority(self, _ws_env):
+        from unittest.mock import MagicMock, patch
+
+        from aether_common.contracts import Event, EventType
+
+        engine_state = _ws_env
+        mock_store = MagicMock()
+        mock_store.list_providers.return_value = ["google_gemini"]
+        mock_store.delete_provider.return_value = True
+        mock_store.load_provider.return_value = "fake-key"
+
+        with patch("aether_engine.routes.websocket.SecretStore",
+                   return_value=mock_store):
+            from starlette.testclient import TestClient
+
+            from aether_engine.app import app
+
+            with TestClient(app) as client, client.websocket_connect(
+                    "/ws/tasks",
+                    headers={
+                        "Authorization":
+                            f"Bearer {engine_state.auth_token}",
+                    }) as ws:
+                ws.receive_text()  # HELLO
+                cfg = engine_state.user_config
+                cfg.default_provider = "openai"
+                cfg.default_model = "gpt-4o"
+                cfg.provider_models["openai"] = ["gpt-4o"]
+                # Replacement provider's persisted list is stale
+                # and unsorted: the 404 model first.
+                cfg.provider_models["google_gemini"] = [
+                    "gemini-2.5-flash", "gemini-3.5-flash",
+                ]
+                engine_state.model_registry.update_provider_models(
+                    "google_gemini",
+                    ["gemini-2.5-flash", "gemini-3.5-flash"],
+                )
+                engine_state.configured_providers = ["openai", "google_gemini"]
+                ws.send_text(Event(
+                    type=EventType.PROVIDER_REMOVE_REQUEST,
+                    payload={"provider": "openai"},
+                ).to_json())
+                resp = Event.from_json(ws.receive_text())
+
+        assert resp.type == EventType.PROVIDER_REMOVE_RESPONSE
+        assert resp.payload["success"] is True
+        assert engine_state.user_config.default_provider == "google_gemini"
+        assert engine_state.user_config.default_model == "gemini-3.5-flash"
+        assert engine_state.active_model == "gemini-3.5-flash"

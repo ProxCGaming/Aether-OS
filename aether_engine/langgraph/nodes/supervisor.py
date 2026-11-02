@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import time
@@ -13,7 +12,6 @@ from aether_engine.event_bus import event_bus
 from aether_engine.langgraph.state import AetherState, message_dicts
 from aether_engine.memory import session_store
 from aether_engine.memory.facade import backend_or_none
-from aether_engine.providers.base import ToolCall
 from aether_engine.tools.policy import resolve_policy_by_name
 
 logger = logging.getLogger("aether_engine.langgraph.supervisor")
@@ -211,10 +209,9 @@ def _resolve_supervisor_provider(config: RunnableConfig):
 
     Applies the ``agent_models["supervisor"]`` override (via
     ``_create_provider_instance``) on top of the graph's default
-    provider, exactly as the supervisor node always has. Raises
-    RuntimeError when no usable provider is configured. Shared by
-    ``supervisor_node`` and the create_supervisor model adapter
-    (``supervisor_model.py``) so both resolve identically.
+    provider. Raises RuntimeError when no usable provider is
+    configured. Used by the create_supervisor model adapter
+    (``supervisor_model.py``).
     """
     provider = config.get("configurable", {}).get("provider")
 
@@ -228,7 +225,16 @@ def _resolve_supervisor_provider(config: RunnableConfig):
             if len(parts) == 2:
                 p_name, m_name = parts
                 from aether_engine.orchestration.core import _create_provider_instance
-                provider = _create_provider_instance(p_name, m_name, secret_store)
+                # M17 residual: the run's routing constraints (set by
+                # the executor from the routing decision) bind this
+                # construction too — no silent cloud fallback for a
+                # local-only task's images.
+                _cfg = config.get("configurable", {})
+                provider = _create_provider_instance(
+                    p_name, m_name, secret_store,
+                    local_only=bool(_cfg.get("local_only")),
+                    require_vision=bool(_cfg.get("require_vision")),
+                )
         except Exception as e:  # noqa: BLE001 — an unusable override falls back to the graph provider, as the node always has.
             logger.warning(f"Supervisor agent_models override {agent_model_override!r} unusable, using default provider: {e}")
 
@@ -248,8 +254,8 @@ def _decision_from_text(content: str, available_nodes: list[str]) -> dict:
 
     Strips markdown fences, then JSON-parses. Empty or unparseable
     output falls back to the planner (or first available specialist)
-    with the reason recorded — the behaviour the supervisor node has
-    always had. Shared by ``supervisor_node`` and the model adapter.
+    with the reason recorded. Used by the create_supervisor model
+    adapter (``supervisor_model.py``).
     """
     content_clean = content.strip()
     content_clean = content_clean.removeprefix("```json")
@@ -269,10 +275,10 @@ def _decision_from_text(content: str, available_nodes: list[str]) -> dict:
 def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: list[str], *, tool_mode: bool = False) -> str:
     """Build the supervisor's routing prompt.
 
-    ``tool_mode=False`` is the original prompt (JSON decision output),
-    used by ``supervisor_node``. ``tool_mode=True`` swaps the decision
-    format for transfer-tool delegation, used by the create_supervisor
-    routing prompt; everything else (memory guidance, anti-hallucination
+    ``tool_mode=False`` is the original prompt format (JSON decision
+    output). ``tool_mode=True`` swaps the decision format for
+    transfer-tool delegation, used by the create_supervisor routing
+    prompt; everything else (memory guidance, anti-hallucination
     rules) is identical.
     """
     options_str = "'" + "', '".join(available_nodes) + "'"
@@ -392,9 +398,9 @@ async def search_past_episodes(query: str, *, runtime: ToolRuntime) -> str:
 def build_supervisor_memory_tools() -> list:
     """The supervisor's memory tools as LangChain tools (Epic 1).
 
-    These wrap ``_execute_supervisor_memory_tool`` — the same execution
-    path (audit events, TOOL_ACTIVITY events) the supervisor node uses —
-    for the create_supervisor agent's ToolNode.
+    These wrap ``_execute_supervisor_memory_tool`` — the shared
+    execution path (audit events, TOOL_ACTIVITY events) — for the
+    create_supervisor agent's ToolNode.
     """
     return [get_current_chat_history, search_knowledge_graph, search_past_episodes]
 
@@ -448,8 +454,8 @@ def repo_map_context(
     weaker "files in play" bias), inside the user's token budget
     (``repo_map_token_budget``). Returns "" when no workspace is
     granted, the budget disables the map, or the build fails: the
-    map is ambient context and must never break routing. Shared by
-    ``supervisor_node`` and the create_supervisor routing prompt
+    map is ambient context and must never break routing. Used by
+    the create_supervisor routing prompt
     (``supervisor_model.supervisor_routing_prompt``). Graph tasks
     only — fast chat never calls this (grill Q18).
     """
@@ -478,211 +484,3 @@ def repo_map_context(
         "ranked for this task — use it to target file reads; it is not "
         f"the files' content):\n{text}"
     )
-
-
-async def supervisor_node(state: AetherState, config: RunnableConfig) -> dict:
-    """
-    Supervisor node routes to exactly one specialist or decides it is done.
-    Autonomously evaluates whether to call memory tools (chat history, knowledge graph,
-    or episodic memory) before deciding delegation and formulating a targeted plan/briefing.
-    """
-    provider = _resolve_supervisor_provider(config)
-
-    session_id = state.get("session_id") or config.get("configurable", {}).get("session_id")
-
-    # Check if a specialist already responded — if so, end the task
-    if _should_end_task(state):
-        return {
-            "delegation_log": [{
-                "timestamp": int(time.time()),
-                "prompt_summary": state.get("original_prompt", "")[:50] + "...",
-                "decision": {"next": "END", "reason": "Specialist has responded; task complete."},
-                "task_id": state.get("task_id", "unknown")
-            }],
-            "active_specialist": None,
-            "next": "END"
-        }
-
-    forced_agent = config.get("configurable", {}).get("forced_agent")
-    if forced_agent and forced_agent != "supervisor":
-        return {
-            "delegation_log": [{
-                "timestamp": int(time.time()),
-                "prompt_summary": state.get("original_prompt", "")[:50] + "...",
-                "decision": {"next": forced_agent, "reason": "Forced via slash command."},
-                "task_id": state.get("task_id", "unknown")
-            }],
-            "active_specialist": forced_agent,
-            "next": forced_agent
-        }
-
-    available_nodes = _available_specialists(config)
-    
-    if not available_nodes:
-        return {
-            "delegation_log": [{
-                "timestamp": int(time.time()),
-                "prompt_summary": state.get("original_prompt", "")[:50] + "...",
-                "decision": {"next": "END", "reason": "All specialists are disabled."},
-                "task_id": state.get("task_id", "unknown")
-            }],
-            "active_specialist": None,
-            "next": "END"
-        }
-        
-    original_prompt = state.get('original_prompt', 'None')
-
-    system_prompt = _supervisor_system_prompt(
-        original_prompt, state.get('plan', 'No plan yet.'), available_nodes,
-    )
-
-    state_messages = list(state.get("messages", []))
-    if not any(isinstance(m, dict) and m.get("role") == "user" for m in state_messages):
-        orig = state.get("original_prompt") or "Please review the task."
-        state_messages.insert(0, {"role": "user", "content": orig})
-
-    # Epic 8, E8-3.1: ambient repo map for graph tasks (never fast
-    # chat) — rebuilt from the workspace's live files, ranked toward
-    # this prompt, appended to the supervisor's context before it
-    # plans. Built in a thread: tree-sitter parsing is CPU work.
-    repo_section = await asyncio.to_thread(
-        repo_map_context,
-        config,
-        original_prompt,
-        " ".join(
-            str(m.get("content", ""))
-            for m in state_messages
-            if isinstance(m, dict)
-        ),
-    )
-    if repo_section:
-        system_prompt = f"{system_prompt}\n\n{repo_section}"
-
-    messages = [{"role": "system", "content": system_prompt}] + state_messages
-
-    if messages and messages[-1].get("role") != "user":
-        messages.append({
-            "role": "user",
-            "content": "Review the progress above. Which specialist should run next? Output JSON with 'next', 'reason', and 'briefing'."
-        })
-
-    content_parts = []
-    accumulated_tool_calls: dict[str, ToolCall] = {}
-    
-    agent_tools = config.get("configurable", {}).get("agent_tools", {})
-    allowed_tools = agent_tools.get("supervisor")
-    if allowed_tools is not None and isinstance(allowed_tools, list):
-        import copy
-        used_tools = set()
-        for msg in state.get("messages", []):
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                for tc in msg.get("tool_calls"):
-                    if isinstance(tc, dict):
-                        used_tools.add(tc.get("function", {}).get("name"))
-        tools = []
-        for t in SUPERVISOR_MEMORY_TOOLS:
-            t_name = t.get("function", {}).get("name")
-            if t_name in allowed_tools:
-                tools.append(t)
-            elif t_name in used_tools:
-                disabled_t = copy.deepcopy(t)
-                disabled_t["function"]["description"] = "DO NOT USE THIS TOOL. IT IS CURRENTLY DISABLED FOR YOUR ROLE."
-                tools.append(disabled_t)
-    else:
-        tools = SUPERVISOR_MEMORY_TOOLS.copy()
-        
-    user_config = config.get("configurable", {}).get("user_config")
-    if user_config:
-        filtered_tools = []
-        for t in tools:
-            t_name = t.get("function", {}).get("name")
-            policy = resolve_policy_by_name(t_name, user_config.tool_policies)
-            if policy != "deny":
-                filtered_tools.append(t)
-        tools = filtered_tools
-    
-    try:
-        async for chunk in provider.call_stream(messages, tools=tools, node_name="supervisor"):
-            if chunk.text:
-                content_parts.append(chunk.text)
-            if chunk.tool_calls:
-                for tc in chunk.tool_calls:
-                    if tc.call_id not in accumulated_tool_calls:
-                        accumulated_tool_calls[tc.call_id] = tc
-            if chunk.finish_reason:
-                break
-    except Exception as e:  # noqa: BLE001 — provider boundary: a tools-mode failure retries as a plain text call, logged here.
-        logger.warning(f"Supervisor call_stream with tools failed: {e}; falling back to text prompt")
-        content_parts = []
-        accumulated_tool_calls = {}
-        async for chunk in provider.call_stream(messages, node_name="supervisor"):
-            if chunk.text:
-                content_parts.append(chunk.text)
-
-    # If the model called memory tools, execute them and make a second call for the final decision
-    if accumulated_tool_calls:
-        tool_messages = []
-        assistant_tc_list = []
-        for tc in accumulated_tool_calls.values():
-            args = tc.args if isinstance(tc.args, dict) else {}
-            assistant_tc_list.append({
-                "id": tc.call_id,
-                "type": "function",
-                "function": {"name": tc.name, "arguments": json.dumps(args)}
-            })
-            result_str = await _execute_supervisor_memory_tool(tc.name, args, session_id, original_prompt, state.get("task_id", ""))
-            tool_messages.append({
-                "role": "tool",
-                "tool_call_id": tc.call_id,
-                "name": tc.name,
-                "content": result_str
-            })
-
-        follow_up_messages = list(messages) + [
-            {"role": "assistant", "content": "".join(content_parts) or "", "tool_calls": assistant_tc_list}
-        ] + tool_messages + [
-            {"role": "user", "content": "Based on the retrieved memory above, provide your final routing decision. Output ONLY JSON with 'next', 'reason', and 'briefing'."}
-        ]
-
-        content_parts = []
-        try:
-            async for chunk in provider.call_stream(follow_up_messages, node_name="supervisor"):
-                if chunk.text:
-                    content_parts.append(chunk.text)
-                if chunk.finish_reason:
-                    break
-        except Exception as e:  # noqa: BLE001 — provider boundary: a failed follow-up leaves the memory result as the decision input, logged here.
-            logger.warning(f"Supervisor follow-up call failed: {e}")
-
-    content = "".join(content_parts)
-
-    decision = _decision_from_text(content, available_nodes)
-
-    next_node = decision.get("next", "END")
-    if next_node not in available_nodes and next_node != "END":
-        next_node = "END"
-
-    briefing = (decision.get("briefing") or "").strip()
-    reason = decision.get("reason", "")
-
-    # Update plan — only carry the operational goal forward.
-    # Deliberately do NOT re-inject the LLM-generated briefing as a 'Context:' block
-    # because it feeds back into the next supervisor call and causes the LLM to amplify
-    # hallucinated history (e.g. 'the user is repeatedly asking for X').
-    # Specialists receive the briefing directly via context_briefing, not via plan.
-    updated_plan = f"Goal: {reason}"
-
-    log_entry = {
-        "timestamp": int(time.time()),
-        "prompt_summary": state.get("original_prompt", "")[:50] + "...",
-        "decision": decision,
-        "task_id": state.get("task_id", "unknown")
-    }
-
-    return {
-        "delegation_log": [log_entry],
-        "active_specialist": next_node if next_node != "END" else None,
-        "next": next_node,
-        "plan": updated_plan,
-        "context_briefing": briefing or None,
-    }

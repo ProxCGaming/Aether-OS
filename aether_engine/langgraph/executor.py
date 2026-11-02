@@ -11,13 +11,18 @@ try:
     from langgraph.types import Command
 
     from aether_engine.langgraph.graph import GRAPH_RECURSION_LIMIT, compile_graph
-    from aether_engine.langgraph.state import AetherState, multimodal_user_content
+    from aether_engine.langgraph.state import (
+        AetherState,
+        message_dicts,
+        multimodal_user_content,
+    )
     _LANGGRAPH_AVAILABLE = True
 except ImportError:
     RunnableConfig = Any  # type: ignore
     AsyncSqliteSaver = Any  # type: ignore
     compile_graph = None  # type: ignore
     AetherState = Any  # type: ignore
+    message_dicts = None  # type: ignore
     multimodal_user_content = None  # type: ignore
     _LANGGRAPH_AVAILABLE = False
 
@@ -30,6 +35,7 @@ from aether_common.contracts import (
     validate_transition,
 )
 from aether_engine.artifacts.store import get_artifact_store
+from aether_engine.config import UserConfig
 from aether_engine.event_bus import event_bus
 from aether_engine.langgraph.checkpointer import DEFAULT_CHECKPOINT_DB
 from aether_engine.langgraph.compaction import (
@@ -196,6 +202,141 @@ def _is_retriable_error(exc: Exception) -> bool:
     ]
     return any(indicator in err_str for indicator in retriable_indicators)
 
+
+def _messages_have_images(messages: Any) -> bool:
+    """True when any message carries an image part (M17 resume check).
+
+    Checkpointed messages use the multimodal parts shape
+    (``content`` is a list of ``{"type": "image_url", ...}`` dicts)
+    once a task has shown the model an image; plain-text turns are
+    plain strings and never match.
+    """
+    if not isinstance(messages, list):
+        return False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+    return False
+
+def _run_config_snapshot(
+    *,
+    provider: BaseProvider,
+    session_id: str | None,
+    agent_models: dict[str, str] | None,
+    agent_tools: dict[str, list[str]] | None,
+    workspace_roots: list[str] | None,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """The run's effective configuration as plain JSON-safe data.
+
+    Seeded into the graph state (``run_config``) so the checkpointer
+    carries it across an approval pause: E1-F04 — a resume rebuilds
+    the paused task's OWN provider, per-agent models/tools, forced
+    agent, workspace roots and layered user config from this
+    snapshot instead of discarding them for the current globals.
+    Only names and values are recorded; live objects (provider
+    instance, tool registry, secret store) are rebuilt at resume
+    time and never enter the checkpoint.
+    """
+    user_config = kwargs.get("user_config")
+    return {
+        "provider_name": getattr(provider, "provider_name", None),
+        "model": getattr(provider, "model", None),
+        "session_id": session_id,
+        "agent_models": dict(agent_models or {}),
+        "agent_tools": {
+            name: list(tools) for name, tools in (agent_tools or {}).items()
+        },
+        "forced_agent": kwargs.get("forced_agent"),
+        "workspace_roots": [str(root) for root in (workspace_roots or [])],
+        "user_config": (
+            user_config.to_dict() if isinstance(user_config, UserConfig) else None
+        ),
+        "local_only": bool(kwargs.get("local_only")),
+        "require_vision": bool(kwargs.get("require_vision")),
+    }
+
+
+async def get_persisted_run_config(thread_id: str) -> dict[str, Any] | None:
+    """Read the run-config snapshot checkpointed with a thread's state.
+
+    Returns None when the thread has no snapshot (a task paused
+    before snapshots existed, or an unreadable checkpoint) — callers
+    fall back to their previous behaviour for those threads.
+    """
+    db_path = DEFAULT_CHECKPOINT_DB
+    if not db_path.exists():
+        return None
+    try:
+        async with AsyncSqliteSaver.from_conn_string(str(db_path)) as saver:
+            await saver.setup()
+            graph = compile_graph(checkpointer=saver)
+            state = await graph.aget_state(
+                {"configurable": {"thread_id": thread_id}})
+            snapshot = (state.values or {}).get("run_config")
+            return snapshot if isinstance(snapshot, dict) else None
+    except Exception:  # best-effort read: a resume must never fail because the snapshot could not be loaded
+        logger.debug(
+            f"Could not read persisted run config for thread {thread_id}",
+            exc_info=True)
+        return None
+
+
+def _turn_text(content: Any) -> str:
+    """Plain text of a message content: strings pass through;
+    multimodal part lists contribute their text parts."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ).strip()
+    return ""
+
+
+def _turn_key(role: str, text: str) -> tuple[str, str]:
+    return role, " ".join(text.split())
+
+
+def _missing_store_turns(
+    checkpoint_messages: Any, store_history: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Session-store turns the graph checkpoint does not hold (E1-F05).
+
+    The session store is the visible conversation: it also holds the
+    fast-chat turns, which never enter the graph checkpoint. Matching
+    is an in-order subsequence walk — each store turn consumes the
+    first identical checkpoint turn at or after the previous match —
+    so graph turns are recognised as present (never duplicated) while
+    turns that happened outside the graph are returned, in store
+    order, for the caller to append ahead of the new prompt.
+    """
+    checkpoint_keys: list[tuple[str, str]] = []
+    for msg in message_dicts(checkpoint_messages):
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = _turn_text(msg.get("content"))
+        if text.strip():
+            checkpoint_keys.append(_turn_key(role, text))
+    missing: list[dict[str, str]] = []
+    cursor = 0
+    for turn in store_history:
+        key = _turn_key(turn["role"], turn["content"])
+        try:
+            cursor = checkpoint_keys.index(key, cursor) + 1
+        except ValueError:
+            missing.append({"role": turn["role"], "content": turn["content"]})
+    return missing
+
+
 async def run_langgraph_task(
     prompt: str,
     provider: BaseProvider,
@@ -221,7 +362,8 @@ async def run_langgraph_task(
     # assigned specialist's own model through graph init, history
     # seeding, handoff and checkpointing. Text-only tasks keep the
     # plain string content, byte-identical to before.
-    user_content = multimodal_user_content(prompt, kwargs.get("attachments"))
+    user_content = multimodal_user_content(
+        prompt, kwargs.get("attachments"), workspace_roots=workspace_roots)
 
     # Transition PENDING -> RUNNING
     validate_transition(state_enum, TaskState.RUNNING)
@@ -264,6 +406,14 @@ async def run_langgraph_task(
                 # also seeded into state below, which is the channel
                 # that survives the approval pause.
                 "message_id": kwargs.get("message_id"),
+                # Finding M17 (residual): the routing decision's
+                # constraints ride the run config so providers built
+                # INSIDE the run (specialist overrides, the supervisor
+                # resolver, the compaction summariser) honour them —
+                # a local-only vision task must not acquire a cloud
+                # fallback one construction level down.
+                "local_only": bool(kwargs.get("local_only")),
+                "require_vision": bool(kwargs.get("require_vision")),
             }
         }
 
@@ -289,6 +439,7 @@ async def run_langgraph_task(
             "artifact_paths": {},
             "tool_results_summary": {},
             "pending_tool_call": None,
+            "queued_tool_calls": [],
             "active_specialist": None,
             "blackboard": {},
             "structured_outputs": {},
@@ -300,6 +451,17 @@ async def run_langgraph_task(
             "message_id": kwargs.get("message_id"),
             "context_briefing": None,
             "active_skills": effective_skills,
+            # E1-F04: this run's effective configuration, checkpointed
+            # with the state so an approval resume rebuilds the SAME
+            # configuration (see _run_config_snapshot).
+            "run_config": _run_config_snapshot(
+                provider=provider,
+                session_id=session_id,
+                agent_models=agent_models,
+                agent_tools=agent_tools,
+                workspace_roots=workspace_roots,
+                kwargs=kwargs,
+            ),
         }
 
         # ── Conversation compaction (Epic 1, E1-06) ──────────────────
@@ -321,28 +483,50 @@ async def run_langgraph_task(
             )
         except Exception:  # noqa: BLE001 — a fresh or unreadable thread has no history to compact; real checkpointer failures surface in the run itself.
             prior_values = {}
-        if not prior_values.get("messages") and session_id:
-            # Fresh thread (new session, lost checkpoint DB, or the
-            # thread was invalidated by an edit-and-resend truncation):
-            # seed the run from the session store's retained history so
-            # the conversation continues from what the user can see —
-            # never from a deleted branch, never from nothing when the
-            # store still holds the earlier turns.
+        if session_id:
+            # The session store holds the whole visible conversation,
+            # fast-chat turns included; the graph checkpoint holds
+            # only graph turns. The store is consulted for EVERY run
+            # (E1-F05), not just fresh threads — best-effort either
+            # way: a store failure leaves the run with the prompt
+            # alone, exactly as before.
             try:
-                seeded_history = await asyncio.to_thread(
+                store_history = await asyncio.to_thread(
                     session_store.get_chat_history, session_id, prompt)
-            except Exception:  # noqa: BLE001 — seeding is best-effort; the run proceeds with the prompt alone.
-                seeded_history = []
-            if seeded_history:
-                initial_state["messages"] = [
-                    *seeded_history,
-                    {"role": "user", "content": user_content},
-                ]
+            except Exception:  # noqa: BLE001 — history is best-effort; the run proceeds with the prompt alone.
+                store_history = []
+            if not prior_values.get("messages"):
+                # Fresh thread (new session, lost checkpoint DB, or
+                # the thread was invalidated by an edit-and-resend
+                # truncation): seed the run from the session store's
+                # retained history so the conversation continues from
+                # what the user can see — never from a deleted branch,
+                # never from nothing when the store still holds the
+                # earlier turns.
+                if store_history:
+                    initial_state["messages"] = [
+                        *store_history,
+                        {"role": "user", "content": user_content},
+                    ]
+            else:
+                # Existing checkpoint: turns taken in fast chat since
+                # the last graph run live only in the store. Append
+                # the ones the checkpoint lacks, in store order, ahead
+                # of the new prompt — or the work model answers
+                # without what the user already said in chat.
+                missing_turns = _missing_store_turns(
+                    prior_values["messages"], store_history)
+                if missing_turns:
+                    initial_state["messages"] = [
+                        *missing_turns,
+                        {"role": "user", "content": user_content},
+                    ]
         if prior_values.get("messages"):
             compacted = None
             try:
                 summariser_provider = resolve_summariser_provider(
-                    kwargs.get("user_config"), kwargs.get("secret_store"), provider)
+                    kwargs.get("user_config"), kwargs.get("secret_store"), provider,
+                    local_only=bool(kwargs.get("local_only")))
                 compacted = await compact_history(
                     prior_values["messages"],
                     prior_values.get("context_summary"),
@@ -864,12 +1048,25 @@ async def resume_langgraph_task(
     (per-agent models/tools, user config, secret store, forced agent):
     the resumed specialists and the supervisor's routing model resolve
     their providers from it exactly as they did before the pause.
+
+    Finding M17 (residual): the routing constraints ride along too.
+    Callers may pass ``local_only`` / ``require_vision`` explicitly;
+    when they don't, they are re-derived here — ``local_only`` from
+    the same auxiliary vision override the original routing decision
+    read, ``require_vision`` from the checkpointed history once it is
+    loaded below — so the constraint cannot lapse across a pause.
     """
+    _local_only = kwargs.get("local_only")
+    if _local_only is None:
+        from aether_engine.routing.policy import local_only_from_vision_override
+
+        _local_only = local_only_from_vision_override(
+            getattr(kwargs.get("user_config"), "auxiliary_models", None))
     db_path = DEFAULT_CHECKPOINT_DB
     async with AsyncSqliteSaver.from_conn_string(str(db_path)) as saver:
         await saver.setup()
         graph = compile_graph(checkpointer=saver)
-        
+
         config = {
             "recursion_limit": GRAPH_RECURSION_LIMIT,
             "configurable": {
@@ -887,6 +1084,8 @@ async def resume_langgraph_task(
                 "secret_store": kwargs.get("secret_store"),
                 "user_config": kwargs.get("user_config"),
                 "forced_agent": kwargs.get("forced_agent"),
+                "local_only": bool(_local_only),
+                "require_vision": bool(kwargs.get("require_vision")),
             }
         }
         
@@ -901,6 +1100,43 @@ async def resume_langgraph_task(
         try:
             state_obj = await graph.aget_state(config)
             task_id = state_obj.values.get("task_id", thread_id)
+            # E1-F04: fill any run configuration the caller did not
+            # supply from the snapshot the run checkpointed with its
+            # state — the resume continues the PAUSED task's execution
+            # settings, not whatever the caller happens to hold.
+            # Caller-supplied values always win (the websocket route
+            # passes its own snapshot read); this is the net for
+            # direct executor callers.
+            _snapshot = state_obj.values.get("run_config")
+            if isinstance(_snapshot, dict):
+                _cfg = config["configurable"]
+                if not _cfg.get("session_id"):
+                    _cfg["session_id"] = _snapshot.get("session_id")
+                if not _cfg.get("forced_agent"):
+                    _cfg["forced_agent"] = _snapshot.get("forced_agent")
+                if not _cfg.get("agent_models") and _snapshot.get("agent_models"):
+                    _cfg["agent_models"] = dict(_snapshot["agent_models"])
+                if not _cfg.get("agent_tools") and _snapshot.get("agent_tools"):
+                    _cfg["agent_tools"] = {
+                        name: list(tools)
+                        for name, tools in _snapshot["agent_tools"].items()
+                    }
+                if _cfg.get("user_config") is None and isinstance(
+                        _snapshot.get("user_config"), dict):
+                    try:
+                        _cfg["user_config"] = UserConfig.from_dict(
+                            _snapshot["user_config"])
+                    except Exception:  # a corrupt snapshot must not block the resume
+                        logger.debug(
+                            "Could not restore run user_config from snapshot",
+                            exc_info=True)
+            # M17 residual: if the caller did not state require_vision,
+            # derive it from the checkpointed history — the resumed
+            # specialists are shown those same image parts, so their
+            # provider constructions must keep the vision constraint.
+            if not kwargs.get("require_vision"):
+                config["configurable"]["require_vision"] = (
+                    _messages_have_images(state_obj.values.get("messages")))
             # History from before the pause is already emitted; only
             # post-resume additions count as new output.
             messages_seen = len(state_obj.values.get("messages") or [])
@@ -1092,11 +1328,25 @@ async def resume_langgraph_task(
             async for _ev in _consume_segment(Command(resume=resume_value)):
                 yield _ev
 
-            if pending_steers and not interrupted:
-                # The resumed segment settled: apply the steers as a
-                # fresh segment on the same thread, where the next
-                # provider call re-reads the full state and sees them.
-                for steer in pending_steers:
+            # Apply the drained steers as fresh segments on the same
+            # thread, where the next provider call re-reads the full
+            # state and sees them. E1-F06: steers keep arriving while
+            # the resumed run works, so every settled segment is
+            # followed by a fresh drain — a steer that landed during
+            # the resume segment (or during a steer segment) is
+            # applied by THIS task instead of being stranded in the
+            # queue when the task completes.
+            while not interrupted:
+                if not pending_steers:
+                    # Nothing was waiting at entry (or the previous
+                    # batch just applied): pick up whatever arrived
+                    # while the last segment was running.
+                    pending_steers = drain_steers(steering_key)
+                if not pending_steers:
+                    break
+                steers_to_apply = pending_steers
+                pending_steers = []
+                for steer in steers_to_apply:
                     yield Event(
                         type=EventType.STEERING_APPLIED,
                         request_id=thread_id,
@@ -1108,13 +1358,17 @@ async def resume_langgraph_task(
                         },
                     )
                 async for _ev in _consume_segment(
-                        {"messages": steer_message_dicts(pending_steers)}):
+                        {"messages": steer_message_dicts(steers_to_apply)}):
                     yield _ev
-            elif pending_steers:
+            if pending_steers:
                 # Paused again before the steers could be applied:
                 # return them to the queue for the next resume.
                 for steer in pending_steers:
-                    enqueue_steer(steering_key, steer.text, steer.message_id)
+                    # PF-1: attachments ride the re-enqueue too, or a
+                    # steer that pauses twice loses its images.
+                    enqueue_steer(
+                        steering_key, steer.text, steer.message_id,
+                        steer.attachments)
             if interrupted:
                 # Phase 10.1 A2: same as the run path -- a re-interrupt on
                 # resume is still a pause for approval, not a failure.

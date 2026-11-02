@@ -37,6 +37,30 @@ def _candidate_paths(args: dict | None) -> list[Path]:
     return candidate_paths(args)
 
 
+def is_sensitive_floor_path(path: Path) -> bool:
+    """True when ``path`` sits under a home-sensitive floor prefix.
+
+    The per-path form of the E2-06 floor, for tools that discover
+    paths policy never judged as call arguments (E2-F03): a recursive
+    reader must not open a floored descendant on the strength of an
+    ancestor's verdict.
+    """
+    return any(path.is_relative_to(p) for p in _floor_prefixes())
+
+
+def path_rule_denies(
+    path: Path, path_rules: list | None, *, tool_name: str, risk: ToolRisk
+) -> bool:
+    """True when the first matching user path rule denies ``path``.
+
+    The per-path form of :func:`_path_rule_verdict` for a concrete
+    discovered path (E2-F03), honouring the rules' tool/risk scoping
+    exactly as call-level resolution does.
+    """
+    probe = Tool(name=tool_name, description="", risk=risk)
+    return _path_rule_verdict(probe, {"path": str(path)}, path_rules) == "deny"
+
+
 def _apply_floor(verdict: str, tool: Tool, args: dict | None) -> str:
     """Raise an "allow" to "ask" when the call touches a floored prefix."""
     if verdict != "allow":

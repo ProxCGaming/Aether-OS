@@ -1,6 +1,12 @@
 [project]
 name = "aether-os"
-version = "0.1.0"
+# Mirror of APP_VERSION in aether_engine/version.py (the single source
+# of truth). This project is virtual for uv (no [build-system]; uv.lock
+# records source = { virtual = "." }), so the version cannot be read
+# dynamically at build time — tests/test_epic10_hardening.py pins this
+# value, desktop_app/package.json and the root package.json to
+# APP_VERSION so they cannot drift.
+version = "0.3.5"
 description = "Aether-OS: local AI agent OS"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -31,12 +37,8 @@ dependencies = [
     "tree-sitter-python>=0.25.0",
     "tree-sitter-javascript>=0.25.0",
     "tree-sitter-typescript>=0.23.2",
-    "faster-whisper>=1.2.1",
-    "kokoro>=0.9.4",
-    "onnxruntime>=1.31.1",
     "numpy>=2.5.4",
     "aiortc>=1.15.0",
-    "silero-vad>=6.2.3",
     "publicsuffix2>=2.20191221",
     "playwright>=1.64.1",
 ]
@@ -52,10 +54,36 @@ legacy-ui = [
     # aether_ui/components/chat_bubble.py imports markdown.
     "markdown>=3.0",
 ]
+# Local voice stack (aether_engine/voice/ — Silero VAD, faster-whisper
+# STT, Kokoro TTS): NOT installed by default. Its stages are the only
+# consumers of these packages; they probe with find_spec, import
+# lazily in open(), and fail closed with an honest "voice unavailable"
+# reason when the extra is absent. Install with:
+#   uv sync --extra voice
+voice = [
+    "faster-whisper>=1.2.1",
+    "kokoro>=0.9.4",
+    "onnxruntime>=1.31.1",
+    "silero-vad>=6.2.3",
+]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
     "ruff>=0.17.0",
 ]
+
+# Coverage (S5-M11): measurement only — no fail-under threshold yet.
+# `source` is the engine package; the desktop app is measured by Jest
+# (see desktop_app/jest.config.cjs). Local commands are documented in
+# README.md ("Test" section); CI passes the --cov flags explicitly so
+# plain `uv run pytest` stays a fast, coverage-free gate.
+[tool.coverage.run]
+source = ["aether_engine"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

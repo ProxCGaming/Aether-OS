@@ -226,7 +226,7 @@ class TestMCPUpdateWebSocketHandlers:
 
         # The app lifespan re-runs engine_state.initialize() when the
         # TestClient starts, regenerating the token - read the current one.
-        return client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}")
+        return client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"})
 
     def _send(self, ws, type_, payload):
         from aether_common.contracts import Event

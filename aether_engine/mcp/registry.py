@@ -14,6 +14,7 @@ drives connects). Before that it returns ``[]``, honestly.
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
 from pathlib import Path
@@ -226,8 +227,43 @@ class MCPRegistry:
         for name, entry in self._invalid_servers.items():
             data[name] = entry["config"]
         data.update(self.servers)
-        with open(self._config_path, "w") as f:
-            json.dump(data, f, indent=4)
+        # E3-F04: atomic write — serialise to a temp file in the same
+        # directory, then os.replace() it over the live file (the
+        # pattern E0-01 added for the plugin registry). A failed save
+        # (disk full, crash mid-write) leaves the previous valid file
+        # fully intact instead of a truncated fragment that would
+        # reload as zero servers and take the whole allow-list with it.
+        tmp_path = self._config_path.with_name(self._config_path.name + ".tmp")
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(data, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self._config_path)
+        except BaseException:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    def _snapshot_servers(self) -> tuple[dict, dict]:
+        """Shallow copies of the mutable config state (E3-F04 rollback)."""
+        return dict(self.servers), dict(self._invalid_servers)
+
+    def _save_config_rolled_back(self, snapshot: tuple[dict, dict]) -> None:
+        """Save, restoring the in-memory state if the save fails.
+
+        Mutators apply their change in memory and then save; without
+        this, a failed save left memory holding a change the disk
+        never took, and the two disagreed until a reload silently
+        dropped it (E3-F04).
+        """
+        try:
+            self._save_config()
+        except BaseException:
+            self.servers, self._invalid_servers = snapshot
+            raise
 
     def add_server(self, name: str, config: dict):
         """
@@ -248,8 +284,9 @@ class MCPRegistry:
                     "MCP_SERVER_ADD_REJECTED audit logging failed: %s", audit_err
                 )
             raise
+        snapshot = self._snapshot_servers()
         self.servers[name] = normalised
-        self._save_config()
+        self._save_config_rolled_back(snapshot)
 
     async def update_server(
         self, name: str, *, auto_connect: bool | None = None,
@@ -277,10 +314,11 @@ class MCPRegistry:
                 raise MCPConfigError(f"MCP server {name!r} 'enabled' must be true/false.")
             updates["enabled"] = enabled
         if updates:
+            snapshot = self._snapshot_servers()
             self.servers[name] = validate_mcp_server_config(
                 name, {**self.servers[name], **updates}
             )
-            self._save_config()
+            self._save_config_rolled_back(snapshot)
         if enabled is False:
             await self.disconnect_server(name)
         return redact_mcp_config_for_ui(self.servers[name])
@@ -326,7 +364,12 @@ class MCPRegistry:
             logger.warning("MCP auto-connect failed for %s: %s", name, e)
 
     async def stop_auto_connect(self) -> None:
-        """Stop auto-connect: close every owner-task session (shutdown)."""
+        """Stop auto-connect: close every owner-task session (shutdown).
+
+        Every session is owner-task managed (E3-F03), so this — the
+        app lifespan's shutdown call — closes manually connected
+        sessions as well as auto-connected ones.
+        """
         self._auto_connect_started = False
         self._auto_connect_tasks = []
         try:
@@ -343,6 +386,7 @@ class MCPRegistry:
         the owner task). Sync callers use ``remove_server_sync``.
         """
         await self.disconnect_server(name)
+        snapshot = self._snapshot_servers()
         removed = False
         if name in self.servers:
             del self.servers[name]
@@ -352,7 +396,7 @@ class MCPRegistry:
             removed = True
         if removed:
             self._tools_cache.pop(name, None)
-            self._save_config()
+            self._save_config_rolled_back(snapshot)
 
     def remove_server_sync(self, name: str):
         """Synchronous removal for sync callers (``plugins/installer.py``).
@@ -381,12 +425,14 @@ class MCPRegistry:
                     "live session from a sync caller."
                 )
         if name in self.servers:
+            snapshot = self._snapshot_servers()
             del self.servers[name]
             self._tools_cache.pop(name, None)
-            self._save_config()
+            self._save_config_rolled_back(snapshot)
         elif name in self._invalid_servers:
+            snapshot = self._snapshot_servers()
             del self._invalid_servers[name]
-            self._save_config()
+            self._save_config_rolled_back(snapshot)
 
     def get_server(self, name: str) -> dict | None:
         return self.servers.get(name)
@@ -452,12 +498,17 @@ class MCPRegistry:
         return await self._finish_connect(name, await self._client.connect(name, config))
 
     async def connect_server_owned(self, name: str) -> dict[str, Any]:
-        """Like :meth:`connect_server`, but the session lives in a
+        """Like :meth:`connect_server`; the session lives in a
         dedicated owner task (issue 004, auto-connect).
 
         The owner task opens the session and parks; later disconnects
         from any task are routed through it, so a stdio session is
         actually closed instead of leaking (anyio cancel-scope rule).
+        Since E3-F03 :meth:`connect_server` lands in the same owner
+        machinery (``MCPClientManager.connect`` delegates to
+        ``connect_owned``) — every registered session has exactly one
+        owner, however it was connected; this entry point remains for
+        the auto-connect call sites.
         """
         config = self.servers.get(name)
         if config is None:
@@ -526,6 +577,37 @@ class MCPRegistry:
         self._tools_cache[name] = [
             self._convert_tool(name, t) for t in mcp_tools
         ]
+        # E3-F01: surface a name collision the moment it appears
+        # (connect time), not at first use. Enforcement lives in
+        # get_mcp_tools(); this log is the early, loud signal.
+        for colliding, sources in self._colliding_tool_names().items():
+            logger.error(
+                "MCP tool name collision: %s is produced by more than "
+                "one server/tool (%s); it will be refused by "
+                "get_mcp_tools() until the ambiguity is resolved.",
+                colliding, ", ".join(sources),
+            )
+
+    def _colliding_tool_names(self) -> dict[str, list[str]]:
+        """Prefixed names produced by more than one (server, tool).
+
+        The ``server__tool`` composite is ambiguous whenever two
+        pairs map to the same string — server names may contain
+        ``__`` themselves (``trusted__docs`` + ``read`` vs
+        ``trusted`` + ``docs__read``), and a single server can list
+        the same tool twice. Any such name cannot be trusted to
+        identify one tool, one risk classification, or one
+        execution target (E3-F01).
+        """
+        sources_by_name: dict[str, list[str]] = {}
+        for server_tools in self._tools_cache.values():
+            for tool in server_tools:
+                sources_by_name.setdefault(tool.name, []).append(tool.source)
+        return {
+            name: sources
+            for name, sources in sources_by_name.items()
+            if len(sources) > 1
+        }
 
     def _convert_tool(self, server: str, mcp_tool: Any) -> Tool:
         """One MCP tool -> one Aether Tool: ``server__tool``, EXECUTE, in-process."""
@@ -578,6 +660,24 @@ class MCPRegistry:
         tools: list[Tool] = []
         for server_tools in self._tools_cache.values():
             tools.extend(server_tools)
+        # E3-F01: a name produced by more than one (server, tool)
+        # pair identifies nothing — offering it would let a risk
+        # override classified for one server's tool transfer to
+        # another's, and the shared registry would silently keep
+        # one tool as the other's stand-in. Refuse every tool
+        # carrying a colliding name (loudly); unambiguous tools
+        # are unaffected.
+        colliding = self._colliding_tool_names()
+        if colliding:
+            for name, sources in colliding.items():
+                logger.error(
+                    "Refusing MCP tool %s: the name is produced by "
+                    "more than one server/tool (%s), so it cannot "
+                    "identify a single tool. Rename a server or a "
+                    "tool to resolve the ambiguity.",
+                    name, ", ".join(sources),
+                )
+            tools = [t for t in tools if t.name not in colliding]
         if not risk_overrides:
             return tools
         import dataclasses

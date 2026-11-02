@@ -934,7 +934,7 @@ class TestBrowserPolicyWebSocket:
         from aether_engine.app import engine_state
 
         token = engine_state.token_path.read_text(encoding="utf-8").strip()
-        return client.websocket_connect(f"/ws/tasks?token={token}")
+        return client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {token}"})
 
     def _send(self, ws, event_type, payload):
         from aether_common.contracts import Event

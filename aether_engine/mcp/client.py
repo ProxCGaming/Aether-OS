@@ -152,12 +152,19 @@ class MCPClientManager:
         self._stacks: dict[str, AsyncExitStack] = {}
         self._configs: dict[str, dict] = {}
         self._status: dict[str, dict[str, Any]] = {}
-        # Sessions opened by a background (auto-connect) task: the task
-        # that opened the session must also close it — anyio forbids
-        # exiting a cancel scope from a different task, and closing a
-        # stdio stack from another task silently leaks the subprocess
-        # (issue 004). The owner task parks after opening the session and
-        # closes the stack itself when its close event is set.
+        # Session ownership (issue 004, E3-F03): EVERY session
+        # registered here is owned by exactly one dedicated owner
+        # task. The task that opened the session must also close it —
+        # anyio forbids exiting a cancel scope from a different task,
+        # and closing a stdio stack from another task silently leaks
+        # the subprocess. The owner task parks after opening the
+        # session and closes the stack itself when its close event is
+        # set; callers (websocket handlers, startup, shutdown) only
+        # ever signal the owner, they never touch the stack. There is
+        # no unowned registered session: a caller task (a socket
+        # handler above all) can die at any time, and a session whose
+        # stack lives in a dead caller's task can neither be closed
+        # cleanly nor survive its owner — it is simply orphaned.
         self._owner_tasks: dict[str, asyncio.Task] = {}
         self._close_events: dict[str, asyncio.Event] = {}
 
@@ -336,24 +343,32 @@ class MCPClientManager:
         return {"ok": True, "error": None}
 
     async def connect(self, name: str, config: dict) -> dict[str, Any]:
-        """Connect to *name* in the caller's task; returns {"ok": bool, "error": str|None}."""
-        if name in self._sessions:
-            if self.get_status(name)["status"] == "connected":
-                return {"ok": True, "error": None}
-            await self._drop_dead_session(name)
-        owner = self._owner_tasks.get(name)
-        if owner is not None and not owner.done():
-            return {"ok": True, "error": None}
-        return await self._open_and_register(name, config)
+        """Connect to *name*; returns {"ok": bool, "error": str|None}.
+
+        The session is opened by a dedicated owner task, never in
+        the caller's task (E3-F03): see :meth:`connect_owned`. This
+        used to open the session in whichever task called it — for a
+        manual Connect that is a websocket handler task — which left
+        the session with no stable owner: a disconnect from another
+        socket closed its AnyIO stack from the wrong task (anyio
+        cancel-scope error, first handler cancelled), a socket close
+        orphaned it entirely, and the shutdown hook, which only
+        closes owner-task sessions, never closed it. There is now
+        exactly one way a session comes to be registered, and it
+        always has an owner.
+        """
+        return await self.connect_owned(name, config)
 
     async def connect_owned(self, name: str, config: dict) -> dict[str, Any]:
         """Connect to *name* in a dedicated owner task (issue 004).
 
-        For auto-connect: the caller must not block on the connect, and
-        the session must be closable later from a different task (the
-        websocket handler). The owner task opens the session, signals
-        readiness, then parks until :meth:`disconnect` sets its close
-        event — and closes the stack itself, in the task that opened it.
+        The one way sessions are opened — auto-connect and manual
+        connects alike (E3-F03). The caller must not block on the
+        connect, and the session must be closable later from a
+        different task (another websocket handler, the shutdown
+        hook). The owner task opens the session, signals readiness,
+        then parks until :meth:`disconnect` sets its close event —
+        and closes the stack itself, in the task that opened it.
         Returns {"ok": bool, "error": str|None} once the session is up
         (or the connect has failed); the owner task keeps running.
         """
@@ -420,10 +435,12 @@ class MCPClientManager:
     async def _drop_dead_session(self, name: str) -> None:
         """Drop a failed (dead) session registration so a fresh connect can open a new one.
 
-        The session is already dead — closing it is best-effort. For an
-        owned session the owner task is woken and awaited (bounded), so
-        its stack is closed in the task that opened it; for a manual
-        session the stack is closed here. A live session is never
+        The session is already dead — closing it is best-effort. The
+        owner task is woken and awaited (bounded), so its stack is
+        closed in the task that opened it. The fallback below covers
+        a registration whose owner task is already gone (e.g. it
+        crashed): the registrations are dropped and the stack close
+        is attempted here, best-effort. A live session is never
         dropped: callers only reach this when status is "failed".
         """
         owner = self._owner_tasks.get(name)
@@ -479,6 +496,11 @@ class MCPClientManager:
                 logger.warning("MCP disconnect failed for %s: owner task ended", name)
                 self._set_status(name, "disconnected", error=None)
             return {"ok": True, "error": None}
+        # No live owner: the session's owner task already finished
+        # (or the registration predates ownership). Registered
+        # sessions are always owned (E3-F03), so this is a defensive
+        # close for a leftover registration — drop it and attempt the
+        # stack close here, best-effort, rather than leaking it.
         self._owner_tasks.pop(name, None)
         self._close_events.pop(name, None)
         stack = self._stacks.pop(name, None)
@@ -495,7 +517,12 @@ class MCPClientManager:
         return {"ok": True, "error": None}
 
     async def shutdown_owned(self) -> None:
-        """Close every owner-task session (engine shutdown, issue 004).
+        """Close every session (engine shutdown, issue 004).
+
+        Every registered session is owner-task managed (E3-F03), so
+        signalling every owner closes manual and auto-connected
+        sessions alike — before this, the shutdown hook left manual
+        sessions (and their stdio children) running with no owner.
 
         Bounded: an owner still mid-connect (e.g. a 30s blackhole) must
         not hold shutdown hostage — wait at most 10s, then return; the

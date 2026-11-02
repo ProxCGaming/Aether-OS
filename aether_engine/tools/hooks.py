@@ -8,6 +8,9 @@ registry at two points:
     * return ``None`` — pass the call through unchanged;
     * return a ``dict`` — replace the call arguments (audited);
     * raise :class:`HookBlock` — block the call (audited).
+  Rewritten arguments are NOT trusted on the strength of the
+  original checks: the registry re-runs policy + pre-flight on the
+  final args before anything executes (S2-M1, registry Step 2.55).
 - ``tool_result`` hooks run after a successful execution. A hook
   may return ``None`` (keep the result) or a ``str`` (replace the
   result the agent sees; audited).

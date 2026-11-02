@@ -15,6 +15,22 @@ results over exceptions:
   public page cannot bounce the fetch onto the local network. The one
   escape hatch is the user's explicit opt-in: the environment variable
   ``AETHER_ALLOW_LOCAL_FETCH=1``.
+- Address pinning (S2-M3): validating resolved IPs is not enough if the
+  transport then re-resolves the hostname at connect time — a DNS
+  answer that changes between check and connect (rebinding) would
+  bypass the guard entirely. So the transport dials the guard's
+  validated IP literals directly (``_PinnedTransport``), preserving the
+  original hostname in the Host header and as the TLS SNI /
+  certificate-verification name, so certificates are still verified
+  against the hostname the user asked for. Every redirect hop is
+  re-validated AND re-pinned. Proxy boundary: the plain client honours
+  proxy environment variables, but a proxy resolves the hostname
+  itself, so validated addresses cannot be pinned through one — a
+  guarded fetch that would go through a proxy is refused (fail closed)
+  instead of silently fetching unpinned. The opt-in local mode
+  (``AETHER_ALLOW_LOCAL_FETCH=1``) keeps the historical unpinned
+  behaviour, proxies included: the user has explicitly asked to reach
+  local addresses, and pinning is a guard property, not a local one.
 - Bounds: a ``FETCH_TIMEOUT_S`` deadline across the whole chain, a
   ``MAX_BODY_BYTES`` read cap at the transport, and a loud character
   cap on the returned text (``max_chars``, hard-capped).
@@ -33,6 +49,8 @@ import os
 import re
 import socket
 import time
+import urllib.request
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
@@ -60,6 +78,25 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 class FetchTimeoutError(Exception):
     """The transport hit the fetch deadline (translated from httpx)."""
+
+
+class FetchProxyError(Exception):
+    """A guarded fetch would have to go through a proxy (user-facing).
+
+    Pinning cannot apply through a proxy — the proxy resolves the
+    hostname — so the fetch is refused. ``str(error)`` is the complete
+    tool-result string; the fetch loop returns it verbatim.
+    """
+
+
+#: The guard-validated addresses for the hop currently being fetched.
+#: ``_fetch_url_impl`` sets this around its ``_request_once`` call so
+#: the transport can pin them without changing the transport seam's
+#: ``(url, timeout_s)`` signature that tests fake. A ContextVar (not a
+#: plain global) because fetches run concurrently on several threads.
+_PINNED_ADDRESSES: ContextVar[tuple[str, ...] | None] = ContextVar(
+    "aether_fetch_pinned_addresses", default=None
+)
 
 
 @dataclass
@@ -110,51 +147,192 @@ def _blocked_reason(address: str) -> str | None:
     return None
 
 
-def _guard_url(url: str) -> str | None:
-    """Scheme + SSRF check for one URL. Returns an error string or None."""
+def _guard_url_pinned(url: str) -> tuple[str | None, tuple[str, ...] | None]:
+    """Scheme + SSRF check for one URL, plus the addresses to pin.
+
+    Returns ``(error, pinned)``: ``error`` is the refusal string (and
+    ``pinned`` is None) or None on success, in which case ``pinned``
+    holds the validated IP literals the transport MUST dial — never a
+    hostname, so nothing is re-resolved at connect time (S2-M3). In
+    the opt-in local mode (``AETHER_ALLOW_LOCAL_FETCH=1``) the guard
+    does not resolve at all and ``pinned`` is None, meaning "fetch
+    unpinned, as before".
+    """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return (
-            f"Error: fetch_url only supports http/https URLs, "
-            f"got scheme '{parsed.scheme or '(none)'}' in '{url}'."
+            (
+                f"Error: fetch_url only supports http/https URLs, "
+                f"got scheme '{parsed.scheme or '(none)'}' in '{url}'."
+            ),
+            None,
         )
     host = parsed.hostname
     if not host:
-        return f"Error: fetch_url needs a URL with a host, got '{url}'."
+        return f"Error: fetch_url needs a URL with a host, got '{url}'.", None
     if _allow_local_fetch():
-        return None
+        return None, None
     try:
         addresses = _resolve_addresses(host)
     except socket.gaierror as e:
-        return f"Error: could not resolve host '{host}' for '{url}': {e}"
+        return f"Error: could not resolve host '{host}' for '{url}': {e}", None
     if not addresses:
-        return f"Error: could not resolve host '{host}' for '{url}': no addresses returned."
+        return (
+            f"Error: could not resolve host '{host}' for '{url}': no addresses returned.",
+            None,
+        )
     for address in addresses:
         reason = _blocked_reason(address)
         if reason is not None:
             return (
-                f"Error: refusing to fetch '{url}': host '{host}' resolves to "
-                f"{reason} ({address}). fetch_url does not connect to "
-                f"non-public addresses; set {ALLOW_LOCAL_FETCH_ENV}=1 to allow it."
+                (
+                    f"Error: refusing to fetch '{url}': host '{host}' resolves to "
+                    f"{reason} ({address}). fetch_url does not connect to "
+                    f"non-public addresses; set {ALLOW_LOCAL_FETCH_ENV}=1 to allow it."
+                ),
+                None,
             )
-    return None
+    pinned: list[str] = []
+    for address in addresses:
+        ip = ipaddress.ip_address(address)
+        # Dial the plain IPv4 form of a v4-mapped IPv6 address: it is
+        # the same endpoint, in the form URL hosts and SNI expect.
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            address = str(ip.ipv4_mapped)
+        pinned.append(address)
+    return None, tuple(pinned)
 
 
-def _request_once(url: str, timeout_s: float) -> FetchResponse:
+def _guard_url(url: str) -> str | None:
+    """Scheme + SSRF check for one URL. Returns an error string or None."""
+    error, _pinned = _guard_url_pinned(url)
+    return error
+
+
+def _env_proxy_for(url: str) -> str | None:
+    """The proxy the environment configures for this URL, if any.
+
+    Mirrors what the plain httpx client (``trust_env``) would use:
+    the ``*_proxy`` environment variables, honouring ``no_proxy``
+    bypasses. Only consulted for guarded (pinned) fetches — see
+    ``_request_once``.
+    """
+    try:
+        proxies = urllib.request.getproxies()
+    except Exception:  # noqa: BLE001 — proxy detection must never crash a fetch
+        return None
+    if not proxies:
+        return None
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    bypassed = False
+    try:
+        bypassed = bool(host and urllib.request.proxy_bypass(host))
+    except Exception:  # noqa: BLE001 — a broken no_proxy must not crash the fetch
+        bypassed = False
+    if bypassed:
+        return None
+    return proxies.get(parsed.scheme) or proxies.get("all")
+
+
+class _PinnedTransport(httpx.BaseTransport):
+    """An httpx transport that dials ONLY the guard-validated IPs.
+
+    For each request the URL's host is rewritten to a validated IP
+    literal (httpcore then connects to that literal — ``socket``
+    never re-resolves a name), while:
+
+    - the ``Host`` header is reset to the original netloc, and
+    - the ``sni_hostname`` request extension carries the original
+      hostname, so httpcore performs the TLS handshake with that SNI
+      and the SSL context verifies the certificate against the
+      original hostname — verification stays REAL, just aimed at the
+      name the user asked for instead of the dialled IP.
+
+    Validated addresses are tried in order on connect failure, the
+    same fallback ``getaddrinfo`` + ``create_connection`` would have
+    given (e.g. an unreachable IPv6 address before a working IPv4).
+    """
+
+    def __init__(self, addresses: tuple[str, ...] | list[str]) -> None:
+        self._addresses = list(addresses)
+        # Default transport settings: certificate verification on,
+        # trust_env on so SSL_CERT_FILE / SSL_CERT_DIR are honoured
+        # for the CA bundle exactly as the plain client honours them.
+        self._inner = httpx.HTTPTransport()
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        original_url = request.url
+        original_host = original_url.host
+        host_header = original_url.netloc.decode("ascii")  # original host[:port]
+        last_error: httpx.HTTPError | None = None
+        for address in self._addresses:
+            request.url = original_url.copy_with(host=address)
+            request.headers["Host"] = host_header
+            request.extensions["sni_hostname"] = original_host
+            try:
+                return self._inner.handle_request(request)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                # Connection never established, so nothing was sent:
+                # safe to fall back to the next validated address.
+                last_error = e
+        assert last_error is not None  # _addresses is non-empty (checked by caller)
+        raise last_error
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def _request_once(
+    url: str, timeout_s: float, pinned_addresses: tuple[str, ...] | list[str] | None = None
+) -> FetchResponse:
     """One GET with no redirect following (the transport seam).
 
     Reads at most ``MAX_BODY_BYTES``; beyond that the read stops and
     ``body_capped`` is set so the caller can say so loudly.
+
+    When ``pinned_addresses`` are given (directly, or via the
+    ``_PINNED_ADDRESSES`` context the fetch loop sets) the connection
+    is pinned to those validated IP literals through
+    ``_PinnedTransport``; a configured proxy makes the fetch fail
+    closed with ``FetchProxyError`` because a proxy would re-resolve
+    the hostname and defeat the pin. With no pinned addresses (the
+    opt-in local mode) the historical plain client is used unchanged.
     """
+    pins = pinned_addresses if pinned_addresses is not None else _PINNED_ADDRESSES.get()
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "text/html, application/xhtml+xml, text/plain;q=0.9, */*;q=0.5",
     }
     try:
-        with (
-            httpx.Client(follow_redirects=False, timeout=httpx.Timeout(timeout_s)) as client,
-            client.stream("GET", url, headers=headers) as resp,
-        ):
+        if pins:
+            for address in pins:
+                try:
+                    ipaddress.ip_address(address)
+                except ValueError:
+                    raise ValueError(
+                        f"pinned address {address!r} is not an IP literal; "
+                        "refusing to let the transport resolve it"
+                    ) from None
+            proxy = _env_proxy_for(url)
+            if proxy is not None:
+                raise FetchProxyError(
+                    f"Error: refusing to fetch '{url}': the environment configures "
+                    f"a proxy for this host ({proxy}), and a proxy resolves the "
+                    f"hostname itself, so the SSRF guard's validated addresses "
+                    f"cannot be pinned through it. fetch_url will not fetch "
+                    f"unpinned through a proxy; unset the proxy for this host "
+                    f"(or add it to no_proxy) to fetch it directly."
+                )
+            client = httpx.Client(
+                transport=_PinnedTransport(pins),
+                follow_redirects=False,
+                timeout=httpx.Timeout(timeout_s),
+                trust_env=False,
+            )
+        else:
+            client = httpx.Client(follow_redirects=False, timeout=httpx.Timeout(timeout_s))
+        with client, client.stream("GET", url, headers=headers) as resp:
             lowered = {k.lower(): v for k, v in resp.headers.items()}
             if resp.status_code in _REDIRECT_STATUSES:
                 return FetchResponse(
@@ -259,16 +437,24 @@ def _fetch_url_impl(url: str, max_chars: int | None = None) -> str:
     current = url
     resp: FetchResponse | None = None
     for hop in range(MAX_REDIRECTS + 1):
-        guard_error = _guard_url(current)
+        guard_error, pinned = _guard_url_pinned(current)
         if guard_error is not None:
             return guard_error
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return f"Error: fetching '{url}' timed out after {FETCH_TIMEOUT_S:.0f}s."
         try:
-            resp = _request_once(current, remaining)
+            # Hand this hop's validated addresses to the transport via
+            # the context var, keeping the seam signature unchanged.
+            token = _PINNED_ADDRESSES.set(pinned)
+            try:
+                resp = _request_once(current, remaining)
+            finally:
+                _PINNED_ADDRESSES.reset(token)
         except FetchTimeoutError:
             return f"Error: fetching '{current}' timed out after {FETCH_TIMEOUT_S:.0f}s."
+        except FetchProxyError as e:
+            return str(e)
         except Exception as e:  # noqa: BLE001 — transport raises arbitrary network errors; surface honestly as the tool result
             return f"Error: fetching '{current}' failed: {e}"
         if resp.status in _REDIRECT_STATUSES and resp.location:

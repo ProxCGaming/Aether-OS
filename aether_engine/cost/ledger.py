@@ -394,10 +394,12 @@ def record_provider_call(
     with NO context is still real model work (intent classification,
     the voice talker, media analysis, embeddings, background jobs —
     finding M19), so it is recorded with the explicit ``system``
-    task class and no session/task rather than dropped; genuine
-    probes never reach this hook (key validation calls LiteLLM
-    directly and does not pass through the provider's recording
-    seam). When the provider reported no token usage, counts are
+    task class and no session/task rather than dropped. Probe
+    traffic is NOT recorded, by explicit opt-out rather than by
+    topology (R2-NEW-1): reachability probes and capability
+    self-tests build their provider with ``record_usage=False``,
+    and key validation calls LiteLLM directly, bypassing the
+    provider's recording seam altogether. When the provider reported no token usage, counts are
     estimated and the row is labelled ``estimated``; when estimation
     is impossible the row records zero tokens as ``unpriced``.
     Publishes ``TASK_COST_UPDATE`` (figures read back from the

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from aether_engine.config import (
     CLOUD_PROVIDERS,
+    DEFAULT_GEMINI_MODEL,
     LOCAL_MODELS,
     PROVIDER_MAP,
     UserConfig,
@@ -80,6 +81,43 @@ class TestProviderConfig(unittest.TestCase):
             path.write_text("not valid json {[", encoding="utf-8")
             cfg = load_config(path)
             self.assertEqual(cfg.default_provider, "google_gemini")
+
+
+class TestS1M1ModelDefaults(unittest.TestCase):
+    """S1-M1: no silent model rewrite; dead-model defaults removed.
+
+    A persisted default_model must load verbatim — from_dict must not
+    substring-rewrite any model containing "2.5" — and every initial
+    default must be the verified working model gemini-3.5-flash.
+    """
+
+    def test_from_dict_loads_gemini_25_flash_unchanged(self):
+        cfg = UserConfig.from_dict({"default_model": "gemini-2.5-flash"})
+        self.assertEqual(cfg.default_model, "gemini-2.5-flash")
+
+    def test_from_dict_loads_model_containing_25_substring_unchanged(self):
+        cfg = UserConfig.from_dict({"default_model": "xx-2.5-yy"})
+        self.assertEqual(cfg.default_model, "xx-2.5-yy")
+
+    def test_fresh_user_config_default_is_gemini_35_flash(self):
+        self.assertEqual(UserConfig().default_model, "gemini-3.5-flash")
+
+    def test_default_gemini_model_constant_is_gemini_35_flash(self):
+        self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-3.5-flash")
+
+    def test_from_dict_missing_default_model_falls_back_to_gemini_35_flash(self):
+        cfg = UserConfig.from_dict({})
+        self.assertEqual(cfg.default_model, "gemini-3.5-flash")
+
+    def test_from_dict_empty_default_model_falls_back_to_gemini_35_flash(self):
+        cfg = UserConfig.from_dict({"default_model": ""})
+        self.assertEqual(cfg.default_model, "gemini-3.5-flash")
+
+    def test_fresh_engine_state_active_model_is_gemini_35_flash(self):
+        from aether_engine.state import EngineState
+
+        state = EngineState()
+        self.assertEqual(state.active_model, "gemini-3.5-flash")
 
 
 if __name__ == "__main__":

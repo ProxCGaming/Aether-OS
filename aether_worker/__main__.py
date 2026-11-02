@@ -19,6 +19,15 @@ and its shell pre-flight is only an existence check anyway. The token
 is passed via the environment, never argv, so it does not appear in
 ``ps`` output (cf. the argv-leak note in the Phase 10 audit).
 
+Payload channel (EGM S2-M4): the payload arrives ONLY on stdin — the
+engine writes one JSON document and closes the pipe, and this module
+reads stdin to EOF. There is deliberately no ``--payload`` argv form:
+argv is readable by any same-user process via ``ps`` /
+``/proc/<pid>/cmdline``, so shell commands and file bodies in the
+payload would leak, and argv is OS-size-bounded besides. The engine
+likewise spawns this worker with an allowlisted environment (S2-M5),
+not its full ``os.environ``.
+
 What this does NOT protect against: a same-user process that can read
 ``.run/engine.token`` can present the token — the same trust basis as
 the ``/ws/tasks`` channel itself. True privilege separation (running
@@ -37,7 +46,6 @@ and a network attempt to every worker spawn. The worker therefore
 appends the audit JSONL record directly, in the exact record shape
 ``AuditLogger.log_event`` produces; if that shape changes, update both.
 """
-import argparse
 import asyncio
 import json
 import os
@@ -107,7 +115,10 @@ async def run_worker(task_payload: dict):
 
         path = args.get("path")
         edits = args.get("edits") or []
-        expected_hash = args.get("expected_hash") or ""
+        # E2-F01: keep "not supplied" (absent/None) distinct from a
+        # supplied value — a supplied empty string is a hash that can
+        # never match, not a request to skip the check below.
+        expected_hash = args.get("expected_hash")
         if not path:
             raise ValueError("File path is required")
         target = Path(path)
@@ -115,7 +126,7 @@ async def run_worker(task_payload: dict):
             raise ValueError(f"edit_file failed: '{path}' does not exist or is not a file.")
         data = target.read_bytes()
         actual = content_hash(data)
-        if expected_hash and actual != expected_hash:
+        if expected_hash is not None and actual != expected_hash:
             raise ValueError(
                 f"edit_file failed: '{path}' changed since it was read "
                 f"(expected sha256 {expected_hash[:12]}…, found {actual[:12]}…). Re-read the file."
@@ -197,12 +208,14 @@ def _refuse(action: str, tool_name, reason: str) -> int:
 
 
 async def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--payload", required=True)
-    args = parser.parse_args()
-
+    # Payload contract (S2-M4): exactly one JSON document on stdin,
+    # read to EOF. No argv form exists — see the module docstring.
+    # The read is synchronous on purpose: nothing else can run until
+    # the payload is in hand, and the engine closes stdin right after
+    # writing, so this cannot block on a live writer.
+    raw_payload = sys.stdin.read()
     try:
-        payload = json.loads(args.payload)
+        payload = json.loads(raw_payload)
     except json.JSONDecodeError as e:
         print(f"Invalid payload JSON: {e}", file=sys.stderr)
         return 1

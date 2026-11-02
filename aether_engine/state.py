@@ -8,6 +8,7 @@ from aether_common.auth import (
 )
 from aether_engine.audit import AuditLogger
 from aether_engine.config import (
+    DEFAULT_GEMINI_MODEL,
     UserConfig,
     load_config,
 )
@@ -43,7 +44,7 @@ class EngineState:
         from aether_engine.plugins.installer import PluginInstaller
         self.plugin_installer = PluginInstaller(Path.home() / ".aether" / "plugins", audit_logger=self.audit_logger)
         self.active_provider: str = "google_gemini"
-        self.active_model: str = "gemini-2.5-flash"
+        self.active_model: str = DEFAULT_GEMINI_MODEL
         self.configured_providers: list[str] = []
         self.disabled_nodes: set[str] = set()
 

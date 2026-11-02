@@ -93,10 +93,13 @@ async def _collect(agen):
     return [event async for event in agen]
 
 
-async def _run(provider, session_id, attachments=None, prompt=PROMPT):
+async def _run(provider, session_id, attachments=None, prompt=PROMPT,
+               workspace_roots=None):
     kwargs = {}
     if attachments is not None:
         kwargs["attachments"] = attachments
+    if workspace_roots is not None:
+        kwargs["workspace_roots"] = workspace_roots
     return await _collect(executor_module.run_langgraph_task(
         prompt,
         provider,
@@ -140,9 +143,13 @@ async def test_graph_task_delivers_file_image_to_specialist(graph_env, tmp_path)
     shot.write_bytes(PNG_BYTES)
     provider = ImageRoutingProvider()
 
+    # S1-M8-ADJ (xref S1-M8): the graph path now applies the same
+    # containment as fast chat — a file path loads only from the
+    # attachments dir or a granted workspace root. Grant tmp_path the
+    # way the websocket handler grants the session's workspace roots.
     events = await _run(provider, "m16-file", attachments=[
         {"name": "shot.png", "mime_type": "image/png", "path": str(shot)},
-    ])
+    ], workspace_roots=[str(tmp_path)])
 
     assert EventType.TASK_COMPLETED in [ev.type for ev in events]
     user_msgs = _specialist_user_messages(provider)
@@ -186,7 +193,7 @@ async def test_graph_task_attachment_survives_checkpoint_round_trip(graph_env, t
 
     events = await _run(provider, sid, attachments=[
         {"name": "shot.png", "mime_type": "image/png", "path": str(shot)},
-    ])
+    ], workspace_roots=[str(tmp_path)])
     assert EventType.TASK_COMPLETED in [ev.type for ev in events]
 
     db_path = graph_env / "checkpoints.db"
@@ -223,7 +230,7 @@ async def test_graph_task_attachment_survives_history_seeding(
 
     events = await _run(provider, sid, attachments=[
         {"name": "shot.png", "mime_type": "image/png", "path": str(shot)},
-    ])
+    ], workspace_roots=[str(tmp_path)])
 
     assert EventType.TASK_COMPLETED in [ev.type for ev in events]
     user_msgs = _specialist_user_messages(provider)
@@ -247,7 +254,7 @@ async def test_graph_task_attachment_survives_followup_turn(graph_env, tmp_path)
     first = ImageRoutingProvider()
     events = await _run(first, sid, attachments=[
         {"name": "shot.png", "mime_type": "image/png", "path": str(shot)},
-    ])
+    ], workspace_roots=[str(tmp_path)])
     assert EventType.TASK_COMPLETED in [ev.type for ev in events]
 
     second = ImageRoutingProvider()

@@ -16,16 +16,33 @@ Any shortfall is reported WITH stage attribution (which stage blew the budget),
 never as a bare pass/fail.
 
 Honesty about what is measured:
-This harness ALWAYS runs against injectable fake/simulated engines with
-calibrated delays — it never loads a real model, whether or not the voice
-runtime dependencies (faster-whisper, kokoro, silero-vad/onnxruntime, aiortc)
-are installed. The benchmark report therefore always labels the run as
-running on fakes: synthetic timings must never be presented as measured
-hardware latency. (Dependency presence is still probed and reported, so a
-missing-runtime environment is called out by name.)
+In its DEFAULT mode this harness ALWAYS runs against injectable
+fake/simulated engines with calibrated delays — it never loads a real
+model, whether or not the voice runtime dependencies (faster-whisper,
+kokoro, silero-vad/onnxruntime, aiortc) are installed. The default-mode
+report therefore always labels the run as running on fakes: synthetic
+timings must never be presented as measured hardware latency.
+(Dependency presence is still probed and reported, so a missing-runtime
+environment is called out by name.)
+
+Real-stages mode (``--real``, S4-M14) is the exception, and it is
+opt-in: it loads the REAL SileroVad, the real Endpointer (with Smart
+Turn at its default sensitivity), the real FasterWhisperStt and the
+real KokoroTts, synthesises its fixture speech with that same Kokoro
+TTS (a known sentence, so the transcript is known without a
+microphone), and measures the local stages for real. It carries
+``is_fake=False`` and a REAL label only when every reported stage
+genuinely ran on a real model; if any stage cannot load it fails with
+the precise reason and emits no report at all — it never falls back
+to the fakes. There is no LLM provider in the bench environment, so
+real mode does NOT measure (and never simulates) LLM TTFT: its
+end-to-end figure is the sum of the measured local stages only, is
+labelled as such, and its verdict against the 800 ms target applies
+to that local-stage subtotal, not to a full conversational turn.
 
 Usage:
   uv run python benchmarks/voice_latency_bench.py [--runs 5]
+  uv run python benchmarks/voice_latency_bench.py --real [--runs 3]
 """
 
 from __future__ import annotations
@@ -33,9 +50,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib.util
+import io
+import os
+import platform
 import statistics
+import struct
 import sys
 import time
+import wave
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -43,10 +66,22 @@ from typing import Any
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from aether_engine.voice import VoiceUnavailableError
 from aether_engine.voice.pipeline import VoicePipeline, VoiceTransport
 from aether_engine.voice.stt import FasterWhisperStt, SttEngine
-from aether_engine.voice.tts import KokoroTts, TtsEngine
-from aether_engine.voice.vad import Endpointer, EndpointerConfig, SileroVad, VadEngine
+from aether_engine.voice.tts import (
+    DEFAULT_VOICE,
+    KOKORO_SAMPLE_RATE,
+    KokoroTts,
+    TtsEngine,
+)
+from aether_engine.voice.vad import (
+    SILERO_FRAME_SAMPLES,
+    Endpointer,
+    EndpointerConfig,
+    SileroVad,
+    VadEngine,
+)
 
 # Reference per-stage guideline budgets (summing to 750 ms < 800 ms target)
 TARGET_E2E_MS = 800.0
@@ -85,6 +120,16 @@ class BenchmarkResult:
     is_fake: bool
     fake_reasons: list[str] = field(default_factory=list)
     target_ms: float = TARGET_E2E_MS
+    # Real-stages mode (S4-M14). The defaults preserve the fake
+    # mode's behaviour and labelling exactly: fake runs measure a
+    # (simulated) LLM TTFT and carry no environment block. A real
+    # run sets llm_measured=False (no provider in the bench env —
+    # the e2e figure is then the local-stage subtotal) and carries
+    # the environment it measured on.
+    llm_measured: bool = True
+    environment: dict[str, Any] | None = None
+    fixture_text: str = ""
+    stt_transcript: str = ""
 
     @property
     def sample_count(self) -> int:
@@ -122,6 +167,8 @@ class BenchmarkResult:
             "================================================================================",
         ]
 
+        is_real = not self.is_fake and self.environment is not None
+
         if self.is_fake:
             lines.extend([
                 "",
@@ -132,6 +179,29 @@ class BenchmarkResult:
                 "Real-hardware verification requires Windows QA environment with native runtimes.",
                 "--------------------------------------------------------------------------------",
             ])
+        elif is_real:
+            env = self.environment or {}
+            lines.extend([
+                "",
+                "[REAL — MEASURED ON REAL MODELS]",
+                "Every stage below ran on a real local model: Silero VAD +",
+                "Endpointer (Smart Turn at default sensitivity), Faster-Whisper",
+                "STT, and Kokoro TTS. Fixture speech was synthesised by the real",
+                "Kokoro TTS, so no microphone was involved.",
+                "",
+                "Environment:",
+                f"  Platform:       {env.get('platform', 'unknown')}",
+                f"  OS:             {env.get('os', 'unknown')}",
+                f"  CPU count:      {env.get('cpu_count', 'unknown')}",
+                f"  Whisper model:  {env.get('whisper_model', 'unknown')}",
+                f"  Kokoro voice:   {env.get('kokoro_voice', 'unknown')}",
+                f"  Runs:           {env.get('runs', self.sample_count)}  (samples: {env.get('samples', self.sample_count)})",
+            ])
+            if self.fixture_text:
+                lines.append(f"  Fixture text:   {self.fixture_text!r}")
+            if self.stt_transcript:
+                lines.append(f"  STT transcript: {self.stt_transcript!r}")
+            lines.append("--------------------------------------------------------------------------------")
         else:
             lines.extend([
                 "",
@@ -152,9 +222,12 @@ class BenchmarkResult:
         stage_data = [
             ("VAD", STAGE_BUDGETS_MS["VAD"], self.median_vad_ms),
             ("STT", STAGE_BUDGETS_MS["STT"], self.median_stt_ms),
-            ("LLM TTFT", STAGE_BUDGETS_MS["LLM TTFT"], self.median_llm_ttft_ms),
-            ("TTS first-audio", STAGE_BUDGETS_MS["TTS first-audio"], self.median_tts_first_audio_ms),
         ]
+        if self.llm_measured:
+            stage_data.append(
+                ("LLM TTFT", STAGE_BUDGETS_MS["LLM TTFT"], self.median_llm_ttft_ms))
+        stage_data.append(
+            ("TTS first-audio", STAGE_BUDGETS_MS["TTS first-audio"], self.median_tts_first_audio_ms))
 
         for name, budget, measured in stage_data:
             diff = measured - budget
@@ -164,13 +237,29 @@ class BenchmarkResult:
                 status = f"OVER BUDGET (+{diff:.1f} ms)"
             lines.append(f"  {name:<17} | {budget:>6.1f} ms  | {measured:>6.1f} ms | {status}")
 
-        lines.extend([
-            "  ------------------+------------+-----------+--------------------",
-            f"  End-to-End Turn   | {self.target_ms:>6.1f} ms  | {self.median_e2e_ms:>6.1f} ms | "
-            + ("PASSED (<800 ms)" if self.meets_target else "SHORTFALL (>=800 ms)"),
-            "",
-            f"Median turn: {self.median_e2e_ms:.1f} ms",
-        ])
+        if not self.llm_measured:
+            lines.append(
+                f"  {'LLM TTFT':<17} | {STAGE_BUDGETS_MS['LLM TTFT']:>6.1f} ms  | "
+                "     —     | NOT MEASURED")
+
+        if is_real:
+            lines.extend([
+                "  ------------------+------------+-----------+--------------------",
+                f"  End-to-End (local) | {self.target_ms:>6.1f} ms  | {self.median_e2e_ms:>6.1f} ms | "
+                + ("PASSED (<800 ms)" if self.meets_target else "SHORTFALL (>=800 ms)"),
+                "",
+                f"Median turn: {self.median_e2e_ms:.1f} ms (local stages only)",
+                "End-to-end is the sum of the measured LOCAL stages only — LLM TTFT not measured (no provider configured in the bench env).",
+                "The verdict against the 800 ms target applies to this local-stage subtotal, not to a full conversational turn.",
+            ])
+        else:
+            lines.extend([
+                "  ------------------+------------+-----------+--------------------",
+                f"  End-to-End Turn   | {self.target_ms:>6.1f} ms  | {self.median_e2e_ms:>6.1f} ms | "
+                + ("PASSED (<800 ms)" if self.meets_target else "SHORTFALL (>=800 ms)"),
+                "",
+                f"Median turn: {self.median_e2e_ms:.1f} ms",
+            ])
 
         if shortfall:
             lines.extend([
@@ -233,9 +322,14 @@ def attribute_shortfall(result: BenchmarkResult) -> dict[str, Any] | None:
     medians = {
         "VAD": result.median_vad_ms,
         "STT": result.median_stt_ms,
-        "LLM TTFT": result.median_llm_ttft_ms,
         "TTS first-audio": result.median_tts_first_audio_ms,
     }
+    if result.llm_measured:
+        # Fake mode measures a (simulated) LLM TTFT, so it takes
+        # part in attribution exactly as before. Real mode never
+        # measured it (llm_measured=False): blaming or crediting an
+        # unmeasured stage would be a fabricated attribution.
+        medians["LLM TTFT"] = result.median_llm_ttft_ms
 
     deltas = {stage: medians[stage] - STAGE_BUDGETS_MS[stage] for stage in medians}
     overages = {stage: delta for stage, delta in deltas.items() if delta > 0}
@@ -614,15 +708,410 @@ def run_voice_latency_bench(
     )
 
 
+# ---------------------------------------------------------------------------
+# Real-stages mode (S4-M14)
+#
+# Everything above stays the fake bench. Everything below loads the
+# REAL engines — SileroVad, Endpointer (Smart Turn at default
+# sensitivity), FasterWhisperStt, KokoroTts — and measures them.
+# The seams (engine factories, fixture generator) exist so tests can
+# drive this exact code path with lightweight stand-ins instead of
+# downloading models; production callers use the defaults, which are
+# the real engines.
+# ---------------------------------------------------------------------------
+
+#: The canonical fixture sentence (the fake bench's reply text):
+#: known transcript, synthesised by the real Kokoro TTS.
+REAL_FIXTURE_SENTENCE = "The red bicycle is outside."
+
+#: Fixture speech must reach the STT stage at the pipeline's rate.
+FIXTURE_SAMPLE_RATE = 16000
+
+# Type aliases for the injection seams.
+VadFactory = Callable[[], VadEngine]
+SttFactory = Callable[[], SttEngine]
+TtsFactory = Callable[[], TtsEngine]
+# A fixture generator turns the (opened) TTS engine into raw 16 kHz
+# PCM16 speech bytes for the fixture sentence.
+FixtureGenerator = Callable[..., Awaitable[bytes]]
+
+
+def collect_environment(
+    *,
+    whisper_model: str,
+    kokoro_voice: str,
+    runs: int,
+    samples: int,
+) -> dict[str, Any]:
+    """The environment block a REAL report must carry."""
+    return {
+        "platform": platform.platform(),
+        "os": f"{platform.system()} {platform.release()}",
+        "cpu_count": os.cpu_count() or 0,
+        "whisper_model": whisper_model,
+        "kokoro_voice": kokoro_voice,
+        "runs": runs,
+        "samples": samples,
+    }
+
+
+def resample_pcm16(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
+    """Linear-interpolation resample of PCM16 mono audio."""
+    if src_rate == dst_rate or not pcm:
+        return pcm
+    count = len(pcm) // 2
+    src = struct.unpack(f"<{count}h", pcm[: count * 2])
+    out_count = round(count * dst_rate / src_rate)
+    out: list[int] = []
+    for i in range(out_count):
+        pos = i * src_rate / dst_rate
+        lo = int(pos)
+        hi = min(lo + 1, count - 1)
+        frac = pos - lo
+        value = src[lo] * (1.0 - frac) + src[hi] * frac
+        out.append(round(value))
+    return struct.pack(f"<{len(out)}h", *out)
+
+
+def wav_bytes_to_pcm16(wav_bytes: bytes) -> tuple[bytes, int]:
+    """Decode a WAV chunk to (raw PCM16 bytes, sample_rate).
+
+    Non-WAV input is treated as raw PCM16 at Kokoro's sample rate
+    (the only producer that could hand us headerless audio).
+    """
+    if wav_bytes[:4] != b"RIFF":
+        return wav_bytes, KOKORO_SAMPLE_RATE
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
+        rate = wav.getframerate()
+        width = wav.getsampwidth()
+        frames = wav.readframes(wav.getnframes())
+    if width != 2:
+        raise VoiceUnavailableError(
+            f"real bench: expected PCM16 WAV audio, got sample width {width}")
+    return frames, rate
+
+
+def slice_pcm_into_frames(
+    pcm: bytes, frame_samples: int = SILERO_FRAME_SAMPLES,
+) -> list[bytes]:
+    """Slice PCM16 audio into fixed-size frames (last one padded)."""
+    frame_bytes = frame_samples * 2
+    frames: list[bytes] = []
+    for offset in range(0, len(pcm), frame_bytes):
+        chunk = pcm[offset:offset + frame_bytes]
+        if len(chunk) < frame_bytes:
+            chunk = chunk + b"\x00" * (frame_bytes - len(chunk))
+        frames.append(chunk)
+    return frames
+
+
+@dataclass
+class FixtureAudio:
+    """Synthesised fixture speech, framed for the VAD/endpointer."""
+
+    text: str
+    pcm: bytes  # speech only, 16 kHz PCM16 — what STT transcribes
+    frames: list[bytes]  # silence + speech + silence, 512-sample frames
+    speech_start_frame: int
+    speech_end_frame: int  # exclusive: first trailing-silence frame
+    sample_rate: int = FIXTURE_SAMPLE_RATE
+
+
+def build_fixture_frames(
+    speech_pcm_16k: bytes,
+    *,
+    text: str,
+    prepend_silence_ms: int = 160,
+    append_silence_ms: int = 1024,
+    frame_samples: int = SILERO_FRAME_SAMPLES,
+) -> FixtureAudio:
+    """Frame fixture speech with leading/trailing silence so the
+    endpointer's speech-start and trailing-silence paths both run."""
+    frame_ms = frame_samples * 1000 // FIXTURE_SAMPLE_RATE
+    silence_frame = b"\x00" * (frame_samples * 2)
+    prepend = max(0, prepend_silence_ms // frame_ms)
+    append = max(1, append_silence_ms // frame_ms)
+    speech_frames = slice_pcm_into_frames(speech_pcm_16k, frame_samples)
+    frames = [silence_frame] * prepend + speech_frames + [silence_frame] * append
+    return FixtureAudio(
+        text=text,
+        pcm=speech_pcm_16k,
+        frames=frames,
+        speech_start_frame=prepend,
+        speech_end_frame=prepend + len(speech_frames),
+    )
+
+
+async def synthesize_fixture_pcm(
+    tts: TtsEngine, *, sentence: str, voice: str,
+) -> bytes:
+    """Default fixture generator: speak *sentence* with the real
+    TTS engine and return its audio as 16 kHz PCM16."""
+    pcm_parts: list[bytes] = []
+    async for chunk in tts.synthesize(sentence, voice=voice):
+        pcm, rate = wav_bytes_to_pcm16(chunk)
+        if rate != FIXTURE_SAMPLE_RATE:
+            pcm = resample_pcm16(pcm, rate, FIXTURE_SAMPLE_RATE)
+        pcm_parts.append(pcm)
+    pcm = b"".join(pcm_parts)
+    if not pcm:
+        raise VoiceUnavailableError(
+            "real bench: TTS produced no audio for the fixture sentence")
+    return pcm
+
+
+def _load_real_stage(name: str, factory: Callable[[], Any]) -> Any:
+    """Build one real stage, failing honestly.
+
+    A factory (or the engine's own availability probe) that reports
+    a problem becomes a VoiceUnavailableError naming the stage and
+    the precise reason — never a silent fallback to a fake.
+    """
+    try:
+        engine = factory()
+    except VoiceUnavailableError:
+        raise
+    except Exception as e:  # re-raised honestly below
+        raise VoiceUnavailableError(
+            f"real bench: {name} stage failed to construct: {e}") from e
+    reason = engine.unavailable_reason()
+    if reason is not None:
+        raise VoiceUnavailableError(f"real bench: {name} stage unavailable: {reason}")
+    return engine
+
+
+async def _open_real_stage(name: str, engine: Any) -> None:
+    try:
+        await engine.open()
+    except VoiceUnavailableError:
+        raise
+    except Exception as e:  # e.g. a failed model download
+        raise VoiceUnavailableError(
+            f"real bench: {name} stage failed to load: {e}") from e
+
+
+async def _measure_vad_endpointing(
+    vad: VadEngine,
+    endpointer: Endpointer,
+    fixture: FixtureAudio,
+) -> float:
+    """Drive the real Endpointer with real per-frame VAD
+    probabilities, frame by frame as the pipeline does, and return
+    the ms from the last speech frame being fed to utterance_end.
+
+    "Last speech frame" means the last frame whose real VAD
+    probability crossed the speech threshold — the fake bench's
+    convention (its transport timestamps the last marker frame) —
+    not the fixture buffer's nominal end: synthesised audio may
+    itself end in silence, and the acoustic end is what the
+    endpointer reacts to.
+
+    Frames are fed back-to-back (the fake bench's convention), so
+    this measures the endpointing processing cost — Silero
+    inference over the trailing-silence frames plus the state
+    machine — not the wall-clock length of the silence window.
+    The fixture transcript is observed once speech starts, exactly
+    as the pipeline observes STT partials, so the Smart Turn policy
+    bends the trailing-silence window for this utterance.
+    """
+    endpointer.reset()
+    last_speech_fed_at: float | None = None
+    frame_ms = round(
+        len(fixture.frames[0]) / 2 / fixture.sample_rate * 1000) if fixture.frames else 32
+    for frame in fixture.frames:
+        probability = await vad.probability(frame, fixture.sample_rate)
+        event = endpointer.feed(probability, frame_ms)
+        if event == "speech_started":
+            endpointer.observe_transcript(fixture.text)
+        if probability >= endpointer.config.speech_threshold:
+            last_speech_fed_at = time.perf_counter()
+        if event == "utterance_end":
+            if last_speech_fed_at is None:
+                last_speech_fed_at = time.perf_counter()
+            return max(0.0, (time.perf_counter() - last_speech_fed_at) * 1000.0)
+    raise VoiceUnavailableError(
+        "real bench: endpointer never emitted utterance_end for the "
+        "fixture utterance (VAD probabilities or silence window "
+        "did not produce an endpoint)")
+
+
+async def _measure_stt(
+    stt: SttEngine, fixture: FixtureAudio,
+) -> tuple[float, str]:
+    """Real transcription of the fixture utterance, timed."""
+    start = time.perf_counter()
+    transcript = await stt.transcribe(
+        fixture.pcm, sample_rate=fixture.sample_rate)
+    return max(0.0, (time.perf_counter() - start) * 1000.0), (transcript or "").strip()
+
+
+async def _measure_tts_first_audio(
+    tts: TtsEngine, *, text: str, voice: str,
+) -> float:
+    """Time from synthesize() call to the first audio chunk."""
+    start = time.perf_counter()
+    async for _chunk in tts.synthesize(text, voice=voice):
+        return max(0.0, (time.perf_counter() - start) * 1000.0)
+    raise VoiceUnavailableError(
+        "real bench: TTS produced no audio chunks for the reply sentence")
+
+
+async def _run_real_stages_bench_async(
+    runs: int,
+    *,
+    whisper_model: str,
+    kokoro_voice: str,
+    sentence: str,
+    reply_text: str,
+    vad_factory: VadFactory,
+    stt_factory: SttFactory,
+    tts_factory: TtsFactory,
+    fixture_generator: FixtureGenerator,
+    endpointer_config: EndpointerConfig | None,
+) -> BenchmarkResult:
+    vad = _load_real_stage("vad", vad_factory)
+    stt = _load_real_stage("stt", stt_factory)
+    tts = _load_real_stage("tts", tts_factory)
+    opened: list[Any] = []
+    try:
+        for name, engine in (("vad", vad), ("stt", stt), ("tts", tts)):
+            await _open_real_stage(name, engine)
+            opened.append(engine)
+
+        fixture_pcm = await fixture_generator(
+            tts, sentence=sentence, voice=kokoro_voice)
+        if not fixture_pcm:
+            raise VoiceUnavailableError(
+                "real bench: fixture generator produced no audio")
+        fixture = build_fixture_frames(fixture_pcm, text=sentence)
+        endpointer = Endpointer(endpointer_config or EndpointerConfig())
+
+        samples: list[StageTimings] = []
+        transcript = ""
+        for _ in range(runs):
+            vad_ms = await _measure_vad_endpointing(vad, endpointer, fixture)
+            stt_ms, transcript = await _measure_stt(stt, fixture)
+            tts_ms = await _measure_tts_first_audio(
+                tts, text=reply_text, voice=kokoro_voice)
+            samples.append(StageTimings(
+                vad_ms=vad_ms,
+                stt_ms=stt_ms,
+                # Not measured: no provider in the bench env. Zero
+                # is a placeholder excluded from attribution and
+                # from the report table (llm_measured=False).
+                llm_ttft_ms=0.0,
+                tts_first_audio_ms=tts_ms,
+                e2e_ms=vad_ms + stt_ms + tts_ms,
+            ))
+    except VoiceUnavailableError:
+        raise
+    except Exception as e:  # a real stage crashing mid-measurement
+        # is still an honest failure, never a REAL-labelled report.
+        raise VoiceUnavailableError(
+            f"real bench: measurement failed: {type(e).__name__}: {e}") from e
+    finally:
+        for engine in reversed(opened):
+            try:
+                await engine.close()
+            except Exception:  # noqa: S110, BLE001 — teardown must not mask the result
+                pass
+
+    return BenchmarkResult(
+        samples=samples,
+        # False only because every stage above is a real engine
+        # that loaded and ran; any failure raised before this point.
+        is_fake=False,
+        fake_reasons=[],
+        target_ms=TARGET_E2E_MS,
+        llm_measured=False,
+        environment=collect_environment(
+            whisper_model=whisper_model,
+            kokoro_voice=kokoro_voice,
+            runs=runs,
+            samples=len(samples),
+        ),
+        fixture_text=sentence,
+        stt_transcript=transcript,
+    )
+
+
+def run_real_stages_bench(
+    runs: int = 3,
+    *,
+    whisper_model: str = "small",
+    kokoro_voice: str = DEFAULT_VOICE,
+    sentence: str = REAL_FIXTURE_SENTENCE,
+    reply_text: str | None = None,
+    vad_factory: VadFactory | None = None,
+    stt_factory: SttFactory | None = None,
+    tts_factory: TtsFactory | None = None,
+    fixture_generator: FixtureGenerator | None = None,
+    endpointer_config: EndpointerConfig | None = None,
+) -> BenchmarkResult:
+    """Measure the REAL local voice stages (S4-M14).
+
+    Loads SileroVad, FasterWhisperStt(``whisper_model``) and
+    KokoroTts for real, synthesises the fixture sentence with that
+    Kokoro TTS, and per run measures VAD+endpointing, STT, and TTS
+    first-audio. LLM TTFT is not measured (no provider in the bench
+    environment): the e2e figure is the local-stage subtotal.
+
+    Raises VoiceUnavailableError — with the precise reason — when
+    any real stage cannot load; never falls back to the fakes and
+    never returns a REAL-labelled result for a failed stage.
+
+    The factory / fixture-generator parameters are the test seam:
+    they default to the real engines.
+    """
+    return asyncio.run(_run_real_stages_bench_async(
+        runs,
+        whisper_model=whisper_model,
+        kokoro_voice=kokoro_voice,
+        sentence=sentence,
+        reply_text=reply_text if reply_text is not None else sentence,
+        vad_factory=vad_factory if vad_factory is not None else SileroVad,
+        stt_factory=stt_factory if stt_factory is not None
+        else (lambda: FasterWhisperStt(model=whisper_model)),
+        tts_factory=tts_factory if tts_factory is not None else KokoroTts,
+        fixture_generator=fixture_generator if fixture_generator is not None
+        else synthesize_fixture_pcm,
+        endpointer_config=endpointer_config,
+    ))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Aether Voice Pipeline Latency Benchmark (E8-5.2)")
     parser.add_argument("--runs", type=int, default=3, help="Number of benchmark repetitions (default: 3)")
+    parser.add_argument("--real", action="store_true",
+                        help="Measure the REAL local stages (Silero VAD, Faster-Whisper STT, "
+                             "Kokoro TTS) instead of the simulated ones (S4-M14). Fails "
+                             "honestly, with no report, when a real stage cannot load.")
+    parser.add_argument("--whisper-model", type=str, default="small",
+                        help="Whisper model size for --real STT (default: small, the production default)")
+    parser.add_argument("--kokoro-voice", type=str, default=DEFAULT_VOICE,
+                        help=f"Kokoro voice for --real TTS (default: {DEFAULT_VOICE})")
     parser.add_argument("--silence-ms", type=int, default=350, help="Endpointing silence duration in ms (default: 350)")
     parser.add_argument("--vad-ms", type=float, default=1.0, help="Simulated VAD inference latency ms (default: 1.0)")
     parser.add_argument("--stt-ms", type=float, default=150.0, help="Simulated STT transcription latency ms (default: 150.0)")
     parser.add_argument("--ttft-ms", type=float, default=150.0, help="Simulated LLM TTFT latency ms (default: 150.0)")
     parser.add_argument("--tts-ms", type=float, default=120.0, help="Simulated TTS synthesis latency ms (default: 120.0)")
     args = parser.parse_args()
+
+    if args.real:
+        try:
+            res = run_real_stages_bench(
+                runs=args.runs,
+                whisper_model=args.whisper_model,
+                kokoro_voice=args.kokoro_voice,
+            )
+        except VoiceUnavailableError as e:
+            # Honest failure: name the precise reason on stderr,
+            # emit no report (and certainly no REAL-labelled one),
+            # and exit nonzero.
+            print(f"real voice bench failed: {e}", file=sys.stderr)
+            raise SystemExit(2) from e
+        print(res.format_report())
+        return
 
     res = run_voice_latency_bench(
         runs=args.runs,

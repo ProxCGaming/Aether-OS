@@ -62,6 +62,34 @@ function mergeThoughtEntries(base, extra) {
   return merged;
 }
 
+// S3-M7: the floating-window transfer state (full chat history +
+// draft input) lives in Electron main-process memory, reached only
+// through these IPC-backed helpers. It must NEVER go through
+// localStorage again: web storage is readable by any script running
+// in the renderer. Reads return the parsed state object (or null);
+// a string payload is tolerated for older bridges that JSON-encoded.
+async function readFloatingTransferState() {
+  try {
+    if (!window.electronAPI || !window.electronAPI.getFloatingTransferState) return null;
+    const data = await window.electronAPI.getFloatingTransferState();
+    if (!data) return null;
+    return typeof data === 'string' ? JSON.parse(data) : data;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function writeFloatingTransferState(state) {
+  try {
+    if (window.electronAPI && window.electronAPI.setFloatingTransferState) {
+      await window.electronAPI.setFloatingTransferState(state);
+    }
+  } catch (err) {
+    // Best-effort: a failed handover leaves the floating window
+    // empty rather than falling back to web storage.
+  }
+}
+
 function AppContent() {
   // Phase 10.3 C1: the engine-message facade lives in SocketContext, not
   // here. AppContent consumes its wsRef/isConnected; it builds no mock of
@@ -280,8 +308,15 @@ function AppContent() {
   // E8-5.1b: bumped on every VOICE_BARGE_IN; the overlay cuts its
   // scheduled playback when this changes.
   const [voicePlaybackCut, setVoicePlaybackCut] = useState(0);
+  // F-12b: RTC signalling for the live voice session. The engine's
+  // answer and its ICE candidates are seq-numbered props for the
+  // overlay (the voiceAudioChunk pattern); the overlay's offer and
+  // local candidates go up through the callbacks below.
+  const [voiceRtcAnswer, setVoiceRtcAnswer] = useState(null);
+  const [voiceRtcRemoteCandidate, setVoiceRtcRemoteCandidate] = useState(null);
   const voiceStateRef = useRef(null);
   const voiceChunkSeqRef = useRef(0);
+  const voiceRtcSeqRef = useRef(0);
 
   const applyVoiceState = useCallback((next) => {
     voiceStateRef.current = next;
@@ -314,6 +349,8 @@ function AppContent() {
   const handleVoiceStart = useCallback(() => {
     const current = voiceStateRef.current;
     if (current && current.status !== 'error') return;
+    setVoiceRtcAnswer(null);
+    setVoiceRtcRemoteCandidate(null);
     const sessionId = activeSessionRef.current;
     if (!sendVoiceRequest('VOICE_SESSION_START_REQUEST', { session_id: sessionId })) {
       applyVoiceState({
@@ -340,12 +377,37 @@ function AppContent() {
     sendVoiceRequest('VOICE_SESSION_STOP_REQUEST', {
       session_id: current.sessionId || activeSessionRef.current,
     });
+    setVoiceRtcAnswer(null);
+    setVoiceRtcRemoteCandidate(null);
     applyVoiceState(null);
   }, [applyVoiceState, commitVoiceAssistant, sendVoiceRequest]);
 
   const handleVoiceDismissError = useCallback(() => {
+    setVoiceRtcAnswer(null);
+    setVoiceRtcRemoteCandidate(null);
     applyVoiceState(null);
   }, [applyVoiceState]);
+
+  // F-12b: the overlay offers (it holds the microphone); the
+  // engine answers. A refused negotiation flips the session to the
+  // error state — the overlay must never sit live with no media.
+  const handleVoiceRtcOffer = useCallback((offer) => {
+    const current = voiceStateRef.current;
+    if (!current) return;
+    sendVoiceRequest('VOICE_RTC_OFFER_REQUEST', {
+      session_id: current.sessionId || activeSessionRef.current,
+      sdp: offer,
+    });
+  }, [sendVoiceRequest]);
+
+  const handleVoiceRtcIceCandidate = useCallback((candidate) => {
+    const current = voiceStateRef.current;
+    if (!current) return;
+    sendVoiceRequest('VOICE_RTC_ICE_REQUEST', {
+      session_id: current.sessionId || activeSessionRef.current,
+      candidate,
+    });
+  }, [sendVoiceRequest]);
 
   // Epic 8, E8-5.3: Push-to-talk dictation + assistant message read-aloud
   const [dictationState, setDictationState] = useState(null);
@@ -475,31 +537,43 @@ function AppContent() {
     }));
   }, [wsRef]);
   
+  // S3-M7: purge the legacy localStorage copy of the transfer state
+  // left behind by older builds, so the plaintext chat history does
+  // not linger in web storage after the move to main-process memory.
   useEffect(() => {
-    if (isFloating) {
-      try {
-        const transferData = localStorage.getItem('floating_transfer_state');
-        if (transferData) {
-          const parsed = JSON.parse(transferData);
-          if (parsed.messages) setChatMessages(parsed.messages);
-          if (parsed.input) setInitialInput(parsed.input);
-          // We intentionally don't clear it immediately so refreshing the floating window keeps the context
-        }
-      } catch (err) {
-        console.error('Failed to load floating transfer state', err);
-      }
-    }
+    try {
+      localStorage.removeItem('floating_transfer_state');
+    } catch (e) {}
+  }, []);
+
+  useEffect(() => {
+    if (!isFloating) return undefined;
+    let cancelled = false;
+    (async () => {
+      const parsed = await readFloatingTransferState();
+      if (cancelled || !parsed) return;
+      if (parsed.messages) setChatMessages(parsed.messages);
+      if (parsed.input) setInitialInput(parsed.input);
+      // We intentionally don't clear it: the state lives in the main
+      // process, so refreshing the floating window re-reads it and
+      // keeps its context. Main clears it when the floating window
+      // closes for real.
+    })();
+    return () => { cancelled = true; };
   }, [isFloating]);
 
-  // Sync back to floating_transfer_state if messages change in floating window
+  // Sync edits back to the main-process transfer state if messages
+  // change in the floating window (read-modify-write, preserving
+  // the draft input the floating window was handed).
   useEffect(() => {
-    if (isFloating && chatMessages.length > 0) {
-      try {
-        const current = JSON.parse(localStorage.getItem('floating_transfer_state') || '{}');
-        current.messages = chatMessages;
-        localStorage.setItem('floating_transfer_state', JSON.stringify(current));
-      } catch (e) {}
-    }
+    if (!isFloating || chatMessages.length === 0) return undefined;
+    let cancelled = false;
+    (async () => {
+      const current = (await readFloatingTransferState()) || {};
+      if (cancelled) return;
+      await writeFloatingTransferState({ ...current, messages: chatMessages });
+    })();
+    return () => { cancelled = true; };
   }, [isFloating, chatMessages]);
 
   const graphRef = useRef();
@@ -1398,6 +1472,36 @@ function AppContent() {
           // A local stop already tore the UI down; this only lands
           // for a stop we did not initiate.
           if (voiceStateRef.current) applyVoiceState(null);
+        } else if (data.type === 'VOICE_RTC_OFFER_RESPONSE') {
+          // F-12b: the engine's answer goes down to the overlay's
+          // peer connection; a refusal is the voice error state.
+          const p = data.payload || {};
+          const current = voiceStateRef.current;
+          if (current && p.session_id === current.sessionId) {
+            if (p.ok && p.answer) {
+              voiceRtcSeqRef.current += 1;
+              setVoiceRtcAnswer({ seq: voiceRtcSeqRef.current, answer: p.answer });
+            } else {
+              applyVoiceState({
+                ...current,
+                status: 'error',
+                error: p.error || 'Voice connection failed.',
+                webrtcConfig: null,
+              });
+            }
+          }
+        } else if (data.type === 'VOICE_RTC_ICE') {
+          // F-12b: one of the engine's own ICE candidates (or the
+          // null end-of-candidates marker) for the overlay's peer.
+          const p = data.payload || {};
+          const current = voiceStateRef.current;
+          if (current && current.status === 'active' && p.session_id === current.sessionId) {
+            voiceRtcSeqRef.current += 1;
+            setVoiceRtcRemoteCandidate({
+              seq: voiceRtcSeqRef.current,
+              candidate: p.candidate ?? null,
+            });
+          }
         } else if (data.type === 'DICTATION_START_RESPONSE') {
           const p = data.payload || {};
           if (p.ok) {
@@ -1572,15 +1676,16 @@ function AppContent() {
     }
 
     if (window.electronAPI && window.electronAPI.onChatAttached) {
-      unsubscribers.push(window.electronAPI.onChatAttached(() => {
+      unsubscribers.push(window.electronAPI.onChatAttached(async (attachedState) => {
         setIsChatDetached(false);
-        try {
-          const transferData = localStorage.getItem('floating_transfer_state');
-          if (transferData) {
-            const parsed = JSON.parse(transferData);
-            if (parsed.messages) setChatMessages(parsed.messages);
-          }
-        } catch (e) {}
+        // S3-M7: main hands the final transfer snapshot over WITH
+        // this event (its store is already cleared at that point);
+        // fall back to reading the store when no snapshot rides
+        // along (e.g. a bridge that does not forward it).
+        const parsed = (attachedState && typeof attachedState === 'object')
+          ? attachedState
+          : await readFloatingTransferState();
+        if (parsed && parsed.messages) setChatMessages(parsed.messages);
       }));
     }
 
@@ -1795,23 +1900,32 @@ function AppContent() {
           { role: 'agent', content: '', thoughts: [], isFinal: false }
         ]);
     setIsThinking(true);
+    const outboundPacket = JSON.stringify({
+      type: steering ? 'STEER_TASK' : 'START_TASK',
+      schema_version: 1,
+      request_id: messageId,
+      payload: {
+        prompt: text,
+        session_id: activeSession,
+        message_id: messageId,
+        attachments: attachments || [],
+        ...(steering ? {} : { plan_mode: planMode })
+      }
+    });
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: steering ? 'STEER_TASK' : 'START_TASK',
-        schema_version: 1,
-        request_id: messageId,
-        payload: {
-          prompt: text,
-          session_id: activeSession,
-          message_id: messageId,
-          attachments: attachments || [],
-          ...(steering ? {} : { plan_mode: planMode })
-        }
-      }));
+      wsRef.current.send(outboundPacket);
     } else if (steering) {
-      // Offline steer: keep the bubble queued rather than failing the
-      // running task's bubble; the engine never saw it, and clearing
-      // the flag is STEERING_APPLIED's job once reconnect delivers it.
+      // Offline steer (E1-F07): keep the bubble queued rather than
+      // failing the running task's bubble — and hand the packet to
+      // the facade anyway. Its send() queues while the socket is
+      // down and flushes on reconnect, so the steer actually reaches
+      // the engine once it is back; clearing the queued flag is then
+      // STEERING_APPLIED's job, as the bubble promises. Dropping the
+      // packet here (the old behaviour) lost the message silently:
+      // reconnect had nothing to deliver.
+      if (wsRef.current) {
+        wsRef.current.send(outboundPacket);
+      }
     } else {
       setTimeout(() => {
         setIsThinking(false);
@@ -2146,19 +2260,18 @@ function AppContent() {
     }
   };
 
-  const handleReattachChat = () => {
+  const handleReattachChat = async () => {
+    // S3-M7: read the floating window's edits from the main-process
+    // store BEFORE closing it — main clears the store the moment the
+    // floating window closes (the 'chat-attached' event that follows
+    // carries the same snapshot and restores it again, idempotently).
+    const parsed = await readFloatingTransferState();
+    if (parsed && parsed.messages) setChatMessages(parsed.messages);
     if (window.electronAPI && window.electronAPI.closeFloatingChat) {
       window.electronAPI.closeFloatingChat();
     }
     setIsChatDetached(false);
     setActiveTab('Chat');
-    try {
-      const transferData = localStorage.getItem('floating_transfer_state');
-      if (transferData) {
-        const parsed = JSON.parse(transferData);
-        if (parsed.messages) setChatMessages(parsed.messages);
-      }
-    } catch (e) {}
   };
 
   const handleStopTask = () => {
@@ -2614,11 +2727,14 @@ function AppContent() {
           rewindUndo={rewindUndo && rewindUndo.sessionId === activeSession ? rewindUndo : null}
           onRewindUndo={handleRewindUndoClick}
           onRewindUndoExpire={handleRewindUndoExpire}
-          onDetach={(state) => {
-            localStorage.setItem('floating_transfer_state', JSON.stringify({
+          onDetach={async (state) => {
+            // S3-M7: hand the history + draft to main-process memory
+            // and await it BEFORE opening the floating window, so the
+            // floating window can never load a stale/absent state.
+            await writeFloatingTransferState({
               messages: chatMessages,
               input: state?.input || ''
-            }));
+            });
             setIsChatDetached(true);
             window.electronAPI?.openFloatingChat(activeSession);
           }}
@@ -2645,6 +2761,10 @@ function AppContent() {
           onVoiceStart={handleVoiceStart}
           onVoiceStop={handleVoiceStop}
           onVoiceDismissError={handleVoiceDismissError}
+          voiceRtcAnswer={voiceRtcAnswer}
+          voiceRtcRemoteCandidate={voiceRtcRemoteCandidate}
+          onVoiceRtcOffer={handleVoiceRtcOffer}
+          onVoiceRtcIceCandidate={handleVoiceRtcIceCandidate}
           dictationState={dictationState}
           readAloudState={readAloudState}
           onDictationStart={handleDictationStart}

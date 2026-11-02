@@ -210,7 +210,7 @@ def test_ws_pump_fallback_triggers_on_graph_retriable_failure(ws_env):
     with (
         stack,
         TestClient(app) as client,
-        client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}") as ws,
+        client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws,
     ):
         ws.receive_text()  # HELLO
         ws.send_text(Event(

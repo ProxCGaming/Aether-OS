@@ -14,15 +14,100 @@ try {
   process.on('uncaughtException', (err) => writeCrash('UNCAUGHT', err));
   process.on('unhandledRejection', (err) => writeCrash('UNHANDLED_REJECTION', err));
 } catch { /* logging setup is best-effort */ }
-const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification, globalShortcut, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification, globalShortcut, nativeImage, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const WebSocket = require('ws');
 const { createWindowStateStore } = require('./electron/windowState.cjs');
 const { shouldNotify, notificationContent } = require('./electron/notify.cjs');
 const { computeCaptureGeometry, selectScreenSource } = require('./electron/snipGeometry.cjs');
+const { createTransferStateStore } = require('./electron/transferState.cjs');
+const {
+  DEV_ORIGIN,
+  isTrustedSender,
+  getSenderUrl,
+  validateEngineMessage,
+  validateOpenPathArg,
+  validateAccelerator,
+  validateShowOpenDialogOptions,
+  validateSessionId,
+} = require('./electron/ipcValidation.cjs');
+const {
+  buildContentSecurityPolicy,
+  withCspResponseHeaders,
+  createPermissionRequestHandler,
+  createPermissionCheckHandler,
+  guardWillNavigate,
+  windowOpenDecision,
+  shouldGuardWebContents,
+} = require('./electron/securityPolicy.cjs');
+
+// S3-M7: the floating-window transfer state (full chat history +
+// draft input) lives ONLY in this main-process store — never in
+// renderer localStorage, where any renderer script could read it.
+const floatingTransferState = createTransferStateStore();
 
 const isDev = process.env.NODE_ENV === 'development';
+
+// S3-M2: shell hardening — electron/securityPolicy.cjs owns every
+// decision; the code below is only wiring. The trust options are
+// the S3-M3 sender rule (dev origin, or dist/index.html in prod).
+function securityPolicyOptions() {
+  return {
+    isDev,
+    appIndexPath: path.join(__dirname, 'dist', 'index.html'),
+  };
+}
+
+function installSecurityPolicy() {
+  const options = securityPolicyOptions();
+  // Permission handlers live on the default session: deny by
+  // default, allow only the small justified set, and only from the
+  // app's own page. The <webview> preview guests (M01) use their
+  // own 'aether-preview' partition session and are untouched.
+  session.defaultSession.setPermissionRequestHandler(
+    createPermissionRequestHandler(options, (msg) => console.warn(msg))
+  );
+  session.defaultSession.setPermissionCheckHandler(
+    createPermissionCheckHandler(options)
+  );
+  // CSP delivery: production ships the policy as a <meta> tag in
+  // index.html (the built page loads from file://, where response
+  // headers cannot deliver one). In dev, vite.config.js strips
+  // that tag and this header serves the relaxed dev-only policy
+  // (Vite HMR needs inline/eval) on the dev origin instead.
+  if (isDev) {
+    session.defaultSession.webRequest.onHeadersReceived(
+      { urls: [`${DEV_ORIGIN}/*`], types: ['mainFrame'] },
+      (details, callback) => {
+        callback({
+          responseHeaders: withCspResponseHeaders(
+            details.responseHeaders,
+            buildContentSecurityPolicy({ isDev: true })
+          ),
+        });
+      }
+    );
+  }
+}
+
+// S3-M2: navigation + window-open guards for the app's OWN windows
+// only. shouldGuardWebContents leaves <webview> preview guests
+// alone (navigating them is the M01 preview feature) and skips
+// devtools / background contents. A navigation away from the app's
+// own page is cancelled inside guardWillNavigate; window.open is
+// always denied — the renderer has no window.open call site, and
+// opening local files already goes through the guarded
+// 'open-path' IPC.
+app.on('web-contents-created', (_event, contents) => {
+  if (!shouldGuardWebContents(contents)) return;
+  contents.on('will-navigate', (navEvent, url) => {
+    if (!guardWillNavigate(navEvent, url, securityPolicyOptions())) {
+      console.warn(`[security] Blocked navigation away from the app: ${url}`);
+    }
+  });
+  contents.setWindowOpenHandler(() => windowOpenDecision());
+});
 
 let mainWindow = null;
 let floatingChatWindow = null;
@@ -171,6 +256,11 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      // S3-M2: sandboxed renderer. preload.cjs requires only
+      // 'electron' (contextBridge + ipcRenderer), which is exactly
+      // the API set a sandboxed preload is allowed — pinned by
+      // electron/__tests__/securityPolicy.test.js.
+      sandbox: true,
       // M01: ProjectPreview renders dev-server previews in a
       // <webview> guest (separate WebContents, own session
       // partition, no preload) so previewed content can never
@@ -238,6 +328,8 @@ function createFloatingChat(sessionId) {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      // S3-M2: sandboxed renderer, same as the main window.
+      sandbox: true,
       // M01: same renderer bundle as the main window — see there.
       webviewTag: true,
       preload: path.join(__dirname, 'preload.cjs')
@@ -245,15 +337,22 @@ function createFloatingChat(sessionId) {
   });
 
   if (isDev) {
-    floatingChatWindow.loadURL(`http://localhost:5173?floating=true&session=${sessionId || ''}`);
+    floatingChatWindow.loadURL(`http://localhost:5173?floating=true&session=${encodeURIComponent(sessionId || '')}`);
   } else {
     floatingChatWindow.loadFile(path.join(__dirname, 'dist/index.html'), { query: { floating: 'true', session: sessionId || '' } });
   }
 
   floatingChatWindow.on('closed', () => {
     floatingChatWindow = null;
+    // S3-M7: the floating window has closed for real, so the
+    // transfer state is cleared from main-process memory. The final
+    // snapshot rides WITH the 'chat-attached' event (captured before
+    // the clear) so the main window can still restore the floating
+    // window's edits without the state persisting anywhere.
+    const transferSnapshot = floatingTransferState.get();
+    floatingTransferState.clear();
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('chat-attached');
+      mainWindow.webContents.send('chat-attached', transferSnapshot);
     }
   });
 }
@@ -287,6 +386,7 @@ function registerSnipGlobalShortcut(shortcut) {
 
 app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return;
+  installSecurityPolicy();
   createWindow();
   connectEngine();
   createTray();
@@ -317,17 +417,43 @@ app.on('window-all-closed', () => {
 });
 
 // IPC handlers
+//
+// S3-M3: trust boundary. Every handler below is a privileged
+// action (engine relay, native dialogs, global shortcuts, shell
+// open, screen capture). The sender is validated ONCE here, in
+// this shared guard: the invoking frame's URL must be the app's
+// own page — http://localhost:5173 in dev, dist/index.html as a
+// file:// URL in production, for either the main window or the
+// floating window (see electron/ipcValidation.cjs). A refusal is
+// logged and the handler returns its shape's refusal value
+// (null / false / error string) or throws where the handler's
+// existing error shape is a throw. Renderer arguments for the
+// privileged handlers are validated with the same module.
+function isTrustedIpcSender(event, channel) {
+  const trusted = isTrustedSender(event, {
+    isDev,
+    appIndexPath: path.join(__dirname, 'dist', 'index.html'),
+  });
+  if (!trusted) {
+    console.warn(`[ipc] Refused '${channel}' from untrusted sender: ${getSenderUrl(event) || '(no URL)'}`);
+  }
+  return trusted;
+}
+
 ipcMain.handle('close-window', (event) => {
+  if (!isTrustedIpcSender(event, 'close-window')) return;
   const win = BrowserWindow.fromWebContents(event.sender)
   if (win) win.close()
 });
 
 ipcMain.handle('minimize-window', (event) => {
+  if (!isTrustedIpcSender(event, 'minimize-window')) return;
   const win = BrowserWindow.fromWebContents(event.sender)
   if (win) win.minimize()
 });
 
 ipcMain.handle('select-directory', async (event) => {
+  if (!isTrustedIpcSender(event, 'select-directory')) return null;
   const win = BrowserWindow.fromWebContents(event.sender);
   const result = await dialog.showOpenDialog(win, {
     properties: ['openDirectory', 'createDirectory'],
@@ -341,6 +467,7 @@ ipcMain.handle('select-directory', async (event) => {
 });
 
 ipcMain.handle('maximize-window', (event) => {
+  if (!isTrustedIpcSender(event, 'maximize-window')) return;
   const win = BrowserWindow.fromWebContents(event.sender)
   if (win) {
     if (win.isMaximized()) win.unmaximize()
@@ -348,7 +475,10 @@ ipcMain.handle('maximize-window', (event) => {
   }
 });
 
-ipcMain.handle('open-logs-folder', async () => {
+ipcMain.handle('open-logs-folder', async (event) => {
+  if (!isTrustedIpcSender(event, 'open-logs-folder')) {
+    throw new Error('Refused to open the logs folder: untrusted sender.');
+  }
   const path = require('path');
   const os = require('os');
   const fs = require('fs');
@@ -358,36 +488,82 @@ ipcMain.handle('open-logs-folder', async () => {
   await shell.openPath(dir);
   return dir;
 });
-ipcMain.handle('get-ws-status', () => {
+ipcMain.handle('get-ws-status', (event) => {
+  if (!isTrustedIpcSender(event, 'get-ws-status')) return false;
   return wsClient && wsClient.readyState === WebSocket.OPEN;
 });
 
 ipcMain.on('engine-send', (event, msg) => {
+  if (!isTrustedIpcSender(event, 'engine-send')) return;
+  const check = validateEngineMessage(msg);
+  if (!check.ok) {
+    console.warn(`[ipc] Refused engine-send message: ${check.error}`);
+    return;
+  }
   if (wsClient && wsClient.readyState === WebSocket.OPEN) {
-    wsClient.send(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    wsClient.send(check.value);
   }
 });
 
 ipcMain.handle('open-floating-chat', (event, sessionId) => {
-  createFloatingChat(sessionId);
+  if (!isTrustedIpcSender(event, 'open-floating-chat')) return;
+  const check = validateSessionId(sessionId);
+  if (!check.ok) {
+    console.warn(`[ipc] Refused open-floating-chat: ${check.error}`);
+    return;
+  }
+  createFloatingChat(check.value);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('chat-detached');
   }
 });
 
-ipcMain.handle('close-floating-chat', () => {
+ipcMain.handle('close-floating-chat', (event) => {
+  if (!isTrustedIpcSender(event, 'close-floating-chat')) return;
   if (floatingChatWindow && !floatingChatWindow.isDestroyed()) {
     floatingChatWindow.close();
   }
 });
 
-ipcMain.handle('get-memory-usage', () => {
+// S3-M7: floating-window transfer state — main-process memory only.
+// The renderer sets it on detach, the floating window reads it on
+// load (surviving its own renderer refresh) and writes its edits
+// back; main clears it when the floating window closes (see the
+// 'closed' handler in createFloatingChat). S3-M3: the transfer
+// state is chat content, so these handlers sit behind the same
+// sender guard as every other privileged handler.
+ipcMain.handle('set-floating-transfer-state', (event, state) => {
+  if (!isTrustedIpcSender(event, 'set-floating-transfer-state')) return false;
+  return floatingTransferState.set(state);
+});
+
+ipcMain.handle('get-floating-transfer-state', (event) => {
+  if (!isTrustedIpcSender(event, 'get-floating-transfer-state')) return null;
+  return floatingTransferState.get();
+});
+
+ipcMain.handle('clear-floating-transfer-state', (event) => {
+  if (!isTrustedIpcSender(event, 'clear-floating-transfer-state')) return false;
+  floatingTransferState.clear();
+  return true;
+});
+
+ipcMain.handle('get-memory-usage', (event) => {
+  if (!isTrustedIpcSender(event, 'get-memory-usage')) {
+    throw new Error('Refused memory usage request: untrusted sender.');
+  }
   return Math.round(process.memoryUsage().rss / 1024 / 1024);
 });
 
 ipcMain.handle('show-open-dialog', async (event, options) => {
+  if (!isTrustedIpcSender(event, 'show-open-dialog')) return null;
+  const check = validateShowOpenDialogOptions(options);
+  if (!check.ok) {
+    console.warn(`[ipc] Refused show-open-dialog options: ${check.error}`);
+    return null;
+  }
   const win = BrowserWindow.fromWebContents(event.sender);
-  const result = await dialog.showOpenDialog(win, options || {
+  const result = await dialog.showOpenDialog(win, check.value || {
     properties: ['openDirectory'],
     title: 'Select Folder'
   });
@@ -396,17 +572,27 @@ ipcMain.handle('show-open-dialog', async (event, options) => {
 });
 
 // Epic 8, E8-4.1: Snip IPC handlers
-ipcMain.handle('trigger-snip', () => {
+ipcMain.handle('trigger-snip', (event) => {
+  if (!isTrustedIpcSender(event, 'trigger-snip')) return false;
   triggerSnipFlow();
   return true;
 });
 
-ipcMain.handle('get-snip-shortcut', () => {
+ipcMain.handle('get-snip-shortcut', (event) => {
+  if (!isTrustedIpcSender(event, 'get-snip-shortcut')) {
+    throw new Error('Refused snip shortcut request: untrusted sender.');
+  }
   return currentSnipShortcut;
 });
 
 ipcMain.handle('register-snip-shortcut', (event, shortcut) => {
-  registerSnipGlobalShortcut(shortcut);
+  if (!isTrustedIpcSender(event, 'register-snip-shortcut')) return currentSnipShortcut;
+  const check = validateAccelerator(shortcut);
+  if (!check.ok) {
+    console.warn(`[ipc] Refused snip shortcut: ${check.error}`);
+    return currentSnipShortcut;
+  }
+  registerSnipGlobalShortcut(check.value);
   return currentSnipShortcut;
 });
 
@@ -417,6 +603,9 @@ ipcMain.handle('register-snip-shortcut', (event, shortcut) => {
 // rejects, and the overlay tells the user the snip failed — there
 // is no synthetic image and no fabricated success.
 ipcMain.handle('capture-screen', async (event, rect) => {
+  if (!isTrustedIpcSender(event, 'capture-screen')) {
+    throw new Error('Screen capture failed: untrusted sender.');
+  }
   const { desktopCapturer, screen } = require('electron');
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || win.isDestroyed()) {
@@ -455,9 +644,9 @@ ipcMain.handle('capture-screen', async (event, rect) => {
 // "Open externally" action). Resolves to '' on success or the
 // shell's error string — the renderer surfaces it, never a picker.
 ipcMain.handle('open-path', async (event, filePath) => {
-  if (!filePath || typeof filePath !== 'string') {
-    return 'No file path was provided.';
-  }
+  if (!isTrustedIpcSender(event, 'open-path')) return 'Refused: untrusted sender.';
+  const check = validateOpenPathArg(filePath);
+  if (!check.ok) return check.error;
   const { shell } = require('electron');
-  return shell.openPath(filePath);
+  return shell.openPath(check.value);
 });

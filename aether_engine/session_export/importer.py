@@ -26,6 +26,100 @@ from aether_engine.memory import session_store
 
 logger = logging.getLogger("aether_engine.session_export.importer")
 
+# M15 residual (EGM S4 M12): format gate + size caps.
+#
+# Every export this app produces carries ``format_version: 1`` (the
+# exporter's payload builder stamps it on both the JSON form and the
+# ZIP's session.json). Import validates it before anything is
+# written: a foreign file that merely has a ``messages`` list is not
+# an Aether export and is refused.
+SUPPORTED_FORMAT_VERSIONS = (1,)
+
+# Size caps, sized far beyond any real session — a transcript is
+# text and attachments are user-shared files — while bounding what
+# a hostile or corrupt archive can make the importer expand into
+# memory/disk before a refusal can occur (zip-bomb exposure).
+MAX_IMPORT_MEMBERS = 10_000  # session.json + transcript + attachments
+MAX_IMPORT_MEMBER_BYTES = 512 * 1024 * 1024  # one member, expanded
+MAX_IMPORT_TOTAL_BYTES = 2 * 1024 * 1024 * 1024  # all members, expanded
+MAX_SESSION_JSON_BYTES = 64 * 1024 * 1024  # session.json is parsed in memory
+MAX_IMPORT_JSON_BYTES = 256 * 1024 * 1024  # whole JSON-form payload
+
+
+def _validate_format_version(session_data: dict[str, Any]) -> None:
+    """Refuse anything that is not a supported Aether export."""
+    version = session_data.get("format_version")
+    if version is None:
+        raise ValueError(
+            "Not an Aether session export: missing format_version"
+        )
+    if version not in SUPPORTED_FORMAT_VERSIONS:
+        supported = ", ".join(str(v) for v in SUPPORTED_FORMAT_VERSIONS)
+        raise ValueError(
+            f"Unsupported session export format_version: {version!r} "
+            f"(supported: {supported})"
+        )
+
+
+def _read_member_capped(
+    zf: zipfile.ZipFile, name: str, limit: int
+) -> bytes:
+    """Read one archive member, refusing past ``limit`` expanded bytes.
+
+    Streams in chunks so an oversized member is refused after
+    ``limit`` bytes instead of being expanded in full first.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    with zf.open(name, "r") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise ValueError(
+                    f"Archive member {name!r} exceeds the import size "
+                    f"cap of {limit} bytes"
+                )
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _stage_member_capped(
+    zf: zipfile.ZipFile,
+    name: str,
+    dest: Path,
+    *,
+    total_so_far: int,
+) -> int:
+    """Stream one member to ``dest``, enforcing the size caps.
+
+    Returns the member's expanded size. Raises ValueError the moment
+    the per-member cap or the running total cap is exceeded — the
+    caller stages into a throwaway directory, so a refusal here
+    leaves nothing behind.
+    """
+    written = 0
+    with zf.open(name, "r") as fh, dest.open("wb") as out:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > MAX_IMPORT_MEMBER_BYTES:
+                raise ValueError(
+                    f"Archive member {name!r} exceeds the per-file "
+                    f"import cap of {MAX_IMPORT_MEMBER_BYTES} bytes"
+                )
+            if total_so_far + written > MAX_IMPORT_TOTAL_BYTES:
+                raise ValueError(
+                    f"Archive exceeds the total import cap of "
+                    f"{MAX_IMPORT_TOTAL_BYTES} bytes (expanded)"
+                )
+            out.write(chunk)
+    return written
+
 
 def data_home() -> Path:
     return Path.home() / ".aether"
@@ -135,11 +229,15 @@ def import_session_json(content: str | None = None, file_path: str | Path | None
     """Validate and import a session from JSON string or file."""
     try:
         if content is not None:
+            if len(content) > MAX_IMPORT_JSON_BYTES:
+                return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": f"Session JSON exceeds the import size cap of {MAX_IMPORT_JSON_BYTES} bytes"}
             raw = content
         elif file_path is not None:
             p = Path(file_path)
             if not p.exists() or not p.is_file():
                 return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": f"File not found: {file_path}"}
+            if p.stat().st_size > MAX_IMPORT_JSON_BYTES:
+                return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": f"Session JSON exceeds the import size cap of {MAX_IMPORT_JSON_BYTES} bytes"}
             raw = p.read_text(encoding="utf-8")
         else:
             return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": "No content or file_path provided"}
@@ -147,6 +245,8 @@ def import_session_json(content: str | None = None, file_path: str | Path | None
         data = json.loads(raw)
         if not isinstance(data, dict):
             return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": "Session JSON must be an object"}
+
+        _validate_format_version(data)
 
         if "messages" not in data or not isinstance(data["messages"], list):
             return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": "Session JSON missing valid 'messages' list"}
@@ -161,6 +261,8 @@ def import_session_json(content: str | None = None, file_path: str | Path | None
         }
     except json.JSONDecodeError as e:
         return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": f"Invalid JSON format: {e}"}
+    except ValueError as e:
+        return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": str(e)}
     except Exception as e:
         logger.exception("Failed to import session from JSON")
         return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": f"Import failed: {e}"}
@@ -267,6 +369,12 @@ def import_session_archive(archive_path: str | Path | None = None, content: str 
     (M14); the staged files are placed last, and if placing them fails
     the restored session is deleted again. A refused import therefore
     leaves no session, no messages, and no extracted files behind.
+
+    Validation happens before any of that (M15 residual, EGM S4 M12):
+    the payload must carry a supported ``format_version`` and the
+    archive must fit the size caps (member count, per-member and
+    total expanded bytes), enforced on the declared sizes AND again
+    while streaming members into staging.
     """
     staging_dir: Path | None = None
     try:
@@ -294,21 +402,42 @@ def import_session_archive(archive_path: str | Path | None = None, content: str 
 
             file_obj.seek(0)
             with zipfile.ZipFile(file_obj, "r") as zf:
-                member_names = zf.namelist()
+                infos = zf.infolist()
+                member_names = [info.filename for info in infos]
 
                 # 1. Zip-slip verification for all members
                 dummy_target = Path("/tmp/check")
                 for member_name in member_names:
                     _validate_zip_member(member_name, dummy_target)
 
+                # 1b. Size caps (M15 residual): refuse on the
+                # archive's declared shape before expanding anything,
+                # and enforce the same caps again while streaming
+                # below, so a lying header cannot sneak past.
+                if len(infos) > MAX_IMPORT_MEMBERS:
+                    return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": f"Archive has too many members ({len(infos)} > {MAX_IMPORT_MEMBERS})"}
+                declared_total = 0
+                for info in infos:
+                    if info.file_size > MAX_IMPORT_MEMBER_BYTES:
+                        return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": f"Archive member {info.filename!r} exceeds the per-file import cap of {MAX_IMPORT_MEMBER_BYTES} bytes"}
+                    if info.filename == "session.json" and info.file_size > MAX_SESSION_JSON_BYTES:
+                        return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": f"session.json exceeds the import size cap of {MAX_SESSION_JSON_BYTES} bytes"}
+                    declared_total += info.file_size
+                if declared_total > MAX_IMPORT_TOTAL_BYTES:
+                    return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": f"Archive exceeds the total import cap of {MAX_IMPORT_TOTAL_BYTES} bytes (expanded)"}
+
                 # 2. Check for session.json and validate its shape
                 if "session.json" not in member_names:
                     return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": "Archive missing session.json"}
 
-                raw_json = zf.read("session.json").decode("utf-8")
+                raw_json = _read_member_capped(
+                    zf, "session.json", MAX_SESSION_JSON_BYTES
+                ).decode("utf-8")
                 session_data = json.loads(raw_json)
                 if not isinstance(session_data, dict) or not isinstance(session_data.get("messages"), list):
                     return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": "Corrupt or invalid session archive"}
+
+                _validate_format_version(session_data)
 
                 # 3. Stage every attachment member BEFORE any state
                 # change. Reading a member verifies its CRC, so a
@@ -317,12 +446,16 @@ def import_session_archive(archive_path: str | Path | None = None, content: str 
                 # untouched — instead of after the session is committed.
                 staging_dir = Path(tempfile.mkdtemp(prefix="aether-import-"))
                 staged: dict[str, Path] = {}
+                staged_total = 0
                 for member_name in member_names:
                     if member_name.startswith("attachments/") and not member_name.endswith("/"):
                         rel_path = member_name[len("attachments/"):]
                         staged_path = _validate_zip_member(rel_path, staging_dir)
                         staged_path.parent.mkdir(parents=True, exist_ok=True)
-                        staged_path.write_bytes(zf.read(member_name))
+                        staged_total += _stage_member_capped(
+                            zf, member_name, staged_path,
+                            total_so_far=staged_total,
+                        )
                         staged[rel_path] = staged_path
 
                 # 4. Choose the restored session's id and reconnect the

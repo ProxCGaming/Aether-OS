@@ -56,7 +56,7 @@ class TestEngineWebSocket(unittest.TestCase):
                 pass
             self.assertEqual(cm.exception.code, 1008)
 
-            with self.assertRaises(WebSocketDisconnect) as cm, client.websocket_connect("/ws/tasks?token=invalid_token_12345"):
+            with self.assertRaises(WebSocketDisconnect) as cm, client.websocket_connect("/ws/tasks", headers={"Authorization": "Bearer invalid_token_12345"}):
                 pass
             self.assertEqual(cm.exception.code, 1008)
 
@@ -67,7 +67,7 @@ class TestEngineWebSocket(unittest.TestCase):
     def test_websocket_authenticated_and_hello(self):
         with TestClient(app) as client:
             valid_token = engine_state.auth_token
-            with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+            with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
                 msg_text = ws.receive_text()
                 hello_event = Event.from_json(msg_text)
                 self.assertEqual(hello_event.type, EventType.HELLO)
@@ -86,7 +86,7 @@ class TestEngineWebSocket(unittest.TestCase):
                 from aether_engine.secrets.storage import ProviderNotFoundError
                 mock_store.load_provider.side_effect = ProviderNotFoundError("Not found")
 
-                with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+                with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
                     ws.receive_text()  # HELLO
 
                     start_event = Event(
@@ -118,7 +118,7 @@ class TestEngineWebSocket(unittest.TestCase):
                 mock_provider.call_stream = mock_call_stream
                 mock_factory.return_value = mock_provider
 
-                with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+                with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
                     ws.receive_text()  # HELLO
 
                     start_event = Event(
@@ -170,7 +170,7 @@ class TestEngineWebSocket(unittest.TestCase):
                 mock_provider.call_stream = slow_call_stream
                 mock_factory.return_value = mock_provider
 
-                with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+                with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
                     ws.receive_text()  # HELLO
 
                     start_event = Event(
@@ -205,7 +205,7 @@ class TestEngineWebSocket(unittest.TestCase):
     def test_provider_list_request(self):
         with TestClient(app) as client:
             valid_token = engine_state.auth_token
-            with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+            with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
                 ws.receive_text()  # HELLO
 
                 list_req = Event(type=EventType.PROVIDER_LIST_REQUEST)
@@ -228,7 +228,7 @@ class TestEngineWebSocket(unittest.TestCase):
                 mock_store.save_provider.return_value = None
                 mock_store.delete_provider.return_value = True
 
-                with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+                with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
                     ws.receive_text()  # HELLO
 
                     # Save
@@ -294,7 +294,7 @@ class TestEngineWebSocket(unittest.TestCase):
                 mock_store.list_providers.return_value = [pname]
                 mock_store.delete_provider.return_value = True
 
-                with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+                with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
                     ws.receive_text()  # HELLO
 
                     # Seed config with a fully-configured custom provider
@@ -334,7 +334,7 @@ class TestEngineWebSocket(unittest.TestCase):
                     mock_store.save_provider.return_value = None
                     mock_store.load_provider.return_value = "sk-x"
 
-                    with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+                    with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
                         ws.receive_text()  # HELLO
 
                         save_req = Event(
@@ -377,7 +377,7 @@ class TestEngineWebSocket(unittest.TestCase):
     def test_model_set_default(self):
         with TestClient(app) as client:
             valid_token = engine_state.auth_token
-            with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+            with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
                 ws.receive_text()  # HELLO
 
                 set_req = Event(
@@ -444,7 +444,7 @@ class TestEditAndResendHardening(unittest.TestCase):
 
                 mock_store.load_provider.side_effect = ProviderNotFoundError("Not found")
 
-                with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+                with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
                     ws.receive_text()  # HELLO
                     ws.send_text(Event(
                         type=EventType.START_TASK,
@@ -465,7 +465,7 @@ class TestEditAndResendHardening(unittest.TestCase):
         session_id = self._seed_session()
         with TestClient(app) as client:
             valid_token = engine_state.auth_token
-            with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+            with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
                 ws.receive_text()  # HELLO
                 ws.send_text(Event(
                     type=EventType.SESSION_TRUNCATE_REQUEST,
@@ -485,6 +485,103 @@ class TestEditAndResendHardening(unittest.TestCase):
             m["content"] for m in self.session_store.get_session(session_id)["messages"]
         ]
         self.assertEqual(contents, ["same text", "first answer"])
+
+
+class TestAgentUpdateValidation(unittest.TestCase):
+    """S1-M9: AGENT_UPDATE_REQUEST must validate agent + model and
+    only report success when something was actually persisted."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp_dir.name)
+        self.token_file = self.tmp_path / "engine.token"
+        self.audit_file = self.tmp_path / "audit.log"
+        engine_state.token_path = self.token_file
+        engine_state.audit_logger.log_path = self.audit_file
+        self.token = engine_state.initialize_auth()
+        self.patcher = patch(
+            "aether_engine.memory.session_store.DB_PATH",
+            self.tmp_path / "test_memory.db",
+        )
+        self.patcher.start()
+        # Snapshot mutable config state
+        self._orig_agent_models = dict(engine_state.user_config.agent_models)
+        self._orig_agent_tools = dict(engine_state.user_config.agent_tools)
+        self._orig_configured = list(engine_state.configured_providers)
+        self._orig_provider_models = dict(engine_state.user_config.provider_models)
+        engine_state.user_config.agent_models = {}
+        engine_state.user_config.agent_tools = {}
+        engine_state.configured_providers = ["google_gemini"]
+        engine_state.user_config.provider_models = {"google_gemini": ["gemini-3.5-flash"]}
+
+    def tearDown(self):
+        engine_state.user_config.agent_models = self._orig_agent_models
+        engine_state.user_config.agent_tools = self._orig_agent_tools
+        engine_state.configured_providers = self._orig_configured
+        engine_state.user_config.provider_models = self._orig_provider_models
+        self.patcher.stop()
+        self.tmp_dir.cleanup()
+
+    def _send_update(self, payload):
+        with TestClient(app) as client:
+            valid_token = engine_state.auth_token
+            with client.websocket_connect(
+                "/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}
+            ) as ws:
+                ws.receive_text()  # HELLO
+                ws.send_text(Event(
+                    type=EventType.AGENT_UPDATE_REQUEST, payload=payload
+                ).to_json())
+                resp = Event.from_json(ws.receive_text())
+                self.assertEqual(resp.type, EventType.AGENT_UPDATE_RESPONSE)
+                return resp.payload
+
+    def test_unknown_agent_rejected(self):
+        payload = self._send_update({"agent_id": "no_such_agent", "model": "inherit"})
+        self.assertFalse(payload["success"])
+        self.assertIn("error", payload)
+        self.assertEqual(engine_state.user_config.agent_models, {})
+
+    def test_missing_agent_id_rejected(self):
+        payload = self._send_update({"model": "inherit"})
+        self.assertFalse(payload["success"])
+        self.assertIn("error", payload)
+        self.assertEqual(engine_state.user_config.agent_models, {})
+
+    def test_malformed_models_rejected(self):
+        for bad in ("nocolon", ":model", "provider:", "unknown-provider:model"):
+            with self.subTest(model=bad):
+                engine_state.user_config.agent_models = {}
+                engine_state.user_config.agent_tools = {}
+                payload = self._send_update(
+                    {"agent_id": "coder", "model": bad, "tools": ["x"]}
+                )
+                self.assertFalse(payload["success"], f"model={bad!r} should fail")
+                self.assertIn("error", payload)
+                self.assertEqual(engine_state.user_config.agent_models, {})
+                # Atomic: tools must not be persisted either
+                self.assertEqual(engine_state.user_config.agent_tools, {})
+
+    def test_valid_provider_model_succeeds(self):
+        payload = self._send_update(
+            {"agent_id": "coder", "model": "google_gemini:gemini-3.5-flash"}
+        )
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["agent_id"], "coder")
+        self.assertEqual(
+            engine_state.user_config.agent_models.get("coder"),
+            "google_gemini:gemini-3.5-flash",
+        )
+
+    def test_inherit_succeeds(self):
+        payload = self._send_update({"agent_id": "planner", "model": "inherit"})
+        self.assertTrue(payload["success"])
+        self.assertEqual(engine_state.user_config.agent_models.get("planner"), "inherit")
+
+    def test_nothing_to_update_rejected(self):
+        payload = self._send_update({"agent_id": "coder"})
+        self.assertFalse(payload["success"])
+        self.assertIn("error", payload)
 
 
 if __name__ == "__main__":

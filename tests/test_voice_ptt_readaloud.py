@@ -43,22 +43,27 @@ def _receive_until(ws, wanted, max_events=40):
 
 
 class FakeStt:
-    def __init__(self, script=(), reason=None):
+    def __init__(self, script=(), reason=None, transcribe_error=None):
         self.script = list(script)
         self.reason = reason
+        self.transcribe_error = transcribe_error
         self.calls = []
+        self.open_calls = 0
+        self.close_calls = 0
 
     def unavailable_reason(self):
         return self.reason
 
     async def open(self):
-        pass
+        self.open_calls += 1
 
     async def close(self):
-        pass
+        self.close_calls += 1
 
     async def transcribe(self, audio: bytes, *, sample_rate: int) -> str:
         self.calls.append((len(audio), sample_rate))
+        if self.transcribe_error is not None:
+            raise self.transcribe_error
         if self.script:
             return self.script.pop(0)
         return ""
@@ -68,15 +73,17 @@ class FakeTts:
     def __init__(self, reason=None):
         self.reason = reason
         self.requests = []
+        self.open_calls = 0
+        self.close_calls = 0
 
     def unavailable_reason(self):
         return self.reason
 
     async def open(self):
-        pass
+        self.open_calls += 1
 
     async def close(self):
-        pass
+        self.close_calls += 1
 
     async def synthesize(self, text: str, *, voice: str):
         self.requests.append((text, voice))
@@ -112,7 +119,7 @@ class TestDictationWebsocket:
             ws_module, "create_stt_engine",
             lambda: FakeStt(reason="faster-whisper is not installed (local STT)"))
         with ExitStack(), TestClient(app) as client, client.websocket_connect(
-            f"/ws/tasks?token={engine_state.auth_token}"
+            "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}
         ) as ws:
             ws.receive_text()  # HELLO
             ws.send_text(
@@ -132,7 +139,7 @@ class TestDictationWebsocket:
         monkeypatch.setattr(ws_module, "create_stt_engine", lambda: fake_stt)
 
         with ExitStack(), TestClient(app) as client, client.websocket_connect(
-            f"/ws/tasks?token={engine_state.auth_token}"
+            "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}
         ) as ws:
             ws.receive_text()  # HELLO
 
@@ -191,7 +198,7 @@ class TestReadAloudWebsocket:
             ws_module, "create_tts_engine",
             lambda: FakeTts(reason="kokoro is not installed (local TTS)"))
         with ExitStack(), TestClient(app) as client, client.websocket_connect(
-            f"/ws/tasks?token={engine_state.auth_token}"
+            "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}
         ) as ws:
             ws.receive_text()  # HELLO
             ws.send_text(
@@ -212,7 +219,7 @@ class TestReadAloudWebsocket:
         monkeypatch.setattr(ws_module, "create_tts_engine", lambda: fake_tts)
 
         with ExitStack(), TestClient(app) as client, client.websocket_connect(
-            f"/ws/tasks?token={engine_state.auth_token}"
+            "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}
         ) as ws:
             ws.receive_text()  # HELLO
             ws.send_text(
@@ -242,7 +249,7 @@ class TestReadAloudWebsocket:
         monkeypatch.setattr(ws_module, "create_tts_engine", lambda: fake_tts)
 
         with ExitStack(), TestClient(app) as client, client.websocket_connect(
-            f"/ws/tasks?token={engine_state.auth_token}"
+            "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}
         ) as ws:
             ws.receive_text()  # HELLO
             ws.send_text(
@@ -253,3 +260,146 @@ class TestReadAloudWebsocket:
             )
             events = _receive_until(ws, EventType.READ_ALOUD_STOP_RESPONSE)
             assert events[-1].payload["ok"] is True
+
+
+def _wait_for_final_read_aloud_chunk(ws, max_events=20):
+    for _ in range(max_events):
+        ev = Event.from_json(ws.receive_text())
+        if ev.type == EventType.READ_ALOUD_CHUNK and ev.payload.get("is_final"):
+            return ev
+    raise AssertionError("final READ_ALOUD_CHUNK not received")
+
+
+class TestSpeechEngineCachingS4M7:
+    """S4-M7: speech engines are per-connection, not per chunk/request,
+    and a dictation-stop transcription failure is reported, not
+    swallowed as empty success."""
+
+    def test_dictation_reuses_one_stt_engine_and_opens_once(self, ws_env, monkeypatch):
+        fake_stt = FakeStt(["hello", "hello world", "final transcript"])
+        factory_calls = {"count": 0}
+
+        def counting_factory():
+            factory_calls["count"] += 1
+            return fake_stt
+
+        monkeypatch.setattr(ws_module, "create_stt_engine", counting_factory)
+
+        with ExitStack(), TestClient(app) as client, client.websocket_connect(
+            "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}
+        ) as ws:
+            ws.receive_text()  # HELLO
+            ws.send_text(
+                Event(
+                    type=EventType.DICTATION_START_REQUEST,
+                    payload={"session_id": "s1"},
+                ).to_json()
+            )
+            events = _receive_until(ws, EventType.DICTATION_START_RESPONSE)
+            assert events[-1].payload["ok"] is True
+
+            for audio, expected in (
+                (b"audio_bytes_1", "hello"),
+                (b"audio_bytes_2", "hello world"),
+            ):
+                ws.send_text(
+                    Event(
+                        type=EventType.DICTATION_CHUNK_REQUEST,
+                        payload={
+                            "session_id": "s1",
+                            "audio": base64.b64encode(audio).decode("ascii"),
+                            "sample_rate": 16000,
+                            "is_final": False,
+                        },
+                    ).to_json()
+                )
+                events = _receive_until(ws, EventType.DICTATION_CHUNK_RESPONSE)
+                assert events[-1].payload["ok"] is True
+                assert events[-1].payload["text"] == expected
+
+            ws.send_text(
+                Event(
+                    type=EventType.DICTATION_STOP_REQUEST,
+                    payload={
+                        "session_id": "s1",
+                        "audio": base64.b64encode(b"audio_bytes_final").decode("ascii"),
+                        "sample_rate": 16000,
+                    },
+                ).to_json()
+            )
+            events = _receive_until(ws, EventType.DICTATION_STOP_RESPONSE)
+            assert events[-1].payload["ok"] is True
+            assert events[-1].payload["text"] == "final transcript"
+
+            assert factory_calls["count"] == 1
+            assert fake_stt.open_calls == 1
+        # Engines live for the connection and close at teardown.
+        assert fake_stt.close_calls == 1
+
+    def test_dictation_stop_reports_transcribe_error(self, ws_env, monkeypatch):
+        fake_stt = FakeStt(transcribe_error=RuntimeError("whisper exploded"))
+        monkeypatch.setattr(ws_module, "create_stt_engine", lambda: fake_stt)
+
+        with ExitStack(), TestClient(app) as client, client.websocket_connect(
+            "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}
+        ) as ws:
+            ws.receive_text()  # HELLO
+            ws.send_text(
+                Event(
+                    type=EventType.DICTATION_START_REQUEST,
+                    payload={"session_id": "s1"},
+                ).to_json()
+            )
+            events = _receive_until(ws, EventType.DICTATION_START_RESPONSE)
+            assert events[-1].payload["ok"] is True
+
+            ws.send_text(
+                Event(
+                    type=EventType.DICTATION_STOP_REQUEST,
+                    payload={
+                        "session_id": "s1",
+                        "audio": base64.b64encode(b"audio_bytes_final").decode("ascii"),
+                        "sample_rate": 16000,
+                    },
+                ).to_json()
+            )
+            events = _receive_until(ws, EventType.DICTATION_STOP_RESPONSE)
+        payload = events[-1].payload
+        assert payload["ok"] is False
+        assert payload["text"] == ""
+        assert payload["error"]
+        assert "whisper exploded" in payload["error"]
+
+    def test_read_aloud_reuses_one_tts_engine_across_starts(self, ws_env, monkeypatch):
+        fake_tts = FakeTts()
+        factory_calls = {"count": 0}
+
+        def counting_factory():
+            factory_calls["count"] += 1
+            return fake_tts
+
+        monkeypatch.setattr(ws_module, "create_tts_engine", counting_factory)
+
+        with ExitStack(), TestClient(app) as client, client.websocket_connect(
+            "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}
+        ) as ws:
+            ws.receive_text()  # HELLO
+            for message_id, text in (
+                ("m1", "Hello assistant."),
+                ("m2", "Second message."),
+            ):
+                ws.send_text(
+                    Event(
+                        type=EventType.READ_ALOUD_START_REQUEST,
+                        payload={"message_id": message_id, "text": text},
+                    ).to_json()
+                )
+                events = _receive_until(ws, EventType.READ_ALOUD_START_RESPONSE)
+                assert events[-1].payload["ok"] is True
+                assert events[-1].payload["message_id"] == message_id
+                final = _wait_for_final_read_aloud_chunk(ws)
+                assert final.payload["message_id"] == message_id
+
+            assert factory_calls["count"] == 1
+            assert fake_tts.open_calls == 1
+        assert fake_tts.close_calls == 1

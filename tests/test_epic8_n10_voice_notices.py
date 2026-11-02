@@ -235,7 +235,7 @@ class TestVoiceEscalationNotices:
             stack.enter_context(patch.object(
                 ws_module, "run_langgraph_task", side_effect=fake_graph))
             with TestClient(app) as client, client.websocket_connect(
-                    f"/ws/tasks?token={engine_state.auth_token}") as ws:
+                    "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws:
                 ws.receive_text()  # HELLO
                 _start_voice_session(ws, sid)
                 events = _receive_until(ws, lambda evs: any(
@@ -315,7 +315,7 @@ class TestVoiceEscalationNotices:
             stack.enter_context(patch.object(
                 ws_module, "run_langgraph_task", side_effect=fake_graph))
             with TestClient(app) as client, client.websocket_connect(
-                    f"/ws/tasks?token={engine_state.auth_token}") as ws:
+                    "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws:
                 ws.receive_text()  # HELLO
                 _start_voice_session(ws, sid)
                 _receive_until(ws, lambda evs: any(
@@ -374,7 +374,7 @@ class TestVoiceEscalationNotices:
             stack.enter_context(patch.object(
                 ws_module, "run_langgraph_task", side_effect=fake_graph))
             with TestClient(app) as client, client.websocket_connect(
-                    f"/ws/tasks?token={engine_state.auth_token}") as ws:
+                    "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws:
                 ws.receive_text()  # HELLO
                 _start_voice_session(ws, sid)
                 events = _receive_until(ws, lambda evs: any(

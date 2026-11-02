@@ -9,20 +9,20 @@ identifiers mentioned in the prompt rank first), rendered inside a
 Layers covered:
   * rag.repo_map — extraction (signatures only, no bodies), ranking,
     budget enforcement, .gitignore respect, freshness after an edit.
-  * langgraph.nodes.supervisor — the map lands in the supervisor's
-    prompt on the graph path; no workspace -> no map.
+  * langgraph.supervisor_model — the map lands in the production
+    create_supervisor routing prompt on the graph path (built by
+    langgraph.nodes.supervisor.repo_map_context); no workspace -> no map.
   * langgraph.fast_chat — the same prompt through fast chat contains
     zero repo-map tokens and never triggers a map build.
 """
 from unittest.mock import patch
 
 import pytest
-from langchain_core.runnables import RunnableConfig
 
 from aether_common.contracts import EventType
 from aether_engine.config import UserConfig
 from aether_engine.langgraph.fast_chat import run_fast_chat
-from aether_engine.langgraph.nodes.supervisor import supervisor_node
+from aether_engine.langgraph.supervisor_model import supervisor_routing_prompt
 from aether_engine.providers.base import StreamChunk
 from aether_engine.rag.repo_map import build_repo_map, estimate_tokens
 
@@ -204,21 +204,14 @@ def test_map_updates_after_file_edit(repo):
 
 # ---------------------------------------------------------------------------
 # Graph-path injection (supervisor)
+#
+# S1-M4: these tests originally called the hand-written supervisor
+# node, now removed. They drive the production create_supervisor
+# routing prompt (supervisor_model.supervisor_routing_prompt), which
+# appends the same repo_map_context section — mirroring the routing-
+# prompt test below. The run config reaches the prompt through
+# langgraph's var_child_runnable_config, as in a real graph run.
 # ---------------------------------------------------------------------------
-
-class InspectProvider:
-    """Records the messages the supervisor shows the model."""
-
-    def __init__(self):
-        self.received_messages = []
-
-    async def call_stream(self, messages, tools=None, node_name=None, **kwargs):
-        self.received_messages.extend(messages)
-        yield StreamChunk(
-            text='{"next": "planner", "reason": "test", "briefing": ""}',
-            finish_reason="stop",
-        )
-
 
 def _supervisor_state(prompt):
     return {
@@ -230,24 +223,29 @@ def _supervisor_state(prompt):
     }
 
 
-@pytest.mark.asyncio
-async def test_supervisor_prompt_contains_repo_map(repo):
-    provider = InspectProvider()
-    config = RunnableConfig(configurable={
-        "session_id": "test-session",
-        "provider": provider,
-        "workspace_roots": [str(repo)],
-        "user_config": UserConfig(),
-    })
-    await supervisor_node(_supervisor_state("fix compute_total"), config)
-    shown = "\n".join(str(m.get("content", "")) for m in provider.received_messages)
+def _routing_messages(state, configurable):
+    from langgraph.config import var_child_runnable_config
+
+    token = var_child_runnable_config.set({"configurable": configurable})
+    try:
+        return supervisor_routing_prompt(state)
+    finally:
+        var_child_runnable_config.reset(token)
+
+
+def test_supervisor_prompt_contains_repo_map(repo):
+    messages = _routing_messages(
+        _supervisor_state("fix compute_total"),
+        {"workspace_roots": [str(repo)], "user_config": UserConfig()},
+    )
+    shown = messages[0].content
     assert "Repository map" in shown
     assert "def compute_total(items):" in shown
 
 
 def test_routing_prompt_contains_repo_map(repo):
     """The live create_supervisor routing prompt (supervisor_model)
-    carries the same map section as supervisor_node."""
+    carries the map section built by repo_map_context."""
     from langgraph.config import var_child_runnable_config
 
     from aether_engine.langgraph.supervisor_model import supervisor_routing_prompt
@@ -270,16 +268,15 @@ def test_routing_prompt_contains_repo_map(repo):
     assert "def compute_total(items):" in messages[0].content
 
 
-@pytest.mark.asyncio
-async def test_supervisor_without_workspace_has_no_map():
-    provider = InspectProvider()
-    config = RunnableConfig(configurable={
-        "session_id": "test-session",
-        "provider": provider,
-        "user_config": UserConfig(),
-    })
-    await supervisor_node(_supervisor_state("hello"), config)
-    shown = "\n".join(str(m.get("content", "")) for m in provider.received_messages)
+def test_supervisor_without_workspace_has_no_map():
+    messages = _routing_messages(
+        _supervisor_state("hello"),
+        {"user_config": UserConfig()},
+    )
+    shown = "\n".join(
+        str(m.content if not isinstance(m, dict) else m.get("content", ""))
+        for m in messages
+    )
     assert "Repository map" not in shown
 
 

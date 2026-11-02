@@ -211,6 +211,7 @@ class LiteLLMProvider(BaseProvider):
         fallback_models: list[FallbackModel] | None = None,
         reasoning_effort: str = "standard",
         ttsr_rules: list | None = None,
+        record_usage: bool = True,
     ):
         api_key = api_key.strip() if api_key else ""
         if not api_key and provider_name not in ("custom_openai", "openai_compatible", "ollama"):
@@ -226,6 +227,13 @@ class LiteLLMProvider(BaseProvider):
         # Phase 9, B2: user-selected reasoning depth, forwarded to litellm for
         # reasoning-capable models ("standard" | "medium" | "high").
         self.reasoning_effort = reasoning_effort or "standard"
+        # R2-NEW-1: explicit recording opt-out for probe-originated
+        # calls. Reachability probes and capability self-tests are
+        # not agent work; with recording on, their abandoned streams
+        # wrote estimated ledger rows via the M19 early-close path
+        # and polluted the cost totals. Probes pass record_usage=
+        # False; every real call keeps the default.
+        self._usage_recording = record_usage
         # Epic 7, E7-02: TTSR stream rules (empty = off).
         from aether_engine.providers.ttsr import StreamRules
 
@@ -760,7 +768,10 @@ class LiteLLMProvider(BaseProvider):
         """Epic 8, E8-A8.1a: record one completed call in the usage
         ledger (see aether_engine.cost.ledger). Observational only —
         a recording failure must never break the call that produced
-        it, so this never raises."""
+        it, so this never raises. Instances built with
+        ``record_usage=False`` (probes — R2-NEW-1) never record."""
+        if not self._usage_recording:
+            return
         try:
             from aether_engine.cost.ledger import record_provider_call
 

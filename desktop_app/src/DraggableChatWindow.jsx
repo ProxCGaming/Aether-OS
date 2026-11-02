@@ -8,6 +8,7 @@ import SnipOverlay from './components/SnipOverlay';
 import CostHeaderPopover, { formatUsd } from './components/CostHeaderPopover';
 import ContextBar, { CompactContextBar } from './components/ContextBar';
 import VoiceOverlay from './components/VoiceOverlay';
+import { sanitizeSvg } from './sanitizeSvg';
 import './chat.css';
 
 export function getNodeStyle(nodeName = '') {
@@ -1017,8 +1018,9 @@ export function ScratchpadPanel({ scratchpad }) {
             background: 'rgba(0, 0, 0, 0.25)'
           }}
         >
+          {/* S3-M1 note is in sanitizeSvg.js: agent SVG is DOMPurify-sanitised before injection below. */}
           {kind === 'svg' && (
-            <div className="scratchpad-svg" dangerouslySetInnerHTML={{ __html: content }} />
+            <div className="scratchpad-svg" dangerouslySetInnerHTML={{ __html: sanitizeSvg(content) }} />
           )}
           {kind === 'mermaid' && (mermaidSvg ? (
             <div className="scratchpad-mermaid" dangerouslySetInnerHTML={{ __html: mermaidSvg }} />
@@ -1559,6 +1561,10 @@ export default function DraggableChatWindow({
   onVoiceStart = () => {},
   onVoiceStop = () => {},
   onVoiceDismissError = () => {},
+  voiceRtcAnswer = null,
+  voiceRtcRemoteCandidate = null,
+  onVoiceRtcOffer = () => {},
+  onVoiceRtcIceCandidate = () => {},
   dictationState = null,
   readAloudState = null,
   onDictationStart = null,
@@ -3367,6 +3373,10 @@ export default function DraggableChatWindow({
             playbackCut={voicePlaybackCut}
             onStop={onVoiceStop}
             onDismiss={onVoiceDismissError}
+            onRtcOffer={onVoiceRtcOffer}
+            rtcAnswer={voiceRtcAnswer}
+            onRtcIceCandidate={onVoiceRtcIceCandidate}
+            rtcRemoteCandidate={voiceRtcRemoteCandidate}
           />
         )}
 

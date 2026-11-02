@@ -454,8 +454,8 @@ class TestFailClosed:
         say so — the fail-closed contract the UI shows. Absence is
         simulated by hiding the packages from find_spec (the stages'
         only probe), so the test holds whether or not the packages
-        are installed in the environment — they are, since the voice
-        packaging slice declared them in pyproject."""
+        are installed in the environment — they are when the
+        ``voice`` extra is synced (S5-M7)."""
         import importlib.util
 
         from aether_engine.voice.stt import FasterWhisperStt
@@ -478,11 +478,31 @@ class TestFailClosed:
             reason = stage.unavailable_reason()
             assert reason is not None and "not installed" in reason
 
-    async def test_default_factory_fails_closed_in_this_environment(self):
+    async def test_default_factory_builds_in_this_environment(self):
+        """With the voice extra installed, the default factory
+        builds a pipeline here: the runtime deps are declared in
+        the ``voice`` extra (packaging slice; S5-M7 moved them out
+        of the hard dependencies) and the RTC transport is real
+        (F-12a). Construction opens nothing; fail-closed behaviour
+        for genuinely missing deps is pinned by the hidden-import
+        tests in test_voice_packaging.py. Without the extra the
+        factory correctly fails closed, so this test skips."""
+        import importlib.util
+
+        missing = [
+            name
+            for name in ("faster_whisper", "kokoro", "onnxruntime",
+                         "silero_vad")
+            if importlib.util.find_spec(name) is None
+        ]
+        if missing:
+            pytest.skip(
+                "voice extra not installed "
+                f"(uv sync --extra voice); missing: {missing}")
         pipeline, error = create_voice_pipeline(
             session_id="s", talker=FakeTalker(), emit=Emitter())
-        assert pipeline is None
-        assert error is not None and error.startswith("voice unavailable:")
+        assert error is None
+        assert pipeline is not None
 
 
 # ---------------------------------------------------------------------------
@@ -629,12 +649,19 @@ def _voice_stack(stack: ExitStack):
 
 class TestVoiceWebsocketHandlers:
     def test_start_fails_closed_when_stages_unavailable(self, ws_env):
-        """No voice deps in this environment: the start response is
-        ok=False with the honest reason, and no session task runs."""
+        """The factory reporting stages unavailable: the start
+        response is ok=False with the honest reason relayed
+        verbatim, and no session task runs."""
         with ExitStack() as stack:
             _voice_stack(stack)
+            stack.enter_context(patch(
+                "aether_engine.voice.pipeline.create_voice_pipeline",
+                return_value=(
+                    None,
+                    ("voice unavailable: faster-whisper is not "
+                     "installed (local STT)"))))
             with TestClient(app) as client, client.websocket_connect(
-                    f"/ws/tasks?token={engine_state.auth_token}") as ws:
+                    "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws:
                 ws.receive_text()  # HELLO
                 ws.send_text(Event(
                     type=EventType.VOICE_SESSION_START_REQUEST,
@@ -652,7 +679,7 @@ class TestVoiceWebsocketHandlers:
         with ExitStack() as stack:
             _voice_stack(stack)
             with TestClient(app) as client, client.websocket_connect(
-                    f"/ws/tasks?token={engine_state.auth_token}") as ws:
+                    "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws:
                 ws.receive_text()  # HELLO
                 ws.send_text(Event(
                     type=EventType.VOICE_SESSION_STOP_REQUEST,
@@ -696,7 +723,7 @@ class TestVoiceWebsocketHandlers:
             stack.enter_context(patch.object(
                 ws_module, "classify_intent", side_effect=_chat_verdict))
             with TestClient(app) as client, client.websocket_connect(
-                    f"/ws/tasks?token={engine_state.auth_token}") as ws:
+                    "/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws:
                 ws.receive_text()  # HELLO
                 ws.send_text(Event(
                     type=EventType.VOICE_SESSION_START_REQUEST,

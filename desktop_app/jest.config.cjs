@@ -8,4 +8,14 @@ module.exports = {
   transform: {
     '^.+\\.jsx?$': 'babel-jest',
   },
+  // Coverage (S5-M11): measurement only — no coverageThreshold, so a
+  // coverage run reports but never fails on a percentage. Run it with
+  // `npm run test:coverage` (see README "Test" section).
+  collectCoverageFrom: [
+    'src/**/*.{js,jsx}',
+    '!src/__tests__/**',
+    '!src/setupTests.js',
+  ],
+  coverageDirectory: 'coverage',
+  coverageReporters: ['text', 'lcov', 'html'],
 };

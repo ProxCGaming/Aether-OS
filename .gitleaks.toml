@@ -2,16 +2,43 @@
 # Extends the Gitleaks defaults; the allowlist below exists only so the
 # pre-commit hook does not false-positive on test fixture placeholders.
 # NEVER allowlist a real key pattern here.
+#
+# S5-M10: the allowlist must NEVER exempt whole paths. An earlier version
+# allowlisted every tests/ / fixtures/ / examples/ path, so a real key
+# committed in a test file was never scanned at all. The allowlist is now
+# value-shaped only — every entry matches the secret itself, in any file —
+# so a real-shaped key (sk-..., AIza..., ghp_..., AKIA..., or any long
+# high-entropy string) is flagged wherever it appears, test files
+# included, while the recognisable placeholder values the test suite
+# actually uses stay green.
 
 [extend]
 useDefault = true
 
 [allowlist]
-description = "Test fixture placeholders and test/example paths. Real key patterns must never be added."
+description = "Placeholder-shaped secret VALUES only (matched against the secret, in any file). No path exemptions: real-shaped keys are flagged even in test files."
 regexes = [
+  # Exact placeholder literals used by the test suite:
   '''secret-123''',
   '''<redacted>''',
-]
-paths = [
-  '''(?i)(^|/)(tests?|__tests__|fixtures?|examples?|testdata)(/|$)''',
+  '''secret-token-xyz-12345''',
+  # RFC 6238 base32 test seed used by the vault TOTP tests
+  # (desktop_app/src/components/Settings/__tests__/VaultPanelTotp.test.jsx)
+  # — a published test vector, not a credential:
+  '''GEZDGNBVGY3TQOJQ''',
+  # Placeholder-shaped values: a placeholder word plus optional short
+  # word/digit suffixes (test-key, test-key-123, test_key, fake-key,
+  # secret-token-xyz-12345, ...). Anchored to the whole secret, so a real
+  # high-entropy key never matches.
+  '''(?i)^(test|fake|example|sample|dummy|placeholder|mock|secret)([-_][a-z0-9]+)*$''',
+  # OpenAI-style test dummies used in fixtures: the sk-test family
+  # (sk-test, sk-test2, sk-test-C2SECRET-1234567890, ...) and lowercase
+  # word+digits dummies (sk-jsonsecret1234567890, sk-roundtrip1234567890,
+  # sk-abcdef1234567890abcdef). Both anchored to the whole secret; real
+  # keys are long, mixed-case and high-entropy, so they never match.
+  '''^sk-test[0-9]*([-_][A-Za-z0-9]+)*$''',
+  '''^sk-[a-z]+[0-9]+[a-z]*$''',
+  # AWS documentation-style dummy: AKIA followed by digits only
+  # (AKIA1234567890123456). Real access key ids are alphanumeric.
+  '''^AKIA[0-9]{16}$''',
 ]

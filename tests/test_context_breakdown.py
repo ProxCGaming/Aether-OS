@@ -178,7 +178,7 @@ def test_context_breakdown_and_budget_websocket_flow(tmp_path, monkeypatch):
 
     with TestClient(app) as client:
         token = engine_state.auth_token
-        with client.websocket_connect(f"/ws/tasks?token={token}") as ws:
+        with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {token}"}) as ws:
             # Receive HELLO
             hello = ws.receive_json()
             assert hello["type"] == EventType.HELLO.value

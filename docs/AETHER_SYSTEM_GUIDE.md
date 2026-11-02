@@ -1,6 +1,6 @@
 # AETHER System Architecture, Subsystems, Future Roadmap & AI Prompt Guide
 
-**AETHER** is a local, privacy-first desktop AI operating layer and intelligent assistant built for Windows. It features a hybrid multi-process architecture combining a PySide6 HUD desktop client with an asynchronous FastAPI engine over an authenticated loopback WebSocket.
+**AETHER** is a local, privacy-first desktop AI operating layer and intelligent assistant built for Windows. It features a hybrid multi-process architecture combining an Electron + React desktop client (`desktop_app/`) with an asynchronous FastAPI engine over an authenticated loopback WebSocket. (The original frontend was a PySide6 HUD in `aether_ui/`; it is retired — see the retirement note below.)
 
 > **Retirement note:** `aether_ui/` (PySide6) is retired — the live frontend is the Electron + React app in `desktop_app/` (ADR-0019), and PySide6 is installed only via the `legacy-ui` optional extra (`uv sync --extra legacy-ui`). The `aether_ui` descriptions below are kept as historical reference.
 
@@ -9,7 +9,7 @@
 ## Table of Contents
 1. [High-Level Architecture](#1-high-level-architecture)
 2. [Deep Dive: Core Subsystems](#2-deep-dive-core-subsystems)
-   - [A. Frontend Client (`aether_ui`)](#a-frontend-client-aether_ui)
+   - [A. Frontend Client (`desktop_app`)](#a-frontend-client-desktop_app)
    - [B. Backend Engine (`aether_engine`)](#b-backend-engine-aether_engine)
    - [C. Shared Contracts (`aether_common`)](#c-shared-contracts-aether_common)
    - [D. Process Sandboxing (`aether_worker`)](#d-process-sandboxing-aether_worker)
@@ -28,11 +28,11 @@ AETHER separates the user interface and the core execution engine into two decou
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │                                    AETHER DESKTOP                                      │
 ├────────────────────────────────────────────────────┬───────────────────────────────────┤
-│                  FRONTEND (aether_ui)              │          BACKEND (aether_engine)  │
+│                FRONTEND (desktop_app)              │          BACKEND (aether_engine)  │
 │                                                    │                                   │
 │  ┌──────────────────────────────────────────────┐  │  ┌─────────────────────────────┐  │
-│  │   Frameless Window & Geometry Persistence    │  │  │  FastAPI / Uvicorn Server   │  │
-│  │   (QPainter Orb HUD + Stream Log)            │  │  │  (/ws/tasks Authenticated)  │  │
+│  │   Window & Geometry Persistence              │  │  │  FastAPI / Uvicorn Server   │  │
+│  │   (Electron + React UI + Stream Log)         │  │  │  (/ws/tasks Authenticated)  │  │
 │  └──────────────────────┬───────────────────────┘  │  └──────────────┬──────────────┘  │
 │                         │                          │                 │                 │
 │  ┌──────────────────────▼───────────────────────┐  │  ┌──────────────▼──────────────┐  │
@@ -61,7 +61,24 @@ AETHER separates the user interface and the core execution engine into two decou
 
 ## 2. Deep Dive: Core Subsystems
 
-### A. Frontend Client (`aether_ui`)
+### A. Frontend Client (`desktop_app`)
+
+The current frontend is the Electron + React app in `desktop_app/`. It talks to the engine over the same authenticated loopback WebSocket the earlier client used, and `run_ui.py` launches it.
+
+| File / Component | Responsibility |
+| :--- | :--- |
+| `main.cjs` | Electron main-process shell: windows (main + floating chat), tray, IPC handlers, global shortcuts, and the engine WebSocket client. |
+| `preload.cjs` | Preload bridge exposing a narrow `electronAPI` to the renderer via `contextBridge` (window controls, dialogs, engine messages); the renderer runs with `contextIsolation` and no Node integration. |
+| `electron/` | Main-process helpers: window-state persistence (`windowState.cjs`), notifications (`notify.cjs`), and screen-snip geometry (`snipGeometry.cjs`). |
+| `src/App.jsx` | React application shell: chat, dashboard, projects, and settings views, with the 3D knowledge-graph background loaded lazily. |
+| `src/DraggableChatWindow.jsx` | Chat window with streaming event log, tool-activity cards, and approval interactions. |
+| `src/SettingsPanel.jsx` & `src/components/Settings/` | Settings UI: providers and models, memory, vault, and advanced (backup / diagnostics / updates) panels. |
+| `src/components/` | Feature components: onboarding, command palette, artifacts canvas, media library, voice overlay, and snip overlay. |
+| `src/contexts/SocketContext` | React socket context wrapping the engine WebSocket connection and event dispatch. |
+
+#### Historical: the retired PySide6 client (`aether_ui`)
+
+The table below describes the original PySide6 frontend. It is kept as historical reference only: `aether_ui/` is retired (ADR-0019), is not the shipped UI, and its dependencies install only via the `legacy-ui` optional extra.
 
 | File / Component | Responsibility |
 | :--- | :--- |
@@ -174,13 +191,13 @@ AETHER separates the user interface and the core execution engine into two decou
 Use the prompt below whenever starting a new conversation with ChatGPT or Claude to give the AI full context on the AETHER codebase:
 
 ```markdown
-You are an expert AI system architect and Python engineer specializing in PySide6 desktop applications, FastAPI backend engines, and LLM orchestration systems.
+You are an expert AI system architect and engineer specializing in Electron + React desktop applications, Python FastAPI backend engines, and LLM orchestration systems.
 
 I am developing an open-source local AI assistant called **AETHER** (repository: `Aether-OS`).
 
 ### Core Architecture & Tech Stack:
 - **Architecture**: Hybrid multi-process client-server.
-  - **Frontend (`aether_ui`)**: PySide6 desktop HUD running `qasync` to integrate Qt's event loop with Python asyncio.
+  - **Frontend (`desktop_app`)**: Electron + React desktop app — an Electron main process (`main.cjs`, `preload.cjs`, `electron/` helpers) hosting the React UI in `src/`, connected to the engine over the authenticated loopback WebSocket. (The original PySide6 HUD in `aether_ui/` is retired history, not the current UI.)
   - **Backend Engine (`aether_engine`)**: FastAPI + Uvicorn service communicating over authenticated loopback WebSockets (`/ws/tasks`).
   - **Contracts (`aether_common`)**: Zero-dependency dataclass event contracts (`Event`, `EventType`, `TaskState`).
   - **Security**: Local WebSocket authentication via one-time tokens (`~/.aether/auth_token`) and Windows DPAPI encrypted secret storage (`~/.aether/secrets.db`).
@@ -202,22 +219,22 @@ Aether-OS/
 │   ├── tools/              # Tool registry & workspace file tools
 │   ├── workers/            # Windows Job Object process containment
 │   └── audit/              # JSONL task state transition logging
-├── aether_ui/              # PySide6 Desktop Frontend
-│   ├── main.py             # Frameless main window, geometry memory, drawer manager
-│   ├── hud.py              # HUD view, provider health badge, model selector, log stream
-│   ├── orb.py              # Native QPainter pulsing AI core
-│   ├── models_panel.py     # Cloud & Local (Ollama) settings drawer
-│   ├── ws_client.py        # Async WebSocket client with auto-reconnect
-│   └── widgets/            # ProviderHealthBadge, RoutingBanner, ApprovalDrawer
+├── desktop_app/            # Electron + React Desktop Frontend (current UI)
+│   ├── main.cjs            # Electron main process: windows, tray, IPC, engine WebSocket
+│   ├── preload.cjs         # Preload bridge (contextBridge `electronAPI`)
+│   ├── electron/           # Main-process helpers: window state, notifications, snip geometry
+│   ├── index.html          # Vite entry page
+│   └── src/                # React UI: App.jsx, chat window, SettingsPanel, components/
+├── aether_ui/              # Retired PySide6 frontend (historical; `legacy-ui` extra only)
 ├── run_engine.py           # Backend engine launcher
-└── run_ui.py               # Desktop frontend launcher
+└── run_ui.py               # Desktop frontend launcher (launches the Electron app)
 ```
 
 ### Key Engineering Rules:
 1. **Never break contract parity**: Any event sent over `/ws/tasks` must match the schema in `aether_common/contracts.py`.
 2. **Strict Tool Safety**: Tools modifying the filesystem or executing commands must pass workspace containment checks and request human approval via `TOOL_APPROVAL_REQUEST`.
 3. **No Unsafe Mid-Loop Fallbacks**: Automatic provider fallback is allowed on initial prompt failure, but strictly forbidden once tools have started executing.
-4. **Clean Concurrency**: Always use `asyncio.create_task` or Qt signals when bridging UI and WebSocket actions.
+4. **Clean Concurrency**: Always use `asyncio.create_task` on the engine side, and the preload/IPC bridge or WebSocket events on the UI side, when bridging UI and WebSocket actions.
 
 Please keep these architectural principles, directory paths, and design patterns in mind when helping me write code, debug issues, or design new features.
 ```

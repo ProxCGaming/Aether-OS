@@ -89,7 +89,9 @@ def providers(monkeypatch):
     fast = _NamedProvider("fast")
     factory_calls = []
 
-    def _factory(p_name, m_name, secret_store):
+    def _factory(p_name, m_name, secret_store, **_kwargs):
+        # **_kwargs: the factory contract gained keyword-only
+        # constraint params (local_only / require_vision, M17).
         factory_calls.append((p_name, m_name))
         return fast
 

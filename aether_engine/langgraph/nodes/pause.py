@@ -290,8 +290,10 @@ def _edit_preview(args: dict, workspace_roots: list) -> dict:
 
         target = resolve_contained(str(args.get("path", "")), workspace_roots)
         data = target.read_bytes()
-        expected = args.get("expected_hash") or ""
-        if expected and content_hash(data) != expected:
+        # E2-F01: same rule as execution — a supplied hash (even an
+        # empty string) is checked; only an absent/None hash is not.
+        expected = args.get("expected_hash")
+        if expected is not None and content_hash(data) != expected:
             return {"error": "The file changed since the agent read it — this edit will be refused at execution unless the agent re-reads the file."}
         old_text = data.decode("utf-8")
         new_text = apply_text_edits(old_text, args.get("edits") or [])

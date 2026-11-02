@@ -2,15 +2,50 @@ import React, { createContext, useContext, useEffect, useRef, useState, useCallb
 
 const SocketContext = createContext(null);
 
-// Phase 10.3 C1: the single dedup point for the whole renderer. An identical
-// IPC packet arriving within this window is delivered once per subscriber.
-// This replaces the module-level 150ms hack that lived in App.jsx: it only
+// Phase 10.3 C1: the single dedup point for the whole renderer. This
+// replaces the module-level 150ms hack that lived in App.jsx: it only
 // guarded App's own handler while every other subscriber got duplicates,
 // and it papered over the real cause (App's async initConnection leaked its
 // first subscription under React StrictMode double-mount, so each packet
 // arrived twice). Dedup is per subscriber, not global: two different
 // subscribers must each receive one copy of the same packet.
+//
+// S3-M9: suppression is keyed on the packet's own IDENTITY, never on raw
+// content alone. The old rule ("same string as the previous packet within
+// 150ms") dropped legitimate packets: two distinct stream packets can
+// carry byte-identical content, and content equality is not duplication.
+// Engine packets are Event JSON (aether_common/contracts.py): a top-level
+// `request_id`/`event_id` mirrored pair that names the TASK (every chunk
+// of one stream shares it — keying on it alone would eat the stream) and
+// a per-instance `ts` stamped when the Event was constructed. A genuine
+// duplicate — the leaked subscription redelivering the SAME serialized
+// instance — repeats identity (id + ts) and bytes exactly, so the dedup
+// key is that identity tuple. Distinct instances always differ in id or
+// ts and are always delivered. A packet with neither an identity field
+// nor a ts carries nothing that could distinguish a duplicate delivery
+// from a distinct packet, so it is never suppressed: guessing from its
+// content is exactly the defect being fixed.
 const DEDUP_WINDOW_MS = 150;
+
+// The dedup key for one raw engine packet, or null when the packet has
+// no identity to key on (unparseable, or neither id nor ts present).
+function packetIdentityKey(data) {
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch (e) {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const id = parsed.event_id ?? parsed.request_id ?? null;
+  const ts = parsed.ts ?? null;
+  if (id === null && ts === null) return null;
+  // The exact bytes ride along so two instances that share an id and a
+  // ts but differ in content still count as distinct packets; only a
+  // byte-identical redelivery of an already-delivered identity is a
+  // duplicate.
+  return `${id}|${ts}|${parsed.type ?? ''}|${data}`;
+}
 
 export const SocketProvider = ({ children }) => {
   const [isConnected, setIsConnected] = useState(false);
@@ -38,15 +73,26 @@ export const SocketProvider = ({ children }) => {
       },
       addEventListener: (event, handler) => {
         if (event === 'message' && window.electronAPI && window.electronAPI.onEngineMessage) {
-          let lastData = null;
-          let lastTime = 0;
+          // Packet identities delivered to THIS subscriber within the
+          // retention window (identity key -> delivery time). Bounded by
+          // the window: entries are pruned on every packet, and a repeat
+          // of an identity after the window is a new delivery, not a
+          // duplicate.
+          const deliveredIdentities = new Map();
           const cleanup = window.electronAPI.onEngineMessage((data) => {
-            const now = Date.now();
-            if (data === lastData && (now - lastTime) < DEDUP_WINDOW_MS) {
-              return; // identical duplicate packet within the window
+            const key = packetIdentityKey(data);
+            if (key !== null) {
+              const now = Date.now();
+              for (const [seenKey, seenAt] of deliveredIdentities) {
+                if ((now - seenAt) >= DEDUP_WINDOW_MS) {
+                  deliveredIdentities.delete(seenKey);
+                }
+              }
+              if (deliveredIdentities.has(key)) {
+                return; // true duplicate: same packet identity redelivered
+              }
+              deliveredIdentities.set(key, now);
             }
-            lastData = data;
-            lastTime = now;
             handler({ data });
           });
           wsListeners.current.set(handler, cleanup);

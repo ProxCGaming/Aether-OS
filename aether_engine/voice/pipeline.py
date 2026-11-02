@@ -51,14 +51,15 @@ same way, as notices that a decision is waiting in chat.
 
 The transport is the SmallWebRTC seam: audio frames come from a
 ``VoiceTransport``, never from a device the engine opens itself.
-``WebRtcVoiceTransport`` is the production transport; in this
-build the engine has no RTC negotiation endpoint (and aiortc is
-an optional dependency), so it reports itself unavailable and
-session start fails closed honestly until that lands.
+``WebRtcVoiceTransport`` (``aether_engine.voice.rtc``) is the
+production transport: a real aiortc peer connection the desktop
+negotiates over the engine WebSocket (``VOICE_RTC_OFFER_*`` /
+``VOICE_RTC_ICE_*`` signalling); received audio is resampled to
+PCM16 at the session sample rate and streamed into the cascade,
+and TTS audio returns over ``VOICE_OUTPUT_CHUNK`` events.
 """
 import asyncio
 import base64
-import importlib.util
 import logging
 import re
 import time
@@ -67,6 +68,7 @@ from typing import Protocol
 
 from aether_common.contracts import Event, EventType
 from aether_engine.voice import VoiceTalkerError, VoiceUnavailableError
+from aether_engine.voice.rtc import WebRtcVoiceTransport
 from aether_engine.voice.stt import FasterWhisperStt, SttEngine
 from aether_engine.voice.tts import DEFAULT_VOICE, KokoroTts, TtsEngine
 from aether_engine.voice.vad import Endpointer, EndpointerConfig, SileroVad, VadEngine
@@ -168,33 +170,6 @@ class VoiceTransport(Protocol):
         ...
 
 
-class WebRtcVoiceTransport:
-    """SmallWebRTC peer transport between Electron and the engine.
-
-    Gated in this build: aiortc is an optional dependency and the
-    engine exposes no RTC negotiation endpoint yet, so the
-    transport honestly reports unavailable and voice sessions fail
-    closed at start instead of pretending to listen.
-    """
-
-    def unavailable_reason(self) -> str | None:
-        if importlib.util.find_spec("aiortc") is None:
-            return "aiortc is not installed (SmallWebRTC transport)"
-        return "SmallWebRTC negotiation endpoint is not available in this build"
-
-    async def open(self) -> dict | None:
-        reason = self.unavailable_reason()
-        raise VoiceUnavailableError(reason or "SmallWebRTC transport unavailable")
-
-    async def frames(self) -> AsyncIterator[bytes]:
-        reason = self.unavailable_reason()
-        raise VoiceUnavailableError(reason or "SmallWebRTC transport unavailable")
-        yield b""  # pragma: no cover — makes this an async generator
-
-    async def close(self) -> None:
-        return None
-
-
 def _unavailable_message(reasons: dict[str, str]) -> str:
     detail = "; ".join(f"{stage}: {reason}" for stage, reason in reasons.items())
     return f"voice unavailable: {detail}"
@@ -277,6 +252,10 @@ class VoicePipeline:
         # Barge-in detection state (E8-5.1b): a separate endpointer
         # watches frames while output plays, so the main
         # endpointer's utterance state is never corrupted.
+        # S4-M16: the barge-in endpointer shares the config (so it
+        # carries a Smart Turn policy object too) but never observes
+        # a transcript, so it degrades to silence-only endpointing —
+        # barge-in timing is deliberately unchanged by Smart Turn.
         self._barge_endpointer = Endpointer(self._endpointer.config)
         self._barge_frames: list[bytes] = []
         self._barge_speech_ms = 0
@@ -372,6 +351,42 @@ class VoicePipeline:
             except Exception:  # idempotent teardown: log and continue
                 logger.debug("voice stage close failed", exc_info=True)
         self._started = False
+
+    # -- RTC negotiation (F-12a) ---------------------------------------
+    # Signalling for the production transport, delegated: the
+    # pipeline owns the transport, the WebSocket layer owns the
+    # socket, and these methods are the seam between them. A
+    # transport that does not negotiate (a scripted test double)
+    # fails offer/ICE calls closed with VoiceUnavailableError; the
+    # candidate listener is best-effort — such a transport simply
+    # never pushes candidates.
+
+    async def handle_rtc_offer(self, offer: dict) -> dict:
+        """Answer the renderer's RTC offer via the transport."""
+        handler = getattr(self._transport, "handle_offer", None)
+        if handler is None:
+            raise VoiceUnavailableError(
+                "voice unavailable: this session's transport does "
+                "not negotiate RTC")
+        return await handler(offer)
+
+    async def add_rtc_ice_candidate(self, candidate: dict | None) -> None:
+        """Trickle one renderer ICE candidate into the transport
+        (None = end-of-candidates)."""
+        handler = getattr(self._transport, "add_remote_candidate", None)
+        if handler is None:
+            raise VoiceUnavailableError(
+                "voice unavailable: this session's transport does "
+                "not negotiate RTC")
+        await handler(candidate)
+
+    def set_rtc_ice_listener(self, listener) -> None:
+        """Register the push channel for the transport's own
+        gathered ICE candidates (wire-shaped dicts, or None for
+        end-of-candidates)."""
+        setter = getattr(self._transport, "set_local_candidate_listener", None)
+        if setter is not None:
+            setter(listener)
 
     # -- barge-in -------------------------------------------------------
 
@@ -545,6 +560,12 @@ class VoicePipeline:
         text = (text or "").strip()
         if text and text != self._last_partial_text:
             self._last_partial_text = text
+            # S4-M16 (Smart Turn): feed the partial into the main
+            # endpointer so its turn-completion policy can bend the
+            # trailing-silence window for this utterance. The
+            # barge-in endpointer is intentionally NOT fed — it
+            # never observes transcripts and stays silence-only.
+            self._endpointer.observe_transcript(text)
             await self._emit(Event(
                 type=EventType.VOICE_PARTIAL_TRANSCRIPT,
                 payload={

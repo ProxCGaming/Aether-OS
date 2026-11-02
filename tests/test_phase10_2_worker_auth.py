@@ -1,6 +1,7 @@
 """Phase 10.2, A1: the worker is an unauthenticated backdoor — fixed.
 
-Before the fix, ``python -m aether_worker --payload ...`` dispatched any
+Before the fix, invoking ``python -m aether_worker`` with a payload
+dispatched any
 tool with no token, no policy, no workspace check (``read_token`` was
 imported but never called). These tests fail on the pre-fix code and
 pass after: direct invocation without/with a wrong token is refused,
@@ -51,8 +52,9 @@ def _run_worker(tmp_path, payload, token_env=None, token_file=None):
     if token_env is not None:
         env["AETHER_WORKER_TOKEN"] = token_env
     return subprocess.run(
-        [sys.executable, "-m", "aether_worker", "--payload", payload],
-        cwd=tmp_path, env=env,
+        # S2-M4: payload travels on stdin, never argv.
+        [sys.executable, "-m", "aether_worker"],
+        cwd=tmp_path, env=env, input=payload,
         capture_output=True, text=True, timeout=30, check=False,
     )
 

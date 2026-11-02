@@ -7,7 +7,8 @@ supervisor, every tool call passes one policy/approval pipeline,
 and API keys live only in an encrypted secret store.
 
 Current version: **0.3.5** (single source: `aether_engine/version.py`,
-mirrored in `desktop_app/package.json`).
+mirrored in `desktop_app/package.json`, `pyproject.toml` and the root
+`package.json` — tests pin all four equal).
 
 ## Layout
 
@@ -49,6 +50,27 @@ uv run pytest                 # engine suite
 cd desktop_app && npx jest    # UI suite
 ```
 
+### Coverage
+
+Coverage is measured, not gated: there is no failing threshold yet
+(S5-M11 — measurement first, so trends are visible before anyone
+picks a floor).
+
+```bash
+# Engine (aether_engine): terminal report with missing lines, plus
+# written reports in coverage.xml (CI/tooling) and htmlcov/ (browse
+# htmlcov/index.html). Config: [tool.coverage] in pyproject.toml.
+uv run pytest --cov=aether_engine --cov-report=term-missing \
+  --cov-report=xml:coverage.xml --cov-report=html:htmlcov
+
+# Desktop app (desktop_app/src): text summary plus lcov + HTML in
+# desktop_app/coverage/. Config: desktop_app/jest.config.cjs.
+cd desktop_app && npm run test:coverage
+```
+
+CI runs both commands on every push / PR and uploads the written
+reports as build artifacts (see `.github/workflows/ci.yml`).
+
 Commits are gated (commitlint + lint + related tests; pushes run
 the full suites) — see the commit-rules notes in
 `docs/audits/` and never bypass with `--no-verify`.
@@ -59,6 +81,13 @@ the full suites) — see the commit-rules notes in
 cd desktop_app
 npm run dist     # vite build + electron-builder (NSIS on Windows)
 ```
+
+Packaging proof so far is a Linux AppImage (built and inspected
+during Epic 10). The Windows NSIS build and the install → onboard →
+uninstall walkthrough still await the owner's Windows pass, and the
+npm dependency audit is unverified, not clean — see
+`docs/audits/epic-10-summary.md` and the Known limitations note in
+`CHANGELOG.md`.
 
 ## Data & safety
 

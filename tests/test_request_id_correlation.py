@@ -1,13 +1,12 @@
 """Tests for request_id correlation across loopback WebSocket events."""
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 from starlette.testclient import TestClient
 
 from aether_common.contracts import Event, EventType
 from aether_engine.app import app, engine_state
-from aether_engine.secrets.storage import SecretStore
 
 
 class TestRequestIdCorrelation(unittest.TestCase):
@@ -41,7 +40,7 @@ class TestRequestIdCorrelation(unittest.TestCase):
     def test_websocket_ping_echoes_request_id(self):
         with TestClient(app) as client:
             token = engine_state.auth_token
-            with client.websocket_connect(f"/ws/tasks?token={token}") as ws:
+            with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {token}"}) as ws:
                 hello_raw = ws.receive_text()
                 self.assertEqual(Event.from_json(hello_raw).type, EventType.HELLO)
 
@@ -59,7 +58,7 @@ class TestRequestIdCorrelation(unittest.TestCase):
     def test_websocket_provider_list_echoes_request_id(self):
         with TestClient(app) as client:
             token = engine_state.auth_token
-            with client.websocket_connect(f"/ws/tasks?token={token}") as ws:
+            with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {token}"}) as ws:
                 ws.receive_text()  # HELLO
 
                 req_id = "list-req-456"

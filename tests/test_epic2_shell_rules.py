@@ -79,6 +79,64 @@ def test_policy_denies_and_asks():
     assert resolve_tool_policy(SHELL, {"execute_shell": "Always Allow"}, args={"command": "shutdown now"}) == "deny"
 
 
+# ── S2-M6: deny rules must see inside nested shells, not quoted data ──
+# _mask_quotes blanks quoted contents so ``echo "rm -rf / is dangerous"``
+# does not false-positive — but the same masking hid a denied payload
+# handed to a nested shell (``bash -c "rm -rf /"`` masked to
+# ``bash -c "        "``). A quoted string that a carrier (``sh -c``,
+# ``eval``, command substitution) will EXECUTE is command position and
+# must be re-evaluated as a command line; quoted data for ordinary
+# commands stays masked.
+
+
+@pytest.mark.parametrize("command", [
+    'bash -c "rm -rf /"',          # the acceptance case
+    "bash -c 'rm -rf /'",          # single-quoted payload
+    'sh -c "rm -rf /"',
+    "sh -c 'shutdown now'",
+    'zsh -c "rm -rf ~"',
+    '/bin/sh -c "rm -rf /"',
+    'bash -lc "rm -rf /"',         # combined flag cluster ending in c
+    'sudo bash -c "rm -rf /"',     # wrapper before the shell
+    'eval "rm -rf /"',             # eval equivalent
+    "eval 'rm -rf /'",
+    'echo hi; bash -c "rm -rf $HOME"',
+    'bash -c "bash -c \'rm -rf /\'"',  # double nesting
+    'bash -c "mkfs.ext4 /dev/sda1"',
+    'echo "$(rm -rf /)"',          # command substitution executes
+    "echo `rm -rf /`",             # backtick substitution executes
+])
+def test_deny_inside_nested_shell(command):
+    assert evaluate_shell_command(command).verdict == "deny", command
+
+
+@pytest.mark.parametrize("command", [
+    'bash -c "rm -rf build/"',
+    "sh -c 'rm -rf dist'",
+])
+def test_ask_inside_nested_shell(command):
+    assert evaluate_shell_command(command).verdict == "ask", command
+
+
+@pytest.mark.parametrize("command", [
+    'echo "rm -rf / is dangerous"',  # existing false-positive case, kept green
+    "echo 'rm -rf / is dangerous'",
+    'printf "shutdown is just a word"',
+    'bash -c "echo hello"',
+    'bash -c "echo \\"rm -rf / is dangerous\\""',  # payload is itself quoted text
+    "sh -c 'echo \"rm -rf / is dangerous\"'",
+    'echo "run it with bash -c and read the manual first"',
+])
+def test_quoted_data_still_allowed(command):
+    assert evaluate_shell_command(command).verdict == "allow", command
+
+
+def test_nested_deny_cannot_be_configured_away():
+    assert resolve_tool_policy(SHELL, {"execute_shell": "Always Allow"}, args={"command": 'bash -c "rm -rf /"'}) == "deny"
+    res = validate_tool_request("execute_shell", {"command": 'sh -c "rm -rf /"'}, workspace_roots=[])
+    assert not res.is_valid and "safety rule" in (res.error or "")
+
+
 def test_preflight_blocks_deny_rules():
     res = validate_tool_request("execute_shell", {"command": "ls; rm -rf /"}, workspace_roots=[])
     assert not res.is_valid and "safety rule" in (res.error or "")

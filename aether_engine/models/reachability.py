@@ -135,7 +135,10 @@ class ModelReachabilityChecker:
 
         start = time.time()
         try:
-            prov = LiteLLMProvider(api_key=api_key, model=model_id, provider_name=provider_name, base_url=base_url)
+            # R2-NEW-1: a probe is not agent work — opt out of usage
+            # recording so the abandoned stream never writes a ledger
+            # row via the provider's early-close recording path.
+            prov = LiteLLMProvider(api_key=api_key, model=model_id, provider_name=provider_name, base_url=base_url, record_usage=False)
             # Send a minimal 1-token completion probe
             async def _probe():
                 async for chunk in prov.call_stream([{"role": "user", "content": "hi"}]):

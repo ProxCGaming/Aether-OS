@@ -28,6 +28,8 @@ def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 def init_db() -> None:
@@ -363,16 +365,32 @@ def get_chat_history(session_id: str, current_prompt: str | None = None, *, limi
     callers append the prompt themselves. Bounded by message count and
     total characters, most recent turns kept.
     """
-    sess = get_session(session_id)
-    if not sess:
-        return []
+    # S1-M11: bounded fetch — do NOT load the whole session via
+    # get_session() (which fetchall()s every message, thoughts and
+    # attachments included) just to keep the last `limit` turns.
+    # Ask SQLite for the latest limit+1 eligible messages instead:
+    # +1 covers the just-saved current turn, which may be excluded
+    # below, so the window still fills to `limit`. get_session()
+    # itself stays full-fidelity for the UI session-load path.
+    # TRIM's character list mirrors Python's str.strip(): SQLite's
+    # bare TRIM(content) strips only spaces, so tab/newline-only
+    # messages would otherwise slip past the filter.
+    init_db()
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT role, content FROM session_messages"
+            " WHERE session_id = ? AND role IN ('user', 'assistant')"
+            " AND TRIM(content, ' ' || char(9) || char(10) || char(11)"
+            " || char(12) || char(13)) <> ''"
+            " ORDER BY timestamp DESC, rowid DESC LIMIT ?",
+            (session_id, int(limit) + 1),
+        ).fetchall()
     history: list[dict[str, str]] = []
-    for msg in sess.get("messages", []):
-        role = msg.get("role")
-        content = (msg.get("content") or "").strip()
-        if role not in ("user", "assistant") or not content:
+    for row in reversed(rows):
+        content = (row["content"] or "").strip()
+        if not content:
             continue
-        history.append({"role": role, "content": content})
+        history.append({"role": row["role"], "content": content})
     if current_prompt:
         target = current_prompt.strip()
         if history and history[-1]["role"] == "user" and history[-1]["content"] == target:

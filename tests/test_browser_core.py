@@ -27,6 +27,7 @@ import pytest
 
 from aether_common.contracts import EventType
 from aether_engine.audit import AuditLogger
+from aether_engine.browser import session as browser_session
 from aether_engine.browser.session import (
     BrowserError,
     BrowserParkedError,
@@ -164,6 +165,83 @@ class TestProfileIsolation:
     def test_subdir_of_dedicated_root_is_allowed(self):
         ok = dedicated_profile_dir() / "work"
         assert validate_profile_dir(ok) == ok
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("platform refuses symlink creation")
+
+
+class TestProfileSymlinkContainment:
+    """S2-M11: containment is judged on RESOLVED paths.
+
+    Lexically a symlink inside the dedicated root sits inside it,
+    but where it POINTS is what the browser would actually open —
+    a link to the user's real profile must be refused, while a
+    link whose target stays inside the root is fine.
+    """
+
+    @pytest.fixture
+    def dedicated_root(self, tmp_path, monkeypatch):
+        root = tmp_path / "dedicated-profile"
+        root.mkdir()
+        monkeypatch.setattr(
+            browser_session, "dedicated_profile_dir", lambda: root)
+        return root
+
+    def test_root_itself_passes(self, dedicated_root):
+        assert validate_profile_dir(dedicated_root) == dedicated_root
+
+    def test_real_subdir_inside_root_passes(self, dedicated_root):
+        ok = dedicated_root / "work"
+        ok.mkdir()
+        assert validate_profile_dir(ok) == ok
+
+    def test_symlink_inside_root_pointing_outside_is_refused(
+            self, dedicated_root, tmp_path):
+        real_profile = tmp_path / "real-profile"
+        real_profile.mkdir()
+        _symlink_or_skip(dedicated_root / "escape", real_profile)
+        with pytest.raises(BrowserProfileError):
+            validate_profile_dir(dedicated_root / "escape")
+
+    def test_subpath_through_escaping_symlink_is_refused(
+            self, dedicated_root, tmp_path):
+        # The leaf need not exist: the resolved parent already
+        # escapes, so a not-yet-created profile under the link
+        # would land in the real profile too.
+        real_profile = tmp_path / "real-profile"
+        real_profile.mkdir()
+        _symlink_or_skip(dedicated_root / "escape", real_profile)
+        with pytest.raises(BrowserProfileError):
+            validate_profile_dir(dedicated_root / "escape" / "Default")
+
+    def test_symlink_inside_root_pointing_inside_root_passes(
+            self, dedicated_root):
+        inner = dedicated_root / "inner"
+        inner.mkdir()
+        _symlink_or_skip(dedicated_root / "alias", inner)
+        assert validate_profile_dir(dedicated_root / "alias") == (
+            dedicated_root / "alias")
+
+    def test_nonexistent_leaf_inside_root_passes(self, dedicated_root):
+        # resolve(strict=False) semantics: a profile dir that does
+        # not exist yet is judged by its resolved would-be location,
+        # exactly as before the fix.
+        ok = dedicated_root / "not-created-yet"
+        assert validate_profile_dir(ok) == ok
+
+    def test_manager_refuses_escaping_symlink(self, dedicated_root, tmp_path):
+        real_profile = tmp_path / "real-profile"
+        real_profile.mkdir()
+        _symlink_or_skip(dedicated_root / "escape", real_profile)
+        with pytest.raises(BrowserProfileError):
+            BrowserSessionManager(
+                profile_dir=dedicated_root / "escape",
+                audit_logger=AuditLogger(log_path=tmp_path / "audit.log"),
+            )
 
 
 # ---------------------------------------------------------------------
@@ -702,6 +780,100 @@ class TestTaskIdentityBinding:
         assert session.control_state.value == "agent"
 
 
+class TestChallengeHandoffRouting:
+    """M04 residual: the challenge handoff goes to the DRIVING task.
+
+    A live session is bound to its creator for ownership/admission,
+    but while the browser agent is enabled any task may drive the
+    shared session. Before this fix, ``_detect_and_park`` always
+    published BROWSER_CHALLENGE_DETECTED to the CREATOR's channel, so
+    when task B drove task A's session into a CAPTCHA, the handoff
+    notification went to task A (which was not waiting on it) and B
+    never saw it on its own stream. The handoff must route to the
+    task currently driving; the creator binding itself must not move.
+    """
+
+    async def test_challenge_handoff_routes_to_the_driving_task(self, tmp_path):
+        queue_a: asyncio.Queue = asyncio.Queue()
+        queue_b: asyncio.Queue = asyncio.Queue()
+        event_bus.subscribe("task-a", queue_a)
+        event_bus.subscribe("task-b", queue_b)
+        driver = FakeDriver({
+            "https://example.com/": ("Example Domain", PLAIN_PAGE),
+            "https://example.com/signup": ("Robot check", CAPTCHA_PAGE),
+        })
+        manager = make_manager(tmp_path, driver)
+        try:
+            # Task A creates the shared session on a plain page.
+            token = set_usage_context(session_id="chat-a", task_id="task-a")
+            try:
+                await registry_with(manager).execute(
+                    "browser_navigate", {"url": "https://example.com/"}, approved=True)
+            finally:
+                reset_usage_context(token)
+            session = manager.active_session
+            assert session is not None
+            assert session.task_id == "task-a"
+
+            # Task B drives the SAME session into a challenge.
+            token = set_usage_context(session_id="chat-b", task_id="task-b")
+            try:
+                await registry_with(manager).execute(
+                    "browser_navigate", {"url": "https://example.com/signup"},
+                    approved=True)
+            finally:
+                reset_usage_context(token)
+        finally:
+            event_bus.unsubscribe("task-a", queue_a)
+            event_bus.unsubscribe("task-b", queue_b)
+
+        assert session.control_state.value == "waiting_user"
+        # The handoff reached the driving task's stream...
+        event = queue_b.get_nowait()
+        assert event.type == EventType.BROWSER_CHALLENGE_DETECTED
+        assert event.payload["session_id"] == session.session_id
+        assert event.payload["task_id"] == "task-b"
+        assert event.payload["chat_session_id"] == "chat-b"
+        # ...and NOT the creator's stream.
+        assert queue_a.empty()
+        # Ownership/admission binding is untouched: still task A's.
+        assert session.task_id == "task-a"
+        assert session.chat_session_id == "chat-a"
+
+    async def test_challenge_handoff_follows_the_latest_driver(self, tmp_path):
+        queue_a: asyncio.Queue = asyncio.Queue()
+        queue_b: asyncio.Queue = asyncio.Queue()
+        event_bus.subscribe("task-a2", queue_a)
+        event_bus.subscribe("task-b2", queue_b)
+        driver = FakeDriver({
+            "https://example.com/": ("Example Domain", PLAIN_PAGE),
+            "https://example.com/signup": ("Robot check", CAPTCHA_PAGE),
+        })
+        manager = make_manager(tmp_path, driver)
+        try:
+            # A creates, B drives (plain page, no challenge), then A
+            # drives again and hits the challenge: the handoff is A's.
+            for task, chat, url in (
+                ("task-a2", "chat-a2", "https://example.com/"),
+                ("task-b2", "chat-b2", "https://example.com/"),
+                ("task-a2", "chat-a2", "https://example.com/signup"),
+            ):
+                token = set_usage_context(session_id=chat, task_id=task)
+                try:
+                    await registry_with(manager).execute(
+                        "browser_navigate", {"url": url}, approved=True)
+                finally:
+                    reset_usage_context(token)
+        finally:
+            event_bus.unsubscribe("task-a2", queue_a)
+            event_bus.unsubscribe("task-b2", queue_b)
+
+        event = queue_a.get_nowait()
+        assert event.type == EventType.BROWSER_CHALLENGE_DETECTED
+        assert event.payload["task_id"] == "task-a2"
+        assert queue_b.empty()
+
+
 # ---------------------------------------------------------------------
 # Missing Playwright: fail closed, honestly
 # ---------------------------------------------------------------------
@@ -796,7 +968,7 @@ class TestBrowserControlWebSocket:
         from aether_engine.app import engine_state
 
         token = engine_state.token_path.read_text(encoding="utf-8").strip()
-        return client.websocket_connect(f"/ws/tasks?token={token}")
+        return client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {token}"})
 
     def _control(self, ws, action, session_id=None):
         from aether_common.contracts import Event

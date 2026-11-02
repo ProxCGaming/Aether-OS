@@ -88,6 +88,22 @@ def parse_vision_override(
     return provider, model
 
 
+def local_only_from_vision_override(
+    auxiliary_models: dict[str, str] | None,
+) -> bool:
+    """True when the explicit vision override pins image work local.
+
+    This is exactly the derivation ``RoutingPolicy.select_route``
+    stamps onto the RoutingDecision as ``local_only`` (finding M17).
+    Paths that never see the original decision — above all the
+    approval-resume path, which rebuilds providers long after the
+    decision was made — re-derive the constraint from the same
+    source so it cannot silently lapse across a pause.
+    """
+    override = parse_vision_override(auxiliary_models)
+    return bool(override) and is_local_provider(override[0])
+
+
 class RoutingPolicy:
     """Evaluates task requirements, provider availability, and user preferences to select models."""
 

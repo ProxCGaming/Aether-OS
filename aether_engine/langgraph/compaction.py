@@ -262,13 +262,18 @@ def make_provider_summariser(provider: Any) -> Summariser:
     return _summarise
 
 
-def resolve_summariser_provider(user_config: Any | None, secret_store: Any, fallback: Any) -> Any:
+def resolve_summariser_provider(user_config: Any | None, secret_store: Any, fallback: Any, *, local_only: bool = False) -> Any:
     """Resolve the summariser provider: compression override or fallback.
 
     Mirrors how the specialist nodes resolve per-agent overrides and
     how routing resolves the vision auxiliary override: a
     ``"provider:::model"`` string wins when it is usable; anything else
     (absent, ``"auto"``, unusable) falls back to the run's provider.
+
+    ``local_only`` (finding M17 residual) carries the run's routing
+    constraint into this construction too: folded history can contain
+    image content (stringified by the summariser's prompt builder),
+    so a local-only run's summariser must not acquire cloud fallbacks.
     """
     override = ((getattr(user_config, "auxiliary_models", None) or {}).get("compression") or "").strip()
     if override and override != "auto" and secret_store:
@@ -277,7 +282,7 @@ def resolve_summariser_provider(user_config: Any | None, secret_store: Any, fall
             try:
                 from aether_engine.orchestration.core import _create_provider_instance
 
-                return _create_provider_instance(p_name, m_name, secret_store)
+                return _create_provider_instance(p_name, m_name, secret_store, local_only=local_only)
             except Exception as e:  # noqa: BLE001 — an unusable compression override falls back to the run provider; compaction must not fail the task.
                 logger.warning(
                     f"Compression auxiliary override {override!r} unusable, "

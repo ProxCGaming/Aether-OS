@@ -31,6 +31,7 @@ def _project_tree_fn(path: str | None = None, workspace_roots: list | None = Non
     root = resolve_contained(path, workspace_roots) if path else effective_roots(workspace_roots)[0].resolve()
     if not root.is_dir():
         return f"Error: not a directory: {root}"
+    resolved_roots = [r.resolve() for r in effective_roots(workspace_roots)]
     lines = [f"[project_tree: {root}]"]
     count = 0
     truncated = False
@@ -55,7 +56,16 @@ def _project_tree_fn(path: str | None = None, workspace_roots: list | None = Non
             indent = "  " * depth
             lines.append(f"{indent}{entry.name}{'/' if entry.is_dir() else ''}")
             if entry.is_dir():
-                walk(entry, depth + 1)
+                # E2-F02: is_dir() follows symlinks, so a linked
+                # directory can point outside the granted roots.
+                # Descend only when the RESOLVED directory stays
+                # inside a root — the same resolve-then-check rule
+                # resolve_contained applies to the starting path.
+                # The link's own name is listed above; its outside
+                # contents are not disclosed.
+                resolved = entry.resolve()
+                if any(resolved.is_relative_to(r) for r in resolved_roots):
+                    walk(entry, depth + 1)
 
     walk(root, 0)
     if truncated:

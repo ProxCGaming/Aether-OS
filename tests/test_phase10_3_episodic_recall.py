@@ -19,7 +19,6 @@ ImportError for the new ``dedupe_episodic_rows`` /
 ``backfill_episodic_embeddings``) and pass after it. All DBs are tmp
 files — nothing here touches the real ~/.aether/*.db.
 """
-import pickle
 import sqlite3
 import time
 from contextlib import ExitStack
@@ -27,6 +26,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from aether_engine.embedding_codec import encode_embedding
 from aether_engine.memory import episodic
 from aether_engine.memory.episodic import query_episodes, store_episode
 
@@ -114,7 +114,7 @@ def _insert_embedding(emb_db, task_id, vector):
         conn.execute(
             "INSERT OR REPLACE INTO episodic_embeddings (task_id, embedding, model, dimension)"
             " VALUES (?, ?, ?, ?)",
-            (task_id, pickle.dumps(vector), episodic.resolve_embedder(), len(vector)),
+            (task_id, encode_embedding(vector), episodic.resolve_embedder(), len(vector)),
         )
         conn.commit()
     finally:

@@ -15,12 +15,32 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 // resets so the next speech starts immediately, and a chunk whose
 // decode finishes after the cut is dropped (it belongs to the
 // reply the user just talked over).
+//
+// F-12b: the peer connection actually negotiates. The overlay is
+// the offerer (it holds the microphone): on capture it creates an
+// offer and reports it through onRtcOffer; local ICE candidates
+// are forwarded through onRtcIceCandidate in the engine's wire
+// shape; the engine's answer arrives as the rtcAnswer prop and is
+// applied with setRemoteDescription; engine candidates arrive as
+// rtcRemoteCandidate and are queued until the answer is in, then
+// applied in order. Connection state is surfaced honestly — a
+// connecting/connected/interrupted line while live, and a failed
+// or closed peer replaces the overlay with an error instead of
+// sitting there looking alive with no media behind it.
 
 const STATUS_LABELS = {
   starting: 'Starting…',
   listening: 'Listening',
   thinking: 'Thinking',
   speaking: 'Speaking',
+};
+
+const RTC_STATE_LABELS = {
+  new: 'Connecting…',
+  connecting: 'Connecting…',
+  checking: 'Connecting…',
+  connected: 'Connected',
+  disconnected: 'Connection interrupted — trying to reconnect…',
 };
 
 export default function VoiceOverlay({
@@ -35,9 +55,15 @@ export default function VoiceOverlay({
   playbackCut = 0,
   onStop = () => {},
   onDismiss = () => {},
+  onRtcOffer = () => {},
+  rtcAnswer = null,
+  onRtcIceCandidate = () => {},
+  rtcRemoteCandidate = null,
 }) {
   const [micLive, setMicLive] = useState(false);
   const [micError, setMicError] = useState(null);
+  const [rtcState, setRtcState] = useState(null);
+  const [rtcError, setRtcError] = useState(null);
   const streamRef = useRef(null);
   const pcRef = useRef(null);
   const audioCtxRef = useRef(null);
@@ -49,6 +75,22 @@ export default function VoiceOverlay({
   useEffect(() => {
     webrtcConfigRef.current = webrtcConfig;
   }, [webrtcConfig]);
+  // Signalling callbacks live in refs so a re-render with fresh
+  // prop identities never restarts capture or negotiation.
+  const onRtcOfferRef = useRef(onRtcOffer);
+  useEffect(() => {
+    onRtcOfferRef.current = onRtcOffer;
+  }, [onRtcOffer]);
+  const onRtcIceCandidateRef = useRef(onRtcIceCandidate);
+  useEffect(() => {
+    onRtcIceCandidateRef.current = onRtcIceCandidate;
+  }, [onRtcIceCandidate]);
+  // Engine candidates that arrive before the answer is applied
+  // queue here; the answer effect flushes them in order.
+  const pendingRemoteRef = useRef([]);
+  const remoteAppliedRef = useRef(false);
+  const lastAnswerSeqRef = useRef(null);
+  const lastCandidateSeqRef = useRef(null);
 
   const teardownCapture = useCallback(() => {
     if (streamRef.current) {
@@ -61,7 +103,27 @@ export default function VoiceOverlay({
       try { pcRef.current.close(); } catch { /* already closed */ }
       pcRef.current = null;
     }
+    pendingRemoteRef.current = [];
+    remoteAppliedRef.current = false;
     setMicLive(false);
+    setRtcState(null);
+    setRtcError(null);
+  }, []);
+
+  const flushRemoteCandidates = useCallback(() => {
+    const pc = pcRef.current;
+    if (!pc || !remoteAppliedRef.current
+        || typeof pc.addIceCandidate !== 'function') return;
+    const queued = pendingRemoteRef.current;
+    pendingRemoteRef.current = [];
+    queued.forEach((candidate) => {
+      try {
+        const applied = pc.addIceCandidate(candidate);
+        if (applied && typeof applied.catch === 'function') {
+          applied.catch(() => { /* one stale candidate is not fatal */ });
+        }
+      } catch { /* as above: a single bad candidate never kills the call */ }
+    });
   }, []);
 
   // Capture: runs only for a live session. The engine confirmed the
@@ -85,10 +147,56 @@ export default function VoiceOverlay({
         setMicLive(true);
         const RTC = window.RTCPeerConnection;
         const config = webrtcConfigRef.current;
+        if (config && typeof RTC !== 'function') {
+          // The engine expects a peer connection and this
+          // environment cannot make one: say so, instead of
+          // streaming the microphone to nowhere.
+          setRtcError('WebRTC is not available in this environment — voice cannot connect.');
+          return;
+        }
         if (config && typeof RTC === 'function') {
           const pc = new RTC({ iceServers: config.iceServers || [] });
           stream.getTracks().forEach((track) => pc.addTrack(track, stream));
           pcRef.current = pc;
+          setRtcState('connecting');
+          pc.onicecandidate = (event) => {
+            const forward = onRtcIceCandidateRef.current;
+            if (!forward) return;
+            const candidate = event ? event.candidate : null;
+            forward(candidate ? {
+              candidate: candidate.candidate,
+              sdpMid: candidate.sdpMid ?? null,
+              sdpMLineIndex: candidate.sdpMLineIndex ?? null,
+            } : null);
+          };
+          pc.onconnectionstatechange = () => {
+            const state = pc.connectionState;
+            setRtcState(state);
+            if (state === 'failed') {
+              setRtcError('Voice connection failed — the link to the engine dropped. Try again.');
+            } else if (state === 'closed') {
+              setRtcError('Voice connection closed.');
+            }
+          };
+          // Negotiate: we hold the microphone, so we offer. The
+          // engine's answer returns through the rtcAnswer prop.
+          if (typeof pc.createOffer === 'function'
+              && typeof pc.setLocalDescription === 'function') {
+            try {
+              const offer = await pc.createOffer();
+              if (cancelled) return;
+              await pc.setLocalDescription(offer);
+              if (cancelled) return;
+              const local = pc.localDescription || offer;
+              if (onRtcOfferRef.current) {
+                onRtcOfferRef.current({ type: local.type, sdp: local.sdp });
+              }
+            } catch (e) {
+              if (!cancelled) {
+                setRtcError(`Voice connection failed: ${e && e.message ? e.message : e}`);
+              }
+            }
+          }
         }
       } catch (e) {
         if (!cancelled) {
@@ -102,6 +210,43 @@ export default function VoiceOverlay({
       teardownCapture();
     };
   }, [open, active, teardownCapture]);
+
+  // The engine's answer: apply it, then flush any engine
+  // candidates that arrived while it was in flight.
+  useEffect(() => {
+    if (!rtcAnswer || !rtcAnswer.answer) return undefined;
+    if (lastAnswerSeqRef.current === rtcAnswer.seq) return undefined;
+    lastAnswerSeqRef.current = rtcAnswer.seq;
+    const pc = pcRef.current;
+    if (!pc || typeof pc.setRemoteDescription !== 'function') return undefined;
+    let cancelled = false;
+    try {
+      Promise.resolve(pc.setRemoteDescription(rtcAnswer.answer)).then(() => {
+        if (cancelled) return;
+        remoteAppliedRef.current = true;
+        flushRemoteCandidates();
+      }).catch((e) => {
+        if (!cancelled) {
+          setRtcError(`Voice connection failed: ${e && e.message ? e.message : e}`);
+        }
+      });
+    } catch (e) {
+      setRtcError(`Voice connection failed: ${e && e.message ? e.message : e}`);
+    }
+    return () => { cancelled = true; };
+  }, [rtcAnswer, flushRemoteCandidates]);
+
+  // Engine candidates: queue until the answer is in (the peer has
+  // no remote description before that), then apply in order.
+  useEffect(() => {
+    if (!rtcRemoteCandidate) return;
+    if (lastCandidateSeqRef.current === rtcRemoteCandidate.seq) return;
+    lastCandidateSeqRef.current = rtcRemoteCandidate.seq;
+    if (rtcRemoteCandidate.candidate) {
+      pendingRemoteRef.current.push(rtcRemoteCandidate.candidate);
+    }
+    flushRemoteCandidates();
+  }, [rtcRemoteCandidate, flushRemoteCandidates]);
 
   // Playback cut (E8-5.1b): stop every scheduled source, reset
   // the play head to now, and invalidate decodes still in flight.
@@ -194,41 +339,13 @@ export default function VoiceOverlay({
         boxShadow: '0 16px 48px rgba(0, 0, 0, 0.5)',
       }}
     >
-      <style>{`
-        @keyframes voiceWavePulse {
-          0%, 100% { transform: scaleY(0.35); }
-          50% { transform: scaleY(1); }
-        }
-        @keyframes voiceDotPulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.35; }
-        }
-        .voice-wave-bar {
-          display: inline-block;
-          width: 4px;
-          height: 22px;
-          margin-right: 4px;
-          border-radius: 2px;
-          background: #a78bfa;
-          transform-origin: center;
-        }
-        .voice-waveform-live .voice-wave-bar {
-          animation: voiceWavePulse 0.9s ease-in-out infinite;
-        }
-        .voice-mic-dot {
-          display: inline-block;
-          width: 9px;
-          height: 9px;
-          border-radius: 50%;
-          background: #f87171;
-          animation: voiceDotPulse 1.4s ease-in-out infinite;
-        }
-      `}</style>
-
-      {status === 'error' ? (
+      {/* S3-M2: the waveform/mic-dot keyframes live in src/index.css,
+          not a runtime style element — one of those would force
+          style-src 'unsafe-inline' into the app CSP. */}
+      {status === 'error' || rtcError ? (
         <div data-testid="voice-error" style={{ fontSize: '13px', lineHeight: 1.5 }}>
           <div style={{ fontWeight: 600, marginBottom: '6px' }}>Voice unavailable</div>
-          <div style={{ color: '#fca5a5', marginBottom: '12px' }}>{error}</div>
+          <div style={{ color: '#fca5a5', marginBottom: '12px' }}>{status === 'error' ? error : rtcError}</div>
           <button
             type="button"
             data-testid="voice-dismiss-btn"
@@ -264,6 +381,18 @@ export default function VoiceOverlay({
             </span>
           </div>
 
+          {rtcState && RTC_STATE_LABELS[rtcState] && (
+            <div
+              data-testid="voice-rtc-state"
+              style={{
+                color: rtcState === 'disconnected' ? '#fca5a5' : '#a5b4fc',
+                fontSize: '12px',
+                marginBottom: '8px',
+              }}
+            >
+              {RTC_STATE_LABELS[rtcState]}
+            </div>
+          )}
           {micError && (
             <div data-testid="voice-mic-error" style={{ color: '#fca5a5', fontSize: '12px', marginBottom: '8px' }}>
               {micError}

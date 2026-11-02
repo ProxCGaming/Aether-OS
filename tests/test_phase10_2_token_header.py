@@ -14,9 +14,20 @@ After this fix:
 - The token file is written atomically (temp file + rename) with 0600
   owner-only permissions.
 
-The engine side (``aether_engine/routes/websocket.py`` ``_extract_token``)
-already accepted a ``Bearer`` header, so no engine change was needed; these
-tests pin the header path and the 1008 rejection without one.
+S1-M3 follow-up: the engine side originally accepted the query token
+FIRST (``_extract_token`` returned ``?token=...`` before ever looking at
+the header), so a valid token in the URL still authenticated — and URLs
+land in uvicorn access logs and proxy/browser histories. The engine now
+accepts the ``Authorization: Bearer`` header ONLY: a token presented as
+a URL query parameter is refused (1008), with no fallback to query auth.
+Route choice: the real client connection is owned by the Electron MAIN
+process (``desktop_app/main.cjs`` ``connectEngine``, Node ``ws``), which
+can set arbitrary headers — the renderer never opens this socket and
+never holds the token — and the legacy Python client
+(``aether_ui/ws_client.py``, ``websockets`` library) can set headers
+too. Browser ``WebSocket`` cannot set headers, but no browser/renderer
+code connects to this endpoint directly, so neither the subprotocol
+route nor a first-message auth frame is needed.
 """
 
 import os
@@ -97,6 +108,56 @@ class TestHeaderTokenAuth(unittest.TestCase):
                 ):
                     pass
             self.assertEqual(cm.exception.code, 1008)
+
+    def test_websocket_query_token_valid_rejected_1008(self):
+        """S1-M3: a VALID token in the URL query string must NOT
+        authenticate — query tokens land in access logs and histories,
+        so the query route is refused outright (close 1008, pre-accept)."""
+        with TestClient(app) as client:
+            live_token = engine_state.auth_token
+            with self.assertRaises(WebSocketDisconnect) as cm, client.websocket_connect(f"/ws/tasks?token={live_token}"):
+                pass
+            self.assertEqual(cm.exception.code, 1008)
+
+        audit_content = self.audit_file.read_text(encoding="utf-8")
+        self.assertIn("Unauthorized", audit_content)
+        self.assertIn('"success": false', audit_content)
+
+    def test_websocket_query_token_does_not_rescue_wrong_header(self):
+        """S1-M3: no fallback — a valid query token must not rescue a
+        connection whose header token is wrong."""
+        with TestClient(app) as client:
+            live_token = engine_state.auth_token
+            with self.assertRaises(WebSocketDisconnect) as cm, client.websocket_connect(
+                f"/ws/tasks?token={live_token}",
+                headers={"Authorization": "Bearer wrong-token-12345"},
+            ):
+                pass
+            self.assertEqual(cm.exception.code, 1008)
+
+    def test_websocket_query_token_ignored_when_header_valid(self):
+        """S1-M3: the query string is not consulted at all — a bogus
+        query token alongside a valid header still connects (the
+        header alone governs)."""
+        with TestClient(app) as client:
+            live_token = engine_state.auth_token
+            with client.websocket_connect(
+                "/ws/tasks?token=bogus-query-token",
+                headers={"Authorization": f"Bearer {live_token}"},
+            ) as ws:
+                hello_event = Event.from_json(ws.receive_text())
+                self.assertEqual(hello_event.type, EventType.HELLO)
+
+
+class TestEngineHasNoQueryTokenAuthPath(unittest.TestCase):
+    """S1-M3 static guard: no engine code path may read a token from
+    the WebSocket URL query string ever again."""
+
+    def test_websocket_route_has_no_query_token_parameter(self):
+        src = (REPO_ROOT / "aether_engine" / "routes" / "websocket.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("query_token", src)
+        self.assertNotIn("Query(default=None)", src)
 
 
 @unittest.skipIf(os.name == "nt", "POSIX mode bits do not apply on Windows")

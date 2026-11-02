@@ -4,6 +4,15 @@ Extracted from app.py so both the WebSocket handler and the LangGraph execute_to
 node can route risky tool calls through the same sandboxed worker path.
 
 See ADR 0009 (process isolation), ADR 0010 (resource limits), ADR 0011 §2 (preservation).
+
+Spawn contract (EGM S2-M4 / S2-M5):
+- The tool payload travels ONLY on the worker's stdin (one JSON
+  document, read to EOF by ``aether_worker.__main__``). It is never an
+  argv element: argv is readable by any same-user process via ``ps`` /
+  ``/proc/<pid>/cmdline`` and is OS-size-bounded.
+- The child environment is built from the explicit
+  ``WORKER_ENV_ALLOWLIST`` below plus ``AETHER_WORKER_TOKEN`` — never
+  ``os.environ`` wholesale, which holds provider API keys.
 """
 import asyncio
 import json
@@ -18,6 +27,58 @@ from aether_engine.audit import AuditLogger
 from aether_engine.workers.job_object import WorkerJobObject
 
 logger = logging.getLogger("aether_engine.workers.sandbox")
+
+# S2-M5: minimal environment allow-list for the worker child, mirroring
+# MCP_STDIO_ENV_ALLOWLIST (aether_engine/mcp/client.py, issue 011 S2) —
+# same subprocess-boundary reasoning, defined locally so the workers
+# package does not import the MCP client for a constant; a test pins
+# the two sets equal so neither can drift silently. The worker itself
+# reads only AETHER_WORKER_TOKEN (added separately, never part of this
+# set); everything here is for the worker's own runtime and the shell /
+# check subprocesses it spawns on the user's behalf:
+# - PATH/PATHEXT: locate `python -m` support tools and shell commands.
+# - HOME/USER*/LOGNAME + Windows profile dirs: tools resolve the
+#   user's home/config/temp locations from these.
+# - LANG/LC_*/LANGUAGE: locale + text encoding for Python and tools.
+# - TEMP/TMP/TMPDIR: temp files (Python tempfile, compilers, checks).
+# - SystemRoot/SystemDrive/WINDIR/ComSpec/ProgramFiles*/OS: Windows
+#   system dirs; ComSpec is the shell create_subprocess_shell runs.
+# - VIRTUAL_ENV/PYTHONPATH: the venv + module path the worker and
+#   run_checks children (pytest etc.) resolve Python code through.
+# - SHELL/TERM: POSIX shell selection + terminal behaviour.
+# - Proxy / CA-bundle vars: network tools the user approved (git,
+#   curl, npm, pip) reach the network and verify TLS through these;
+#   endpoints/file paths only in the normal case (credentialed proxy
+#   URLs are the separately recorded EGM S2 N2 item, not this fix).
+WORKER_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH", "PATHEXT", "HOME", "USER", "USERNAME", "LOGNAME",
+        "LANG", "LC_ALL", "LC_CTYPE", "LANGUAGE",
+        "TEMP", "TMP", "TMPDIR",
+        "SystemRoot", "SystemDrive", "WINDIR", "ComSpec",
+        "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
+        "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
+        "VIRTUAL_ENV", "PYTHONPATH", "SHELL", "TERM", "OS",
+        "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+        "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+        "NODE_EXTRA_CA_CERTS", "NODE_USE_ENV_PROXY",
+        "SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+    }
+)
+
+
+def _build_worker_env(worker_token: str) -> dict[str, str]:
+    """Child env for the worker: allowlisted vars only, plus the token.
+
+    Provider API keys and every other engine variable are excluded by
+    construction (S2-M5) — a name reaches the child only if it is in
+    ``WORKER_ENV_ALLOWLIST``.
+    """
+    env = {k: v for k, v in os.environ.items() if k in WORKER_ENV_ALLOWLIST}
+    env["AETHER_WORKER_TOKEN"] = worker_token
+    return env
+
 
 # Default task-class resource profiles (mirrors UserConfig defaults).
 _DEFAULT_TASK_CLASSES: dict[str, dict[str, int]] = {
@@ -101,15 +162,17 @@ async def execute_tool_in_worker(
             })
         raise RuntimeError(f"Refusing to execute '{tool_name}': {reason}")
 
+    # S2-M4: payload goes over stdin, never argv (argv is visible in
+    # `ps` / /proc/<pid>/cmdline and size-bounded). S2-M5: env is the
+    # allowlist + token, never the engine's full environment.
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
         "aether_worker",
-        "--payload",
-        payload,
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, "AETHER_WORKER_TOKEN": worker_token},
+        env=_build_worker_env(worker_token),
     )
 
     # Phase 10.2, A2: if the worker cannot be assigned to the Job Object,
@@ -151,7 +214,9 @@ async def execute_tool_in_worker(
         # quick 60s / standard 1800s / heavy 7200s, or the caller's
         # task_classes override). On timeout the worker is killed and a
         # distinct WORKER_EXECUTION_TIMEOUT audit event is recorded.
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=time_cap)
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=payload.encode("utf-8")), timeout=time_cap
+        )
     except TimeoutError:
         try:
             proc.kill()

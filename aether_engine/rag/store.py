@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import pickle
 import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any
+
+from aether_engine.embedding_codec import decode_embedding, encode_embedding
 
 logger = logging.getLogger("aether_engine.rag.store")
 
@@ -56,6 +57,8 @@ class WorkspaceRagStore:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 
     def init_db(self) -> None:
@@ -228,7 +231,7 @@ class WorkspaceRagStore:
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (chunk_id, doc_id, c["chunk_index"], c["line_start"],
                      c["line_end"], c["content"],
-                     pickle.dumps(embedding) if embedding else None))
+                     encode_embedding(embedding) if embedding else None))
             conn.commit()
 
     def chunks_for_document(self, doc_id: str) -> list[dict[str, Any]]:
@@ -269,27 +272,33 @@ class WorkspaceRagStore:
         with self._get_conn() as conn:
             conn.execute(
                 "UPDATE prose_chunks SET embedding = ? WHERE id = ?",
-                (pickle.dumps(embedding), chunk_id))
+                (encode_embedding(embedding), chunk_id))
             conn.commit()
 
-    def search_candidates(self, workspace_roots: list[str] | None = None,
+    def search_candidates(self, workspace_roots: list[str] | None,
                           ) -> list[dict[str, Any]]:
-        """All searchable chunks (non-excluded docs), with doc fields.
+        """Searchable chunks (non-excluded docs) for the given roots.
 
         Both search legs read this set: chunks with an embedding feed
         the semantic leg; every chunk feeds the lexical leg, so a
         partially-indexed workspace still answers.
+
+        ``workspace_roots`` is required and explicit (S2-M2): there
+        is deliberately NO unscoped mode. ``None`` or an empty list
+        means "no workspace granted" and returns no candidates —
+        never every indexed workspace in the store. A caller that
+        legitimately searches several roots passes them all here.
         """
         self.init_db()
+        if not workspace_roots:
+            return []
+        marks = ", ".join("?" for _ in workspace_roots)
         sql = ("SELECT c.*, d.workspace_root, d.file_path, d.status AS doc_status"
                " FROM prose_chunks c"
                " JOIN prose_documents d ON d.id = c.doc_id"
-               " WHERE d.status != 'excluded'")
-        params: list[Any] = []
-        if workspace_roots:
-            marks = ", ".join("?" for _ in workspace_roots)
-            sql += f" AND d.workspace_root IN ({marks})"
-            params.extend(workspace_roots)
+               " WHERE d.status != 'excluded'"
+               f" AND d.workspace_root IN ({marks})")
+        params: list[Any] = list(workspace_roots)
         sql += " ORDER BY d.file_path, c.chunk_index"
         with self._get_conn() as conn:
             rows = conn.execute(sql, params).fetchall()
@@ -298,8 +307,10 @@ class WorkspaceRagStore:
     @staticmethod
     def _chunk_dict(row: sqlite3.Row) -> dict[str, Any]:
         d = dict(row)
-        blob = d.get("embedding")
-        d["embedding"] = pickle.loads(blob) if blob else None
+        # S4-M13: only the tagged safe format decodes; a legacy
+        # pickle blob reads as None ("no embedding" — the chunk
+        # rejoins the backfill queue) and is never unpickled.
+        d["embedding"] = decode_embedding(d.get("embedding"))
         return d
 
     # -- aggregates ----------------------------------------------------

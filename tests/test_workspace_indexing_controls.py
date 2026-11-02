@@ -111,7 +111,7 @@ async def test_websocket_pause_and_config_handlers(tmp_path, monkeypatch):
     try:
         with patch("aether_engine.rag.prose_indexer.get_prose_indexer", return_value=custom_indexer):
             client = TestClient(app)
-            with client.websocket_connect(f"/ws/tasks?token={token}") as ws:
+            with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {token}"}) as ws:
                 # Drain HELLO on connect
                 hello = Event.from_json(ws.receive_text())
                 assert hello.type == EventType.HELLO

@@ -86,6 +86,22 @@ def validate_profile_dir(path: str | Path) -> Path:
     arbitrary folder — raises :class:`BrowserProfileError`. This is
     an allowlist, not a blocklist: the dedicated root is the only
     place a session may live.
+
+    Containment is judged on RESOLVED paths (S2-M11): normpath alone
+    is lexical, so a symlink inside the dedicated root pointing at
+    the user's real profile used to pass — the path sat inside the
+    root while the directory the browser would actually open sat
+    outside it. Both the candidate and the root are resolved and
+    the resolved candidate must be the resolved root or inside it,
+    so a symlink whose target escapes is refused, while one whose
+    target stays inside the root still passes.
+
+    Resolution uses ``strict=False``: a profile directory that does
+    not exist yet (the normal first-run case) is judged by its
+    resolved would-be location — existing ancestors are resolved,
+    the missing tail is taken lexically — exactly as it was judged
+    before this fix. The path returned on success is the caller's
+    path (expanded, normalised), unchanged from before.
     """
     import os
 
@@ -93,7 +109,20 @@ def validate_profile_dir(path: str | Path) -> Path:
     # of the dedicated root while appearing to sit inside it.
     candidate = Path(os.path.normpath(Path(path).expanduser()))
     root = dedicated_profile_dir()
-    if candidate == root or root in candidate.parents:
+    try:
+        resolved_candidate = candidate.resolve(strict=False)
+        resolved_root = root.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        # Unresolvable (e.g. a symlink loop): fail closed — a path
+        # whose real location cannot be established is never inside.
+        raise BrowserProfileError(
+            f"Refusing browser profile '{candidate}': its real location "
+            f"could not be established ({exc}). Agent browser sessions may "
+            f"only use the dedicated profile at '{root}'."
+        ) from exc
+    if resolved_candidate == resolved_root or (
+        resolved_root in resolved_candidate.parents
+    ):
         return candidate
     lowered = str(candidate).lower()
     hint = ""
@@ -198,13 +227,22 @@ class BrowserSession:
         self.session_id = session_id or uuid.uuid4().hex
         # Identity binding (E8-6.1/6.3, review finding M04): the
         # graph task that created this session and the chat session
-        # it belongs to. Challenge handoffs and vault approvals are
-        # addressed by task_id; desktop control resolves by
-        # chat_session_id. Both are bound at creation (or late-bound
-        # by the manager when the creator's identity arrives after
-        # the session) and never re-bound to a different task.
+        # it belongs to. Vault approvals are addressed by task_id;
+        # desktop control resolves by chat_session_id. Both are
+        # bound at creation (or late-bound by the manager when the
+        # creator's identity arrives after the session) and never
+        # re-bound to a different task.
         self.task_id = task_id
         self.chat_session_id = chat_session_id
+        # Driving identity (M04 residual): while the browser agent
+        # is enabled, any task may drive the one live session, so the
+        # manager also tracks the task driving it RIGHT NOW. The
+        # CAPTCHA/2FA handoff is routed to the driving task — the
+        # one whose action hit the challenge and whose stream is
+        # waiting on it — not to the (possibly idle) creator. The
+        # creator binding above never moves; only this does.
+        self.driving_task_id = task_id
+        self.driving_chat_session_id = chat_session_id
         self._audit_logger = audit_logger or AuditLogger()
         self._driver_factory = driver_factory
         self._driver: Any = None
@@ -302,7 +340,10 @@ class BrowserSession:
 
         On a hit the session parks in WAITING_USER, the hit is
         audited, and a BROWSER_CHALLENGE_DETECTED event is published
-        for the bound task (when one is bound).
+        for the task currently DRIVING the session (when one is
+        known) — the task whose action hit the challenge. The
+        creator binding is the fallback when no driver is tracked;
+        it is never used to override a known driver (M04 residual).
         """
         hit = await self._read_live_challenge()
         if hit is None:
@@ -315,17 +356,20 @@ class BrowserSession:
             "challenge": hit["challenge"],
             "host": host,
         })
-        if self.task_id:
+        handoff_task_id = self.driving_task_id or self.task_id
+        if handoff_task_id:
             from aether_common.contracts import Event, EventType
             from aether_engine.event_bus import event_bus
 
-            event_bus.publish(self.task_id, Event(
+            event_bus.publish(handoff_task_id, Event(
                 type=EventType.BROWSER_CHALLENGE_DETECTED,
-                request_id=self.task_id,
+                request_id=handoff_task_id,
                 payload={
                     "session_id": self.session_id,
-                    "task_id": self.task_id,
-                    "chat_session_id": self.chat_session_id,
+                    "task_id": handoff_task_id,
+                    "chat_session_id": (
+                        self.driving_chat_session_id or self.chat_session_id
+                    ),
                     "url": self.current_url,
                     "challenge": hit["challenge"],
                 },
@@ -676,10 +720,12 @@ class BrowserSessionManager:
         chat session id are bound at creation; a session whose
         creator's identity arrives late is late-bound, never
         re-bound. While the browser agent is enabled, any task may
-        drive the one live session. Once the owner disables it, only
-        the OWNING task may keep using the live session — a new task
-        must not silently inherit a running browser (see
-        :meth:`_require_session_admission`).
+        drive the one live session; the latest admitted driver is
+        tracked separately (``driving_task_id``) so challenge
+        handoffs route to the task that hit the challenge. Once the
+        owner disables it, only the OWNING task may keep using the
+        live session — a new task must not silently inherit a running
+        browser (see :meth:`_require_session_admission`).
         """
         active = self.active_session
         if active is not None:
@@ -689,6 +735,14 @@ class BrowserSessionManager:
                 active.task_id = task_id
             if chat_session_id and not active.chat_session_id:
                 active.chat_session_id = chat_session_id
+            # M04 residual: whoever is driving NOW owns the challenge
+            # handoff. The creator binding above stays put (admission
+            # and control resolution depend on it); the driving
+            # identity follows the latest admitted driver.
+            if task_id:
+                active.driving_task_id = task_id
+            if chat_session_id:
+                active.driving_chat_session_id = chat_session_id
             return active
         # Epic 8, E8-6.2: the master switch blocks NEW browser tasks
         # outright — a session may only be CREATED while the browser

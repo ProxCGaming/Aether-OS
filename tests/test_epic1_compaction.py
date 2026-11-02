@@ -234,7 +234,9 @@ def test_resolve_summariser_uses_compression_override(monkeypatch):
     sentinel = object()
     seen = {}
 
-    def _fake_create(provider_name, model_name, secret_store):
+    def _fake_create(provider_name, model_name, secret_store, **_kwargs):
+        # **_kwargs: the factory contract gained keyword-only
+        # constraint params (local_only / require_vision, M17).
         seen.update(provider=provider_name, model=model_name, store=secret_store)
         return sentinel
 

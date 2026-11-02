@@ -179,7 +179,7 @@ def test_ws_backup_create_and_restore(tmp_path, monkeypatch):
         _TestClient(_app) as client,
     ):
         mock_store.return_value.list_providers.return_value = []
-        with client.websocket_connect(f"/ws/tasks?token={_es.auth_token}") as ws:
+        with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {_es.auth_token}"}) as ws:
             ws.receive_text()
             ws.send_text(_Event(type=_ET.BACKUP_CREATE_REQUEST, payload={"include_secrets": True}).to_json())
             resp = _Event.from_json(ws.receive_text())
@@ -233,3 +233,52 @@ def test_diagnostics_bundle_is_redacted_and_counts_only(tmp_path):
 def test_app_version_matches_desktop_package_json():
     pkg = _json.loads((_Path(__file__).parent.parent / "desktop_app" / "package.json").read_text())
     assert pkg["version"] == APP_VERSION
+
+
+# ---------------------------------------------------------------------------
+# S5-M1 + S5-M2 — version single-sourcing is total (not just the desktop
+# shell): pyproject.toml and the root package.json must agree with
+# APP_VERSION too, and the root package.json must not carry its old
+# scaffolding identity. The root package.json itself is load-bearing
+# (husky/commitlint/lint-staged live there — .husky/*, the lint-staged
+# block, scripts.prepare/test), so it is corrected, never deleted.
+# ---------------------------------------------------------------------------
+
+import tomllib as _tomllib
+
+_REPO_ROOT = _Path(__file__).parent.parent
+
+
+def test_app_version_matches_pyproject_toml():
+    with (_REPO_ROOT / "pyproject.toml").open("rb") as fh:
+        project = _tomllib.load(fh)["project"]
+    assert project["version"] == APP_VERSION, (
+        f"pyproject.toml version {project['version']!r} diverged from "
+        f"APP_VERSION {APP_VERSION!r} — aether_engine/version.py is the "
+        "single source of truth; update every mirror together"
+    )
+
+
+def test_app_version_matches_root_package_json():
+    pkg = _json.loads((_REPO_ROOT / "package.json").read_text())
+    assert pkg["version"] == APP_VERSION, (
+        f"root package.json version {pkg['version']!r} diverged from "
+        f"APP_VERSION {APP_VERSION!r}"
+    )
+
+
+def test_root_package_json_is_not_scaffolding():
+    pkg = _json.loads((_REPO_ROOT / "package.json").read_text())
+    assert pkg["name"] == "aether-os"
+    assert pkg.get("description"), "root package.json description is empty"
+    # "main": "test_ws.js" pointed at a stray manual probe script that
+    # nothing imports; a hooks/tooling manifest has no entry point.
+    assert "main" not in pkg
+    # The load-bearing parts must survive: husky installs the hooks,
+    # the root test script is what .husky/pre-push runs as `npm test`,
+    # and lint-staged's config + binaries resolve from here.
+    assert pkg["scripts"]["prepare"] == "husky"
+    assert "desktop_app" in pkg["scripts"]["test"]
+    assert "lint-staged" in pkg
+    for dep in ("@commitlint/cli", "husky", "lint-staged"):
+        assert dep in pkg["devDependencies"]

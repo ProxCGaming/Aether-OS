@@ -515,8 +515,8 @@ def test_ws_task_rewind_and_undo_contract(ws_env):
     rewind_manifest.record_point(sid, "task-ws", 2, "cp-0003", "Task complete", ["a.txt"])
 
     with TestClient(app) as client:
-        url = "/ws/tasks?token=" + engine_state.auth_token
-        with client.websocket_connect(url) as ws:
+        url = "/ws/tasks"
+        with client.websocket_connect(url, headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws:
             ws.receive_text()  # HELLO
 
             # An older task id is refused over the wire too.

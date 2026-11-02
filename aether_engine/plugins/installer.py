@@ -1,7 +1,9 @@
+import copy
 import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import shutil
 import zipfile
@@ -176,7 +178,13 @@ class PluginInstaller:
 
     def _save_registry(self):
         import json
-        self.registry_file.write_text(json.dumps(self._registry, indent=2))
+        # Atomic write (temp file + os.replace in the same directory):
+        # a failed save leaves the previous registry file fully intact,
+        # so on-disk state can never be a half-written mix of the old
+        # and new entries. install()'s rollback relies on this.
+        tmp_file = self.registry_file.with_name(self.registry_file.name + ".tmp")
+        tmp_file.write_text(json.dumps(self._registry, indent=2))
+        os.replace(tmp_file, self.registry_file)
 
     # -- Phase 10.2 B2: refusal + zip validation -------------------------
 
@@ -386,22 +394,68 @@ class PluginInstaller:
             raise RuntimeError(f"Installation failed, rolled back. Error: {e}")
 
         target_dir = self.plugins_dir / plugin_name
-
-        # Rollback mechanism
-        backup = None
-        if target_dir.exists():
-            backup = self.plugins_dir / f"{plugin_name}_backup"
-            if backup.exists():
-                shutil.rmtree(backup)
-            shutil.move(str(target_dir), str(backup))
-
-        installed_skills = []
-        installed_tools = []
-        installed_mcp = []
+        skills_dest = Path.home() / ".aether" / "skills"
 
         from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
 
+        # E0-01: an install/upgrade mutates four surfaces — the package
+        # dir, the global skill dirs (overwritten in place), the global
+        # MCP registry (same-named configs overwritten and persisted at
+        # once), and this installer's registry entry (replaced in
+        # memory, then saved). The old code backed up only the package
+        # dir, so a failure after any other surface had moved destroyed
+        # the previous working installation while the error still
+        # claimed "rolled back". Snapshot ALL four surfaces before
+        # mutating any of them; the except block below restores every
+        # one, and reports "rolled back" only when the restore actually
+        # completed.
+        old_entry = copy.deepcopy(self._registry.get(plugin_name))
+        snapshot_dir = self.plugins_dir / f"{plugin_name}_snapshot"
+        skill_snapshot: dict[Path, Path | None] = {}
+        mcp_snapshot: dict[str, dict | None] = {}
+
+        backup = None
+        installed_skills: list[Path] = []
+        installed_tools: list[str] = []
+        installed_mcp: list[str] = []
+
         try:
+            # --- Snapshot phase (no live state is mutated here) ---
+            if snapshot_dir.exists():
+                shutil.rmtree(snapshot_dir)
+            touched_skill_dirs = {
+                skills_dest / skill.name
+                for skill in manifest.skills if skill.file_path
+            }
+            if old_entry:
+                touched_skill_dirs |= {
+                    Path(p) for p in old_entry.get("installed_skills", [])
+                }
+            for dest_dir in touched_skill_dirs:
+                if dest_dir.exists():
+                    snap_copy = snapshot_dir / "skills" / dest_dir.name
+                    snap_copy.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(dest_dir, snap_copy)
+                    skill_snapshot[dest_dir] = snap_copy
+                else:
+                    skill_snapshot[dest_dir] = None
+            mcp_names = {name for name, _ in mcp_configs}
+            if old_entry:
+                mcp_names |= set(old_entry.get("installed_mcp", []))
+            for name in mcp_names:
+                existing = GLOBAL_MCP_REGISTRY.get_server(name)
+                mcp_snapshot[name] = (
+                    copy.deepcopy(existing) if existing is not None else None
+                )
+
+            # --- Package backup (pre-existing mechanism) ---
+            if target_dir.exists():
+                backup = self.plugins_dir / f"{plugin_name}_backup"
+                if backup.exists():
+                    shutil.rmtree(backup)
+                shutil.move(str(target_dir), str(backup))
+
+            # --- Mutation phase ---
             target_dir.mkdir(parents=True, exist_ok=True)
             if source.is_file() and source.suffix == ".zip":
                 self._safe_extract(source, target_dir)
@@ -416,7 +470,6 @@ class PluginInstaller:
                         shutil.copy2(s, d)
 
             # 1. Install Skills
-            skills_dest = Path.home() / ".aether" / "skills"
             skills_dest.mkdir(parents=True, exist_ok=True)
             for skill in manifest.skills:
                 if skill.file_path:
@@ -441,6 +494,33 @@ class PluginInstaller:
                 GLOBAL_MCP_REGISTRY.add_server(mcp_name, config_dict)
                 installed_mcp.append(mcp_name)
 
+            # 4. Remove the previous version's artefacts that the new
+            # manifest no longer declares, so a successful upgrade
+            # leaves nothing stale behind. Both sets are covered by the
+            # snapshots above, so a failure later still restores them.
+            new_skill_names = {skill.name for skill in manifest.skills}
+            if old_entry:
+                for old_path in old_entry.get("installed_skills", []):
+                    stale_dir = Path(old_path)
+                    if stale_dir.name not in new_skill_names and stale_dir.exists():
+                        shutil.rmtree(stale_dir)
+            new_mcp_names = {name for name, _ in mcp_configs}
+            if old_entry:
+                for old_name in old_entry.get("installed_mcp", []):
+                    if old_name not in new_mcp_names:
+                        try:
+                            GLOBAL_MCP_REGISTRY.remove_server_sync(old_name)
+                        except Exception as rm_err:  # noqa: BLE001 — a connected stale server must not fail an otherwise-good upgrade; it stays registered and the skip is logged
+                            logger.warning(
+                                "Upgrade of %s: could not remove stale "
+                                "MCP server %s: %s",
+                                plugin_name, old_name, rm_err,
+                            )
+
+            # 5. Commit point: replace the registry entry and persist
+            # it (atomically — see _save_registry). Everything before
+            # this is restorable from the snapshots; once the save
+            # lands, the new installation is the recorded truth.
             self._registry[plugin_name] = {
                 "manifest": manifest.model_dump(),
                 "enabled": True,
@@ -450,34 +530,95 @@ class PluginInstaller:
             }
             self._save_registry()
 
-            if backup and backup.exists():
-                shutil.rmtree(backup)
-
         except Exception as e:  # noqa: BLE001 — rollback handler: must catch everything to restore the previous install
-            # Atomic Rollback
-            if target_dir.exists():
-                shutil.rmtree(target_dir)
-            if backup and backup.exists():
-                shutil.move(str(backup), str(target_dir))
+            # Full rollback (E0-01): restore every snapshotted surface.
+            # Each step is attempted independently and failures are
+            # collected — the result reported to the caller must match
+            # reality, so "rolled back" is claimed only when every
+            # restore step actually completed.
+            rollback_errors: list[str] = []
 
-            for skill_dir in installed_skills:
-                if skill_dir.exists():
-                    shutil.rmtree(skill_dir)
-            for mcp_name in installed_mcp:
-                # Issue 011 (S6): a connected server refuses a sync
-                # remove — that refusal must not mask the install
-                # failure being rolled back, so it is best-effort here.
+            # Package directory.
+            try:
+                if target_dir.exists():
+                    shutil.rmtree(target_dir)
+                if backup and backup.exists():
+                    shutil.move(str(backup), str(target_dir))
+            except Exception as rb_err:  # noqa: BLE001 — collect and continue restoring the other surfaces
+                rollback_errors.append(f"package directory: {rb_err}")
+
+            # Global skill dirs: drop whatever the failed attempt left
+            # (including partially copied new skills) and put back the
+            # snapshotted previous content.
+            for dest_dir, snap_copy in skill_snapshot.items():
                 try:
-                    GLOBAL_MCP_REGISTRY.remove_server_sync(mcp_name)
-                except Exception as remove_err:  # noqa: BLE001 — best-effort rollback cleanup (issue 011 S6); must not mask the install failure
-                    logger.debug(
-                        "Rollback could not remove MCP server %s: %s",
-                        mcp_name, remove_err,
-                    )
+                    if dest_dir.exists():
+                        shutil.rmtree(dest_dir)
+                    if snap_copy is not None:
+                        shutil.copytree(snap_copy, dest_dir)
+                except Exception as rb_err:  # noqa: BLE001 — collect and continue
+                    rollback_errors.append(f"skill {dest_dir.name}: {rb_err}")
+
+            # Global MCP registry: re-add the snapshotted configs
+            # (which also re-persists them) and remove servers the
+            # failed attempt introduced. Issue 011 (S6): a connected
+            # server refuses a sync remove — that refusal is collected
+            # and reported, never silently swallowed.
+            for name, snap_config in mcp_snapshot.items():
+                try:
+                    if snap_config is not None:
+                        GLOBAL_MCP_REGISTRY.add_server(
+                            name, copy.deepcopy(snap_config))
+                    elif name in GLOBAL_MCP_REGISTRY.list_servers():
+                        GLOBAL_MCP_REGISTRY.remove_server_sync(name)
+                except Exception as rb_err:  # noqa: BLE001 — collect and continue
+                    rollback_errors.append(f"MCP server {name}: {rb_err}")
+
+            # This installer's registry entry: restore the previous
+            # entry (or drop the new one, for a fresh install) and
+            # persist it. If the persist fails but the file on disk
+            # already matches the restored registry, state is
+            # consistent — that is exactly the case when the original
+            # failure WAS this save, which is atomic and never
+            # half-lands — so it is not counted as a rollback failure.
+            if old_entry is None:
+                self._registry.pop(plugin_name, None)
+            else:
+                self._registry[plugin_name] = copy.deepcopy(old_entry)
+            try:
+                self._save_registry()
+            except Exception as rb_err:  # noqa: BLE001 — judged against the on-disk state below
+                try:
+                    on_disk = json.loads(self.registry_file.read_text())
+                except Exception:  # noqa: BLE001 — an unreadable file counts as not matching
+                    on_disk = None
+                if on_disk != self._registry:
+                    rollback_errors.append(f"plugin registry: {rb_err}")
+
+            if snapshot_dir.exists():
+                shutil.rmtree(snapshot_dir, ignore_errors=True)
 
             self._audit("PLUGIN_INSTALL_FAILED", plugin_name, str(e),
                         str(source))
+            if rollback_errors:
+                raise RuntimeError(
+                    "Installation failed and rollback was incomplete: "
+                    + "; ".join(rollback_errors)
+                    + f". Error: {e}")
             raise RuntimeError(f"Installation failed, rolled back. Error: {e}")
+
+        # Committed. Backup/snapshot cleanup is best-effort only: a
+        # cleanup failure must never roll back a landed install (the
+        # pre-fix code deleted the backup inside the try, so a cleanup
+        # error there rolled back a fully committed upgrade).
+        for debris in (backup, snapshot_dir):
+            if debris is not None and debris.exists():
+                try:
+                    shutil.rmtree(debris)
+                except OSError as cleanup_err:
+                    logger.warning(
+                        "Install of %s committed; could not remove %s: %s",
+                        plugin_name, debris, cleanup_err)
 
     def uninstall(self, plugin_name: str):
         if plugin_name not in self._registry:

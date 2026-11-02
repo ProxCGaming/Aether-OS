@@ -15,7 +15,10 @@ on arrival — fully async, never blocking chat:
 
 Failure is honest and non-destructive: an item whose analysis
 fails is marked ``failed`` with the error recorded in its probe
-metadata, and stays fully usable in the library. When the
+metadata, and stays fully usable in the library. Failed items are
+retried by ``backfill()`` up to ``MAX_ANALYSIS_ATTEMPTS`` total
+attempts (S4-M11), counted in probe metadata as
+``analysis_attempts``. When the
 embedding endpoint is down the item still reaches ``analyzed`` —
 only its semantic recall degrades until a later re-embed; text
 recall (and the store's lexical leg) keeps working.
@@ -59,6 +62,13 @@ logger = logging.getLogger("aether_engine.media.analyzer")
 
 KEYFRAME_CAP = 24
 _VISION_TIMEOUT_S = 120.0
+
+# S4-M11: total analysis attempts for one item, including the first
+# failure. Failed items below this cap are retried by ``backfill()``;
+# at/over it they stay ``failed`` until a human intervenes, so a
+# permanently broken provider/file never requeues forever. The
+# per-item count lives in probe_metadata["analysis_attempts"].
+MAX_ANALYSIS_ATTEMPTS = 3
 
 # E8-4.4: STT consumes raw PCM16 mono (SttEngine.transcribe); the
 # extraction below produces exactly that at the rate whisper
@@ -470,6 +480,23 @@ def _embed_text_for(item_summary: str, tags: list[str], extra: str = "") -> str:
     return " ".join(p for p in parts if p)
 
 
+def _effective_analysis_attempts(item: dict[str, Any]) -> int:
+    """Attempts already spent on a (failed) item, for the retry cap.
+
+    Items that failed before the counter existed carry no
+    ``analysis_attempts`` in their probe metadata; they demonstrably
+    failed once, so they count as 1. A corrupt counter also reads
+    as 1 rather than 0, so it can never buy unlimited retries.
+    """
+    probe = item.get("probe_metadata") or {}
+    if "analysis_attempts" not in probe:
+        return 1
+    try:
+        return int(probe.get("analysis_attempts") or 0)
+    except (TypeError, ValueError):
+        return 1
+
+
 def _embed_text_for_item(item: dict[str, Any]) -> str:
     """Rebuild the embedding text for an already-analysed item.
 
@@ -598,6 +625,23 @@ class MediaAnalyzer:
             if vec is not None:
                 self.store.store_embedding(media_id, vec)
 
+            # S4-M11: success clears the retry slate. The video path
+            # merges the item's previous probe metadata (so stale
+            # ``analysis_attempts`` / ``error`` from an earlier failure
+            # would survive), and the image path returns probe=None
+            # (so the stored probe would be left untouched) — strip
+            # both explicitly in either case.
+            if probe is not None:
+                probe = dict(probe)
+                probe.pop("analysis_attempts", None)
+                probe.pop("error", None)
+            else:
+                existing_probe = dict(item.get("probe_metadata") or {})
+                if "analysis_attempts" in existing_probe or "error" in existing_probe:
+                    existing_probe.pop("analysis_attempts", None)
+                    existing_probe.pop("error", None)
+                    probe = existing_probe
+
             updated = self.store.update_analysis(
                 media_id,
                 status="analyzed",
@@ -614,6 +658,13 @@ class MediaAnalyzer:
             logger.warning(f"Media analysis failed for {media_id}: {e}")
             failed_probe = dict(item.get("probe_metadata") or {})
             failed_probe["error"] = str(e) or repr(e)
+            # S4-M11: count this attempt so backfill() can bound
+            # retries at MAX_ANALYSIS_ATTEMPTS (see that method).
+            try:
+                failed_probe["analysis_attempts"] = (
+                    int(failed_probe.get("analysis_attempts") or 0) + 1)
+            except (TypeError, ValueError):
+                failed_probe["analysis_attempts"] = 1
             updated = self.store.update_analysis(
                 media_id,
                 status="failed",
@@ -766,9 +817,15 @@ class MediaAnalyzer:
 
         Covers media registered before this pipeline shipped (and
         any item left in a stale ``analyzing`` state by a crash).
-        Returns how many items reached ``analyzed``. The E8-4.4
-        transcript backfill rides along in the same pass, so the
-        one startup call covers pre-slice videos too.
+        S4-M11: ``failed`` items are retried too, bounded by
+        ``MAX_ANALYSIS_ATTEMPTS`` — a transient provider failure no
+        longer strands an item forever, and a permanently failing
+        one is not requeued forever either. ``limit`` is respected
+        across the combined work: pending/analyzing items go first
+        and failed retries fill the remainder. Returns how many
+        items reached ``analyzed`` (successful retries included).
+        The E8-4.4 transcript backfill rides along in the same
+        pass, so the one startup call covers pre-slice videos too.
         """
         pending = self.store.list_by_status(("pending", "analyzing"), limit=limit)
         analyzed = 0
@@ -776,6 +833,21 @@ class MediaAnalyzer:
             result = await self.analyze_item(item["id"])
             if result is not None and result.get("status") == "analyzed":
                 analyzed += 1
+        remaining = None if limit is None else max(limit - len(pending), 0)
+        if remaining is None or remaining > 0:
+            # Fetch all failed items rather than capping the query:
+            # capped-out items must not consume the retry budget
+            # and hide eligible ones behind them.
+            retries = [
+                item for item in self.store.list_by_status(("failed",))
+                if _effective_analysis_attempts(item) < MAX_ANALYSIS_ATTEMPTS
+            ]
+            if remaining is not None:
+                retries = retries[:remaining]
+            for item in retries:
+                result = await self.analyze_item(item["id"])
+                if result is not None and result.get("status") == "analyzed":
+                    analyzed += 1
         await self.backfill_transcripts()
         return analyzed
 

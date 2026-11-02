@@ -10,13 +10,14 @@ import logging
 import math
 import mimetypes
 import os
-import pickle
 import re
 import sqlite3
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+from aether_engine.embedding_codec import decode_embedding, encode_embedding
 
 logger = logging.getLogger("aether_engine.media.store")
 
@@ -40,6 +41,22 @@ def _tokens(text: str) -> list[str]:
     return _TOKEN_RE.findall((text or "").lower())
 
 
+def _unlink_media_file(file_path: str) -> bool:
+    """Best-effort unlink of a media item's file (S4-M3).
+
+    Returns True only when a regular file existed and was removed;
+    a missing file or any failure is tolerated (warning-logged).
+    """
+    p = Path(file_path)
+    try:
+        if p.exists() and p.is_file():
+            os.unlink(p)
+            return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Failed to delete underlying file {file_path}: {e}")
+    return False
+
+
 def _cosine(vec1: list[float], vec2: list[float]) -> float:
     if not vec1 or not vec2 or len(vec1) != len(vec2):
         return 0.0
@@ -52,6 +69,9 @@ def _cosine(vec1: list[float], vec2: list[float]) -> float:
 
 
 class MediaStore:
+    # Also reachable as MediaStore._unlink_media_file for callers/tests.
+    _unlink_media_file = staticmethod(_unlink_media_file)
+
     def __init__(self, db_path: Path | str | None = None):
         self.db_path = Path(db_path) if db_path else _DEFAULT_DB_PATH
         self._initialized = False
@@ -357,7 +377,7 @@ class MediaStore:
         with self._get_conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO media_embeddings (media_id, embedding) VALUES (?, ?)",
-                (media_id, pickle.dumps([float(x) for x in embedding])),
+                (media_id, encode_embedding(embedding)),
             )
             conn.commit()
 
@@ -370,11 +390,9 @@ class MediaStore:
             row = cur.fetchone()
             if not row:
                 return None
-            try:
-                vec = pickle.loads(row[0])
-            except Exception:  # noqa: BLE001 — a corrupt blob reads as "no embedding"
-                return None
-            return [float(x) for x in vec]
+            # S4-M13: only the tagged safe format decodes; a corrupt
+            # or legacy pickle blob reads as "no embedding".
+            return decode_embedding(row[0])
 
     def update_analysis(
         self,
@@ -487,11 +505,11 @@ class MediaStore:
                 media_ids,
             )
             for media_id, blob in cur.fetchall():
-                try:
-                    out[media_id] = [float(x) for x in pickle.loads(blob)]
-                except Exception:  # noqa: BLE001 — skip corrupt blobs
+                vec = decode_embedding(blob)
+                if vec is None:  # corrupt or legacy pickle blob — skip it
                     logger.debug(f"Skipping corrupt embedding blob for {media_id}")
                     continue
+                out[media_id] = vec
         return out
 
     def search_media(
@@ -597,28 +615,30 @@ class MediaStore:
 
         file_deleted = False
         if delete_underlying_file and file_path:
-            p = Path(file_path)
-            try:
-                if p.exists() and p.is_file():
-                    os.unlink(p)
-                    file_deleted = True
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Failed to delete underlying file {file_path}: {e}")
+            file_deleted = _unlink_media_file(file_path)
 
         return True, file_deleted
 
     def delete_by_session(self, session_id: str) -> int:
-        """Delete all media entries belonging to a session."""
+        """Delete all media entries belonging to a session.
+
+        S4-M3: also unlinks each item's file from disk (best-effort,
+        via ``_unlink_media_file``) — previously only the DB rows were
+        removed and the session's files were orphaned on disk.
+        """
         self.init_db()
         with self._get_conn() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT id FROM media_items WHERE session_id = ?", (session_id,))
-            ids = [r[0] for r in cur.fetchall()]
-            for mid in ids:
+            cur.execute("SELECT id, file_path FROM media_items WHERE session_id = ?", (session_id,))
+            pairs = [(r[0], r[1]) for r in cur.fetchall()]
+            for mid, _file_path in pairs:
                 conn.execute("DELETE FROM media_embeddings WHERE media_id = ?", (mid,))
                 conn.execute("DELETE FROM media_items WHERE id = ?", (mid,))
             conn.commit()
-            return len(ids)
+        for _mid, file_path in pairs:
+            if file_path:
+                _unlink_media_file(file_path)
+        return len(pairs)
 
 
 GLOBAL_MEDIA_STORE: MediaStore | None = None

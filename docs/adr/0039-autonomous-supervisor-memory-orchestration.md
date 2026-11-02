@@ -1,4 +1,6 @@
-# ADR 0019: Autonomous Supervisor Memory Orchestration (Context Preservation & Specialist Isolation)
+# ADR 0039: Autonomous Supervisor Memory Orchestration (Context Preservation & Specialist Isolation)
+
+> Filed as ADR-0019; renumbered to ADR-0039 on 2 Nov 2026 to resolve a duplicate number with ADR-0019-electron-migration-supersedes-0004.md.
 
 ## Status
 Accepted

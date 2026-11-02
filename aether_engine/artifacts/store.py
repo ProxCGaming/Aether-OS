@@ -89,9 +89,45 @@ class ArtifactStore:
     ) -> dict[str, Any]:
         """Record an artifact in the store. Returns the artifact dict."""
         self.init_db()
-        art_id = artifact_id or str(uuid.uuid4())
         now = int(time.time() * 1000)
         meta_json = json.dumps(metadata or {})
+
+        # S4-M9 residual: when no explicit id is given and this is a
+        # file-backed artifact, reuse the earliest existing row for the
+        # same (session_id, task_id, file_path) so repeated writes/edits
+        # of the same file in one task refresh a single artifact instead
+        # of minting a new row per edit. created_at is preserved by the
+        # ON CONFLICT(id) update below (it is not in the SET list).
+        existing_created_at: int | None = None
+        if artifact_id is None and file_path:
+            with self._get_conn() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT id, created_at FROM artifacts "
+                    "WHERE session_id = ? AND task_id = ? AND file_path = ? "
+                    "ORDER BY created_at ASC LIMIT 1",
+                    (session_id, task_id, file_path),
+                )
+                row = cur.fetchone()
+                if row:
+                    artifact_id = row[0]
+                    try:
+                        existing_created_at = row[1]
+                    except Exception:  # noqa: BLE001 - defensive: row shape
+                        existing_created_at = None
+        elif artifact_id is not None:
+            # Preserve created_at in the returned dict for explicit upserts.
+            with self._get_conn() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT created_at FROM artifacts WHERE id = ?",
+                    (artifact_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    existing_created_at = row[0]
+
+        art_id = artifact_id or str(uuid.uuid4())
 
         with self._get_conn() as conn:
             conn.execute(
@@ -100,6 +136,7 @@ class ArtifactStore:
                     id, session_id, task_id, kind, title, file_path, content, metadata_json, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                    kind=excluded.kind,
                     title=excluded.title,
                     file_path=excluded.file_path,
                     content=excluded.content,
@@ -119,7 +156,7 @@ class ArtifactStore:
             "file_path": file_path,
             "content": content,
             "metadata": metadata or {},
-            "created_at": now,
+            "created_at": existing_created_at if existing_created_at is not None else now,
             "updated_at": now,
         }
 

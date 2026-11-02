@@ -124,7 +124,7 @@ def bench_ttft():
         mock_store_cls.return_value.list_providers.return_value = ["google_gemini"]
         sid = session_store.create_session("bench")
         for _ in range(5):
-            with client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}") as ws:
+            with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws:
                 ws.receive_text()  # HELLO
                 start = time.perf_counter()
                 ws.send_text(Event(

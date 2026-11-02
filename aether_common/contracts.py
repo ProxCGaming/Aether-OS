@@ -245,6 +245,25 @@ class EventType(str, Enum):
     VOICE_PARTIAL_TRANSCRIPT = "VOICE_PARTIAL_TRANSCRIPT"
     VOICE_OUTPUT_CHUNK = "VOICE_OUTPUT_CHUNK"
     VOICE_BARGE_IN = "VOICE_BARGE_IN"
+    # F-12a: RTC negotiation for the streaming voice session rides
+    # this same socket. The renderer holds the microphone, so it is
+    # the offerer. OFFER_REQUEST payload: {"session_id", "sdp":
+    # {"type": "offer", "sdp": str}}; OFFER_RESPONSE: {"ok": bool,
+    # "session_id", "answer": {"type": "answer", "sdp": str} | None,
+    # "error": str | None} — a refused negotiation (no live session,
+    # malformed offer) is ok=False with the honest reason.
+    # ICE_REQUEST payload: {"session_id", "candidate": {"candidate":
+    # str, "sdpMid": str | None, "sdpMLineIndex": int | None} |
+    # None} — a null candidate is the end-of-candidates marker;
+    # ICE_RESPONSE: {"ok": bool, "session_id", "error": str | None}.
+    # VOICE_RTC_ICE is the engine -> renderer push carrying the
+    # engine's own gathered candidates in the same shape:
+    # {"session_id", "candidate": {...} | None}.
+    VOICE_RTC_OFFER_REQUEST = "VOICE_RTC_OFFER_REQUEST"
+    VOICE_RTC_OFFER_RESPONSE = "VOICE_RTC_OFFER_RESPONSE"
+    VOICE_RTC_ICE_REQUEST = "VOICE_RTC_ICE_REQUEST"
+    VOICE_RTC_ICE_RESPONSE = "VOICE_RTC_ICE_RESPONSE"
+    VOICE_RTC_ICE = "VOICE_RTC_ICE"
     # Epic 8, E8-5.3: push-to-talk dictation. START_REQUEST payload:
     # {"session_id": str | None}; START_RESPONSE: {"ok": bool, "error": str | None}.
     # CHUNK_REQUEST payload: {"session_id": str | None, "audio": str,
@@ -463,6 +482,34 @@ class EventType(str, Enum):
     VAULT_ENTRY_DELETE_RESPONSE = "VAULT_ENTRY_DELETE_RESPONSE"
     VAULT_FILL_APPROVAL_REQUEST = "VAULT_FILL_APPROVAL_REQUEST"
     VAULT_FILL_APPROVAL_RESPONSE = "VAULT_FILL_APPROVAL_RESPONSE"
+    # Authenticator view (PRD Open Point 14, decided YES by the
+    # owner 1 Nov 2026): the vault doubles as the owner's
+    # authenticator app. Standalone TOTP entries enrol from the
+    # Settings vault panel — TOTP_SAVE_REQUEST payload: {"id":
+    # str|None, "label": str, "issuer": str, "secret": str} (the
+    # Base32 setup key shown beside a site's QR code; blank on
+    # update keeps the stored secret). The engine validates the
+    # secret and stores it normalised + encrypted; a malformed
+    # secret is refused with {"success": False, "id", "error"}.
+    # TOTP_LIST_RESPONSE {"entries": [{"id", "label", "issuer",
+    # "created_at", "updated_at"}]} is METADATA ONLY, like the
+    # login listing. TOTP_CODES_RESPONSE is the ONLY payload that
+    # ever carries a code: {"generated_at": int, "codes":
+    # [{"entry_id", "kind": "authenticator"|"login", "label",
+    # "issuer", "username" (login kind only), "code": str,
+    # "period": 30, "seconds_remaining": int}]} — codes computed
+    # engine-side (RFC 6238) from secrets that never leave the
+    # engine, served only on the owner's Settings channel. No
+    # agent tool or task event can request or receive any of
+    # these payloads; viewing codes is audited VAULT_TOTP_ACCESSED.
+    VAULT_TOTP_LIST_REQUEST = "VAULT_TOTP_LIST_REQUEST"
+    VAULT_TOTP_LIST_RESPONSE = "VAULT_TOTP_LIST_RESPONSE"
+    VAULT_TOTP_SAVE_REQUEST = "VAULT_TOTP_SAVE_REQUEST"
+    VAULT_TOTP_SAVE_RESPONSE = "VAULT_TOTP_SAVE_RESPONSE"
+    VAULT_TOTP_DELETE_REQUEST = "VAULT_TOTP_DELETE_REQUEST"
+    VAULT_TOTP_DELETE_RESPONSE = "VAULT_TOTP_DELETE_RESPONSE"
+    VAULT_TOTP_CODES_REQUEST = "VAULT_TOTP_CODES_REQUEST"
+    VAULT_TOTP_CODES_RESPONSE = "VAULT_TOTP_CODES_RESPONSE"
 
     # Agent Management
     AGENT_LIST_REQUEST = "AGENT_LIST_REQUEST"

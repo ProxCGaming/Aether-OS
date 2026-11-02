@@ -442,7 +442,7 @@ def test_ws_chat_message_uses_fast_path_and_persists(ws_env):
     with (
         _ws_stack(provider, graph_calls),
         TestClient(app) as client,
-        client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}") as ws,
+        client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws,
     ):
         ws.receive_text()  # HELLO
         _start_task(ws, "Hello, how are you today?", sid)
@@ -468,7 +468,7 @@ def test_ws_chat_message_uses_fast_path_and_persists(ws_env):
     with (
         _ws_stack(provider, graph_calls),
         TestClient(app) as client,
-        client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}") as ws,
+        client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws,
     ):
         ws.receive_text()  # HELLO
         _start_task(ws, "Write a python file that prints hello", sid)
@@ -493,7 +493,7 @@ def test_ws_work_message_uses_graph_without_touching_chat_provider(ws_env):
     with (
         _ws_stack(provider, graph_calls),
         TestClient(app) as client,
-        client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}") as ws,
+        client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws,
     ):
         ws.receive_text()  # HELLO
         _start_task(
@@ -517,7 +517,7 @@ def test_ws_cancel_stops_fast_chat_stream(ws_env):
     with (
         _ws_stack(provider, graph_calls),
         TestClient(app) as client,
-        client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}") as ws,
+        client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws,
     ):
         ws.receive_text()  # HELLO
         _start_task(ws, "hello, tell me a long story", sid)

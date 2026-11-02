@@ -23,6 +23,7 @@ import pytest
 
 from aether_common.contracts import EventType
 from aether_engine.media.analyzer import (
+    MAX_ANALYSIS_ATTEMPTS,
     MediaAnalyzer,
     adaptive_keyframe_timestamps,
     probe_video,
@@ -473,6 +474,161 @@ async def test_schedule_media_analysis_drives_item_to_analyzed(
 async def test_analyze_unknown_item_returns_none(temp_store, mock_vision_provider):
     analyzer = MediaAnalyzer(store=temp_store, vision_provider=mock_vision_provider)
     assert await analyzer.analyze_item("no-such-id") is None
+
+
+# ======================================================================
+# 8. S4-M11: failed analyses are retried by backfill, bounded by a cap
+# ======================================================================
+
+class _FlakyVisionProvider:
+    """Fails the first ``failures`` image calls, then succeeds."""
+
+    def __init__(self, failures: int = 1):
+        self.failures = failures
+        self.calls = 0
+
+    async def analyze_image(self, file_path, mime_type=None):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise RuntimeError("provider 503 transient")
+        return {
+            "summary": "A photo of a red bicycle parked by a brick wall.",
+            "tags": ["bicycle", "red"],
+        }
+
+    async def analyze_video_frames(self, frames, probe=None):  # pragma: no cover
+        raise AssertionError("not used in S4-M11 image tests")
+
+
+class _AlwaysFailingVisionProvider:
+    def __init__(self):
+        self.calls = 0
+
+    async def analyze_image(self, file_path, mime_type=None):
+        self.calls += 1
+        raise RuntimeError("provider 503 transient")
+
+    async def analyze_video_frames(self, frames, probe=None):  # pragma: no cover
+        raise AssertionError("not used in S4-M11 image tests")
+
+
+@pytest.mark.asyncio
+async def test_s4m11_failed_item_is_retried_by_backfill_and_ends_analyzed(
+    temp_store, sample_image
+):
+    item = temp_store.register_media(
+        file_path=str(sample_image), collection="user", media_type="image")
+    provider = _FlakyVisionProvider(failures=1)
+    analyzer = MediaAnalyzer(store=temp_store, vision_provider=provider)
+
+    with patch("aether_engine.memory.episodic.litellm.aembedding", new=AsyncMock(side_effect=_fake_aembedding)):
+        first = await analyzer.analyze_item(item["id"])
+        assert first["status"] == "failed"
+        # Before the fix backfill never touches a failed item.
+        assert await analyzer.backfill() == 1
+
+    stored = temp_store.get_media(item["id"])
+    assert stored["status"] == "analyzed"
+    assert provider.calls == 2
+    # Success clears the stale retry slate.
+    assert "analysis_attempts" not in (stored["probe_metadata"] or {})
+    assert "error" not in (stored["probe_metadata"] or {})
+
+
+@pytest.mark.asyncio
+async def test_s4m11_failure_path_still_records_error(temp_store, sample_image):
+    item = temp_store.register_media(
+        file_path=str(sample_image), collection="user", media_type="image")
+    provider = _AlwaysFailingVisionProvider()
+    analyzer = MediaAnalyzer(store=temp_store, vision_provider=provider)
+
+    result = await analyzer.analyze_item(item["id"])
+
+    assert result["status"] == "failed"
+    assert "provider 503" in result["probe_metadata"]["error"]
+    assert result["probe_metadata"]["analysis_attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_s4m11_repeated_failures_increment_attempts_and_stop_at_cap(
+    temp_store, sample_image
+):
+    assert MAX_ANALYSIS_ATTEMPTS == 3
+    item = temp_store.register_media(
+        file_path=str(sample_image), collection="user", media_type="image")
+    provider = _AlwaysFailingVisionProvider()
+    analyzer = MediaAnalyzer(store=temp_store, vision_provider=provider)
+
+    result = await analyzer.analyze_item(item["id"])
+    assert result["probe_metadata"]["analysis_attempts"] == 1
+    assert provider.calls == 1
+
+    assert await analyzer.backfill() == 0
+    stored = temp_store.get_media(item["id"])
+    assert stored["status"] == "failed"
+    assert stored["probe_metadata"]["analysis_attempts"] == 2
+    assert provider.calls == 2
+
+    assert await analyzer.backfill() == 0
+    stored = temp_store.get_media(item["id"])
+    assert stored["probe_metadata"]["analysis_attempts"] == 3
+    assert provider.calls == 3
+
+    # At/over the cap: backfill must not select it again — no infinite requeue.
+    assert await analyzer.backfill() == 0
+    assert await analyzer.backfill() == 0
+    stored = temp_store.get_media(item["id"])
+    assert stored["status"] == "failed"
+    assert stored["probe_metadata"]["analysis_attempts"] == 3
+    assert provider.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_s4m11_legacy_failed_item_without_counter_is_retried_by_backfill(
+    temp_store, sample_image, mock_vision_provider
+):
+    # A failed item from before the counter existed: no analysis_attempts.
+    item = temp_store.register_media(
+        file_path=str(sample_image),
+        collection="user",
+        media_type="image",
+        status="failed",
+        probe_metadata={"error": "provider 500", "origin": "user_upload"},
+    )
+    assert "analysis_attempts" not in item["probe_metadata"]
+    analyzer = MediaAnalyzer(
+        store=temp_store, vision_provider=mock_vision_provider)
+
+    with patch("aether_engine.memory.episodic.litellm.aembedding", new=AsyncMock(side_effect=_fake_aembedding)):
+        assert await analyzer.backfill() == 1
+
+    stored = temp_store.get_media(item["id"])
+    assert stored["status"] == "analyzed"
+    assert mock_vision_provider.analyze_image.call_count == 1
+    assert "analysis_attempts" not in (stored["probe_metadata"] or {})
+
+
+@pytest.mark.asyncio
+async def test_s4m11_backfill_limit_prefers_pending_over_failed_retries(
+    temp_store, sample_image, mock_vision_provider
+):
+    failed = temp_store.register_media(
+        file_path=str(sample_image),
+        collection="user",
+        media_type="image",
+        status="failed",
+        probe_metadata={"error": "provider 500", "analysis_attempts": 1},
+    )
+    pending = temp_store.register_media(
+        file_path=str(sample_image), collection="user", media_type="image")
+    analyzer = MediaAnalyzer(
+        store=temp_store, vision_provider=mock_vision_provider)
+
+    with patch("aether_engine.memory.episodic.litellm.aembedding", new=AsyncMock(side_effect=_fake_aembedding)):
+        assert await analyzer.backfill(limit=1) == 1
+
+    assert temp_store.get_media(pending["id"])["status"] == "analyzed"
+    assert temp_store.get_media(failed["id"])["status"] == "failed"
 
 
 def test_store_embedding_roundtrip_and_lexical_only_search(temp_store, sample_image):

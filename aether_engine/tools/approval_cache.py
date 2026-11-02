@@ -20,12 +20,23 @@ there, but they simply never match a later call — the pause always
 comes back for floored paths.
 
 Revocation is a row delete; listing backs the Settings UI.
+
+Threading (E2-F04): the process-wide singleton is created on
+whichever thread touches it first and then called from everywhere —
+the WS event loop (grant recording), ``asyncio.to_thread`` workers
+(Settings list/revoke), and the graph router / executor threads
+(``covering_grant``). The connection is therefore opened with
+``check_same_thread=False`` and EVERY operation is serialised
+through one re-entrant lock: a single shared connection is only
+safe cross-thread when its use is serialised, and the lock also
+keeps ``covering_grant``'s read-then-mark-used sequence atomic.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -47,47 +58,55 @@ class ApprovalCache:
     def __init__(self, db_path: Path | str | None = None):
         self.db_path = Path(db_path) if db_path else default_cache_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path))
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS grants (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                prefix TEXT NOT NULL,
-                ceiling TEXT NOT NULL,
-                tool_name TEXT NOT NULL DEFAULT '',
-                created_at REAL NOT NULL,
-                last_used_at REAL
+        # Guards every use of the shared connection below (E2-F04).
+        # Re-entrant because covering_grant() composes list_grants().
+        self._lock = threading.RLock()
+        with self._lock:
+            self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS grants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    prefix TEXT NOT NULL,
+                    ceiling TEXT NOT NULL,
+                    tool_name TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    last_used_at REAL
+                )
+                """
             )
-            """
-        )
-        self._conn.commit()
+            self._conn.commit()
 
     # ── writes ──────────────────────────────────────────────────────
     def grant(self, prefix: str, ceiling: str, tool_name: str = "") -> int:
         resolved = str(Path(prefix).expanduser().resolve())
-        cur = self._conn.execute(
-            "INSERT INTO grants (prefix, ceiling, tool_name, created_at) VALUES (?, ?, ?, ?)",
-            (resolved, ceiling, tool_name, time.time()),
-        )
-        self._conn.commit()
-        return int(cur.lastrowid)
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO grants (prefix, ceiling, tool_name, created_at) VALUES (?, ?, ?, ?)",
+                (resolved, ceiling, tool_name, time.time()),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
 
     def revoke(self, grant_id: int) -> bool:
-        cur = self._conn.execute("DELETE FROM grants WHERE id = ?", (grant_id,))
-        self._conn.commit()
-        return cur.rowcount > 0
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM grants WHERE id = ?", (grant_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def clear(self) -> int:
-        cur = self._conn.execute("DELETE FROM grants")
-        self._conn.commit()
-        return cur.rowcount
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM grants")
+            self._conn.commit()
+            return cur.rowcount
 
     # ── reads ───────────────────────────────────────────────────────
     def list_grants(self) -> list[dict]:
-        rows = self._conn.execute(
-            "SELECT id, prefix, ceiling, tool_name, created_at, last_used_at FROM grants ORDER BY created_at"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, prefix, ceiling, tool_name, created_at, last_used_at FROM grants ORDER BY created_at"
+            ).fetchall()
         return [
             {
                 "id": r[0],
@@ -124,26 +143,34 @@ class ApprovalCache:
                 candidate.is_relative_to(p) for p in _system_prefixes()
             ):
                 return None
-        for grant_row in self.list_grants():
-            if RISK_ORDER.get(grant_row["ceiling"], -1) < call_rank:
-                continue
-            prefix = Path(grant_row["prefix"])
-            if all(c.is_relative_to(prefix) for c in candidates):
-                self._conn.execute(
-                    "UPDATE grants SET last_used_at = ? WHERE id = ?",
-                    (time.time(), grant_row["id"]),
-                )
-                self._conn.commit()
-                return grant_row
+        # The match scan and the last_used_at write are one atomic
+        # step under the cache lock (list_grants re-enters it).
+        with self._lock:
+            for grant_row in self.list_grants():
+                if RISK_ORDER.get(grant_row["ceiling"], -1) < call_rank:
+                    continue
+                prefix = Path(grant_row["prefix"])
+                if all(c.is_relative_to(prefix) for c in candidates):
+                    self._conn.execute(
+                        "UPDATE grants SET last_used_at = ? WHERE id = ?",
+                        (time.time(), grant_row["id"]),
+                    )
+                    self._conn.commit()
+                    return grant_row
         return None
 
 
 _default_cache: ApprovalCache | None = None
+_default_cache_lock = threading.Lock()
 
 
 def get_default_cache() -> ApprovalCache:
     """The process-wide cache at ``~/.aether/approval-cache.db``."""
     global _default_cache
     if _default_cache is None:
-        _default_cache = ApprovalCache()
+        # First touch can race across the engine's threads (E2-F04);
+        # double-checked locking keeps the singleton a singleton.
+        with _default_cache_lock:
+            if _default_cache is None:
+                _default_cache = ApprovalCache()
     return _default_cache

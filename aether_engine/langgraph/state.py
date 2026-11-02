@@ -81,18 +81,29 @@ def _valid_data_url(url: str) -> bool:
     return True
 
 
-def _attachment_image_url(att: Any) -> str | None:
+def _attachment_image_url(
+    att: Any, workspace_roots: list[str] | None = None
+) -> str | None:
     """Resolve one attachment to an image URL, or None when its bytes
     are unavailable/corrupt. Mirrors fast chat's resolution order
     (inline ``data``/``url`` first, then a file ``path`` read into a
     data: URL); remote http(s) URLs pass through unverified, exactly
-    as fast chat passes them."""
+    as fast chat passes them.
+
+    S1-M8-ADJ (xref S1-M8): a file ``path`` goes through fast chat's
+    S1-M8 loader — containment against the sanctioned roots (the
+    engine attachments dir plus the granted workspace roots), the
+    image-mime allow-list and the 10 MB cap — instead of a bare
+    ``read_bytes()`` of any local file. A refusal degrades to None
+    here (the caller renders the "could not be loaded" note), which
+    is this path's contract, unlike fast chat's raise-and-fail-turn.
+    The fast-chat import is lazy: fast_chat imports the executor,
+    which imports this module, so a module-level import would cycle.
+    """
     url: Any = None
-    mime = "image/png"
     path: Any = None
     if isinstance(att, dict):
         url = att.get("data") or att.get("url")
-        mime = att.get("mime_type") or mime
         path = att.get("path")
     elif isinstance(att, str):
         if att.startswith(("data:", "http://", "https://")):
@@ -103,12 +114,19 @@ def _attachment_image_url(att: Any) -> str | None:
         if isinstance(path, str) and path.startswith("data:"):
             url = path
         else:
-            p = Path(path)
+            from aether_engine.langgraph.fast_chat import (
+                AttachmentRejectedError,
+                _load_path_attachment,
+                _sanctioned_attachment_roots,
+            )
+
             try:
-                if p.is_file():
-                    b64 = base64.b64encode(p.read_bytes()).decode("ascii")
-                    url = f"data:{mime};base64,{b64}"
-            except OSError:
+                url = _load_path_attachment(
+                    path,
+                    att.get("mime_type") if isinstance(att, dict) else None,
+                    _sanctioned_attachment_roots(workspace_roots),
+                )
+            except AttachmentRejectedError:
                 url = None
     if isinstance(url, str) and url:
         if url.startswith("data:") and not _valid_data_url(url):
@@ -127,7 +145,11 @@ def _attachment_label(att: Any) -> str:
     return "attachment"
 
 
-def multimodal_user_content(prompt: str, attachments: list[Any] | None) -> Any:
+def multimodal_user_content(
+    prompt: str,
+    attachments: list[Any] | None,
+    workspace_roots: list[str] | None = None,
+) -> Any:
     """The user-message content for *prompt* + *attachments*.
 
     The single builder for the multimodal shape both chat paths use
@@ -148,7 +170,7 @@ def multimodal_user_content(prompt: str, attachments: list[Any] | None) -> Any:
     if prompt:
         parts.append({"type": "text", "text": prompt})
     for att in attachments:
-        url = _attachment_image_url(att)
+        url = _attachment_image_url(att, workspace_roots=workspace_roots)
         if url:
             parts.append({"type": "image_url", "image_url": {"url": url}})
         else:
@@ -266,6 +288,15 @@ class AetherState(TypedDict):
     artifact_paths: dict[str, str]
     tool_results_summary: dict[str, str]
     pending_tool_call: dict[str, Any] | None
+
+    # Parallel tool calls (S1-M5): calls a specialist emitted in one
+    # model response beyond the first, as pending-shaped dicts
+    # ({"name", "args", "call_id"}). Plain overwrite channel: each
+    # specialist return writes the full remaining queue, drained one
+    # call per tool-loop round by the specialist node itself (see
+    # nodes/tool_calls.drain_queued_tool_call). Checkpointed in state
+    # so the queue survives the approval pause.
+    queued_tool_calls: list[dict[str, Any]]
     active_specialist: str | None
 
     # Tool-call loop guard (Epic 1, E1-03): signature of the most recent
@@ -329,6 +360,20 @@ class AetherState(TypedDict):
 
     context_briefing: str | None
     active_skills: list[str]
+
+    # Effective run configuration snapshot (E1-F04): the execution
+    # settings this run was resolved with — provider/model names,
+    # per-agent models/tools, forced agent, workspace roots, the
+    # layered (effective) user config and the routing constraints —
+    # as plain JSON-safe data, seeded once by run_langgraph_task.
+    # Like plan_mode it lives in state so the checkpointer carries it
+    # across the approval pause: a resume (possibly on a fresh
+    # connection, possibly after an engine restart) rebuilds the
+    # run's OWN configuration from it instead of the then-current
+    # globals. Live objects (the provider instance, the tool
+    # registry) are rebuilt from these names/values at resume time;
+    # they are never stored here.
+    run_config: dict[str, Any] | None
 
     # Managed by the LangGraph runtime; required in the schema by the
     # prebuilt supervisor agent (langgraph-supervisor / create_react_agent).

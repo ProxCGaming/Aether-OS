@@ -39,11 +39,11 @@ def test_reconnect_storm_leaves_engine_healthy(tmp_path, monkeypatch):
         TestClient(app) as client,
     ):
         for _ in range(20):
-            with client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}") as ws:
+            with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws:
                 hello = Event.from_json(ws.receive_text())
                 assert hello.type == EventType.HELLO
         # After the storm, a fresh connection still gets served.
-        with client.websocket_connect(f"/ws/tasks?token={engine_state.auth_token}") as ws:
+        with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws:
             ws.receive_text()
             ws.send_text(Event(type=EventType.PING).to_json())
             pong = Event.from_json(ws.receive_text())
