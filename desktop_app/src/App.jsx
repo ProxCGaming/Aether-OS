@@ -702,7 +702,16 @@ function AppContent() {
   // transition effect below.
   useEffect(() => {
     const handleMessage = (event) => {
-      const data = JSON.parse(event.data);
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        // S3-N1: one malformed frame must not kill the central
+        // message handler — log and drop it (the SocketContext
+        // facade's parse pattern, applied at this layer too).
+        console.warn('Dropping malformed engine message');
+        return;
+      }
         if (data.type === 'hello') {
           setStatus(`Online / ${data.payload.active_model || 'Agent'}`);
         } else if (data.type === 'TASK_CREATED') {

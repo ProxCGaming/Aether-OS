@@ -217,6 +217,13 @@ function getToken() {
     }
   }
   try {
+    // S3-N2 (contract note): this fallback assumes the engine was
+    // started with the repo root as its CWD, so its CWD-relative
+    // .run/engine.token (aether_common.auth.DEFAULT_TOKEN_PATH)
+    // lands here. The spawned-engine path above is the production
+    // route; moving the token location means moving the engine
+    // default, the worker inheritance, the lifecycle path, and this
+    // fallback together.
     const tokenPath = path.join(__dirname, '..', '.run', 'engine.token');
     return fs.readFileSync(tokenPath, 'utf8').trim();
   } catch (err) {
