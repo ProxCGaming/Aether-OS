@@ -3,16 +3,16 @@
 Merges Option A (published benchmark data) and Option C (live self-test evals)
 into authoritative capability tags and performance tier assignments.
 """
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 from aether_engine.capability.benchmark_cache import get_benchmark_for_model
 
 
 def classify_model_capabilities(
     model_id: str,
-    benchmark_data: Optional[Dict[str, Any]] = None,
-    selftest_data: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    benchmark_data: dict[str, Any] | None = None,
+    selftest_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Synthesize model capabilities and tier from benchmark and self-test evidence.
 
     Returns a dict with:
@@ -24,7 +24,7 @@ def classify_model_capabilities(
     bench = benchmark_data or get_benchmark_for_model(model_id) or {}
     st = selftest_data or {}
 
-    caps: Set[str] = {"chat"}  # All LLMs support chat
+    caps: set[str] = {"chat"}  # All LLMs support chat
     tier = bench.get("tier", "balanced")
     confidence_sources = 0
 
@@ -77,7 +77,7 @@ def classify_model_capabilities(
     confidence = 0.95 if confidence_sources >= 2 else (0.75 if confidence_sources == 1 else 0.40)
 
     # Convert sorted list for deterministic serialization
-    capabilities_list = sorted(list(caps))
+    capabilities_list = sorted(caps)
 
     return {
         "model_id": model_id,

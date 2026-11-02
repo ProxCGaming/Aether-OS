@@ -3,9 +3,9 @@
 Stores published benchmark scores (MMLU, HumanEval, MATH), speed ratings,
 and standard capability tags for common LLM model architectures.
 """
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-BENCHMARK_CACHE: Dict[str, Dict[str, Any]] = {
+BENCHMARK_CACHE: dict[str, dict[str, Any]] = {
     # Google Gemini
     "gemini-2.0-flash": {
         "mmlu": 84.5,
@@ -185,7 +185,7 @@ BENCHMARK_CACHE: Dict[str, Dict[str, Any]] = {
 }
 
 
-def get_benchmark_for_model(model_id: str) -> Optional[Dict[str, Any]]:
+def get_benchmark_for_model(model_id: str) -> dict[str, Any] | None:
     """Look up benchmark entry by exact match or normalized prefix match."""
     if model_id in BENCHMARK_CACHE:
         return dict(BENCHMARK_CACHE[model_id])

@@ -1,0 +1,149 @@
+"""Approval cache: remembered approval grants (Epic 2, E2-09).
+
+When the user approves a tool call they may scope the approval:
+**once** (the default — nothing stored), **this file**, or **this
+folder**. A stored grant is a (path prefix, risk ceiling) pair in
+``~/.aether/approval-cache.db``: a later call whose policy verdict is
+"ask" is allowed without pausing when a grant's prefix contains the
+call's path and the grant's ceiling is at or above the tool's risk —
+so a write grant covers reads under it, and never covers a riskier
+call or a path outside the prefix.
+
+The cache is an overlay ON the policy verdict, consulted only where a
+pause would otherwise happen (the graph's tool_router and
+``ToolRegistry.execute``). It can never override a deny — and it can
+never cover a floored path: per ADR 0029 D3 nothing auto-allows a
+call under ``~/.ssh`` / ``~/.aether`` (or a non-read-only call under
+system prefixes), and a stored grant is exactly the kind of standing
+configuration that rule names. Grants can be CREATED from an approval
+there, but they simply never match a later call — the pause always
+comes back for floored paths.
+
+Revocation is a row delete; listing backs the Settings UI.
+"""
+
+from __future__ import annotations
+
+import logging
+import sqlite3
+import time
+from pathlib import Path
+
+from aether_engine.tools.paths import candidate_paths
+from aether_engine.tools.registry import ToolRisk
+
+logger = logging.getLogger("aether_engine.tools.approval_cache")
+
+RISK_ORDER: dict[str, int] = {risk.value: idx for idx, risk in enumerate(ToolRisk)}
+
+
+def default_cache_path() -> Path:
+    return Path.home() / ".aether" / "approval-cache.db"
+
+
+class ApprovalCache:
+    """SQLite-backed store of approval grants."""
+
+    def __init__(self, db_path: Path | str | None = None):
+        self.db_path = Path(db_path) if db_path else default_cache_path()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(self.db_path))
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS grants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                prefix TEXT NOT NULL,
+                ceiling TEXT NOT NULL,
+                tool_name TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                last_used_at REAL
+            )
+            """
+        )
+        self._conn.commit()
+
+    # ── writes ──────────────────────────────────────────────────────
+    def grant(self, prefix: str, ceiling: str, tool_name: str = "") -> int:
+        resolved = str(Path(prefix).expanduser().resolve())
+        cur = self._conn.execute(
+            "INSERT INTO grants (prefix, ceiling, tool_name, created_at) VALUES (?, ?, ?, ?)",
+            (resolved, ceiling, tool_name, time.time()),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def revoke(self, grant_id: int) -> bool:
+        cur = self._conn.execute("DELETE FROM grants WHERE id = ?", (grant_id,))
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def clear(self) -> int:
+        cur = self._conn.execute("DELETE FROM grants")
+        self._conn.commit()
+        return cur.rowcount
+
+    # ── reads ───────────────────────────────────────────────────────
+    def list_grants(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT id, prefix, ceiling, tool_name, created_at, last_used_at FROM grants ORDER BY created_at"
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "prefix": r[1],
+                "ceiling": r[2],
+                "tool_name": r[3],
+                "created_at": r[4],
+                "last_used_at": r[5],
+            }
+            for r in rows
+        ]
+
+    def covering_grant(self, *, risk: str, args: dict | None) -> dict | None:
+        """The grant covering this call, or None.
+
+        A grant covers a call when every candidate path sits inside
+        the grant prefix (a call always has exactly one path today;
+        "every" keeps multi-path calls honest) and the call's risk is
+        at or below the grant's ceiling.
+        """
+        candidates = candidate_paths(args)
+        if not candidates:
+            return None
+        call_rank = RISK_ORDER.get(risk)
+        if call_rank is None:
+            return None
+        # ADR 0029 D3: floored paths are ungrantable (see module docstring).
+        from aether_engine.tools.policy import _floor_prefixes, _system_prefixes
+
+        for candidate in candidates:
+            if any(candidate.is_relative_to(p) for p in _floor_prefixes()):
+                return None
+            if risk != ToolRisk.READ_ONLY.value and any(
+                candidate.is_relative_to(p) for p in _system_prefixes()
+            ):
+                return None
+        for grant_row in self.list_grants():
+            if RISK_ORDER.get(grant_row["ceiling"], -1) < call_rank:
+                continue
+            prefix = Path(grant_row["prefix"])
+            if all(c.is_relative_to(prefix) for c in candidates):
+                self._conn.execute(
+                    "UPDATE grants SET last_used_at = ? WHERE id = ?",
+                    (time.time(), grant_row["id"]),
+                )
+                self._conn.commit()
+                return grant_row
+        return None
+
+
+_default_cache: ApprovalCache | None = None
+
+
+def get_default_cache() -> ApprovalCache:
+    """The process-wide cache at ``~/.aether/approval-cache.db``."""
+    global _default_cache
+    if _default_cache is None:
+        _default_cache = ApprovalCache()
+    return _default_cache

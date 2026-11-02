@@ -1,13 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { User, Key, Cpu, Settings as SettingsIcon, Monitor, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock } from 'lucide-react';
+import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock, Scissors, Globe, CircleDollarSign, Mic } from 'lucide-react';
 import Dropdown from './Dropdown';
 import LocalModelsTab from './LocalModelsTab';
 import './chat.css';
 import ProviderSettings from './components/Settings/ProviderSettings';
 import MemoryManagement from './components/Settings/MemoryManagement';
 import DiagnosticsPanel from './components/Settings/DiagnosticsPanel';
+import WorkspaceIndexingPanel from './components/Settings/WorkspaceIndexingPanel';
+import BrowserPolicyPanel from './components/Settings/BrowserPolicyPanel';
+import UsageSettingsPanel from './components/Settings/UsageSettingsPanel';
+import VaultPanel from './components/Settings/VaultPanel';
 
-export default function SettingsPanel({ wsRef, providers = {}, localModels = [], defaultModel = '' }) {
+export default function SettingsPanel({ wsRef, providers = [], providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
   const [modelTab, setModelTab] = useState('cloud'); // 'cloud' or 'local'
   const [keys, setKeys] = useState({});
@@ -18,6 +22,20 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   const [customDisplayNames, setCustomDisplayNames] = useState({}); // for custom_openai
   
   const [tools, setTools] = useState([]);
+  // Epic 2: approval mode ('ask' | 'write', from TOOL_LIST_RESPONSE) and
+  // the remembered scoped-approval grants (E2-09 approval cache).
+  const [approvalMode, setApprovalMode] = useState('ask');
+  // Epic 6, E6-06: settings search + reset-to-defaults state.
+  const [settingsQuery, setSettingsQuery] = useState('');
+  const [resetArmed, setResetArmed] = useState(false);
+  const [resetDone, setResetDone] = useState(false);
+  // Epic 10: backup / restore + update check (Advanced tab).
+  const [backupStatus, setBackupStatus] = useState('');
+  const [includeSecrets, setIncludeSecrets] = useState(false);
+  const [restorePath, setRestorePath] = useState('');
+  const [restoreStatus, setRestoreStatus] = useState('');
+  const [versionCheck, setVersionCheck] = useState('');
+  const [approvalGrants, setApprovalGrants] = useState([]);
   const [mcpServers, setMcpServers] = useState({});
   const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '' });
 
@@ -29,6 +47,10 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   // Advanced Config State
   const [disableFallbacks, setDisableFallbacks] = useState(false);
   const [fallbackChain, setFallbackChain] = useState('');
+  const [snipHotkey, setSnipHotkey] = useState('CommandOrControl+Shift+S');
+  // Voice Tuning State (E8-5.2)
+  const [vadThreshold, setVadThreshold] = useState(0.5);
+  const [silenceDurationMs, setSilenceDurationMs] = useState(700);
   
   // A5: State for Reasoning Effort and Node model override
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem('reasoning_effort') || 'standard');
@@ -104,6 +126,32 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
     }
   };
 
+  const handleApprovalModeChange = (mode) => {
+    // Optimistic: the selector reflects the choice immediately; the
+    // APPROVAL_MODE_SET_RESPONSE confirms (or the next TOOL_LIST_RESPONSE
+    // corrects) it.
+    setApprovalMode(mode);
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'APPROVAL_MODE_SET_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { mode }
+      }));
+    }
+  };
+
+  const handleRevokeGrant = (id) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'APPROVAL_GRANT_REVOKE_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { id }
+      }));
+    }
+  };
+
   const handleClearAllFacts = () => {
     if (window.confirm("Are you sure you want to clear all facts from the Knowledge Graph?")) {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -148,6 +196,20 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
           }
         } else if (data.type === 'TOOL_LIST_RESPONSE') {
           setTools(data.payload.tools || []);
+          if (data.payload.approval_mode) {
+            setApprovalMode(data.payload.approval_mode);
+          }
+        } else if (data.type === 'APPROVAL_MODE_SET_RESPONSE') {
+          if (data.payload.success && data.payload.mode) {
+            setApprovalMode(data.payload.mode);
+          }
+        } else if (data.type === 'APPROVAL_GRANTS_RESPONSE') {
+          setApprovalGrants(data.payload.grants || []);
+        } else if (data.type === 'APPROVAL_GRANT_REVOKE_RESPONSE') {
+          // The revoke response carries the refreshed grants list.
+          if (Array.isArray(data.payload.grants)) {
+            setApprovalGrants(data.payload.grants);
+          }
         } else if (data.type === 'TOOL_POLICY_SET_RESPONSE') {
           if (data.payload.success) {
             setTools(prev => prev.map(t => t.function.name === data.payload.tool_name ? { ...t, policy: data.payload.policy } : t));
@@ -167,6 +229,8 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
         } else if (data.type === 'PLUGIN_LIST_RESPONSE') {
           const p = data.payload.plugins;
           setPlugins(Array.isArray(p) ? p : Object.values(p || {}));
+        } else if (data.type === 'SKILL_TOGGLE_RESPONSE') {
+          if (data.payload.skills) setSkills(data.payload.skills);
         } else if (data.type === 'SKILL_LIST_RESPONSE') {
           setSkills(data.payload.skills || []);
         } else if (data.type === 'PLUGIN_INSTALL_RESPONSE' || data.type === 'PLUGIN_UNINSTALL_RESPONSE' || data.type === 'PLUGIN_TOGGLE_RESPONSE') {
@@ -188,10 +252,49 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
           setCapabilityStatus(data.payload.summary);
           setCapabilityHistory(data.payload.history || []);
           setIsDiagnosticsRunning(false);
+        } else if (data.type === 'CONFIG_RESET_RESPONSE') {
+          setResetArmed(false);
+          setResetDone(true);
+        } else if (data.type === 'BACKUP_CREATE_RESPONSE') {
+          setBackupStatus(data.payload.success
+            ? `Backup saved: ${data.payload.path} (${data.payload.files} files)`
+            : `Backup failed: ${data.payload.error}`);
+        } else if (data.type === 'BACKUP_RESTORE_RESPONSE') {
+          setRestoreStatus(data.payload.success
+            ? `Restored ${data.payload.files} files. Restart Aether for the restore to take effect.`
+            : `Restore failed: ${data.payload.error}`);
+        } else if (data.type === 'DIAGNOSTICS_EXPORT_RESPONSE') {
+          if (data.payload.success) {
+            const blob = new Blob([JSON.stringify(data.payload.bundle, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `aether-diagnostics-${new Date().toISOString().slice(0, 10)}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+            setVersionCheck('Diagnostics exported — the file contains no API keys and no memory content.');
+          } else {
+            setVersionCheck(`Diagnostics export failed: ${data.payload.error}`);
+          }
+        } else if (data.type === 'VERSION_CHECK_RESPONSE') {
+          setVersionCheck(data.payload.success
+            ? (data.payload.update_available
+              ? `A newer version is available: ${data.payload.latest} (you have ${data.payload.current}). Download it from the project's GitHub releases when you're ready — nothing is installed automatically.`
+              : `You're on the latest version (${data.payload.current}).`)
+            : `Couldn't check for updates: ${data.payload.error}`);
         } else if (data.type === 'CONFIG_GET_RESPONSE' || data.type === 'CONFIG_UPDATE_RESPONSE') {
           if (data.payload.config) {
             setDisableFallbacks(data.payload.config.disable_fallbacks || false);
             setFallbackChain((data.payload.config.fallback_chain || []).join(', '));
+            if (data.payload.config.snip_hotkey) {
+              setSnipHotkey(data.payload.config.snip_hotkey);
+            }
+            if (data.payload.config.vad_threshold !== undefined && data.payload.config.vad_threshold !== null) {
+              setVadThreshold(data.payload.config.vad_threshold);
+            }
+            if (data.payload.config.silence_duration_ms !== undefined && data.payload.config.silence_duration_ms !== null) {
+              setSilenceDurationMs(data.payload.config.silence_duration_ms);
+            }
             // Phase 9, B1/B2: engine-persisted auxiliary models and reasoning effort.
             setAuxModels(data.payload.config.auxiliary_models || {});
             const serverEffort = data.payload.config.reasoning_effort;
@@ -225,6 +328,12 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
     if (activeMenu === 'Tools' && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'TOOL_LIST_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+      wsRef.current.send(JSON.stringify({
+        type: 'APPROVAL_GRANTS_REQUEST',
         schema_version: 1,
         request_id: Date.now().toString(),
         payload: {}
@@ -277,7 +386,7 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
         request_id: Date.now().toString(),
         payload: {}
       }));
-    } else if ((activeMenu === 'Advanced' || activeMenu === 'Models') && wsRef.current?.readyState === WebSocket.OPEN) {
+    } else if ((activeMenu === 'Advanced' || activeMenu === 'Models' || activeMenu === 'Voice') && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'CONFIG_GET_REQUEST',
         schema_version: 1,
@@ -288,21 +397,17 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   }, [activeMenu, wsRef]);
 
   useEffect(() => {
-    // Initialize local state with backend keys
-    const initKeys = {};
+    // Initialize local state with backend keys.
+    // Phase 10.1 C1: we never receive the actual API key for security, and
+    // keys are never mirrored to localStorage — the password field always
+    // starts empty; the user re-enters a key to change it. Configured state
+    // comes from the engine's has_key, never from a stored key.
     const initBaseUrls = {};
     if (Array.isArray(providers)) {
       providers.forEach(p => {
-        // We don't receive the actual API key for security, so we leave it empty.
-        // But we can pre-fill it from localStorage if the user previously entered it!
-        const savedLocalKey = localStorage.getItem(`aether_saved_key_${p.name}`);
-        if (savedLocalKey) {
-          initKeys[p.name] = savedLocalKey;
-        }
         initBaseUrls[p.name] = p.base_url || '';
       });
     }
-    setKeys(prev => ({...initKeys, ...prev}));
     setBaseUrls(prev => ({...initBaseUrls, ...prev}));
   }, [providers]);
 
@@ -324,9 +429,9 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
     setValidationState(prev => ({ ...prev, [providerName]: 'saving' }));
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const apiKeyToSave = keys[providerName] || '';
-      if (apiKeyToSave) {
-        localStorage.setItem(`aether_saved_key_${finalProviderName}`, apiKeyToSave);
-      }
+      // Phase 10.1 C1: keys are NEVER mirrored to localStorage (or any other
+      // renderer storage). The engine's secure secret store is the only
+      // destination — the key goes out via PROVIDER_SAVE_REQUEST only.
       wsRef.current.send(JSON.stringify({
         type: 'PROVIDER_SAVE_REQUEST',
         schema_version: 1,
@@ -379,17 +484,21 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
   // LOCAL_MODEL_DOWNLOAD_START with destination_dir.
 
   const menuItems = [
-    { id: 'General', icon: <Monitor size={18} />, label: 'General' },
-    { id: 'Providers', icon: <Key size={18} />, label: 'API Providers' },
-    { id: 'Models', icon: <Cpu size={18} />, label: 'Models & Tasks' },
-    { id: 'Agents', icon: <Network size={18} />, label: 'Agents' },
-    { id: 'Tools', icon: <Wrench size={18} />, label: 'Tools' },
-    { id: 'MCP', icon: <Server size={18} />, label: 'MCP Servers' },
-    { id: 'Plugins', icon: <Plug size={18} />, label: 'Plugins' },
-    { id: 'Skills', icon: <Box size={18} />, label: 'Skills' },
-    { id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
-    { id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
-    { id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' }
+    { keywords: 'api key provider connect model list', id: 'Providers', icon: <Key size={18} />, label: 'API Providers' },
+    { keywords: 'default model local ollama tasks auxiliary vision', id: 'Models', icon: <Cpu size={18} />, label: 'Models & Tasks' },
+    { keywords: 'agent models supervisor planner researcher coder', id: 'Agents', icon: <Network size={18} />, label: 'Agents' },
+    { keywords: 'tools approval grants policy risk', id: 'Tools', icon: <Wrench size={18} />, label: 'Tools' },
+    { keywords: 'mcp servers tools resources prompts', id: 'MCP', icon: <Server size={18} />, label: 'MCP Servers' },
+    { keywords: 'plugins install enable disable', id: 'Plugins', icon: <Plug size={18} />, label: 'Plugins' },
+    { keywords: 'skills slash commands enable disable', id: 'Skills', icon: <Box size={18} />, label: 'Skills' },
+    { keywords: 'workspace indexing rag prose embedder files pause resume search watcher exclusions', id: 'WorkspaceIndexing', icon: <Layers size={18} />, label: 'Workspace Indexing' },
+    { keywords: 'browser agent policy payments envelopes confirmation autofill categories', id: 'BrowserPolicy', icon: <Globe size={18} />, label: 'Browser Agent' },
+    { keywords: 'usage cost budget tokens spend ledger models agents daily alert', id: 'Usage', icon: <CircleDollarSign size={18} />, label: 'Usage' },
+    { keywords: 'password vault credentials logins totp ask every time autofill', id: 'PasswordVault', icon: <Lock size={18} />, label: 'Password Vault' },
+    { keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
+    { keywords: 'capabilities diagnostics environment scheduler', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
+    { keywords: 'voice tuning audio vad endpointing silence threshold mic speech', id: 'Voice', icon: <Mic size={18} />, label: 'Voice Tuning' },
+    { keywords: 'advanced routing fallbacks reset defaults developer', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' }
   ];
 
   return (
@@ -404,7 +513,19 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
         borderRight: '1px solid rgba(255,255,255,0.08)',
         paddingRight: '24px'
       }}>
-        {menuItems.map(item => (
+        <input
+          type="text"
+          aria-label="Search settings"
+          placeholder="Search settings…"
+          value={settingsQuery}
+          onChange={(e) => setSettingsQuery(e.target.value)}
+          style={{ padding: '10px 14px', borderRadius: '10px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', outline: 'none', fontSize: '13px', marginBottom: '4px' }}
+        />
+        {menuItems.filter(item => {
+          const q = settingsQuery.trim().toLowerCase();
+          if (!q) return true;
+          return item.label.toLowerCase().includes(q) || (item.keywords || '').toLowerCase().includes(q);
+        }).map(item => (
           <div
             key={item.id}
             onClick={() => setActiveMenu(item.id)}
@@ -442,24 +563,15 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
       {/* Settings Content Area */}
       <div style={{ flex: 1, overflowY: 'auto', paddingRight: '16px', paddingBottom: '80px' }} className="chat-scroll">
         
-        {activeMenu === 'General' && (
-          <div style={{ color: '#f0f0f5' }}>
-            <h2 style={{ fontSize: '24px', marginBottom: '24px', fontWeight: 500 }}>General Settings</h2>
-            <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '16px', padding: '24px' }}>
-               <h3 style={{ marginBottom: '16px', fontSize: '16px' }}>Appearance</h3>
-               <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '16px' }}>Customize the look and feel of Aether-OS.</p>
-               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(0,0,0,0.2)', padding: '6px', borderRadius: '16px', width: 'fit-content' }}>
-                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'default')} className="ios-glass" style={{ padding: '8px 20px', color: '#fff', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>Default</button>
-                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'system')} className="ios-glass" style={{ padding: '8px 20px', color: '#9090a0', background: 'transparent', border: '1px solid transparent', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>System Default</button>
-                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'light')} className="ios-glass" style={{ padding: '8px 20px', color: '#9090a0', background: 'transparent', border: '1px solid transparent', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>Light</button>
-                  <button onClick={() => document.documentElement.setAttribute('data-theme', 'dark')} className="ios-glass" style={{ padding: '8px 20px', color: '#9090a0', background: 'transparent', border: '1px solid transparent', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>Dark</button>
-               </div>
-            </div>
-          </div>
-        )}
+        {/* Phase 10.3 C2: the General / Appearance section was removed.
+            Its theme buttons only set `data-theme` on <html> — no CSS rule
+            ever read it, nothing persisted the choice, and the app's colours
+            are hardcoded dark inline styles, so a real light theme would
+            need a full re-theme, not a toggle. A control that looks
+            functional must be functional, or it must go — this one went. */}
 
         {activeMenu === 'Providers' && (
-          <ProviderSettings providers={providers} />
+          <ProviderSettings providers={providers} health={providerHealth} />
         )}
 
         {activeMenu === 'Models' && (
@@ -621,7 +733,15 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
             )}
 
             {modelTab === 'local' && (
-               <LocalModelsTab wsRef={wsRef} localModels={localModels} />
+               <LocalModelsTab
+                 wsRef={wsRef}
+                 localModels={localModels}
+                 // Phase 10.3 C2: the active model lives on the providers
+                 // array (the provider flagged is_default); LocalModelsTab
+                 // needs it to show which downloaded model is Active.
+                 defaultProvider={(Array.isArray(providers) ? providers : []).find(p => p.is_default)?.name || ''}
+                 defaultModel={(Array.isArray(providers) ? providers : []).find(p => p.is_default)?.default_model || ''}
+               />
             )}
           </div>
         )}
@@ -699,7 +819,60 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
           <div style={{ color: '#f0f0f5' }}>
             <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Tools Sandbox</h2>
             <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Configure auto-approval policies for built-in tools.</p>
-            
+
+            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <div>
+                <h4 style={{ fontSize: '15px', fontWeight: 500 }}>Approval mode</h4>
+                <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>
+                  {approvalMode === 'write'
+                    ? 'Write tools run without asking. Execute and destructive tools still require approval.'
+                    : 'Every non-read-only tool asks for approval before it runs.'}
+                </p>
+              </div>
+              <div>
+                <Dropdown
+                  value={approvalMode}
+                  onChange={handleApprovalModeChange}
+                  options={[
+                    { value: 'ask', label: 'Ask for approval' },
+                    { value: 'write', label: 'Auto-approve writes' }
+                  ]}
+                  style={{ width: '220px' }}
+                  align="right"
+                />
+              </div>
+            </div>
+
+            <div data-testid="approval-grants" style={{ marginBottom: '24px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '4px' }}>Approval grants</h3>
+              <p style={{ fontSize: '13px', color: '#9090a0', marginBottom: '12px' }}>Files and folders you approved with &quot;remember&quot; — matching tool calls run without asking until you revoke the grant.</p>
+              {approvalGrants.length === 0 ? (
+                <div style={{ color: '#9090a0', fontSize: '14px', padding: '16px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                  No approval grants remembered.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {approvalGrants.map(grant => (
+                    <div key={grant.id} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span style={{ fontFamily: 'monospace', fontSize: '13px' }}>{grant.prefix}</span>
+                        <span style={{ fontSize: '11px', background: 'rgba(59, 130, 246, 0.2)', color: '#93c5fd', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px' }}>up to {grant.ceiling}</span>
+                        {grant.tool_name && (
+                          <span style={{ fontSize: '11px', color: '#9090a0', marginLeft: '8px' }}>{grant.tool_name}</span>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => handleRevokeGrant(grant.id)}
+                        style={{ padding: '6px 12px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.15)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.35)', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}
+                      >
+                        Revoke
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               {tools.length === 0 ? (
                 <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
@@ -718,10 +891,21 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                     badge = <span style={{ fontSize: '11px', background: 'rgba(239, 68, 68, 0.2)', color: '#f87171', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><Lock size={10} /> Risky</span>;
                   }
 
-                  const defaultLabel = tool.effective_policy === 'allow' ? 'Always Allow (default)' : 'Require Approval (default)';
-                  
+                  // Phase 10.3 C2: the old 'default' option is gone. It was
+                  // un-sendable — the handler returned early on it, and no
+                  // engine message exists to clear a stored override (TOOL_POLICY_SET_REQUEST only stores;
+                  // policy_is_default means "no entry in tool_policies", and
+                  // there is no reset event in the contracts). So the
+                  // dropdown now lists only the three policies it can
+                  // actually send, and when the tool is at its default the
+                  // dropdown shows the *effective* policy the engine
+                  // resolves for it, with a note that no override is set.
+                  const effectivePolicyValue =
+                    tool.effective_policy === 'allow' ? 'Always Allow'
+                    : tool.effective_policy === 'deny' ? 'Deny'
+                    : 'Require Approval';
+
                   const options = [
-                    { value: 'default_unset', label: defaultLabel },
                     { value: 'Always Allow', label: 'Always Allow', disabled: !tool.always_allow_permitted },
                     { value: 'Require Approval', label: 'Require Approval' },
                     { value: 'Deny', label: 'Deny' }
@@ -735,15 +919,17 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                           {badge}
                         </h4>
                         <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>{tool.function.description}</p>
+                        {tool.policy_is_default && (
+                           <p style={{ fontSize: '11px', color: '#9090a0', marginTop: '4px' }}>Default policy — no override set. Pick one to override it.</p>
+                        )}
                         {!tool.always_allow_permitted && (
                            <p style={{ fontSize: '11px', color: '#fbbf24', marginTop: '4px' }}>Always Allow is disabled for risky tools.</p>
                         )}
                       </div>
                       <div>
                         <Dropdown 
-                          value={tool.policy_is_default ? 'default_unset' : tool.policy}
+                          value={tool.policy_is_default ? effectivePolicyValue : tool.policy}
                           onChange={(val) => {
-                            if (val === 'default_unset') return;
                             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                               wsRef.current.send(JSON.stringify({
                                 type: 'TOOL_POLICY_SET_REQUEST',
@@ -767,7 +953,7 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
         )}
 
         {activeMenu === 'MCP' && (
-          <DiagnosticsPanel activeMenu='MCP' />
+          <DiagnosticsPanel activeMenu='MCP' activeSession={activeSession} />
         )}
 
         {activeMenu === 'Plugins' && (
@@ -811,6 +997,26 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                         </span>
                       )}
                     </div>
+                    <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <button
+                        onClick={() => {
+                          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                            wsRef.current.send(JSON.stringify({
+                              type: 'SKILL_TOGGLE_REQUEST',
+                              schema_version: 1,
+                              request_id: Date.now().toString(),
+                              payload: { name: skill.name, enabled: skill.enabled === false }
+                            }));
+                          }
+                        }}
+                        style={{ background: skill.enabled === false ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.12)', color: skill.enabled === false ? '#10b981' : '#f87171', border: '1px solid rgba(255,255,255,0.12)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px' }}
+                      >
+                        {skill.enabled === false ? 'Enable skill' : 'Disable skill'}
+                      </button>
+                      {skill.enabled === false && (
+                        <span style={{ fontSize: '12px', color: '#9090a0' }}>Disabled — hidden from agents</span>
+                      )}
+                    </div>
                   </div>
                 ))
               )}
@@ -822,13 +1028,131 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
           <MemoryManagement />
         )}
 
+        {activeMenu === 'WorkspaceIndexing' && (
+          <WorkspaceIndexingPanel wsRef={wsRef} />
+        )}
+
+        {activeMenu === 'BrowserPolicy' && (
+          <BrowserPolicyPanel wsRef={wsRef} />
+        )}
+
+        {activeMenu === 'Usage' && (
+          <UsageSettingsPanel wsRef={wsRef} sessionId={activeSession} dailyBudget={dailyBudget} budgetAlert={budgetAlert} budgetExceeded={!!budgetAlert} />
+        )}
+
+        {activeMenu === 'PasswordVault' && (
+          <VaultPanel wsRef={wsRef} />
+        )}
+
         {activeMenu === 'Advanced' && (
           <div style={{ color: '#f0f0f5', display: 'flex', flexDirection: 'column', gap: '24px' }}>
             <div>
               <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Advanced Settings</h2>
               <p style={{ color: '#9090a0', fontSize: '14px' }}>System configurations and developer options.</p>
             </div>
+
+            <div style={{ background: 'rgba(239,68,68,0.05)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: '12px', padding: '24px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Reset all settings</h3>
+              <p style={{ color: '#9090a0', fontSize: '13px', margin: '0 0 16px 0' }}>
+                Restores every engine setting to its default and saves immediately. Your API keys (held in the
+                encrypted secret store), your files, and your memory are NOT touched.
+              </p>
+              {resetDone ? (
+                <div style={{ color: '#10b981', fontSize: '13px' }}>Settings were reset to defaults.</div>
+              ) : (
+                <button
+                  onClick={() => {
+                    if (!resetArmed) { setResetArmed(true); return; }
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ type: 'CONFIG_RESET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+                    }
+                  }}
+                  style={{ background: resetArmed ? '#ef4444' : 'rgba(239,68,68,0.15)', color: resetArmed ? '#fff' : '#f87171', border: '1px solid rgba(239,68,68,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                >
+                  {resetArmed ? 'Click again to confirm reset' : 'Reset all settings'}
+                </button>
+              )}
+            </div>
             
+            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Backup & restore</h3>
+              <p style={{ color: '#9090a0', fontSize: '13px', margin: '0 0 16px 0' }}>
+                A backup snapshots your settings, memory, sessions and skills into one zip in your workspace's
+                AetherBackups folder. API keys stay out unless you include the (encrypted) secret store.
+                Restoring replaces those files on disk — restart Aether afterwards for it to take effect.
+              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
+                <button
+                  onClick={() => {
+                    setBackupStatus('Creating backup…');
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ type: 'BACKUP_CREATE_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: { include_secrets: includeSecrets } }));
+                    }
+                  }}
+                  style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                >
+                  Create backup
+                </button>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#c0c0cc', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={includeSecrets} onChange={(e) => setIncludeSecrets(e.target.checked)} />
+                  Include encrypted secret store
+                </label>
+              </div>
+              {backupStatus && <div style={{ fontSize: '13px', color: '#a0a0b0', marginBottom: '16px', wordBreak: 'break-all' }}>{backupStatus}</div>}
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <input
+                  value={restorePath}
+                  onChange={(e) => setRestorePath(e.target.value)}
+                  placeholder="Path to a backup zip…"
+                  aria-label="Backup zip path"
+                  style={{ flex: 1, minWidth: '220px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', padding: '9px 12px', color: '#f0f0f5', fontSize: '13px' }}
+                />
+                <button
+                  onClick={() => {
+                    if (!restorePath.trim()) { setRestoreStatus('Enter the path to a backup zip first.'); return; }
+                    setRestoreStatus('Restoring…');
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ type: 'BACKUP_RESTORE_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: { path: restorePath.trim() } }));
+                    }
+                  }}
+                  style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                >
+                  Restore
+                </button>
+              </div>
+              {restoreStatus && <div style={{ fontSize: '13px', color: '#a0a0b0', marginTop: '12px' }}>{restoreStatus}</div>}
+              <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', marginTop: '20px', paddingTop: '16px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => {
+                    setVersionCheck('Checking…');
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ type: 'VERSION_CHECK_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+                    }
+                  }}
+                  style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                >
+                  Check for updates
+                </button>
+                <button
+                  onClick={() => {
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ type: 'DIAGNOSTICS_EXPORT_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+                    }
+                  }}
+                  style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                >
+                  Export diagnostics
+                </button>
+                <button
+                  onClick={() => { if (window.electronAPI && window.electronAPI.openLogsFolder) window.electronAPI.openLogsFolder(); }}
+                  style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                >
+                  Open logs folder
+                </button>
+                {versionCheck && <span style={{ fontSize: '13px', color: '#a0a0b0' }}>{versionCheck}</span>}
+              </div>
+            </div>
+
             <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>
               <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '16px', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Network size={18} style={{ color: '#a78bfa' }} /> Model Routing & Fallbacks
@@ -894,6 +1218,147 @@ export default function SettingsPanel({ wsRef, providers = {}, localModels = [],
                   />
                 </div>
               )}
+            </div>
+
+            <div style={{
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px solid rgba(255,255,255,0.06)',
+              borderRadius: '8px',
+              padding: '16px',
+              marginTop: '16px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                <Scissors size={16} color="#7c3aed" />
+                <div style={{ fontWeight: 500, fontSize: '14px' }}>Screen Snip Hotkey</div>
+              </div>
+              <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
+                Global accelerator to trigger screen region snipping (e.g., <code>CommandOrControl+Shift+S</code>).
+              </div>
+              <input
+                type="text"
+                value={snipHotkey}
+                data-testid="snip-hotkey-input"
+                onChange={(e) => setSnipHotkey(e.target.value)}
+                onBlur={() => {
+                  const hotkey = snipHotkey.trim() || 'CommandOrControl+Shift+S';
+                  setSnipHotkey(hotkey);
+                  if (window.electronAPI?.registerSnipShortcut) {
+                    window.electronAPI.registerSnipShortcut(hotkey);
+                  }
+                  if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({
+                      type: 'CONFIG_UPDATE_REQUEST',
+                      schema_version: 1,
+                      request_id: Date.now().toString(),
+                      payload: { config: { snip_hotkey: hotkey } }
+                    }));
+                  }
+                }}
+                placeholder="CommandOrControl+Shift+S"
+                style={{
+                  width: '100%',
+                  background: 'rgba(0,0,0,0.2)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: '6px',
+                  padding: '10px 12px',
+                  color: '#fff',
+                  fontSize: '13px'
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {activeMenu === 'Voice' && (
+          <div style={{ color: '#f0f0f5' }}>
+            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Voice Tuning</h2>
+            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>
+              Fine-tune speech detection and endpointing thresholds. Changes take effect on the next voice session.
+            </p>
+
+            <div style={{
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px solid rgba(255,255,255,0.05)',
+              borderRadius: '12px',
+              padding: '24px',
+              marginBottom: '20px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+                <Sliders size={18} style={{ color: '#a78bfa' }} />
+                <h3 style={{ fontSize: '16px', fontWeight: 500, color: '#fff', margin: 0 }}>Endpointing Thresholds</h3>
+              </div>
+
+              <div style={{ marginBottom: '24px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                  <label htmlFor="vad-threshold-slider" style={{ fontWeight: 500, fontSize: '14px', color: '#fff' }}>
+                    VAD Speech Threshold
+                  </label>
+                  <span data-testid="vad-threshold-value" style={{ fontSize: '13px', color: '#a78bfa', fontWeight: 600 }}>
+                    {vadThreshold.toFixed(2)}
+                  </span>
+                </div>
+                <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '10px' }}>
+                  Confidence threshold for Silero VAD to register voice activity (default: 0.50). Higher values reduce false triggers from background noise; lower values catch softer speech.
+                </div>
+                <input
+                  id="vad-threshold-slider"
+                  data-testid="vad-threshold-slider"
+                  type="range"
+                  min="0.1"
+                  max="0.9"
+                  step="0.05"
+                  value={vadThreshold}
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value);
+                    setVadThreshold(val);
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({
+                        type: 'CONFIG_UPDATE_REQUEST',
+                        schema_version: 1,
+                        request_id: Date.now().toString(),
+                        payload: { config: { vad_threshold: val } }
+                      }));
+                    }
+                  }}
+                  style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
+                />
+              </div>
+
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                  <label htmlFor="silence-duration-slider" style={{ fontWeight: 500, fontSize: '14px', color: '#fff' }}>
+                    Silence Duration
+                  </label>
+                  <span data-testid="silence-duration-value" style={{ fontSize: '13px', color: '#a78bfa', fontWeight: 600 }}>
+                    {silenceDurationMs} ms
+                  </span>
+                </div>
+                <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '10px' }}>
+                  Trailing silence window required before the turn is marked complete (default: 700 ms). Lower values produce faster turn-taking; higher values allow natural pauses while speaking.
+                </div>
+                <input
+                  id="silence-duration-slider"
+                  data-testid="silence-duration-slider"
+                  type="range"
+                  min="200"
+                  max="2000"
+                  step="50"
+                  value={silenceDurationMs}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    setSilenceDurationMs(val);
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({
+                        type: 'CONFIG_UPDATE_REQUEST',
+                        schema_version: 1,
+                        request_id: Date.now().toString(),
+                        payload: { config: { silence_duration_ms: val } }
+                      }));
+                    }
+                  }}
+                  style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
+                />
+              </div>
             </div>
           </div>
         )}

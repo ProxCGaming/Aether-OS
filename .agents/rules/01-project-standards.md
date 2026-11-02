@@ -26,6 +26,7 @@ All commit messages you write MUST follow the Conventional Commits format. The r
 - `perf`: A code change that improves performance
 - `test`: Adding missing tests or correcting existing tests
 - `chore`: Changes to the build process or auxiliary tools
+- `ci`: Changes to CI configuration files and scripts
 
 **Requirements:**
 - The message MUST accurately describe what *actually changed in the diff*, not just the intent.

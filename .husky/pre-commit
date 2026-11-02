@@ -1,1 +1,20 @@
-npm test
+#!/usr/bin/env sh
+set -e
+npx --no -- lint-staged
+if command -v gitleaks >/dev/null 2>&1; then
+  GITLEAKS=gitleaks
+elif [ -x "$HOME/.local/bin/gitleaks" ]; then
+  # Same fallback as scripts/run-ruff.sh for uv: a non-login shell may not
+  # have ~/.local/bin on PATH even though Gitleaks is installed there.
+  GITLEAKS="$HOME/.local/bin/gitleaks"
+else
+  echo "pre-commit: gitleaks is not installed — cannot scan staged files for secrets." >&2
+  echo "Install it, then commit again:" >&2
+  echo "  Windows: choco install gitleaks   (or download gitleaks.exe from github.com/gitleaks/gitleaks/releases)" >&2
+  echo "  macOS:   brew install gitleaks" >&2
+  echo "  Linux:   download the tar.gz from github.com/gitleaks/gitleaks/releases and put gitleaks on PATH" >&2
+  exit 1
+fi
+"$GITLEAKS" protect --staged --redact --no-banner --verbose
+scripts/check-jest-test.sh
+scripts/check-large-files.sh

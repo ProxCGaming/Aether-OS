@@ -1,7 +1,7 @@
 import asyncio
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from starlette.testclient import TestClient
@@ -11,13 +11,10 @@ from aether_common.contracts import (
     SCHEMA_VERSION,
     Event,
     EventType,
-    TaskState,
 )
 from aether_engine.app import app, engine_state
 from aether_engine.providers.base import BaseProvider, StreamChunk
 from aether_engine.providers.discovery import DiscoveryResult
-from aether_engine.providers.litellm_provider import LiteLLMProvider
-from aether_engine.secrets.storage import SecretStore
 
 
 class DummyProvider(BaseProvider):
@@ -55,14 +52,12 @@ class TestEngineWebSocket(unittest.TestCase):
 
     def test_websocket_unauthenticated_rejected(self):
         with TestClient(app) as client:
-            with self.assertRaises(WebSocketDisconnect) as cm:
-                with client.websocket_connect("/ws/tasks"):
-                    pass
+            with self.assertRaises(WebSocketDisconnect) as cm, client.websocket_connect("/ws/tasks"):
+                pass
             self.assertEqual(cm.exception.code, 1008)
 
-            with self.assertRaises(WebSocketDisconnect) as cm:
-                with client.websocket_connect("/ws/tasks?token=invalid_token_12345"):
-                    pass
+            with self.assertRaises(WebSocketDisconnect) as cm, client.websocket_connect("/ws/tasks?token=invalid_token_12345"):
+                pass
             self.assertEqual(cm.exception.code, 1008)
 
         audit_content = self.audit_file.read_text(encoding="utf-8")
@@ -303,7 +298,7 @@ class TestEngineWebSocket(unittest.TestCase):
                     ws.receive_text()  # HELLO
 
                     # Seed config with a fully-configured custom provider
-                    from aether_engine.config import save_config, load_config
+                    from aether_engine.config import load_config, save_config
                     cfg = engine_state.user_config
                     cfg.provider_models[pname] = ["m1"]
                     cfg.custom_base_urls[pname] = "https://example.com/v1"
@@ -393,6 +388,103 @@ class TestEngineWebSocket(unittest.TestCase):
                 resp = Event.from_json(ws.receive_text())
                 self.assertEqual(resp.type, EventType.MODEL_DEFAULT_CHANGED)
                 self.assertEqual(resp.payload["model"], "gemini-2.5-pro")
+
+
+class TestEditAndResendHardening(unittest.TestCase):
+    """Edit-and-resend: client message ids land in the store, and a
+    truncate whose UI id is not a row id falls back to the
+    occurrence-aware content match instead of silently doing nothing."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp_dir.name)
+        self.token_file = self.tmp_path / "engine.token"
+        self.audit_file = self.tmp_path / "audit.log"
+
+        engine_state.token_path = self.token_file
+        engine_state.audit_logger.log_path = self.audit_file
+        self.token = engine_state.initialize_auth()
+
+        from aether_engine.memory import session_store
+
+        self.session_store = session_store
+        self.patcher = patch(
+            "aether_engine.memory.session_store.DB_PATH",
+            self.tmp_path / "test_memory.db",
+        )
+        self.patcher.start()
+        session_store._initialized = False
+        self.ckpt_patcher = patch(
+            "aether_engine.langgraph.checkpointer.DEFAULT_CHECKPOINT_DB",
+            self.tmp_path / "checkpoints.db",
+        )
+        self.ckpt_patcher.start()
+
+    def tearDown(self):
+        self.ckpt_patcher.stop()
+        self.patcher.stop()
+        self.tmp_dir.cleanup()
+
+    def _seed_session(self):
+        ss = self.session_store
+        session_id = ss.create_session("Edit target")
+        ss.add_message(session_id, "user", "same text")
+        ss.add_message(session_id, "assistant", "first answer")
+        ss.add_message(session_id, "user", "same text")
+        ss.add_message(session_id, "assistant", "second answer")
+        return session_id
+
+    def test_start_task_saves_the_user_message_under_the_client_id(self):
+        session_id = self._seed_session()
+        with TestClient(app) as client:
+            valid_token = engine_state.auth_token
+            with patch("aether_engine.app.SecretStore") as mock_store_cls:
+                mock_store = mock_store_cls.return_value
+                from aether_engine.secrets.storage import ProviderNotFoundError
+
+                mock_store.load_provider.side_effect = ProviderNotFoundError("Not found")
+
+                with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+                    ws.receive_text()  # HELLO
+                    ws.send_text(Event(
+                        type=EventType.START_TASK,
+                        payload={
+                            "prompt": "a brand new prompt",
+                            "session_id": session_id,
+                            "message_id": "msg-client-987",
+                        },
+                    ).to_json())
+                    failed_ev = Event.from_json(ws.receive_text())
+                    self.assertEqual(failed_ev.type, EventType.TASK_FAILED)
+
+        messages = self.session_store.get_session(session_id)["messages"]
+        self.assertEqual(messages[-1]["content"], "a brand new prompt")
+        self.assertEqual(messages[-1]["id"], "msg-client-987")
+
+    def test_truncate_falls_back_to_occurrence_for_unknown_ui_id(self):
+        session_id = self._seed_session()
+        with TestClient(app) as client:
+            valid_token = engine_state.auth_token
+            with client.websocket_connect(f"/ws/tasks?token={valid_token}") as ws:
+                ws.receive_text()  # HELLO
+                ws.send_text(Event(
+                    type=EventType.SESSION_TRUNCATE_REQUEST,
+                    payload={
+                        "session_id": session_id,
+                        "message_id": "ui-only-id-not-in-db",
+                        "content": "same text",
+                        "role": "user",
+                        "occurrence": 1,
+                    },
+                ).to_json())
+                resp = Event.from_json(ws.receive_text())
+                self.assertEqual(resp.type, EventType.SESSION_TRUNCATE_RESPONSE)
+                self.assertTrue(resp.payload["truncated"])
+
+        contents = [
+            m["content"] for m in self.session_store.get_session(session_id)["messages"]
+        ]
+        self.assertEqual(contents, ["same text", "first answer"])
 
 
 if __name__ == "__main__":

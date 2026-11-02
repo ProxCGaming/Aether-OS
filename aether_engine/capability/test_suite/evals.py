@@ -1,7 +1,8 @@
 """Deterministic eval prompts and grading logic for Option C self-tests."""
-from dataclasses import dataclass
 import re
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -33,7 +34,7 @@ def _check_logic_sisters(response: str) -> bool:
     return "1" in clean or "one" in response.lower()
 
 
-SELF_TEST_SUITE: List[SelfTest] = [
+SELF_TEST_SUITE: list[SelfTest] = [
     SelfTest(
         name="arithmetic_reasoning",
         category="reasoning",
@@ -65,7 +66,7 @@ SELF_TEST_SUITE: List[SelfTest] = [
 ]
 
 
-def grade_test(test: SelfTest, response_text: str) -> Dict[str, Any]:
+def grade_test(test: SelfTest, response_text: str) -> dict[str, Any]:
     """Grade an LLM response against a SelfTest specification."""
     passed = test.validator(response_text)
     return {

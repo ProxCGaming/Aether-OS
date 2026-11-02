@@ -2,21 +2,24 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+pytest.importorskip("PySide6", reason="PySide6 not installed (legacy-ui extra, F-16)")
+
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from aether_engine.orchestration.core import _validate_provider_key
-from aether_engine.state import engine_state
 from aether_engine.providers.discovery import (
     DiscoveryResult,
     _discover_openai_compatible_models,
     fetch_available_models,
 )
+from aether_engine.state import engine_state
 from aether_ui.settings_window import (
+    _PROVIDERS_CONFIG,
     AetherConfigWindow,
     ConnectedProviderRow,
     ProviderConfigDialog,
     QuickAddProviderDialog,
-    _PROVIDERS_CONFIG,
     _stable_custom_key,
 )
 
@@ -255,7 +258,7 @@ def test_custom_save_key_is_stable_across_dialogs(qapp):
         assert len(captured) == 1
         return captured[0][0], dialog
 
-    key1, dialog1 = save_key()
+    key1, _dialog1 = save_key()
     key2, _ = save_key()
     assert key1 == key2
     assert key1.startswith("custom_") and key1 != "custom_openai"

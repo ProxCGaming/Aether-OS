@@ -3,11 +3,22 @@ import { Search, Download, Trash2, Folder, HardDrive, Cpu, CheckCircle2, Pause, 
 import Dropdown from './Dropdown';
 import './chat.css';
 
-export default function LocalModelsTab({ wsRef, localModels = [] }) {
+export default function LocalModelsTab({ wsRef, localModels = [], defaultProvider = '', defaultModel = '' }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState('all');
   const [sortType, setSortType] = useState('name');
   const [downloadProgress, setDownloadProgress] = useState({}); // { modelName: { percent, status } }
+
+  // Phase 10.3 C2: which model is the engine's current default, as
+  // { provider, model }. Seeded from props (derived from the providers
+  // array by SettingsPanel) and kept live from MODEL_DEFAULT_CHANGED
+  // broadcasts — the providers list has no ollama entry, so this tab
+  // cannot read the active local model back from it.
+  const [activeDefault, setActiveDefault] = useState({ provider: defaultProvider, model: defaultModel });
+
+  useEffect(() => {
+    setActiveDefault({ provider: defaultProvider, model: defaultModel });
+  }, [defaultProvider, defaultModel]);
   
   // A curated catalogue representing models available to download.
   const [catalog, setCatalog] = useState([]);
@@ -59,6 +70,9 @@ export default function LocalModelsTab({ wsRef, localModels = [] }) {
               status: data.payload.status
             }
           }));
+        } else if (data.type === 'MODEL_DEFAULT_CHANGED' && data.payload) {
+          // The engine confirms a new default (e.g. after Set Active).
+          setActiveDefault({ provider: data.payload.provider || '', model: data.payload.model || '' });
         } else if (data.type === 'TASK_COMPLETED' && data.payload.model) {
           // Refresh list automatically
           setDownloadProgress(prev => {
@@ -85,6 +99,22 @@ export default function LocalModelsTab({ wsRef, localModels = [] }) {
         payload: { model: modelName, destination_dir: localStorage.getItem('local_model_download_dir') || null }
       }));
       setDownloadProgress(prev => ({ ...prev, [modelName]: { percent: 0, status: 'starting' } }));
+    }
+  };
+
+  // Phase 10.3 C2: "Active" used to be a button with no handler. It now
+  // sets the model as the engine's default via MODEL_SET_DEFAULT —
+  // provider 'ollama' is the local-models provider (LiteLLM resolves it
+  // to ollama/<model>), and the engine broadcasts MODEL_DEFAULT_CHANGED,
+  // which flips this card to the Active state (see the message handler).
+  const handleSetActive = (modelName) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'MODEL_SET_DEFAULT',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { provider: 'ollama', model: modelName }
+      }));
     }
   };
 
@@ -260,9 +290,15 @@ export default function LocalModelsTab({ wsRef, localModels = [] }) {
                    </>
                 ) : model.isDownloaded ? (
                    <>
-                     <button className="ios-glass" style={{ flex: 1, padding: '10px 0', background: 'rgba(100, 100, 100, 0.15)', color: 'var(--text-primary, #fff)', border: '1px solid rgba(100, 100, 100, 0.2)', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>
-                       Active
-                     </button>
+                     {activeDefault.provider === 'ollama' && activeDefault.model === model.name ? (
+                       <button disabled title="Currently the active model" className="ios-glass" style={{ flex: 1, padding: '10px 0', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '12px', cursor: 'default', fontWeight: 500, transition: 'all 0.2s' }}>
+                         Active
+                       </button>
+                     ) : (
+                       <button onClick={() => handleSetActive(model.name)} title="Set as the active model" className="ios-glass" style={{ flex: 1, padding: '10px 0', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)', color: 'var(--text-primary, #fff)', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>
+                         Set Active
+                       </button>
+                     )}
                      <button onClick={() => handleDelete(model.name)} className="ios-glass" style={{ padding: '10px 12px', background: 'rgba(239,68,68,0.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '12px', cursor: 'pointer', transition: 'all 0.2s' }} title="Delete Model">
                        <Trash2 size={16} />
                      </button>

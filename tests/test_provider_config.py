@@ -1,4 +1,3 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,7 +55,9 @@ class TestProviderConfig(unittest.TestCase):
     def test_user_config_defaults(self):
         cfg = UserConfig()
         self.assertEqual(cfg.default_provider, "google_gemini")
-        self.assertEqual(cfg.default_model, "gemini-2.0-flash")
+        # Epic 6: the fresh-install default is the verified working
+        # model (gemini-3.5-flash; 2.0/2.5 Flash predate it — ADR 0033).
+        self.assertEqual(cfg.default_model, "gemini-3.5-flash")
         self.assertEqual(cfg.provider_models, {})
 
     def test_save_and_load_config(self):

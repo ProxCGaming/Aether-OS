@@ -1,8 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-import { Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2 } from 'lucide-react';
+import { Globe, Play, Pause, Send, Maximize2, Minimize2, X, GripHorizontal, Bot, User, AlertCircle, ShieldAlert, Check, Shield, TerminalSquare, ChevronDown, ExternalLink, LogIn, Square, CheckCircle2, Copy, Scissors, Clipboard, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight, Cpu, Layers, Activity, Edit2, RotateCcw, Download, MoreHorizontal, CircleDollarSign, Mic, Volume2, VolumeX } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import Dropdown from './Dropdown';
+import Dropdown from './Dropdown';
+import UndoToast from './components/UndoToast';
+import SnipOverlay from './components/SnipOverlay';
+import CostHeaderPopover, { formatUsd } from './components/CostHeaderPopover';
+import ContextBar, { CompactContextBar } from './components/ContextBar';
+import VoiceOverlay from './components/VoiceOverlay';
 import './chat.css';
 
 export function getNodeStyle(nodeName = '') {
@@ -168,15 +173,229 @@ export function PayloadDrawer({ title, data, icon: Icon, defaultOpen = false, em
   );
 }
 
-export function ToolActivityCard({ payload, isNested = false, pendingApproval = null, onApproveTool = null }) {
+// Epic 2 UI batch: the engine may attach a preview to an approval
+// request — a unified diff (edit_file), or an error explaining why no
+// preview could be built. Rendered inside both approval surfaces
+// (the ToolActivityCard box and the standalone approval card) so the
+// user sees what they are approving before deciding.
+export function ApprovalPreview({ preview }) {
+  if (!preview) return null;
+  if (typeof preview.diff === 'string' && preview.diff.length > 0) {
+    const diffLines = preview.diff.split('\n');
+    return (
+      <div
+        className="approval-diff-preview"
+        data-testid="approval-diff-preview"
+        style={{
+          background: 'rgba(0, 0, 0, 0.45)',
+          border: '1px solid rgba(255, 255, 255, 0.1)',
+          borderRadius: '8px',
+          padding: '10px 12px',
+          maxHeight: '240px',
+          overflowY: 'auto',
+          fontFamily: 'monospace',
+          fontSize: '12px',
+          lineHeight: 1.5,
+        }}
+      >
+        {diffLines.map((line, idx) => {
+          let cls = 'diff-line diff-line-context';
+          let color = '#cbd5e1';
+          let background = 'transparent';
+          if (line.startsWith('+++') || line.startsWith('---')) {
+            cls = 'diff-line diff-line-meta';
+            color = '#e2e8f0';
+          } else if (line.startsWith('+')) {
+            cls = 'diff-line diff-line-add';
+            color = '#4ade80';
+            background = 'rgba(74, 222, 128, 0.08)';
+          } else if (line.startsWith('-')) {
+            cls = 'diff-line diff-line-del';
+            color = '#f87171';
+            background = 'rgba(248, 113, 113, 0.08)';
+          } else if (line.startsWith('@@')) {
+            cls = 'diff-line diff-line-hunk';
+            color = '#9090a0';
+          }
+          return (
+            <div key={idx} className={cls} style={{ color, background, whiteSpace: 'pre', padding: '0 4px', borderRadius: '3px' }}>
+              {line || ' '}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+  if (typeof preview.error === 'string' && preview.error.length > 0) {
+    return (
+      <div
+        className="approval-preview-error"
+        data-testid="approval-preview-error"
+        style={{
+          fontSize: '12px',
+          color: '#fbbf24',
+          background: 'rgba(245, 158, 11, 0.1)',
+          border: '1px solid rgba(245, 158, 11, 0.3)',
+          borderRadius: '8px',
+          padding: '8px 10px',
+        }}
+      >
+        ⚠ No preview available: {preview.error}
+      </div>
+    );
+  }
+  return null;
+}
+
+// Epic 2, E2-09 (scoped approvals): when the pending call targets a
+// file path, the approval can be remembered for that file or its
+// folder. Returns the path string, or null when scoping doesn't apply.
+export function approvalScopePath(args) {
+  if (args && typeof args.path === 'string' && args.path.length > 0) return args.path;
+  return null;
+}
+// Epic 8, E8-1.1a: map a message to the rewind point its step menu
+// shows. The manifest holds points for the session's LAST task only
+// (grill Q5), and the rendered transcript does not carry task ids —
+// the current task is therefore identified structurally: it starts
+// at the last user message that is not a steering message (steering
+// continues the running task rather than starting one). The task's
+// opening message maps to point 0 ("Before this task began"); every
+// later message in the task maps to the latest recorded point (the
+// manifest is a per-step trail, not a per-message one). Messages
+// before the current task begins are 'older': no point is offered
+// for them. Returns null only when there is no manifest at all.
+export function getRewindPointForMessage(messages, index, manifest) {
+  if (!manifest) return null;
+  const entries = Array.isArray(manifest.entries) ? manifest.entries : [];
+  let taskStart = -1;
+  (messages || []).forEach((m, j) => {
+    if (m && m.role === 'user' && !m.steering) taskStart = j;
+  });
+  if (taskStart === -1 || index < taskStart) return { scope: 'older', entry: null };
+  if (index === taskStart) return { scope: 'current', entry: entries[0] || null };
+  return { scope: 'current', entry: entries[entries.length - 1] || null };
+}
+
+// Epic 8, E8-1.3: parse the approval drawer's argument editor.
+// Returns { editedArgs } only when the parsed JSON is a plain object
+// that actually differs from the proposed args; { editedArgs: null }
+// for an unchanged editor (legacy approve), and { error } for text
+// that must block the approve (invalid JSON / not an object).
+function parseApprovalEditedArgs(text, originalArgs) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { editedArgs: null, error: 'Arguments must be valid JSON.' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { editedArgs: null, error: 'Arguments must be a JSON object.' };
+  }
+  const sortDeep = (v) => (Array.isArray(v)
+    ? v.map(sortDeep)
+    : (v && typeof v === 'object'
+      ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortDeep(v[k])]))
+      : v));
+  if (JSON.stringify(sortDeep(parsed)) === JSON.stringify(sortDeep(originalArgs || {}))) {
+    return { editedArgs: null, error: null };
+  }
+  return { editedArgs: parsed, error: null };
+}
+
+// Epic 8, E8-6.2 / N11: the ONE browser-confirmation control and
+// grant contract, shared by the standalone approval card and the
+// compact ToolActivityCard. Before N11 the envelope checkbox
+// existed only on the standalone surface, so the same approval
+// offered different powers depending on which card rendered it.
+// Payments are never envelope-eligible; the engine re-scopes any
+// grant to the confirmed action's category + site regardless.
+function browserEnvelopeGrant(confirmation, grantChecked) {
+  if (!confirmation || confirmation.category === 'payments') return undefined;
+  return grantChecked ? { grant: true } : undefined;
+}
+
+export function BrowserConfirmationControl({ confirmation, grantChecked = false, onGrantCheckedChange = null }) {
+  if (!confirmation) return null;
+  return (
+    <>
+      <div
+        data-testid="browser-confirmation-description"
+        style={{ background: 'rgba(59, 130, 246, 0.12)', border: '1px solid rgba(59, 130, 246, 0.35)', padding: '12px', borderRadius: '8px', fontSize: '14px', color: '#bfdbfe' }}
+      >
+        {confirmation.description}
+      </div>
+      {confirmation.category === 'payments' ? (
+        <div style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
+          Payments are always confirmed individually — no envelope can cover them.
+        </div>
+      ) : (
+        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#e2e8f0', marginTop: '10px', cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            data-testid="browser-envelope-checkbox"
+            checked={!!grantChecked}
+            onChange={(e) => { if (onGrantCheckedChange) onGrantCheckedChange(e.target.checked); }}
+          />
+          Allow {confirmation.category.replace(/_/g, ' ')} actions on {confirmation.site_name || confirmation.site_host} for the rest of this task
+        </label>
+      )}
+    </>
+  );
+}
+
+
+export function ToolActivityCard({ payload, isNested = false, pendingApproval = null, onApproveTool = null, onOpenArtifact = null, envelopeGrantChecked = false, onEnvelopeGrantCheckedChange = null }) {  // Epic 8, E8-1.3: approval argument editor state (hooks first —
+  // the early return below must stay after them).
+  const [argsEditorOpen, setArgsEditorOpen] = useState(false);
+  const [argsText, setArgsText] = useState('');
+  const [argsError, setArgsError] = useState('');
+
   if (!payload) return null;
 
-  const { tool_name, tool_args, status, result, node, from_node, to_node } = payload;
+  const { tool_name, tool_args, status, result, node, from_node, to_node, edited } = payload;
+
   const isPending = status === 'pending';
   const isFailed = status === 'failed';
   const needsApproval = isPending && !!pendingApproval;
+  const approvalPreview = (pendingApproval && pendingApproval.preview) || payload.preview || null;
+  const scopePath = approvalScopePath((pendingApproval && pendingApproval.tool_args) || tool_args);
 
-  const callerNode = from_node || node || 'agent';
+  const callerNode = from_node || node || 'agent';
+  // Epic 8, E8-1.3: approving from the drawer goes through the
+  // argument editor when it is open. An unchanged editor (or one
+  // never opened) calls back with the exact legacy argument list;
+  // a real edit appends editedArgs as the final argument.
+  const approvalArgs = (pendingApproval && pendingApproval.tool_args) || tool_args || {};
+  const browserConfirmation = (pendingApproval && pendingApproval.browser_confirmation) || payload.browser_confirmation || null;
+  const approveWithEdits = (scope) => {
+    if (!onApproveTool || !pendingApproval) return;
+    // N11: the envelope grant rides the same sixth-argument
+    // contract as the standalone approval card, via the shared
+    // browserEnvelopeGrant helper — one payload, both surfaces.
+    const envelope = browserEnvelopeGrant(browserConfirmation, envelopeGrantChecked);
+    if (!argsEditorOpen) {
+      if (envelope) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope, undefined, envelope);
+      else if (scope) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope);
+      else onApproveTool(pendingApproval.id, true, pendingApproval.approval_key);
+      return;
+    }
+    const { editedArgs, error } = parseApprovalEditedArgs(argsText, approvalArgs);
+    if (error) {
+      setArgsError(error);
+      return;
+    }
+    if (envelope) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope, editedArgs || undefined, envelope);
+    else if (editedArgs) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope, editedArgs);
+    else if (scope) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope);
+    else onApproveTool(pendingApproval.id, true, pendingApproval.approval_key);
+  };
+  const openArgsEditor = () => {
+    setArgsText(JSON.stringify(approvalArgs, null, 2));
+    setArgsError('');
+    setArgsEditorOpen(true);
+  };
+
   const targetNode = to_node || 'execute_tool';
 
   return (
@@ -185,10 +404,37 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
         <div className="tool-identity">
           <TerminalSquare size={14} className="tool-terminal-icon" />
           <span className="tool-call-name">{tool_name || 'unknown_tool'}</span>
+          {tool_args?.path && (
+            <button
+              type="button"
+              className="tool-card-file-link"
+              data-testid="tool-card-file-link"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (onOpenArtifact) onOpenArtifact(tool_args.path);
+              }}
+              title={`View in artifacts: ${tool_args.path}`}
+              style={{
+                background: 'rgba(167, 139, 250, 0.15)',
+                border: '1px solid rgba(167, 139, 250, 0.3)',
+                color: '#c084fc',
+                borderRadius: '4px',
+                padding: '1px 6px',
+                fontSize: '11px',
+                cursor: 'pointer',
+                fontFamily: 'monospace'
+              }}
+            >
+              {tool_args.path.split(/[\/]/).pop()}
+            </button>
+          )}
           <span className="tool-route-badge">
             {callerNode.toUpperCase()} ➔ {targetNode.toUpperCase()}
           </span>
         </div>
+        {edited && (
+          <span data-testid="tool-edited-badge" style={{ fontSize: '10px', fontWeight: 600, color: '#fbbf24', background: 'rgba(251, 191, 36, 0.15)', border: '1px solid rgba(251, 191, 36, 0.4)', borderRadius: '999px', padding: '2px 8px', marginRight: '8px' }}>edited by you</span>
+        )}
         <div className={`tool-status-pill tool-status-${needsApproval ? 'approval' : (status || 'pending')}`} style={needsApproval ? { background: 'rgba(239, 68, 68, 0.2)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.4)' } : {}}>
           {needsApproval ? <ShieldAlert size={11} color="#ef4444" /> : isPending ? <span className="tool-spinner-dot" /> : isFailed ? <AlertCircle size={11} /> : <CheckCircle2 size={11} />}
           <span>{needsApproval ? 'approval required' : (status || 'pending')}</span>
@@ -222,7 +468,37 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
             <div style={{ fontSize: '12px', color: '#cbd5e1' }}>
               The agent is requesting permission to execute <strong>{tool_name}</strong>.
             </div>
-            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '4px' }}>
+            <ApprovalPreview preview={approvalPreview} />
+            {browserConfirmation && (
+              <BrowserConfirmationControl
+                confirmation={browserConfirmation}
+                grantChecked={envelopeGrantChecked}
+                onGrantCheckedChange={onEnvelopeGrantCheckedChange}
+              />
+            )}
+            {!argsEditorOpen ? (
+              <button
+                data-testid="approval-edit-args-btn"
+                onClick={openArgsEditor}
+                style={{ alignSelf: 'flex-start', padding: '6px 12px', borderRadius: '8px', background: 'rgba(255, 255, 255, 0.08)', color: '#e2e8f0', border: '1px solid rgba(255, 255, 255, 0.15)', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>
+                Edit arguments
+              </button>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <textarea
+                  data-testid="approval-args-editor"
+                  value={argsText}
+                  onChange={(e) => setArgsText(e.target.value)}
+                  rows={6}
+                  spellCheck={false}
+                  style={{ width: '100%', boxSizing: 'border-box', background: 'rgba(0,0,0,0.5)', color: '#a78bfa', border: '1px solid rgba(255, 255, 255, 0.15)', borderRadius: '8px', padding: '10px', fontFamily: 'monospace', fontSize: '12px' }}
+                />
+                {argsError && (
+                  <div data-testid="approval-args-error" style={{ fontSize: '12px', color: '#fca5a5' }}>{argsError}</div>
+                )}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'flex-end', marginTop: '4px' }}>
               <button 
                 onClick={() => onApproveTool && onApproveTool(pendingApproval.id, false, pendingApproval.approval_key)}
                 style={{
@@ -238,8 +514,45 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
               >
                 Reject Request
               </button>
+              {scopePath && (
+                <>
+                  <button
+                    onClick={() => approveWithEdits('file')}
+
+                    style={{
+                      padding: '6px 14px',
+                      borderRadius: '8px',
+                      background: 'rgba(255, 255, 255, 0.08)',
+                      color: '#e2e8f0',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      fontWeight: 500
+                    }}
+                  >
+                    Approve + remember file
+                  </button>
+                  <button
+                    onClick={() => approveWithEdits('folder')}
+
+                    style={{
+                      padding: '6px 14px',
+                      borderRadius: '8px',
+                      background: 'rgba(255, 255, 255, 0.08)',
+                      color: '#e2e8f0',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      fontWeight: 500
+                    }}
+                  >
+                    Approve + remember folder
+                  </button>
+                </>
+              )}
               <button 
-                onClick={() => onApproveTool && onApproveTool(pendingApproval.id, true, pendingApproval.approval_key)}
+                onClick={() => approveWithEdits()}
+
                 style={{
                   padding: '6px 14px',
                   borderRadius: '8px',
@@ -274,7 +587,7 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
   );
 }
 
-export function NodeActivityCard({ activity, nestedTools = [], rawDelta }) {
+export function NodeActivityCard({ activity, nestedTools = [], rawDelta, onOpenArtifact = null }) {
   if (!activity) return null;
 
   const { from_node, to_node, action, reason, briefing, input_payload, output_payload, status } = activity;
@@ -332,7 +645,7 @@ export function NodeActivityCard({ activity, nestedTools = [], rawDelta }) {
             </div>
             <div className="nested-tools-list">
               {nestedTools.map((t, tIdx) => (
-                <ToolActivityCard key={tIdx} payload={t.payload} isNested={true} />
+                <ToolActivityCard key={tIdx} payload={t.payload} isNested={true} onOpenArtifact={onOpenArtifact} />
               ))}
             </div>
           </div>
@@ -351,7 +664,7 @@ export function NodeActivityCard({ activity, nestedTools = [], rawDelta }) {
   );
 }
 
-export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopTask, onApproveTool = null, pendingApprovals = [] }) {
+export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopTask, onApproveTool = null, pendingApprovals = [], onOpenArtifact = null, envelopeGrants = {}, onEnvelopeGrantChange = null }) {
   let parsedThoughts = thoughts;
   if (typeof thoughts === 'string') {
     try {
@@ -533,6 +846,7 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
                     activity={item.activity} 
                     nestedTools={item.tools} 
                     rawDelta={item.rawDelta} 
+                    onOpenArtifact={onOpenArtifact}
                   />
                 );
               }
@@ -544,6 +858,9 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
                     payload={item.payload} 
                     pendingApproval={approval}
                     onApproveTool={onApproveTool}
+                    envelopeGrantChecked={!!(approval && envelopeGrants[approval.id])}
+                    onEnvelopeGrantCheckedChange={approval && onEnvelopeGrantChange ? (checked) => onEnvelopeGrantChange(approval.id, checked) : null}
+                    onOpenArtifact={onOpenArtifact}
                   />
                 );
               }
@@ -569,6 +886,154 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
                 </div>
               );
             })
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Epic 1, E1-17: display-only scratchpad panel. Mid-task the agent
+// can sketch a diagram / SVG / notes here; the content arrives
+// pre-sanitised from the engine (scripts and handlers stripped). The
+// panel sits above the composer so it never interrupts the message
+// stream; it collapses, and dismissing hides it until the next
+// SCRATCHPAD event (App stores a fresh object per event, which the
+// effect below treats as "reopen").
+export function ScratchpadPanel({ scratchpad }) {
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isDismissed, setIsDismissed] = useState(false);
+  const [mermaidSvg, setMermaidSvg] = useState('');
+  const [mermaidError, setMermaidError] = useState('');
+
+  const kind = scratchpad?.kind || 'text';
+  const content = typeof scratchpad?.content === 'string' ? scratchpad.content : '';
+  const agent = scratchpad?.agent || null;
+
+  useEffect(() => {
+    setIsDismissed(false);
+    setIsCollapsed(false);
+  }, [scratchpad]);
+
+  // Mermaid sources render to inline SVG with the package loaded
+  // lazily (importing this window never pays for it). Strict security
+  // level plus the engine-side sanitisation keep it display-only.
+  // Any failure falls back to showing the source with a note — the
+  // panel must never take the chat down with it.
+  useEffect(() => {
+    if (!scratchpad || kind !== 'mermaid') {
+      setMermaidSvg('');
+      setMermaidError('');
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const mod = await import('mermaid');
+        const mermaid = mod.default || mod;
+        mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+        const renderId = `aether-scratchpad-${Math.random().toString(36).slice(2, 10)}`;
+        const result = await mermaid.render(renderId, content);
+        if (!cancelled) {
+          setMermaidSvg(result?.svg || '');
+          setMermaidError('');
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setMermaidSvg('');
+          setMermaidError(err?.message || 'render failed');
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [scratchpad, kind, content]);
+
+  if (!scratchpad || isDismissed) return null;
+
+  return (
+    <div
+      className="scratchpad-panel"
+      data-testid="scratchpad-panel"
+      style={{
+        margin: '12px 16px 0 16px',
+        borderRadius: '14px',
+        background: 'rgba(10, 14, 24, 0.55)',
+        border: '1px solid rgba(96, 165, 250, 0.28)',
+        overflow: 'hidden',
+        flexShrink: 0
+      }}
+    >
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        padding: '8px 12px',
+        color: '#93c5fd',
+        fontSize: '12px',
+        userSelect: 'none'
+      }}>
+        <Edit2 size={13} style={{ flexShrink: 0 }} />
+        <span style={{ fontWeight: 600, letterSpacing: '0.4px' }}>Scratchpad</span>
+        <span style={{
+          fontSize: '10px',
+          background: 'rgba(96, 165, 250, 0.16)',
+          border: '1px solid rgba(96, 165, 250, 0.35)',
+          padding: '2px 6px',
+          borderRadius: '4px',
+          fontWeight: 600,
+          letterSpacing: '0.5px',
+          textTransform: 'uppercase'
+        }}>{kind}</span>
+        {agent && <span style={{ fontSize: '11px', color: '#a1a1aa' }}>{agent}</span>}
+        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          onClick={() => setIsCollapsed(!isCollapsed)}
+          aria-label={isCollapsed ? 'Expand scratchpad' : 'Collapse scratchpad'}
+          title={isCollapsed ? 'Expand scratchpad' : 'Collapse scratchpad'}
+          style={{ background: 'transparent', border: 'none', color: '#93c5fd', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px' }}
+        >
+          <ChevronDown size={14} style={{ transition: 'transform 0.3s ease', transform: isCollapsed ? 'rotate(0deg)' : 'rotate(180deg)' }} />
+        </button>
+        <button
+          type="button"
+          onClick={() => setIsDismissed(true)}
+          aria-label="Dismiss scratchpad"
+          title="Dismiss scratchpad"
+          style={{ background: 'transparent', border: 'none', color: '#a1a1aa', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px' }}
+        >
+          <X size={14} />
+        </button>
+      </div>
+      {!isCollapsed && (
+        <div
+          className="chat-scroll"
+          style={{
+            maxHeight: '260px',
+            overflowY: 'auto',
+            overflowX: 'auto',
+            padding: '10px 12px',
+            borderTop: '1px solid rgba(255, 255, 255, 0.06)',
+            background: 'rgba(0, 0, 0, 0.25)'
+          }}
+        >
+          {kind === 'svg' && (
+            <div className="scratchpad-svg" dangerouslySetInnerHTML={{ __html: content }} />
+          )}
+          {kind === 'mermaid' && (mermaidSvg ? (
+            <div className="scratchpad-mermaid" dangerouslySetInnerHTML={{ __html: mermaidSvg }} />
+          ) : mermaidError ? (
+            <div>
+              <div style={{ fontSize: '11px', color: '#fca5a5', marginBottom: '6px' }}>
+                Diagram could not be rendered — showing the source instead.
+              </div>
+              <pre className="scratchpad-source" style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '11.5px', color: '#d4d4d8' }}>{content}</pre>
+            </div>
+          ) : (
+            <div style={{ fontSize: '11.5px', color: '#a1a1aa' }}>Rendering diagram…</div>
+          ))}
+          {kind !== 'svg' && kind !== 'mermaid' && (
+            <pre className="scratchpad-text" style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '12px', color: '#e2e8f0' }}>{content}</pre>
           )}
         </div>
       )}
@@ -755,27 +1220,655 @@ function ContextMenu({ menu, onClose, onShowToast, setInput }) {
   );
 }
 
+// Epic 8, E8-6.1: browser task card for the dedicated agent browser
+export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
+  const { controlState = 'agent', currentUrl = '', challenge = null } = session || {};
+
+  const isStopped = controlState === 'stopped';
+  const isPaused = controlState === 'paused';
+  const isUserControl = controlState === 'user';
+  const isWaitingUser = controlState === 'waiting_user';
+
+  const challengeType = challenge?.challenge ? String(challenge.challenge).toLowerCase() : '';
+  const challengeDisplay = challengeType === 'two_factor' ? 'Two-factor' : (challengeType || 'verification');
+
+  return (
+    <div
+      data-testid="browser-task-card"
+      style={{
+        margin: '12px 16px 0 16px',
+        borderRadius: '14px',
+        border: '1px solid rgba(59, 130, 246, 0.25)',
+        background: 'rgba(15, 23, 42, 0.85)',
+        backdropFilter: 'blur(16px)',
+        padding: '12px 16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '10px',
+        boxShadow: '0 4px 20px rgba(0, 0, 0, 0.25)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+          <div style={{
+            width: '28px',
+            height: '28px',
+            borderRadius: '8px',
+            background: 'rgba(59, 130, 246, 0.15)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#60a5fa',
+            flexShrink: 0,
+          }}>
+            <Globe size={16} />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <span style={{ fontSize: '13px', fontWeight: 600, color: '#f1f5f9' }}>
+              Agent Browser (Dedicated Profile)
+            </span>
+            {currentUrl ? (
+              <span
+                style={{
+                  fontSize: '11px',
+                  color: '#94a3b8',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                title={currentUrl}
+              >
+                {currentUrl}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        <div style={{
+          fontSize: '11px',
+          fontWeight: 500,
+          padding: '2px 8px',
+          borderRadius: '999px',
+          background: isWaitingUser
+            ? 'rgba(245, 158, 11, 0.15)'
+            : isUserControl
+            ? 'rgba(168, 85, 247, 0.15)'
+            : isPaused
+            ? 'rgba(234, 179, 8, 0.15)'
+            : isStopped
+            ? 'rgba(239, 68, 68, 0.15)'
+            : 'rgba(59, 130, 246, 0.15)',
+          color: isWaitingUser
+            ? '#fbbf24'
+            : isUserControl
+            ? '#c084fc'
+            : isPaused
+            ? '#fde047'
+            : isStopped
+            ? '#f87171'
+            : '#60a5fa',
+          border: `1px solid ${
+            isWaitingUser
+              ? 'rgba(245, 158, 11, 0.3)'
+              : isUserControl
+              ? 'rgba(168, 85, 247, 0.3)'
+              : isPaused
+              ? 'rgba(234, 179, 8, 0.3)'
+              : isStopped
+              ? 'rgba(239, 68, 68, 0.3)'
+              : 'rgba(59, 130, 246, 0.3)'
+          }`,
+        }}>
+          {isWaitingUser
+            ? 'Parked'
+            : isUserControl
+            ? 'User in control'
+            : isPaused
+            ? 'Paused'
+            : isStopped
+            ? 'Stopped'
+            : 'Active'}
+        </div>
+      </div>
+
+      {isWaitingUser && (
+        <div style={{
+          background: 'rgba(245, 158, 11, 0.1)',
+          border: '1px solid rgba(245, 158, 11, 0.25)',
+          borderRadius: '8px',
+          padding: '8px 12px',
+          fontSize: '12px',
+          color: '#fef3c7',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+        }}>
+          <ShieldAlert size={16} color="#fbbf24" style={{ flexShrink: 0 }} />
+          <span>
+            Waiting for you: {challengeDisplay} challenge detected in browser window. The agent never solves challenges. Please complete it to continue.
+          </span>
+        </div>
+      )}
+
+      {isUserControl && (
+        <div style={{
+          background: 'rgba(168, 85, 247, 0.1)',
+          border: '1px solid rgba(168, 85, 247, 0.25)',
+          borderRadius: '8px',
+          padding: '8px 12px',
+          fontSize: '12px',
+          color: '#f3e8ff',
+        }}>
+          You have control of the browser window. The agent is waiting for you to return control.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+        {isPaused ? (
+          <button
+            type="button"
+            data-testid="browser-resume-btn"
+            onClick={() => onControl('resume')}
+            style={{
+              background: 'rgba(59, 130, 246, 0.2)',
+              border: '1px solid rgba(59, 130, 246, 0.4)',
+              color: '#93c5fd',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <Play size={13} />
+            <span>Resume</span>
+          </button>
+        ) : !isWaitingUser && !isUserControl ? (
+          <button
+            type="button"
+            data-testid="browser-pause-btn"
+            disabled={isStopped}
+            onClick={() => onControl('pause')}
+            style={{
+              background: isStopped ? 'rgba(255, 255, 255, 0.05)' : 'rgba(234, 179, 8, 0.15)',
+              border: isStopped ? '1px solid rgba(255, 255, 255, 0.1)' : '1px solid rgba(234, 179, 8, 0.35)',
+              color: isStopped ? '#64748b' : '#fde047',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: isStopped ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <Pause size={13} />
+            <span>Pause</span>
+          </button>
+        ) : null}
+
+        {isUserControl ? (
+          <button
+            type="button"
+            data-testid="browser-return-control-btn"
+            onClick={() => onControl('return_control')}
+            style={{
+              background: 'rgba(168, 85, 247, 0.2)',
+              border: '1px solid rgba(168, 85, 247, 0.4)',
+              color: '#d8b4fe',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <Bot size={13} />
+            <span>Return Control</span>
+          </button>
+        ) : !isWaitingUser ? (
+          <button
+            type="button"
+            data-testid="browser-take-control-btn"
+            disabled={isStopped}
+            onClick={() => onControl('take_control')}
+            style={{
+              background: isStopped ? 'rgba(255, 255, 255, 0.05)' : 'rgba(168, 85, 247, 0.15)',
+              border: isStopped ? '1px solid rgba(255, 255, 255, 0.1)' : '1px solid rgba(168, 85, 247, 0.35)',
+              color: isStopped ? '#64748b' : '#d8b4fe',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: isStopped ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <User size={13} />
+            <span>Take Control</span>
+          </button>
+        ) : null}
+
+        {isWaitingUser && (
+          <button
+            type="button"
+            data-testid="browser-resume-btn"
+            onClick={() => onControl('resume')}
+            style={{
+              background: 'rgba(59, 130, 246, 0.2)',
+              border: '1px solid rgba(59, 130, 246, 0.4)',
+              color: '#93c5fd',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <Play size={13} />
+            <span>Resume</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          data-testid="browser-stop-btn"
+          disabled={isStopped}
+          onClick={() => onControl('stop')}
+          style={{
+            background: isStopped ? 'rgba(255, 255, 255, 0.05)' : 'rgba(239, 68, 68, 0.15)',
+            border: isStopped ? '1px solid rgba(255, 255, 255, 0.1)' : '1px solid rgba(239, 68, 68, 0.35)',
+            color: isStopped ? '#64748b' : '#fca5a5',
+            borderRadius: '8px',
+            padding: '5px 12px',
+            fontSize: '12px',
+            fontWeight: 500,
+            cursor: isStopped ? 'not-allowed' : 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+          }}
+        >
+          <Square size={13} />
+          <span>Stop</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
 export default function DraggableChatWindow({ 
   messages, 
   onSendMessage, 
   onStopTask,
-  status, 
+  status = 'Online',
   isThinking,
   onApproveTool,
   onApprovePlugin,
   providers = [],
   onChangeModel = () => {},
   onEditMessage,
+  onRegenerate,
+  planMode = false,
+  scratchpad = null,
+  onTogglePlanMode,
   onDetach,
   isFloating,
   initialInput = '',
   slashCommands = [],
-  isSidebarCollapsed = false
+  isSidebarCollapsed = false,
+  onExportSession = () => {},
+  sessionId = null,
+  rewindManifest = null,
+  onRewindRequest = null,
+  onForkRequest = null,
+  rewindUndo = null,
+  onRewindUndo = null,
+  onRewindUndoExpire = null,
+  artifactsCount = 0,
+  isCanvasOpen = false,
+  onToggleCanvas = () => {},
+  onOpenArtifact = () => {},
+  onTriggerSnip,
+  initialAttachments = [],
+  sessionCostUsd = 0,
+  costTasks = [],
+  runningCostTaskIds = [],
+  onRequestCostBreakdown = () => {},
+  contextBreakdown = null,
+  onRequestContextBreakdown = () => {},
+  budgetAlert = null,
+  browserSession = null,
+  onBrowserControl = null,
+  voiceState = null,
+  voiceAudioChunk = null,
+  voicePlaybackCut = 0,
+  onVoiceStart = () => {},
+  onVoiceStop = () => {},
+  onVoiceDismissError = () => {},
+  dictationState = null,
+  readAloudState = null,
+  onDictationStart = null,
+  onDictationChunk = null,
+  onDictationStop = null,
+  onReadAloudStart = null,
+  onReadAloudStop = null
 }) {
   const [input, setInput] = useState(initialInput);
   const [isMinimized, setIsMinimized] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const exportMenuRef = useRef(null);
+  const [showCostPopover, setShowCostPopover] = useState(false);
+  const costMenuRef = useRef(null);
+  const [showContextPopover, setShowContextPopover] = useState(false);
+  const contextMenuRef = useRef(null);
+  const [showStepPicker, setShowStepPicker] = useState(false);
+  const stepPickerRef = useRef(null);
+  // Epic 8, M12: the header step picker's data — the manifest's
+  // ACTUAL steps when the engine recorded any; otherwise the
+  // session's messages as fork boundaries (a forked or imported
+  // session's inherited history carries no manifest).
+  const stepPickerEntries = rewindManifest && Array.isArray(rewindManifest.entries)
+    ? rewindManifest.entries : [];
+  const stepPickerMessages = (messages || []).filter(
+    (m) => m && (m.role === 'user' || m.role === 'agent' || m.role === 'assistant'));
   const [contextMenu, setContextMenu] = useState(null);
-  const [toastMessage, setToastMessage] = useState('');
+  const [toastMessage, setToastMessage] = useState('');  // Epic 8, E8-1.3: per-approval argument editor state for the
+  // inline approval cards, keyed by message id: { text, error }.
+  // Presence of an entry means that card's editor is open.
+  const [approvalArgEdits, setApprovalArgEdits] = useState({});
+  // Epic 8, E8-6.2: per-approval "allow for this task" envelope
+  // opt-ins on browser confirmation cards, keyed by message id.
+  const [browserEnvelopeGrants, setBrowserEnvelopeGrants] = useState({});
+  // Epic 8, E8-1.1a: which message's step menu is open (index into
+  // messages), or null. One menu at a time.
+  const [openStepMenu, setOpenStepMenu] = useState(null);
+  const [attachments, setAttachments] = useState(initialAttachments || []);
+  const [isSnipOverlayOpen, setIsSnipOverlayOpen] = useState(false);
+  const [isDictating, setIsDictating] = useState(false);
+  const [dictationError, setDictationError] = useState(null);
+  const [playingMessageId, setPlayingMessageId] = useState(null);
+  const [readAloudError, setReadAloudError] = useState(null);
+
+  const dictationStreamRef = useRef(null);
+  const baseInputRef = useRef('');
+  const readAloudAudioCtxRef = useRef(null);
+  const readAloudSourcesRef = useRef(new Set());
+  const readAloudPlayHeadRef = useRef(0);
+
+  useEffect(() => {
+    if (dictationState?.error) {
+      setDictationError(dictationState.error);
+      setIsDictating(false);
+      if (dictationStreamRef.current) {
+        try { dictationStreamRef.current.getTracks().forEach((t) => t.stop()); } catch {} 
+        dictationStreamRef.current = null;
+      }
+    }
+  }, [dictationState?.error]);
+
+  useEffect(() => {
+    if (dictationState?.status === 'active') {
+      const startCapture = async () => {
+        if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+          setDictationError('Microphone is not available in this environment.');
+          return;
+        }
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          dictationStreamRef.current = stream;
+          setIsDictating(true);
+        } catch (err) {
+          setDictationError(`Microphone unavailable: ${err && err.message ? err.message : err}`);
+        }
+      };
+      startCapture();
+    }
+  }, [dictationState?.status]);
+
+  useEffect(() => {
+    if (dictationState?.text !== undefined && dictationState?.text !== null) {
+      const base = baseInputRef.current;
+      setInput(base ? `${base} ${dictationState.text}` : dictationState.text);
+    }
+  }, [dictationState?.text]);
+
+  useEffect(() => {
+    if (readAloudState?.error) {
+      setReadAloudError(readAloudState.error);
+      setPlayingMessageId(null);
+    } else if (readAloudState?.status === 'playing') {
+      setPlayingMessageId(readAloudState.messageId);
+    } else if (!readAloudState || readAloudState.status === 'idle') {
+      setPlayingMessageId(null);
+    }
+  }, [readAloudState]);
+
+  const handleMicStart = async (e) => {
+    if (e) {
+      if (typeof e.preventDefault === 'function') e.preventDefault();
+      if (typeof e.stopPropagation === 'function') e.stopPropagation();
+    }
+    if (isDictating) return;
+    setDictationError(null);
+    baseInputRef.current = input;
+
+    if (onDictationStart) {
+      onDictationStart();
+      return;
+    }
+
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      setDictationError('Microphone is not available in this environment.');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      dictationStreamRef.current = stream;
+      setIsDictating(true);
+    } catch (err) {
+      setDictationError(`Microphone unavailable: ${err && err.message ? err.message : err}`);
+    }
+  };
+
+  const handleMicEnd = (e) => {
+    if (e) {
+      if (typeof e.preventDefault === 'function') e.preventDefault();
+      if (typeof e.stopPropagation === 'function') e.stopPropagation();
+    }
+    if (dictationStreamRef.current) {
+      try {
+        dictationStreamRef.current.getTracks().forEach((t) => t.stop());
+      } catch {} 
+      dictationStreamRef.current = null;
+    }
+    setIsDictating(false);
+    if (onDictationStop) {
+      onDictationStop();
+    }
+  };
+
+  const handleMicKeyDown = (e) => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      handleMicStart(e);
+    }
+  };
+
+  const handleMicKeyUp = (e) => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      handleMicEnd(e);
+    }
+  };
+
+  const stopReadAloudPlayback = () => {
+    readAloudSourcesRef.current.forEach((src) => {
+      try { src.stop(); } catch {}
+    });
+    readAloudSourcesRef.current.clear();
+    if (readAloudAudioCtxRef.current) {
+      readAloudPlayHeadRef.current = readAloudAudioCtxRef.current.currentTime;
+    } else {
+      readAloudPlayHeadRef.current = 0;
+    }
+  };
+
+  const handleToggleReadAloud = (msg, idx) => {
+    const mid = msg.id || String(idx);
+    setReadAloudError(null);
+
+    if (playingMessageId === mid) {
+      stopReadAloudPlayback();
+      setPlayingMessageId(null);
+      if (onReadAloudStop) onReadAloudStop(mid);
+    } else {
+      stopReadAloudPlayback();
+      setPlayingMessageId(mid);
+      if (onReadAloudStart) {
+        onReadAloudStart(mid, msg.content || '');
+      }
+    }
+  };
+
+  // Epic 8, E8-6.1: agent-browser control and activity tracking
+  const [localControlState, setLocalControlState] = useState(null);
+  const lastBrowserStateRef = useRef(browserSession?.controlState);
+  const lastBrowserChallengeRef = useRef(browserSession?.challenge);
+
+  if (lastBrowserStateRef.current !== browserSession?.controlState ||
+      lastBrowserChallengeRef.current !== browserSession?.challenge) {
+    lastBrowserStateRef.current = browserSession?.controlState;
+    lastBrowserChallengeRef.current = browserSession?.challenge;
+    if (localControlState !== null) {
+      setLocalControlState(null);
+    }
+  }
+
+  const browserActivity = React.useMemo(() => {
+    let latest = null;
+    for (const m of messages || []) {
+      for (const t of m.thoughts || []) {
+        const payload = t.payload || {};
+        const toolName = payload.tool_name || t.tool_name || '';
+        if (typeof toolName === 'string' && toolName.startsWith('browser_')) {
+          const url = payload.tool_args?.url || payload.args?.url || '';
+          latest = { toolName, url };
+        }
+      }
+    }
+    return latest;
+  }, [messages]);
+
+  const activeBrowserSession = React.useMemo(() => {
+    if (!browserActivity && !browserSession) return null;
+    return {
+      controlState: localControlState || browserSession?.controlState || 'agent',
+      currentUrl: browserSession?.currentUrl || browserActivity?.url || '',
+      challenge: browserSession?.challenge || null,
+    };
+  }, [browserActivity, browserSession, localControlState]);
+
+  const handleBrowserControlClick = React.useCallback((action) => {
+    if (action === 'pause') {
+      setLocalControlState('paused');
+    } else if (action === 'resume') {
+      setLocalControlState('agent');
+    } else if (action === 'take_control') {
+      setLocalControlState('user');
+    } else if (action === 'return_control') {
+      setLocalControlState('agent');
+    } else if (action === 'stop') {
+      setLocalControlState('stopped');
+    }
+    if (onBrowserControl) {
+      onBrowserControl(action);
+    }
+  }, [onBrowserControl]);
+
+
+  useEffect(() => {
+    if (initialAttachments && initialAttachments.length > 0) {
+      setAttachments(initialAttachments);
+    }
+  }, [initialAttachments]);
+
+  useEffect(() => {
+    if (window.electronAPI && typeof window.electronAPI.onTriggerSnip === 'function') {
+      return window.electronAPI.onTriggerSnip(() => {
+        setIsSnipOverlayOpen(true);
+      });
+    }
+  }, []);
+
+  const handleTriggerSnip = () => {
+    if (onTriggerSnip) {
+      onTriggerSnip();
+    }
+    setIsSnipOverlayOpen(true);
+  };
+
+  const handleSnipCaptured = (snip) => {
+    setIsSnipOverlayOpen(false);
+    setAttachments(prev => [...prev, snip]);
+  };
+
+  const handleRemoveAttachment = (idxToRemove) => {
+    setAttachments(prev => prev.filter((_, idx) => idx !== idxToRemove));
+  };
+
+  // Epic 8, E8-6.2: the envelope grant a browser confirmation
+  // carries when its "allow for this task" box is checked.
+  // Payments never offer one; the engine re-scopes the grant to
+  // the confirmed action's category + site regardless.
+  const browserEnvelopeGrantFor = (msg) => browserEnvelopeGrant(
+    msg && msg.browser_confirmation,
+    !!(msg && browserEnvelopeGrants[msg.id])
+  );
+
+  // N11: one grants map serves both approval surfaces — the
+  // standalone card and the compact ToolActivityCard (via
+  // ThinkingAccordion) read and write the same state.
+  const handleEnvelopeGrantChange = (approvalId, checked) => {
+    setBrowserEnvelopeGrants(prev => ({ ...prev, [approvalId]: checked }));
+  };
+
+  const approveToolWithEdits = (msg, scope) => {
+    if (!onApproveTool) return;
+    const envelope = browserEnvelopeGrantFor(msg);
+    const approve = (s, edited) => {
+      if (envelope) onApproveTool(msg.id, true, msg.approval_key, s, edited, envelope);
+      else if (edited) onApproveTool(msg.id, true, msg.approval_key, s, edited);
+      else if (s) onApproveTool(msg.id, true, msg.approval_key, s);
+      else onApproveTool(msg.id, true, msg.approval_key);
+    };
+    const editState = approvalArgEdits[msg.id];
+    if (!editState) {
+      approve(scope, undefined);
+      return;
+    }
+    const { editedArgs, error } = parseApprovalEditedArgs(editState.text, msg.tool_args || {});
+    if (error) {
+      setApprovalArgEdits(prev => ({ ...prev, [msg.id]: { ...editState, error } }));
+      return;
+    }
+    approve(scope, editedArgs || undefined);
+  };
+
   const toastTimeoutRef = useRef(null);
   const messagesEndRef = useRef(null);
   const nodeRef = useRef(null);
@@ -796,9 +1889,28 @@ export default function DraggableChatWindow({
   };
 
   useEffect(() => {
-    const handleGlobalClick = () => setContextMenu(null);
+    const handleGlobalClick = (e) => {
+      setContextMenu(null);
+      setOpenStepMenu(null);
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target)) {
+        setShowExportMenu(false);
+      if (costMenuRef.current && !costMenuRef.current.contains(e.target)) {
+        setShowCostPopover(false);
+      }
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target)) {
+        setShowContextPopover(false);
+      if (stepPickerRef.current && !stepPickerRef.current.contains(e.target)) {
+        setShowStepPicker(false);
+      }
+      }
+      }
+    };
     const handleGlobalKeyDown = (e) => {
-      if (e.key === 'Escape') setContextMenu(null);
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+        setShowExportMenu(false);
+        setShowCostPopover(false);
+      }
     };
     window.addEventListener('click', handleGlobalClick);
     window.addEventListener('scroll', handleGlobalClick, true);
@@ -950,12 +2062,25 @@ export default function DraggableChatWindow({
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (input.trim() && !isThinking) {
-      onSendMessage(input.trim());
+    // While a task runs, submitting steers it (Epic 1, E1-07) - App
+    // decides START_TASK vs STEER_TASK; the input must not dead-end.
+    if (input.trim() || attachments.length > 0) {
+      if (attachments.length > 0) {
+        onSendMessage(input.trim(), attachments);
+      } else {
+        onSendMessage(input.trim());
+      }
       setInput('');
+      setAttachments([]);
     }
   };
 
+  // Epic 1 UI batch (E1-08): regenerate is offered on the last final
+  // agent bubble only (error bubbles included), and never mid-task.
+  const lastFinalAgentIndex = messages.findLastIndex(
+    m => (m.role === 'agent' || m.role === 'assistant') && m.isFinal
+  );
+
   const handleMouseMove = (e) => {
     if (nodeRef.current) {
       const rect = nodeRef.current.getBoundingClientRect();
@@ -987,7 +2112,7 @@ export default function DraggableChatWindow({
         position: 'absolute',
         top: '40px',
         left: isSidebarCollapsed ? '80px' : '360px',
-        right: '40px',
+        right: isCanvasOpen ? '530px' : '40px',
         bottom: '40px',
         width: 'auto',
         height: 'auto',
@@ -1049,7 +2174,369 @@ export default function DraggableChatWindow({
 
             </div>
           </div>
-          <div style={{ display: 'flex', gap: '12px' }}>
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+            {/* Compact default-model context bar (Epic 8, E8-A8.1b) */}
+            <CompactContextBar
+              breakdown={contextBreakdown}
+              onClick={() => {
+                setShowContextPopover((prev) => !prev);
+                if (!showContextPopover) onRequestContextBreakdown();
+              }}
+            />
+            {/* Cost Ledger (Epic 8, E8-A8.1a) */}
+            <div ref={costMenuRef} style={{ position: 'relative' }}>
+              <button
+                type="button"
+                data-testid="cost-header-btn"
+                onClick={() => {
+                  setShowCostPopover(prev => !prev);
+                  if (!showCostPopover) onRequestCostBreakdown();
+                }}
+                title="Session cost"
+                aria-label="Session cost"
+                style={{
+                  background: showCostPopover ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                  border: showCostPopover ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                  color: '#fff',
+                  cursor: 'pointer',
+                  padding: '6px 10px',
+                  borderRadius: '999px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'all 0.2s',
+                  fontSize: '12px',
+                  fontWeight: 500
+                }}
+              >
+                <CircleDollarSign size={14} />
+                <span data-testid="cost-header-total">{formatUsd(sessionCostUsd)}</span>
+              </button>
+              {showCostPopover && (
+                <CostHeaderPopover
+                  tasks={costTasks}
+                  totalCostUsd={sessionCostUsd}
+                  runningTaskIds={runningCostTaskIds}
+                  budgetAlert={budgetAlert}
+                />
+              )}
+            </div>
+            {/* Context Breakdown Popover (Epic 8, E8-A8.1b) */}
+            <div ref={contextMenuRef} style={{ position: 'relative' }}>
+              <button
+                type="button"
+                data-testid="context-header-btn"
+                onClick={() => {
+                  setShowContextPopover((prev) => !prev);
+                  if (!showContextPopover) onRequestContextBreakdown();
+                }}
+                title="Context window breakdown"
+                aria-label="Context window breakdown"
+                style={{
+                  background: showContextPopover ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                  border: showContextPopover ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                  color: '#fff',
+                  cursor: 'pointer',
+                  padding: '6px 10px',
+                  borderRadius: '999px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'all 0.2s',
+                  fontSize: '12px',
+                  fontWeight: 500
+                }}
+              >
+                <Layers size={14} />
+                <span>Context</span>
+              </button>
+              {showContextPopover && (
+                <ContextBar breakdown={contextBreakdown} />
+              )}
+            </div>
+            {/* Artifacts Canvas Toggle (Epic 8, E8-2.1) */}
+            <button
+              type="button"
+              data-testid="artifacts-header-btn"
+              onClick={() => onToggleCanvas && onToggleCanvas()}
+              title="Artifacts"
+              aria-label="Toggle Artifacts Canvas"
+              style={{
+                background: isCanvasOpen ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                border: isCanvasOpen ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                color: '#fff',
+                cursor: 'pointer',
+                padding: '6px 10px',
+                borderRadius: '999px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                transition: 'all 0.2s',
+                fontSize: '12px',
+                fontWeight: 500
+              }}
+            >
+              <Layers size={14} />
+              <span>Artifacts</span>
+              <span
+                data-testid="artifacts-badge"
+                style={{
+                  background: isCanvasOpen ? '#8b5cf6' : 'rgba(255, 255, 255, 0.15)',
+                  color: '#fff',
+                  borderRadius: '999px',
+                  padding: '1px 6px',
+                  fontSize: '10px',
+                  fontWeight: 600,
+                  minWidth: '16px',
+                  textAlign: 'center'
+                }}
+              >
+                {artifactsCount}
+              </span>
+            </button>
+            {/* Voice mode (Epic 8, E8-5.1a) */}
+            <button
+              type="button"
+              data-testid="voice-header-btn"
+              onClick={() => {
+                if (voiceState && (voiceState.status === 'active' || voiceState.status === 'starting')) onVoiceStop();
+                else onVoiceStart();
+              }}
+              title="Voice mode"
+              aria-label="Toggle voice mode"
+              style={{
+                background: voiceState && voiceState.status === 'active' ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                border: voiceState && voiceState.status === 'active' ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                color: '#fff',
+                cursor: 'pointer',
+                padding: '6px 10px',
+                borderRadius: '999px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                transition: 'all 0.2s',
+                fontSize: '12px',
+                fontWeight: 500
+              }}
+            >
+              <Mic size={14} />
+              <span>Voice</span>
+              {voiceState && voiceState.status === 'active' && (
+                <span
+                  data-testid="voice-live-dot"
+                  style={{
+                    width: '8px',
+                    height: '8px',
+                    borderRadius: '50%',
+                    background: '#f87171',
+                    display: 'inline-block'
+                  }}
+                />
+              )}
+            </button>
+            {/* Rewind / Fork step picker (Epic 8, E8-1.1a/1.2, M12):
+                the session-header entry point. The per-message menus
+                can only name the first/final point; this lists the
+                manifest's ACTUAL steps so an intermediate point can
+                be chosen exactly, and passes the chosen entry through
+                unchanged. Without a manifest it offers message-
+                boundary forks — fork from anywhere holds on inherited
+                and imported histories too. */}
+            <div ref={stepPickerRef} style={{ position: 'relative' }}>
+              <button
+                type="button"
+                data-testid="step-picker-btn"
+                onClick={() => setShowStepPicker(prev => !prev)}
+                title="Rewind / Fork…"
+                aria-label="Rewind or fork from a recorded step"
+                style={{
+                  background: showStepPicker ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                  border: showStepPicker ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                  color: '#fff',
+                  cursor: 'pointer',
+                  padding: '6px 10px',
+                  borderRadius: '999px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'all 0.2s',
+                  fontSize: '12px',
+                  fontWeight: 500
+                }}
+              >
+                <RotateCcw size={14} />
+                <span>Rewind / Fork…</span>
+              </button>
+              {showStepPicker && (
+                <div
+                  data-testid="step-picker"
+                  style={{
+                    position: 'absolute',
+                    top: '100%',
+                    right: 0,
+                    marginTop: '6px',
+                    background: 'rgba(23, 23, 30, 0.95)',
+                    backdropFilter: 'blur(20px)',
+                    border: '1px solid rgba(255, 255, 255, 0.12)',
+                    borderRadius: '8px',
+                    padding: '6px',
+                    minWidth: '340px',
+                    maxHeight: '340px',
+                    overflowY: 'auto',
+                    zIndex: 1100,
+                    boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)'
+                  }}
+                >
+                  {stepPickerEntries.length > 0 ? (
+                    <>
+                      <div style={{ padding: '4px 8px', fontSize: '11px', fontWeight: 600, color: '#a78bfa', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                        Steps in the current task
+                      </div>
+                      {stepPickerEntries.map((entry) => (
+                        <div
+                          key={entry.step_index}
+                          data-testid="step-picker-item"
+                          style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 8px', borderRadius: '6px' }}
+                        >
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: '12px', color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{entry.label}</div>
+                            <div style={{ fontSize: '11px', color: '#9090a0' }}>
+                              Step {entry.step_index} · Checkpoint {String(entry.checkpoint_id || '').slice(0, 8)}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            data-testid="step-picker-rewind"
+                            onClick={() => { setShowStepPicker(false); if (onRewindRequest) onRewindRequest(entry); }}
+                            style={{ background: 'rgba(167, 139, 250, 0.2)', border: '1px solid rgba(167, 139, 250, 0.4)', color: '#ddd6fe', padding: '4px 8px', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}
+                          >
+                            Rewind
+                          </button>
+                          <button
+                            type="button"
+                            data-testid="step-picker-fork"
+                            onClick={() => { setShowStepPicker(false); if (onForkRequest) onForkRequest({ message_id: null, step_index: entry.step_index }); }}
+                            style={{ background: 'rgba(255, 255, 255, 0.08)', border: '1px solid rgba(255, 255, 255, 0.15)', color: '#fff', padding: '4px 8px', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}
+                          >
+                            Fork
+                          </button>
+                        </div>
+                      ))}
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ padding: '4px 8px', fontSize: '11px', fontWeight: 600, color: '#a78bfa', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                        Fork from a message
+                      </div>
+                      <div style={{ padding: '0 8px 4px', fontSize: '11px', color: '#9090a0' }}>
+                        No recorded steps in this session — fork from any message instead.
+                      </div>
+                      {stepPickerMessages.map((m, j) => (
+                        <div
+                          key={m.id || j}
+                          data-testid="step-picker-message-item"
+                          style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 8px', borderRadius: '6px' }}
+                        >
+                          <div style={{ flex: 1, minWidth: 0, fontSize: '12px', color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {typeof m.content === 'string' ? m.content.slice(0, 60) : ''}
+                          </div>
+                          <button
+                            type="button"
+                            data-testid="step-picker-fork-message"
+                            onClick={() => { setShowStepPicker(false); if (onForkRequest) onForkRequest({ message_id: m.id || null, step_index: null }); }}
+                            style={{ background: 'rgba(255, 255, 255, 0.08)', border: '1px solid rgba(255, 255, 255, 0.15)', color: '#fff', padding: '4px 8px', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}
+                          >
+                            Fork
+                          </button>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+            {/* Session Export menu */}
+            <div ref={exportMenuRef} style={{ position: 'relative' }}>
+              <button
+                onClick={() => setShowExportMenu(prev => !prev)}
+                title="Export Session"
+                aria-label="Export Session"
+                style={{
+                  background: showExportMenu ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  color: '#fff',
+                  cursor: 'pointer',
+                  padding: '6px',
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'all 0.2s'
+                }}
+              >
+                <Download size={14} />
+              </button>
+              {showExportMenu && (
+                <div style={{
+                  position: 'absolute',
+                  top: '100%',
+                  right: 0,
+                  marginTop: '6px',
+                  background: 'rgba(23, 23, 30, 0.95)',
+                  backdropFilter: 'blur(20px)',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  borderRadius: '8px',
+                  padding: '4px',
+                  minWidth: '140px',
+                  zIndex: 1100,
+                  boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)'
+                }}>
+                  <button
+                    onClick={() => { setShowExportMenu(false); onExportSession('markdown'); }}
+                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: '#fff', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                  >
+                    Markdown (.md)
+                  </button>
+                  <button
+                    onClick={() => { setShowExportMenu(false); onExportSession('json'); }}
+                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: '#fff', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                  >
+                    JSON (.json)
+                  </button>
+                  <button
+                    onClick={() => { setShowExportMenu(false); onExportSession('zip'); }}
+                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: '#fff', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                  >
+                    ZIP (.zip)
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Phase 10.3 C2: isMinimized used to be settable by nothing —
+                the state existed, the control did not. This toggle wires
+                it: minimise collapses the feed + input to the header bar,
+                restore brings them back. Minimize2/Maximize2 were already
+                imported and unused for this. */}
+            {isMinimized ? (
+              <button 
+                onClick={() => setIsMinimized(false)}
+                title="Restore chat"
+                aria-label="Restore chat"
+                style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
+              >
+                <Maximize2 size={14} />
+              </button>
+            ) : (
+              <button 
+                onClick={() => setIsMinimized(true)}
+                title="Minimise chat"
+                aria-label="Minimise chat"
+                style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
+              >
+                <Minimize2 size={14} />
+              </button>
+            )}
             {isFloating ? (
               <>
                 <button 
@@ -1099,7 +2586,7 @@ export default function DraggableChatWindow({
               {messages.map((msg, i) => {
                 if (msg.role === 'system') {
                   return (
-                    <div key={i} style={{ 
+                    <div key={i} data-message-id={msg.id || undefined} style={{ 
                       display: 'flex', 
                       alignItems: 'center', 
                       gap: '12px', 
@@ -1118,7 +2605,7 @@ export default function DraggableChatWindow({
 
                 if (msg.role === 'tool_approval') {
                   return (
-                    <div key={i} style={{ 
+                    <div key={i} data-message-id={msg.id || undefined} style={{ 
                       margin: '8px 0', 
                       background: 'rgba(0, 0, 0, 0.4)', 
                       border: '1px solid rgba(239, 68, 68, 0.3)',
@@ -1137,7 +2624,43 @@ export default function DraggableChatWindow({
                         <div style={{ background: 'rgba(0,0,0,0.5)', padding: '12px', borderRadius: '8px', fontFamily: 'monospace', fontSize: '12px', color: '#a78bfa', marginBottom: '20px', overflowX: 'auto' }}>
                           {JSON.stringify(msg.tool_args, null, 2)}
                         </div>
-                        <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+                        {msg.preview && (
+                          <div style={{ marginBottom: '20px' }}>
+                            <ApprovalPreview preview={msg.preview} />
+                          </div>
+                        )}
+                        {msg.browser_confirmation && (
+                          <div style={{ marginBottom: '20px' }}>
+                            <BrowserConfirmationControl
+                              confirmation={msg.browser_confirmation}
+                              grantChecked={!!browserEnvelopeGrants[msg.id]}
+                              onGrantCheckedChange={(checked) => setBrowserEnvelopeGrants(prev => ({ ...prev, [msg.id]: checked }))}
+                            />
+                          </div>
+                        )}
+                        {!approvalArgEdits[msg.id] ? (
+                          <button
+                            data-testid="approval-edit-args-btn"
+                            onClick={() => setApprovalArgEdits(prev => ({ ...prev, [msg.id]: { text: JSON.stringify(msg.tool_args || {}, null, 2), error: '' } }))}
+                            style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', marginBottom: '20px' }}>
+                            Edit arguments
+                          </button>
+                        ) : (
+                          <div style={{ marginBottom: '20px' }}>
+                            <textarea
+                              data-testid="approval-args-editor"
+                              value={approvalArgEdits[msg.id].text}
+                              onChange={(e) => setApprovalArgEdits(prev => ({ ...prev, [msg.id]: { text: e.target.value, error: '' } }))}
+                              rows={6}
+                              spellCheck={false}
+                              style={{ width: '100%', boxSizing: 'border-box', background: 'rgba(0,0,0,0.5)', color: '#a78bfa', border: '1px solid rgba(255, 255, 255, 0.15)', borderRadius: '8px', padding: '10px', fontFamily: 'monospace', fontSize: '12px' }}
+                            />
+                            {approvalArgEdits[msg.id].error && (
+                              <div data-testid="approval-args-error" style={{ fontSize: '12px', color: '#fca5a5', marginTop: '6px' }}>{approvalArgEdits[msg.id].error}</div>
+                            )}
+                          </div>
+                        )}
+                        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                           <button 
                             onClick={() => onApproveTool && onApproveTool(msg.id, false, msg.approval_key)}
                             className="ios-close-btn"
@@ -1146,8 +2669,29 @@ export default function DraggableChatWindow({
                             <X size={16} style={{ marginRight: '6px' }} />
                             Reject Request
                           </button>
+                          {approvalScopePath(msg.tool_args) && (
+                            <>
+                              <button 
+                                onClick={() => approveToolWithEdits(msg, 'file')}
+
+                                className="ios-close-btn"
+                                style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center' }}
+                              >
+                                Approve + remember file
+                              </button>
+                              <button 
+                                onClick={() => approveToolWithEdits(msg, 'folder')}
+
+                                className="ios-close-btn"
+                                style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center' }}
+                              >
+                                Approve + remember folder
+                              </button>
+                            </>
+                          )}
                           <button 
-                            onClick={() => onApproveTool && onApproveTool(msg.id, true, msg.approval_key)}
+                            onClick={() => approveToolWithEdits(msg)}
+
                             className="ios-close-btn"
                             style={{ background: 'rgba(239, 68, 68, 0.2)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#fca5a5', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
                           >
@@ -1162,7 +2706,7 @@ export default function DraggableChatWindow({
 
                 if (msg.role === 'plugin_approval') {
                   return (
-                    <div key={i} style={{ 
+                    <div key={i} data-message-id={msg.id || undefined} style={{ 
                       margin: '8px 0', 
                       background: 'rgba(0, 0, 0, 0.4)', 
                       border: '1px solid rgba(59, 130, 246, 0.3)',
@@ -1204,8 +2748,14 @@ export default function DraggableChatWindow({
                   );
                 }
 
+                // Epic 8, E8-1.1a: this message's recorded rewind
+                // point for the step menu (null without a manifest).
+                const rewindPoint = rewindManifest
+                  ? getRewindPointForMessage(messages, i, rewindManifest)
+                  : null;
+
                 return (
-                  <div key={i} className={`chat-message ${msg.role === 'user' ? 'user' : 'agent'}`} style={{
+                  <div key={i} data-message-id={msg.id || undefined} className={`chat-message ${msg.role === 'user' ? 'user' : 'agent'}`} style={{
                     display: 'flex',
                     flexDirection: msg.role === 'user' ? 'row-reverse' : 'row',
                     gap: '12px',
@@ -1224,20 +2774,110 @@ export default function DraggableChatWindow({
                       {msg.role === 'user' ? <User size={18} color="#fff" /> : <Bot size={18} color="#a78bfa" />}
                     </div>
                     <div className={`chat-bubble ${msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-agent'} msg-container`} style={{ position: 'relative' }}>
-                      {msg.role === 'user' && (
-                        <button 
-                          className="msg-edit-btn" 
-                          title="Edit and resend"
-                          onClick={() => {
-                            if (onEditMessage) onEditMessage(msg, i);
-                            setInput(msg.content);
-                            if (textareaRef.current) {
-                              textareaRef.current.focus();
-                            }
+                      {msg.role === 'user' && (
+                        <button
+                          type="button"
+                          className="msg-edit-btn"
+                          title="Edit and resend"
+                          aria-label="Edit and resend this message"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (onEditMessage) onEditMessage(msg, i);
+                            const text = typeof msg.content === 'string' ? msg.content : '';
+                            setInput(text);
+                            // Focus after React applies the new input
+                            // value, and put the caret at the end so the
+                            // user can keep typing immediately.
+                            requestAnimationFrame(() => {
+                              const ta = textareaRef.current;
+                              if (ta) {
+                                ta.focus();
+                                const end = ta.value.length;
+                                try { ta.setSelectionRange(end, end); } catch (err) {}
+                              }
+                            });
+                          }}
+                        >
+                          <Edit2 size={12} />
+                        </button>
+                      )}
+                      {(
+                        <button
+                          type="button"
+                          className="msg-step-menu-btn"
+                          data-testid="step-menu-btn"
+                          title="Step actions"
+                          aria-label="Step actions for this message"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setOpenStepMenu(openStepMenu === i ? null : i);
                           }}
                         >
-                          <Edit2 size={12} />
+                          <MoreHorizontal size={12} />
                         </button>
+                      )}
+                      {openStepMenu === i && (
+                        <div className="step-menu" data-testid="step-menu">
+                          {rewindPoint && rewindPoint.scope === 'current' && rewindPoint.entry && (
+                            <div className="rewind-point-meta" data-testid="rewind-point-meta">
+                              <div className="rewind-point-label">{rewindPoint.entry.label}</div>
+                              <div className="rewind-point-detail">
+                                Checkpoint {String(rewindPoint.entry.checkpoint_id || '').slice(0, 8)}
+                              </div>
+                              {Array.isArray(rewindPoint.entry.files_written) && rewindPoint.entry.files_written.length > 0 && (
+                                <div className="rewind-point-detail">
+                                  Files written: {rewindPoint.entry.files_written.join(', ')}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {rewindPoint && (rewindPoint.scope === 'current' && rewindPoint.entry ? (
+                            <button
+                              type="button"
+                              className="step-menu-action"
+                              data-testid="rewind-action"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setOpenStepMenu(null);
+                                if (onRewindRequest) onRewindRequest(rewindPoint.entry);
+                              }}
+                            >
+                              Rewind to here
+                            </button>
+                          ) : (
+                            <>
+                              <button type="button" className="step-menu-action" data-testid="rewind-action" disabled>
+                                Rewind to here
+                              </button>
+                              <div className="step-menu-hint" data-testid="rewind-hint">
+                                Rewind is available for the current task only.
+                              </div>
+                            </>
+                          ))}
+                          <button
+                            type="button"
+                            className="step-menu-action"
+                            data-testid="fork-action"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setOpenStepMenu(null);
+                              if (onForkRequest) {
+                                onForkRequest({
+                                  message_id: msg.id || null,
+                                  step_index: rewindPoint && rewindPoint.scope === 'current' && rewindPoint.entry
+                                    ? rewindPoint.entry.step_index
+                                    : null,
+                                });
+                              }
+                            }}
+                          >
+                            Fork from here
+                          </button>
+                        </div>
                       )}
                       {(msg.role === 'agent' || msg.role === 'assistant') && (
                         <ThinkingAccordion 
@@ -1247,7 +2887,29 @@ export default function DraggableChatWindow({
                           onStopTask={onStopTask} 
                           onApproveTool={onApproveTool}
                           pendingApprovals={messages.filter(m => m.role === 'tool_approval')}
+                          envelopeGrants={browserEnvelopeGrants}
+                          onEnvelopeGrantChange={handleEnvelopeGrantChange}
+                          onOpenArtifact={onOpenArtifact}
                         />
+                      )}
+                      
+                      {Array.isArray(msg.attachments) && msg.attachments.length > 0 && (
+                        <div className="msg-attachments" data-testid="message-attachments" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: msg.content ? '8px' : '0' }}>
+                          {msg.attachments.map((att, attIdx) => {
+                            const src = att.data || att.url || (att.path ? (att.path.startsWith('data:') ? att.path : `file://${att.path}`) : '');
+                            return (
+                              <div key={attIdx} className="msg-attachment-item" style={{ maxWidth: '240px', borderRadius: '8px', overflow: 'hidden' }}>
+                                {src ? (
+                                  <img src={src} alt={att.name || 'Attachment'} style={{ maxWidth: '100%', maxHeight: '200px', objectFit: 'contain', display: 'block', borderRadius: '8px' }} />
+                                ) : (
+                                  <div style={{ padding: '4px 8px', background: 'rgba(255,255,255,0.1)', borderRadius: '6px', fontSize: '12px' }}>
+                                    {att.name || 'Attachment'}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
                       )}
                       
                       {msg.content ? (
@@ -1267,14 +2929,110 @@ export default function DraggableChatWindow({
                           </div>
                         )
                       )}
+                      {(msg.queued || msg.steering) && (
+                        <div
+                          className="msg-queued-indicator"
+                          data-testid="queued-indicator"
+                          style={{ marginTop: '6px', fontSize: '10px', letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.55)' }}
+                        >
+                          Queued
+                        </div>
+                      )}
+                      {(msg.role === 'agent' || msg.role === 'assistant') && msg.content && (
+                        <button
+                          type="button"
+                          className={`msg-read-aloud-btn ${playingMessageId === String(msg.id || i) ? 'playing' : ''}`}
+                          data-testid={`read-aloud-btn-${msg.id || i}`}
+                          title={playingMessageId === String(msg.id || i) ? 'Stop read aloud' : (readAloudError && playingMessageId === String(msg.id || i) ? readAloudError : 'Read aloud')}
+                          aria-label={playingMessageId === String(msg.id || i) ? 'Stop read aloud' : 'Read message aloud'}
+                          aria-pressed={playingMessageId === String(msg.id || i) ? 'true' : 'false'}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleToggleReadAloud(msg, i);
+                          }}
+                          style={{
+                            background: playingMessageId === String(msg.id || i) ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.06)',
+                            border: playingMessageId === String(msg.id || i) ? '1px solid rgba(167, 139, 250, 0.4)' : '1px solid rgba(255, 255, 255, 0.1)',
+                            borderRadius: '6px',
+                            color: playingMessageId === String(msg.id || i) ? '#c4b5fd' : 'rgba(255, 255, 255, 0.7)',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            fontSize: '11px',
+                            padding: '3px 8px',
+                            marginTop: '6px',
+                            marginRight: '6px',
+                            transition: 'all 0.15s ease',
+                          }}
+                        >
+                          {playingMessageId === String(msg.id || i) ? <VolumeX size={12} color="#c4b5fd" /> : <Volume2 size={12} />}
+                          <span>{playingMessageId === String(msg.id || i) ? 'Stop' : 'Read'}</span>
+                        </button>
+                      )}
+                      {readAloudError && (
+                        <div
+                          data-testid="read-aloud-error"
+                          style={{ color: '#ef4444', fontSize: '11px', marginTop: '4px', padding: '4px 8px', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '4px' }}
+                        >
+                          {readAloudError}
+                        </div>
+                      )}
+                      {i === lastFinalAgentIndex && !isThinking && onRegenerate && (
+                        <button
+                          type="button"
+                          className="msg-regenerate-btn"
+                          title="Regenerate response"
+                          aria-label="Regenerate response"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onRegenerate();
+                          }}
+                        >
+                          <RotateCcw size={12} />
+                          <span>Regenerate</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
               })}
 
 
+              {/* Voice live mirror (Epic 8, E8-5.1a): provisional
+                  bubbles — the partial transcript and the streaming
+                  reply. Finals commit as real messages via App. */}
+              {voiceState && voiceState.partialText && (
+                <div className="chat-message user" data-testid="voice-partial-bubble" style={{ display: 'flex', flexDirection: 'row-reverse', gap: '12px', padding: '16px 20px', opacity: 0.75 }}>
+                  <div style={{ background: 'rgba(255,255,255,0.1)', borderRadius: '50%', width: '36px', height: '36px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <User size={18} color="#fff" />
+                  </div>
+                  <div style={{ fontSize: '14px', lineHeight: 1.6, fontStyle: 'italic' }}>{voiceState.partialText}</div>
+                </div>
+              )}
+              {voiceState && voiceState.assistantText && (
+                <div className="chat-message agent" data-testid="voice-assistant-bubble" style={{ display: 'flex', gap: '12px', padding: '16px 20px' }}>
+                  <div style={{ background: 'rgba(var(--accent-rgb), 0.2)', borderRadius: '50%', width: '36px', height: '36px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <Bot size={18} color="#a78bfa" />
+                  </div>
+                  <div style={{ fontSize: '14px', lineHeight: 1.6 }}>{voiceState.assistantText}</div>
+                </div>
+              )}
               <div ref={messagesEndRef} />
             </div>
+
+            {/* Agent browser task card (Epic 8, E8-6.1) */}
+            {activeBrowserSession && (
+              <BrowserTaskCard
+                session={activeBrowserSession}
+                onControl={handleBrowserControlClick}
+              />
+            )}
+
+            {/* Scratchpad panel (Epic 1, E1-17): above the composer, below the message stream */}
+            <ScratchpadPanel scratchpad={scratchpad} />
 
             {/* Input Area */}
             <div style={{ padding: '16px', borderTop: '1px solid rgba(255,255,255,0.08)', position: 'relative' }}>
@@ -1331,11 +3089,88 @@ export default function DraggableChatWindow({
                   ))}
                 </div>
               )}
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
+                <button
+                  type="button"
+                  className={`plan-mode-toggle ${planMode ? 'active' : ''}`}
+                  aria-pressed={planMode}
+                  aria-label="Toggle plan mode"
+                  title="Plan mode: agents only use read-only tools"
+                  onClick={() => onTogglePlanMode && onTogglePlanMode()}
+                >
+                  Plan
+                </button>
+                <button
+                  type="button"
+                  className="snip-btn"
+                  data-testid="snip-ask-btn"
+                  title="Snip & ask (Ctrl+Shift+S)"
+                  aria-label="Snip screen region"
+                  onClick={handleTriggerSnip}
+                  style={{
+                    marginLeft: '8px',
+                    background: 'rgba(255,255,255,0.06)',
+                    border: '1px solid rgba(255,255,255,0.12)',
+                    borderRadius: '8px',
+                    padding: '4px 10px',
+                    color: '#cbd5e1',
+                    fontSize: '12px',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  <Scissors size={13} color="#a78bfa" />
+                  Snip &amp; ask
+                </button>
+              </div>
               <form onSubmit={handleSubmit} className="ios-glass-input" style={{ 
                 display: 'flex', 
-                alignItems: 'flex-end',
+                flexDirection: 'column',
                 padding: '8px 12px' 
               }}>
+                {attachments.length > 0 && (
+                  <div data-testid="composer-attachments-preview" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '8px', width: '100%' }}>
+                    {attachments.map((att, idx) => (
+                      <div key={idx} style={{ position: 'relative', display: 'inline-block' }}>
+                        <img
+                          data-testid="composer-attachment-thumbnail"
+                          src={att.data || att.url || (att.path ? `file://${att.path}` : '')}
+                          alt={att.name || 'Attached snip'}
+                          style={{ width: '56px', height: '56px', objectFit: 'cover', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.2)' }}
+                        />
+                        <button
+                          type="button"
+                          data-testid="remove-attachment-btn"
+                          onClick={() => handleRemoveAttachment(idx)}
+                          style={{
+                            position: 'absolute',
+                            top: '-6px',
+                            right: '-6px',
+                            width: '18px',
+                            height: '18px',
+                            borderRadius: '50%',
+                            background: '#ef4444',
+                            color: '#fff',
+                            border: 'none',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            cursor: 'pointer',
+                            padding: 0,
+                          }}
+                          title="Remove attachment"
+                        >
+                          <X size={10} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: 'flex', width: '100%', alignItems: 'flex-end' }}>
                 <textarea 
                   ref={textareaRef}
                   value={input}
@@ -1357,7 +3192,66 @@ export default function DraggableChatWindow({
                   }}
                   rows={1}
                 />
+                <button
+                  type="button"
+                  data-testid="composer-mic-btn"
+                  className={`composer-mic-btn ${isDictating ? 'recording' : ''}`}
+                  title={dictationError || (isDictating ? 'Release to finish dictation' : 'Hold to dictate')}
+                  aria-label={dictationError || (isDictating ? 'Release to finish dictation' : 'Hold to dictate')}
+                  aria-pressed={isDictating ? 'true' : 'false'}
+                  onMouseDown={handleMicStart}
+                  onMouseUp={handleMicEnd}
+                  onMouseLeave={handleMicEnd}
+                  onTouchStart={handleMicStart}
+                  onTouchEnd={handleMicEnd}
+                  onTouchCancel={handleMicEnd}
+                  onKeyDown={handleMicKeyDown}
+                  onKeyUp={handleMicKeyUp}
+                  style={{
+                    background: isDictating ? 'rgba(239, 68, 68, 0.25)' : 'rgba(255, 255, 255, 0.08)',
+                    border: isDictating ? '1px solid rgba(239, 68, 68, 0.5)' : '1px solid rgba(255, 255, 255, 0.12)',
+                    borderRadius: '50%',
+                    width: '32px',
+                    height: '32px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: isDictating ? '#ef4444' : '#cbd5e1',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s',
+                    marginLeft: '8px',
+                    flexShrink: 0,
+                    boxShadow: isDictating ? '0 0 10px rgba(239, 68, 68, 0.35)' : 'none',
+                  }}
+                >
+                  <Mic size={14} color={isDictating ? '#ef4444' : '#cbd5e1'} />
+                </button>
                 {isThinking ? (
+                  <>
+                  {input.trim() && (
+                    <button
+                      type="submit"
+                      title="Queue steering message"
+                      aria-label="Queue steering message"
+                      style={{
+                        background: 'var(--accent)',
+                        border: 'none',
+                        borderRadius: '50%',
+                        width: '32px',
+                        height: '32px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: '#fff',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s',
+                        marginLeft: '8px',
+                        flexShrink: 0
+                      }}
+                    >
+                      <Send size={14} />
+                    </button>
+                  )}
                   <button 
                     type="button"
                     onClick={onStopTask}
@@ -1383,12 +3277,13 @@ export default function DraggableChatWindow({
                   >
                     <Square size={12} fill="currentColor" />
                   </button>
+                  </>
                 ) : (
                   <button 
                     type="submit"
-                    disabled={!input.trim()}
+                    disabled={!input.trim() && attachments.length === 0}
                     style={{
-                      background: input.trim() ? 'var(--accent)' : 'rgba(255,255,255,0.1)',
+                      background: (input.trim() || attachments.length > 0) ? 'var(--accent)' : 'rgba(255,255,255,0.1)',
                       border: 'none',
                       borderRadius: '50%',
                       width: '32px',
@@ -1396,8 +3291,8 @@ export default function DraggableChatWindow({
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      color: input.trim() ? '#fff' : 'rgba(255,255,255,0.4)',
-                      cursor: input.trim() ? 'pointer' : 'default',
+                      color: (input.trim() || attachments.length > 0) ? '#fff' : 'rgba(255,255,255,0.4)',
+                      cursor: (input.trim() || attachments.length > 0) ? 'pointer' : 'default',
                       transition: 'all 0.2s',
                       marginLeft: '8px',
                       flexShrink: 0
@@ -1406,12 +3301,49 @@ export default function DraggableChatWindow({
                     <Send size={14} />
                   </button>
                 )}
+                </div>
               </form>
+              {dictationError && (
+                <div
+                  data-testid="dictation-error"
+                  style={{
+                    color: '#ef4444',
+                    fontSize: '11px',
+                    marginTop: '6px',
+                    padding: '4px 8px',
+                    background: 'rgba(239, 68, 68, 0.1)',
+                    borderRadius: '4px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <span>{dictationError}</span>
+                  <button
+                    type="button"
+                    onClick={() => setDictationError(null)}
+                    style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '0 4px' }}
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
               <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.3)', textAlign: 'center', marginTop: '8px' }}>
                 Press Enter to send, Shift+Enter for new line
               </div>
             </div>
           </>
+        )}
+
+        {/* Epic 8, E8-1.1b: 5-second rewind undo window. Expiry is
+            reported through onRewindUndoExpire so App can tell an
+            expiry apart from an Undo click. */}
+        {rewindUndo && (
+          <UndoToast
+            expiresAt={rewindUndo.expiresAt}
+            onUndo={() => { if (onRewindUndo) onRewindUndo(); }}
+            onExpire={() => { if (onRewindUndoExpire) onRewindUndoExpire(); }}
+          />
         )}
 
         {/* Copy Success Floating Toast */}
@@ -1421,6 +3353,24 @@ export default function DraggableChatWindow({
             <span>{toastMessage}</span>
           </div>
         )}
+
+        {voiceState && (
+          <VoiceOverlay
+            open
+            active={voiceState.status === 'active'}
+            status={voiceState.status === 'active' ? ((voiceState.assistantText || voiceState.announcementText) ? 'speaking' : 'listening') : voiceState.status}
+            partialText={voiceState.partialText || ''}
+            assistantText={voiceState.assistantText || voiceState.announcementText || ''}
+            error={voiceState.error || null}
+            webrtcConfig={voiceState.webrtcConfig || null}
+            audioChunk={voiceAudioChunk}
+            playbackCut={voicePlaybackCut}
+            onStop={onVoiceStop}
+            onDismiss={onVoiceDismissError}
+          />
+        )}
+
+        <SnipOverlay isOpen={isSnipOverlayOpen} onCapture={handleSnipCaptured} onCancel={() => setIsSnipOverlayOpen(false)} />
 
         {/* Apple iOS Glass Context Menu */}
         <ContextMenu 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+
 
 @dataclass
 class CommandFlag:
@@ -12,8 +12,8 @@ class SlashCommand:
     description: str
     type: str # "agent_route", "skill_invoke", "system", "composite"
     target: str
-    aliases: List[str] = field(default_factory=list)
-    flags: List[CommandFlag] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
+    flags: list[CommandFlag] = field(default_factory=list)
     
     def to_dict(self):
         return {
@@ -38,7 +38,7 @@ BUILTIN_SLASH_COMMANDS = [
 
 class SlashRegistry:
     def __init__(self):
-        self._commands: Dict[str, SlashCommand] = {}
+        self._commands: dict[str, SlashCommand] = {}
         for cmd in BUILTIN_SLASH_COMMANDS:
             self.register(cmd)
             
@@ -47,11 +47,11 @@ class SlashRegistry:
         for alias in cmd.aliases:
             self._commands[alias] = cmd
             
-    def resolve(self, command_str: str) -> Optional[SlashCommand]:
+    def resolve(self, command_str: str) -> SlashCommand | None:
         base_cmd = command_str.split(" ")[0].lower()
         return self._commands.get(base_cmd)
         
-    def get_all(self) -> List[SlashCommand]:
+    def get_all(self) -> list[SlashCommand]:
         # Return unique commands
         unique_cmds = {cmd.command: cmd for cmd in self._commands.values()}
         return list(unique_cmds.values())

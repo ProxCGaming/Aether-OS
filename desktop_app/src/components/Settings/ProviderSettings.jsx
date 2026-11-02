@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Key, CheckCircle2 } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 
-export default function ProviderSettings({ providers = [] }) {
+export default function ProviderSettings({ providers = [], health = {} }) {
   const { wsRef, sendMessage } = useAetherSocket();
   const [keys, setKeys] = useState({});
   const [baseUrls, setBaseUrls] = useState({});
@@ -11,6 +11,37 @@ export default function ProviderSettings({ providers = [] }) {
   const [validationMsg, setValidationMsg] = useState({});
   const [expandedModels, setExpandedModels] = useState({});
   const [customDisplayNames, setCustomDisplayNames] = useState({});
+  // Test-button hardening: a ref guard (state can lag a fast
+  // double-click), a per-provider client timeout, and an elapsed
+  // clock so a running test is unmistakably visible.
+  const testingRef = useRef({});
+  const testTimersRef = useRef({});
+  const [testingSince, setTestingSince] = useState({});
+  const [nowTick, setNowTick] = useState(Date.now());
+
+  useEffect(() => {
+    if (Object.keys(testingSince).length === 0) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [testingSince]);
+
+  useEffect(() => () => {
+    Object.values(testTimersRef.current).forEach(clearTimeout);
+  }, []);
+
+  const clearTestTracking = (provider) => {
+    testingRef.current[provider] = false;
+    if (testTimersRef.current[provider]) {
+      clearTimeout(testTimersRef.current[provider]);
+      delete testTimersRef.current[provider];
+    }
+    setTestingSince(prev => {
+      if (!(provider in prev)) return prev;
+      const next = { ...prev };
+      delete next[provider];
+      return next;
+    });
+  };
 
   useEffect(() => {
     const handleMessage = (event) => {
@@ -18,6 +49,7 @@ export default function ProviderSettings({ providers = [] }) {
         const data = JSON.parse(event.data);
         if (data.type === 'PROVIDER_VALIDATE_RESPONSE' || data.type === 'SETTINGS_PROVIDER_VALIDATE_RESULT') {
           const provider = data.payload.provider;
+          clearTestTracking(provider);
           const discErr = data.payload.discovery_error;
           const discErrText = discErr
             ? ` (model list failed: ${discErr.code ? 'HTTP ' + discErr.code : 'no response'} — ${discErr.message})`
@@ -79,10 +111,9 @@ export default function ProviderSettings({ providers = [] }) {
     setValidationState(prev => ({ ...prev, [providerName]: 'saving' }));
     
     const apiKeyToSave = keys[providerName] || '';
-    if (apiKeyToSave) {
-      localStorage.setItem(`aether_saved_key_${finalProviderName}`, apiKeyToSave);
-    }
-
+    // Phase 10.1 C1: keys are NEVER mirrored to localStorage (or any other
+    // renderer storage). The engine's secure secret store is the only
+    // destination — the key goes out via PROVIDER_SAVE_REQUEST only.
     sendMessage('PROVIDER_SAVE_REQUEST', {
       schema_version: 1,
       request_id: Date.now().toString(),
@@ -96,7 +127,22 @@ export default function ProviderSettings({ providers = [] }) {
   };
 
   const handleTestKey = (providerName) => {
+    // Repeat clicks while a test is running are ignored outright —
+    // each request used to queue another full engine-side validation.
+    if (testingRef.current[providerName]) return;
+    testingRef.current[providerName] = true;
     setValidationState(prev => ({ ...prev, [providerName]: 'testing' }));
+    setValidationMsg(prev => ({ ...prev, [providerName]: '' }));
+    setTestingSince(prev => ({ ...prev, [providerName]: Date.now() }));
+    // The engine caps validation at 30s; if nothing comes back in
+    // 35s, say so plainly instead of sitting on "Testing..." forever.
+    testTimersRef.current[providerName] = setTimeout(() => {
+      if (testingRef.current[providerName]) {
+        clearTestTracking(providerName);
+        setValidationState(prev => ({ ...prev, [providerName]: 'error' }));
+        setValidationMsg(prev => ({ ...prev, [providerName]: 'No answer from the engine in 35s — it may be busy or offline. Try again.' }));
+      }
+    }, 35000);
     sendMessage('SETTINGS_PROVIDER_VALIDATE_REQUEST', {
       schema_version: 1,
       request_id: Date.now().toString(),
@@ -132,6 +178,8 @@ export default function ProviderSettings({ providers = [] }) {
           const isConfigured = p.has_key;
           const isCustom = providerName.startsWith('custom_') || providerName === 'custom_openai';
           const isExpanded = expandedProvider === providerName;
+          const healthInfo = health && typeof health === 'object' ? health[providerName] : null;
+          const healthColor = !healthInfo ? null : healthInfo.status === 'healthy' ? '#10b981' : healthInfo.status === 'degraded' ? '#f59e0b' : '#ef4444';
           
           return (
             <div key={providerName} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', overflow: 'hidden', transition: 'all 0.3s' }}>
@@ -141,6 +189,12 @@ export default function ProviderSettings({ providers = [] }) {
               >
                 <h3 style={{ fontSize: '16px', margin: 0 }}>{displayName}</h3>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                  {healthInfo && (
+                    <div data-testid={`provider-health-${providerName}`} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: healthColor }}>
+                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: healthColor, display: 'inline-block' }} />
+                      {healthInfo.status}{healthInfo.latency_ms > 0 ? ` · ${Math.round(healthInfo.latency_ms)} ms` : ''}
+                    </div>
+                  )}
                   {isConfigured ? (
                     <>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#10b981', fontSize: '13px' }}>
@@ -210,7 +264,12 @@ export default function ProviderSettings({ providers = [] }) {
                       disabled={validationState[providerName] === 'testing'}
                       style={{ background: 'rgba(255,255,255,0.1)', color: '#fff', border: '1px solid rgba(255,255,255,0.2)', padding: '8px 24px', borderRadius: '12px', cursor: 'pointer', transition: 'all 0.2s', fontWeight: 500 }}
                     >
-                      {validationState[providerName] === 'testing' ? 'Testing...' : 'Test'}
+                      {validationState[providerName] === 'testing' ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                          <span className="aether-spinner" style={{ width: '12px', height: '12px', borderRadius: '50%', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', display: 'inline-block' }} />
+                          Testing…{testingSince[providerName] ? ` ${Math.max(0, Math.floor((nowTick - testingSince[providerName]) / 1000))}s` : ''}
+                        </span>
+                      ) : 'Test'}
                     </button>
                     <button 
                       onClick={() => handleSaveKey(providerName)}
@@ -220,6 +279,10 @@ export default function ProviderSettings({ providers = [] }) {
                       {validationState[providerName] === 'saving' ? 'Saving...' : 'Save Configuration'}
                     </button>
                   </div>
+
+                  {validationState[providerName] === 'testing' && (
+                    <div style={{ color: '#9090a0', fontSize: '12px', marginTop: '6px' }}>Checking the key with the provider — this can take up to ~30s.</div>
+                  )}
 
                   {((p.models && p.models.length > 0) || (p.excluded_models && p.excluded_models.length > 0)) && (
                     <div style={{ marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '12px' }}>

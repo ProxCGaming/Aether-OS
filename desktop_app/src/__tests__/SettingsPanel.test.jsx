@@ -122,3 +122,207 @@ describe('SettingsPanel auxiliary models (Phase 9 UI honesty)', () => {
     expect(reset.payload.model).toBe('auto');
   });
 });
+
+// Phase 10.3 C2: the theme buttons are gone. They only set `data-theme` on
+// <html> — no CSS rule ever read it, nothing persisted the choice, and the
+// app's colours are hardcoded dark inline styles, so no theme ever changed.
+describe('SettingsPanel theme controls removed (Phase 10.3 C2)', () => {
+  it('has no General menu and no theme buttons', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    expect(screen.queryByText('General')).not.toBeInTheDocument();
+    expect(screen.queryByText('Appearance')).not.toBeInTheDocument();
+    for (const label of ['Default', 'System Default', 'Light', 'Dark']) {
+      expect(screen.queryByRole('button', { name: label })).not.toBeInTheDocument();
+    }
+  });
+
+  it('no theme code remains in the SettingsPanel source', () => {
+    // The component must not set data-theme anywhere (comments aside, the
+    // setter call itself must be gone).
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SettingsPanel.jsx'), 'utf8');
+    expect(source).not.toContain("setAttribute('data-theme'");
+    expect(source).not.toContain('setAttribute("data-theme"');
+  });
+});
+
+// Phase 10.3 C2: the tool-policy dropdown used to offer a "default" option
+// it refused to send (the handler returned early on it, and no engine
+// message can clear a stored override). The option is gone; a tool at its
+// default now shows the effective policy the engine resolves, with a note
+// that no override is set — and every remaining option sends for real.
+describe('SettingsPanel tool policy dropdown (Phase 10.3 C2)', () => {
+  const readOnlyToolAtDefault = {
+    function: { name: 'read_file', description: 'Read a file.' },
+    risk: 'read_only',
+    always_allow_permitted: true,
+    effective_policy: 'allow',
+    policy_is_default: true,
+    policy: 'Require Approval', // what the engine sends as `policy` at default
+  };
+
+  it('shows the effective policy for a tool at default, with a no-override note', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Tools'));
+    feedTools(getHandler, [readOnlyToolAtDefault]);
+
+    // The dropdown displays the effective policy (Always Allow), not a
+    // placeholder, and says plainly that this is the default.
+    expect(screen.getByRole('button', { name: 'Always Allow' })).toBeInTheDocument();
+    expect(screen.getByText('Default policy — no override set. Pick one to override it.')).toBeInTheDocument();
+  });
+
+  it('offers only the three sendable policies — no default option — and sends the pick', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Tools'));
+    feedTools(getHandler, [readOnlyToolAtDefault]);
+
+    // Open the dropdown: the menu must list exactly the real policies.
+    fireEvent.click(screen.getByRole('button', { name: 'Always Allow' }));
+    expect(screen.queryByText(/\(default\)/)).not.toBeInTheDocument();
+    expect(screen.getByText('Require Approval')).toBeInTheDocument();
+    expect(screen.getByText('Deny')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Require Approval'));
+
+    const sent = wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
+    const set = sent.filter(m => m.type === 'TOOL_POLICY_SET_REQUEST');
+    expect(set).toHaveLength(1);
+    expect(set[0].payload).toEqual({ tool_name: 'read_file', policy: 'Require Approval' });
+  });
+
+  it('shows the stored policy (and no default note) for a tool with an explicit override', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Tools'));
+    feedTools(getHandler, [{
+      function: { name: 'read_file', description: 'Read a file.' },
+      risk: 'read_only',
+      always_allow_permitted: true,
+      effective_policy: 'deny',
+      policy_is_default: false,
+      policy: 'Deny',
+    }]);
+
+    expect(screen.getByRole('button', { name: 'Deny' })).toBeInTheDocument();
+    expect(screen.queryByText(/no override set/)).not.toBeInTheDocument();
+  });
+
+  it('no un-sendable default option remains in the SettingsPanel source', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SettingsPanel.jsx'), 'utf8');
+    expect(source).not.toContain('default_unset');
+  });
+
+  it('switches to Workspace Indexing tab when clicked', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Workspace Indexing'));
+    expect(screen.getByRole('heading', { level: 2, name: 'Workspace Indexing' })).toBeInTheDocument();
+  });
+
+  it('switches to Usage tab when clicked', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Usage'));
+    expect(screen.getByRole('heading', { level: 2, name: 'Usage & Budget' })).toBeInTheDocument();
+  });
+});
+
+describe('SettingsPanel Voice Tuning (E8-5.2)', () => {
+  function makeWsRef() {
+    let messageHandler = null;
+    const wsRef = {
+      current: {
+        readyState: 1,
+        send: jest.fn(),
+        addEventListener: jest.fn((event, handler) => { messageHandler = handler; }),
+        removeEventListener: jest.fn(),
+      },
+    };
+    return { wsRef, getHandler: () => messageHandler };
+  }
+
+  it('switches to Voice Tuning tab and renders endpointing sliders', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Voice Tuning'));
+    expect(screen.getByRole('heading', { level: 2, name: 'Voice Tuning' })).toBeInTheDocument();
+    expect(screen.getByText('Endpointing Thresholds')).toBeInTheDocument();
+
+    const vadSlider = screen.getByTestId('vad-threshold-slider');
+    const silenceSlider = screen.getByTestId('silence-duration-slider');
+    expect(vadSlider).toBeInTheDocument();
+    expect(silenceSlider).toBeInTheDocument();
+    expect(screen.getByTestId('vad-threshold-value')).toHaveTextContent('0.50');
+    expect(screen.getByTestId('silence-duration-value')).toHaveTextContent('700 ms');
+  });
+
+  it('moving the VAD threshold slider dispatches CONFIG_UPDATE_REQUEST', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Voice Tuning'));
+    const vadSlider = screen.getByTestId('vad-threshold-slider');
+
+    fireEvent.change(vadSlider, { target: { value: '0.35' } });
+    expect(screen.getByTestId('vad-threshold-value')).toHaveTextContent('0.35');
+
+    const sent = wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
+    const update = sent.find(m => m.type === 'CONFIG_UPDATE_REQUEST' && m.payload?.config?.vad_threshold !== undefined);
+    expect(update).toBeDefined();
+    expect(update.payload.config.vad_threshold).toBe(0.35);
+  });
+
+  it('moving the silence duration slider dispatches CONFIG_UPDATE_REQUEST', () => {
+    const { wsRef } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Voice Tuning'));
+    const silenceSlider = screen.getByTestId('silence-duration-slider');
+
+    fireEvent.change(silenceSlider, { target: { value: '450' } });
+    expect(screen.getByTestId('silence-duration-value')).toHaveTextContent('450 ms');
+
+    const sent = wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
+    const update = sent.find(m => m.type === 'CONFIG_UPDATE_REQUEST' && m.payload?.config?.silence_duration_ms !== undefined);
+    expect(update).toBeDefined();
+    expect(update.payload.config.silence_duration_ms).toBe(450);
+  });
+
+  it('populates thresholds from CONFIG_GET_RESPONSE', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+
+    fireEvent.click(screen.getByText('Voice Tuning'));
+
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'CONFIG_GET_RESPONSE',
+          payload: {
+            config: {
+              vad_threshold: 0.40,
+              silence_duration_ms: 550,
+            },
+          },
+        }),
+      });
+    });
+
+    expect(screen.getByTestId('vad-threshold-value')).toHaveTextContent('0.40');
+    expect(screen.getByTestId('silence-duration-value')).toHaveTextContent('550 ms');
+  });
+});

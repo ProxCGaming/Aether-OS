@@ -1,82 +1,22 @@
 import asyncio
-import json
 import logging
-import os
-import subprocess
-import sys
-from contextlib import asynccontextmanager
-import time
-from typing import Any, Dict, List, Optional, Set
-from pathlib import Path
-from pydantic import BaseModel
+from typing import Any
 
 MAX_VALIDATION_PINGS = 5
 
-from fastapi import APIRouter, FastAPI, Query, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import JSONResponse
 
-from aether_common.auth import (
-    DEFAULT_TOKEN_PATH,
-    generate_token,
-    verify_token,
-    write_token,
-)
-from aether_common.contracts import (
-    SCHEMA_VERSION,
-    Event,
-    EventType,
-    InvalidEventPayloadError,
-    SchemaVersionMismatchError,
-    TaskState,
-)
-from aether_engine.audit import AuditLogger
 from aether_engine.config import (
     CLOUD_PROVIDERS,
-    PROVIDER_MAP,
-    UserConfig,
-    load_config,
     save_config,
 )
-from aether_engine.models.local_models import OllamaManager
-from aether_engine.langgraph.executor import run_langgraph_task, resume_langgraph_task, get_pending_approvals
 from aether_engine.providers.discovery import fetch_available_models
-from aether_engine.providers.base import ProviderError
 from aether_engine.providers.litellm_provider import LiteLLMProvider, validate_api_key
 from aether_engine.routing.fallback import (
-    classify_provider_error,
     get_fallback_candidates,
-    is_retriable_error,
 )
-from aether_engine.routing.health import (
-    GLOBAL_HEALTH_MANAGER,
-    ProviderHealthManager,
-    ProviderHealthState,
-)
-from aether_engine.routing.policy import (
-    GLOBAL_ROUTING_POLICY,
-    RoutingDecision,
-    RoutingPolicy,
-    infer_task_requirements,
-)
-from aether_engine.routing.registry import (
-    GLOBAL_MODEL_REGISTRY,
-    ModelEntry,
-    ModelRegistry,
-)
-from aether_engine.routing.startup import (
-    StartupValidationResult,
-    validate_startup_configuration,
-)
-from aether_engine.validation.diagnostics import run_environment_diagnostics
-from aether_engine.scheduler.capability_jobs import CapabilitySchedulerManager
-from aether_engine.secrets.dpapi import SecretDecryptionError
 from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
-from aether_engine.tools.registry import ToolRegistry, create_current_time_tool, create_file_tools, create_web_tools
-from aether_engine.routing.task_class_router import infer_task_class
-from aether_engine.workers.job_object import WorkerJobObject
-from aether_engine.memory import session_store
-
 from aether_engine.state import engine_state
+
 logger = logging.getLogger("aether_engine.orchestration.core")
 
 async def _build_provider_list_async(store: SecretStore) -> list:
@@ -98,7 +38,7 @@ async def _build_provider_list_async(store: SecretStore) -> list:
                         cfg.provider_excluded_models[p.name] = disc.excluded
                         engine_state.model_registry.update_provider_models(p.name, disc.models)
                         save_config(cfg)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — discovery is best-effort per provider; failure is logged, never fatal
                 logger.warning(f"Error discovering models for {p.name}: {e}")
 
         models = models or []
@@ -125,7 +65,7 @@ async def _build_provider_list_async(store: SecretStore) -> list:
     for pname in sorted(dynamic):
         models = cfg.provider_models.get(pname, [])
         base_url = cfg.custom_base_urls.get(pname, "")
-        fallback_name = pname[7:] if pname.startswith("custom_") else pname
+        fallback_name = pname.removeprefix("custom_")
         display_name = cfg.custom_provider_names.get(pname, fallback_name.replace("_", " ").title())
         provider_type = cfg.custom_provider_types.get(pname, "openai_compatible")
 
@@ -140,7 +80,7 @@ async def _build_provider_list_async(store: SecretStore) -> list:
                         cfg.provider_excluded_models[pname] = disc.excluded
                         engine_state.model_registry.update_provider_models(pname, disc.models)
                         save_config(cfg)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — discovery is best-effort per provider; failure is logged, never fatal
                 logger.warning(f"Error discovering models for {pname}: {e}")
 
         result.append({
@@ -194,7 +134,7 @@ def _build_provider_list(store: SecretStore) -> list:
     for pname in sorted(all_custom - known_names):
         models = cfg.provider_models.get(pname, [])
         base_url = cfg.custom_base_urls.get(pname, "")
-        fallback_name = pname[7:] if pname.startswith("custom_") else pname
+        fallback_name = pname.removeprefix("custom_")
         display_name = cfg.custom_provider_names.get(pname, fallback_name.replace("_", " ").title())
         provider_type = cfg.custom_provider_types.get(pname, "openai_compatible")
         if not models:
@@ -219,7 +159,67 @@ def _build_provider_list(store: SecretStore) -> list:
 async def _validate_provider_key(
     provider_name: str,
     api_key: str,
-    base_url: Optional[str] = None,
+    base_url: str | None = None,
+    persist_models: bool = True,
+    budget_s: float = 30.0,
+) -> dict:
+    """Validate a provider key, hard-capped at ``budget_s`` seconds.
+
+    Discovery plus up to MAX_VALIDATION_PINGS sequential pings could
+    previously take ~60s; a caller that awaited it inline (the Test
+    button) wedged for the whole scan. Past the budget the caller gets
+    an honest timeout result instead of silence.
+    """
+    try:
+        return await asyncio.wait_for(
+            _validate_provider_key_inner(provider_name, api_key, base_url=base_url, persist_models=persist_models),
+            timeout=budget_s,
+        )
+    except TimeoutError:
+        logger.warning(f"Provider validation for {provider_name} exceeded the {budget_s:.0f}s budget")
+        return {
+            "status": "network_error",
+            "message": f"Validation timed out after {budget_s:.0f}s — the provider did not answer in time. Try again.",
+            "models": [],
+            "excluded_models": [],
+            "latency_ms": budget_s * 1000.0,
+        }
+
+
+# In-flight validations, keyed by (provider, key, base_url, persist):
+# duplicate Test clicks attach to the SAME run instead of queueing a
+# second full discovery+ping scan behind the first.
+_inflight_validations: dict[tuple, asyncio.Task] = {}
+
+
+async def validate_provider_key_shared(
+    provider_name: str,
+    api_key: str,
+    base_url: str | None = None,
+    persist_models: bool = False,
+) -> dict:
+    """``_validate_provider_key`` with in-flight dedupe.
+
+    A repeat request for the identical provider+key while one is
+    running awaits the running task; every waiter gets a copy of the
+    same result. The cache entry is dropped when the run finishes, so
+    a later Test always re-validates for real.
+    """
+    cache_key = (provider_name, api_key, base_url or "", persist_models)
+    task = _inflight_validations.get(cache_key)
+    if task is None or task.done():
+        task = asyncio.create_task(
+            _validate_provider_key(provider_name, api_key, base_url=base_url, persist_models=persist_models)
+        )
+        _inflight_validations[cache_key] = task
+        task.add_done_callback(lambda _t, k=cache_key: _inflight_validations.pop(k, None))
+    return dict(await task)
+
+
+async def _validate_provider_key_inner(
+    provider_name: str,
+    api_key: str,
+    base_url: str | None = None,
     persist_models: bool = True,
 ) -> dict:
     """Validate a provider key and discover its available models in real-time.
@@ -237,14 +237,14 @@ async def _validate_provider_key(
     disc = await fetch_available_models(provider_name, api_key, base_url=base_url)
     discovered_models = disc.models
 
-    candidates: List[str] = [m for m in discovered_models if m][:MAX_VALIDATION_PINGS]
+    candidates: list[str] = [m for m in discovered_models if m][:MAX_VALIDATION_PINGS]
     if not candidates:
         # No discovered models: fall back to the provider's default test model.
         candidates = [""]
 
     is_custom = provider_name in ("custom_openai", "custom") or provider_name.startswith("custom_")
 
-    result: Dict[str, Any] = {"status": "network_error", "message": "Validation failed."}
+    result: dict[str, Any] = {"status": "network_error", "message": "Validation failed."}
     for model_id in candidates:
         attempt = await validate_api_key(provider_name, api_key, model=model_id, base_url=base_url)
         result = attempt
@@ -298,19 +298,36 @@ async def _validate_provider_key(
         engine_state.health_manager.record_failure(provider_name, result["message"], is_retriable=True)
     return result
 
-def _create_provider_instance(provider_name: str, model: str, secret_store: SecretStore):
+def _create_provider_instance(provider_name: str, model: str, secret_store: SecretStore, *, local_only: bool = False, require_vision: bool = False):
     """Factory for LLM provider instances — all providers route through LiteLLM.
 
     Computes per-node fallback candidates from the health manager and model registry
     so that retriable errors within a single node's call can automatically retry with
     a different provider (Fix 4, Phase 5.1).
-    """
-    from aether_engine.providers.litellm_provider import resolve_litellm_model, FallbackModel
 
-    api_key = secret_store.load_provider(provider_name)
+    Finding M17 constraints (both default off, preserving Epic 5
+    behaviour for unconstrained routes): ``local_only`` forbids any
+    cross-provider fallback to a cloud provider, and ``require_vision``
+    forbids fallbacks to models that cannot see images — together
+    they guarantee a call pinned to an explicit local vision model
+    can never be retried with the image on a cloud model.
+    """
+    from aether_engine.providers.litellm_provider import (
+        FallbackModel,
+        resolve_litellm_model,
+    )
+    from aether_engine.routing.registry import is_local_provider
+
+    if provider_name == "ollama":
+        try:
+            api_key = secret_store.load_provider(provider_name)
+        except ProviderNotFoundError:
+            api_key = "sk-no-key-required"
+    else:
+        api_key = secret_store.load_provider(provider_name)
     base_url = engine_state.user_config.custom_base_urls.get(provider_name)
 
-    fallback_models: List[FallbackModel] = []
+    fallback_models: list[FallbackModel] = []
     
     if not getattr(engine_state.user_config, "disable_fallbacks", False):
         try:
@@ -318,6 +335,8 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
             same_provider_models = engine_state.model_registry.get_models_for_provider(provider_name)
             for entry in same_provider_models:
                 if entry.id != model and entry.capabilities and "chat" in entry.capabilities:
+                    if require_vision and "vision" not in entry.capabilities:
+                        continue
                     fallback_models.append(FallbackModel(
                         model=resolve_litellm_model(entry.id, provider_name),
                         api_key=api_key,
@@ -334,9 +353,13 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
                 for fb_prov in fb_chain:
                     if fb_prov == provider_name or not engine_state.health_manager.is_provider_available(fb_prov):
                         continue
+                    if local_only and not is_local_provider(fb_prov):
+                        continue
                     fb_models = engine_state.model_registry.get_models_for_provider(fb_prov)
                     for entry in fb_models:
                         if entry.capabilities and "chat" in entry.capabilities:
+                            if require_vision and "vision" not in entry.capabilities:
+                                continue
                             fb_api_key = secret_store.load_provider(fb_prov)
                             fb_base_url = engine_state.user_config.custom_base_urls.get(fb_prov)
                             fallback_models.append(FallbackModel(
@@ -353,6 +376,8 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
                     configured_providers=engine_state.configured_providers,
                     health_manager=engine_state.health_manager,
                     registry=engine_state.model_registry,
+                    local_only=local_only,
+                    require_vision=require_vision,
                 )
                 for entry in candidates:
                     fb_api_key = secret_store.load_provider(entry.provider)
@@ -363,7 +388,7 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
                         provider_name=entry.provider,
                         base_url=fb_base_url,
                     ))
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 — fallback computation is best-effort; a failure means no fallbacks, not a crash
             pass  # Fallback computation is best-effort
 
     return LiteLLMProvider(
@@ -373,4 +398,5 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
         base_url=base_url,
         fallback_models=fallback_models,
         reasoning_effort=getattr(engine_state.user_config, "reasoning_effort", "standard"),
+        ttsr_rules=getattr(engine_state.user_config, "ttsr_rules", None),
     )

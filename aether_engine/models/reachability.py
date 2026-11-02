@@ -6,15 +6,49 @@ specific API key/tier before displaying them in UI dropdowns or capability jobs.
 """
 import asyncio
 import logging
-from pathlib import Path
 import sqlite3
 import time
-from typing import Dict, List, Optional, Tuple
+from collections.abc import Iterable
+from pathlib import Path
+
+from aether_engine.providers.discovery import DiscoveryError
 
 logger = logging.getLogger("aether_engine.models.reachability")
 
 DEFAULT_REACHABILITY_DB = Path.home() / ".aether" / "reachability.db"
 DEFAULT_CACHE_TTL_SECONDS = 86400  # 24 hours
+
+
+class ReachableModels(list[str]):
+    """Result of a reachability sweep: the reachable model ids, plus the sweep error.
+
+    Subclasses ``list`` so existing callers keep working unchanged — empty
+    means "nothing reachable", and truthiness/iteration behave like a plain
+    list. ``error`` is a ``DiscoveryError`` (the discovery-v2 error shape:
+    ``code`` + ``message``) and is set when the sweep could not run at all
+    (no API key) or when it probed models but none was reachable. It is
+    ``None`` when at least one model is reachable, or when there was
+    nothing to probe (empty input).
+
+    ``code`` is ``None`` here by the same convention as discovery-v2
+    transport failures: a sweep has no single HTTP status — per-model
+    failures vary and are recorded per model in the reachability DB — so
+    the message carries the provider and the probed/reachable counts
+    instead of a fabricated status code.
+    """
+
+    def __init__(
+        self,
+        models: Iterable[str] = (),
+        error: DiscoveryError | None = None,
+    ):
+        super().__init__(models)
+        self.error = error
+
+    @property
+    def ok(self) -> bool:
+        """True when the sweep produced a usable result (mirrors DiscoveryResult.ok)."""
+        return self.error is None
 
 
 class ModelReachabilityChecker:
@@ -41,7 +75,7 @@ class ModelReachabilityChecker:
             """)
             conn.commit()
 
-    def get_cached_reachability(self, provider: str, model_id: str) -> Optional[Tuple[bool, float]]:
+    def get_cached_reachability(self, provider: str, model_id: str) -> tuple[bool, float] | None:
         """Return (reachable, checked_at) if valid cache entry exists, else None."""
         now = time.time()
         with sqlite3.connect(self.db_path) as conn:
@@ -62,8 +96,8 @@ class ModelReachabilityChecker:
         provider: str,
         model_id: str,
         reachable: bool,
-        latency_ms: Optional[float] = None,
-        error_detail: Optional[str] = None,
+        latency_ms: float | None = None,
+        error_detail: str | None = None,
     ):
         """Persist reachability result to SQLite."""
         with sqlite3.connect(self.db_path) as conn:
@@ -86,7 +120,7 @@ class ModelReachabilityChecker:
         provider_name: str,
         model_id: str,
         api_key: str,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
         force: bool = False,
         timeout: float = 4.0,
     ) -> bool:
@@ -113,7 +147,7 @@ class ModelReachabilityChecker:
             self.record_reachability(cache_key, model_id, reachable=True, latency_ms=latency_ms)
             logger.info(f"Model reachable: {cache_key}/{model_id} ({latency_ms:.1f}ms)")
             return True
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — a failed probe records the model unreachable; probing never raises
             latency_ms = (time.time() - start) * 1000.0
             err_msg = str(e)
             self.record_reachability(cache_key, model_id, reachable=False, latency_ms=latency_ms, error_detail=err_msg)
@@ -123,20 +157,36 @@ class ModelReachabilityChecker:
     async def filter_reachable_models(
         self,
         provider_name: str,
-        model_ids: List[str],
+        model_ids: list[str],
         api_key: str,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
         force: bool = False,
         max_concurrency: int = 5,
         timeout: float = 4.0,
-    ) -> List[str]:
-        """Sweep candidate models with bounded concurrency and return only reachable ones."""
-        if not model_ids or not api_key:
-            return model_ids
+    ) -> ReachableModels:
+        """Sweep candidate models with bounded concurrency and return only reachable ones.
+
+        Returns a ``ReachableModels`` list. When nothing is reachable the
+        list is empty and ``.error`` carries a real ``DiscoveryError``
+        (discovery-v2 shape) — the unfiltered input list is never returned
+        as a silent success. Callers must treat an empty result as "no
+        models available", not as "all models available".
+        """
+        from aether_engine.providers.discovery import DiscoveryError
+
+        if not model_ids:
+            return ReachableModels()
+        if not api_key:
+            err = DiscoveryError(
+                code=None,
+                message=f"No API key for provider '{provider_name}': cannot probe model reachability",
+            )
+            logger.warning(f"Reachability sweep for {provider_name}: {err.message}")
+            return ReachableModels(error=err)
 
         semaphore = asyncio.Semaphore(max_concurrency)
 
-        async def _probe(mid: str) -> Tuple[str, bool]:
+        async def _probe(mid: str) -> tuple[str, bool]:
             async with semaphore:
                 reachable = await self.check_single_model(
                     provider_name=provider_name,
@@ -162,7 +212,20 @@ class ModelReachabilityChecker:
             f"Reachability sweep complete for {provider_name}: "
             f"{len(reachable_models)}/{len(model_ids)} reachable."
         )
-        return reachable_models if reachable_models else model_ids
+        if reachable_models:
+            return ReachableModels(reachable_models)
+        # Phase 10.3 B2: never mask total failure by returning the full
+        # input list. Empty list + a real error; the caller must handle
+        # the "nothing reachable" state explicitly.
+        err = DiscoveryError(
+            code=None,
+            message=(
+                f"No reachable models for provider '{provider_name}': "
+                f"probed {len(model_ids)}, 0 reachable"
+            ),
+        )
+        logger.warning(f"Reachability sweep for {provider_name}: {err.message}")
+        return ReachableModels(error=err)
 
 
 # Global reachability checker singleton

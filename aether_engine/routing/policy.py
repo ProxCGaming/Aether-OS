@@ -1,10 +1,14 @@
 """Intelligent routing policy mapping task requirements and health state to model candidates."""
 from dataclasses import dataclass, field
-import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from aether_engine.routing.health import ProviderHealthManager
-from aether_engine.routing.registry import GLOBAL_MODEL_REGISTRY, ModelEntry, ModelRegistry
+from aether_engine.routing.registry import (
+    GLOBAL_MODEL_REGISTRY,
+    ModelEntry,
+    ModelRegistry,
+    is_local_provider,
+)
 
 
 @dataclass
@@ -21,7 +25,12 @@ class RoutingDecision:
     provider: str
     model: str
     reason: str
-    capabilities: List[str] = field(default_factory=list)
+    capabilities: list[str] = field(default_factory=list)
+    # Finding M17: True when this route is pinned to a local provider
+    # by the owner's explicit configuration (the auxiliary vision
+    # override). Every fallback layer must honour it — a local-only
+    # route fails honestly rather than re-routing to a cloud model.
+    local_only: bool = False
 
 
 _CODE_KEYWORDS = {
@@ -37,7 +46,7 @@ _REASONING_KEYWORDS = {
 
 def infer_task_requirements(
     prompt: str,
-    images: Optional[List[Any]] = None,
+    images: list[Any] | None = None,
     prefer_local: bool = False,
 ) -> TaskRequirements:
     """Infer task requirements by inspecting prompt tokens and attached assets."""
@@ -57,24 +66,47 @@ def infer_task_requirements(
     )
 
 
+def parse_vision_override(
+    auxiliary_models: dict[str, str] | None,
+) -> tuple[str, str] | None:
+    """Parse the explicit auxiliary vision override, if one is set.
+
+    Stored as "provider:::model"; a "provider/model" string or a bare
+    model name are also accepted (the same shapes the media analyzer
+    resolves). Returns ``(provider, model)`` — the provider is "" for
+    a bare model name — or None when the override is absent/"auto".
+    """
+    vision_override = (auxiliary_models or {}).get("vision", "auto")
+    if not vision_override or vision_override == "auto":
+        return None
+    if ":::" in vision_override:
+        provider, _, model = vision_override.partition(":::")
+    elif "/" in vision_override and not vision_override.startswith("models/"):
+        provider, model = vision_override.split("/", 1)
+    else:
+        provider, model = "", vision_override
+    return provider, model
+
+
 class RoutingPolicy:
     """Evaluates task requirements, provider availability, and user preferences to select models."""
 
-    def __init__(self, registry: Optional[ModelRegistry] = None):
+    def __init__(self, registry: ModelRegistry | None = None):
         self.registry = registry or GLOBAL_MODEL_REGISTRY
 
     def select_route(
         self,
         prompt: str,
-        configured_providers: List[str],
+        configured_providers: list[str],
         health_manager: ProviderHealthManager,
         user_default_provider: str = "google_gemini",
-        user_default_model: str = "gemini-2.5-flash",
-        requirements: Optional[TaskRequirements] = None,
-        requested_model: Optional[str] = None,
-        auxiliary_models: Optional[Dict[str, str]] = None,
+        user_default_model: str = "gemini-3.5-flash",
+        requirements: TaskRequirements | None = None,
+        requested_model: str | None = None,
+        auxiliary_models: dict[str, str] | None = None,
+        images: list[Any] | None = None,
     ) -> RoutingDecision:
-        reqs = requirements or infer_task_requirements(prompt)
+        reqs = requirements or infer_task_requirements(prompt, images=images)
 
         # If user explicitly requested a specific model and its provider is healthy
         if requested_model:
@@ -92,13 +124,13 @@ class RoutingPolicy:
                 inferred_prov = None
                 if ("/" in requested_model and not requested_model.startswith("models/")) and "openrouter" in configured_providers:
                     inferred_prov = "openrouter"
-                elif (requested_model.startswith("gemini") or requested_model.startswith("models/gemini")) and "google_gemini" in configured_providers:
+                elif (requested_model.startswith(("gemini", "models/gemini"))) and "google_gemini" in configured_providers:
                     inferred_prov = "google_gemini"
                 elif requested_model.startswith("claude") and "anthropic" in configured_providers:
                     inferred_prov = "anthropic"
                 elif requested_model.startswith("deepseek") and "deepseek" in configured_providers:
                     inferred_prov = "deepseek"
-                elif (requested_model.startswith("gpt-") or requested_model.startswith("o1") or requested_model.startswith("o3")) and "openai" in configured_providers:
+                elif (requested_model.startswith(("gpt-", "o1", "o3"))) and "openai" in configured_providers:
                     inferred_prov = "openai"
 
                 target_prov = inferred_prov or (user_default_provider if user_default_provider in configured_providers else (configured_providers[0] if configured_providers else "google_gemini"))
@@ -110,8 +142,42 @@ class RoutingPolicy:
                         capabilities=["chat", "fast", "tools", "vision"],
                     )
 
+        # Phase 9, B1 + finding M17: an explicit auxiliary vision
+        # override is resolved HERE — before the model-discovery
+        # fallback below. Previously the empty-discovery default was
+        # returned first, so an explicit LOCAL vision override
+        # silently lost to the cloud default whenever discovery found
+        # no healthy model. Acceptance mirrors the historical rule:
+        # the local provider (ollama) is always accepted; any other
+        # provider must be configured and healthy. An override that is
+        # not accepted falls through to the heuristics, as before.
+        if reqs.has_images:
+            vision_override = parse_vision_override(auxiliary_models)
+            if vision_override is not None:
+                o_provider, o_model = vision_override
+                if o_provider == "ollama" or (
+                    o_provider in configured_providers
+                    and health_manager.is_provider_available(o_provider)
+                ):
+                    o_entry = self.registry.get_model(o_model)
+                    if o_entry and o_entry.provider == o_provider:
+                        return RoutingDecision(
+                            provider=o_provider,
+                            model=o_entry.id,
+                            reason=f"User auxiliary override (vision) → {o_entry.label}",
+                            capabilities=list(o_entry.capabilities),
+                            local_only=is_local_provider(o_provider),
+                        )
+                    return RoutingDecision(
+                        provider=o_provider,
+                        model=o_model,
+                        reason=f"User auxiliary override (vision) → {o_model}",
+                        capabilities=["chat", "vision"],
+                        local_only=is_local_provider(o_provider),
+                    )
+
         # Filter all models for configured providers that are currently healthy/available
-        available_models: List[ModelEntry] = []
+        available_models: list[ModelEntry] = []
         for p in configured_providers:
             if health_manager.is_provider_available(p):
                 available_models.extend(self.registry.get_models_for_provider(p))
@@ -136,22 +202,9 @@ class RoutingPolicy:
 
         # Check for specialized requirements
         if reqs.has_images:
-            # Phase 9, B1: an explicit per-task auxiliary override wins over
-            # heuristics. Stored as "provider:::model" (or absent/"auto").
-            vision_override = (auxiliary_models or {}).get("vision", "auto")
-            if vision_override and vision_override != "auto":
-                o_provider, _, o_model = vision_override.partition(":::")
-                if (o_provider and o_model
-                        and o_provider in configured_providers
-                        and health_manager.is_provider_available(o_provider)):
-                    o_entry = self.registry.get_model(o_model)
-                    if o_entry and o_entry.provider == o_provider:
-                        return RoutingDecision(
-                            provider=o_provider,
-                            model=o_entry.id,
-                            reason=f"User auxiliary override (vision) → {o_entry.label}",
-                            capabilities=list(o_entry.capabilities),
-                        )
+            # An explicit vision override was already resolved (and
+            # returned) above; reaching here means there is none, or
+            # it named an unavailable non-local provider.
             if user_def_entry and "vision" in user_def_entry.capabilities:
                 return RoutingDecision(
                     provider=user_def_entry.provider,

@@ -1,22 +1,25 @@
 """Safe automatic fallback policy and error classification."""
 import logging
-from typing import List, Optional, Tuple
 
 from aether_engine.providers.base import (
     AuthenticationError,
     InvalidResponseError,
     NetworkError,
-    ProviderError,
     RateLimitError,
     TimeoutError,
 )
 from aether_engine.routing.health import ProviderHealthManager
-from aether_engine.routing.registry import GLOBAL_MODEL_REGISTRY, ModelEntry, ModelRegistry
+from aether_engine.routing.registry import (
+    GLOBAL_MODEL_REGISTRY,
+    ModelEntry,
+    ModelRegistry,
+    is_local_provider,
+)
 
 logger = logging.getLogger("aether_engine.routing.fallback")
 
 
-def classify_provider_error(exc: Exception) -> Tuple[bool, str]:
+def classify_provider_error(exc: Exception) -> tuple[bool, str]:
     """
     Classify an exception into (is_retriable, user_friendly_message).
 
@@ -80,19 +83,38 @@ def is_retriable_error(exc: Exception) -> bool:
 
 def get_fallback_candidates(
     failed_provider: str,
-    configured_providers: List[str],
+    configured_providers: list[str],
     health_manager: ProviderHealthManager,
-    registry: Optional[ModelRegistry] = None,
-) -> List[ModelEntry]:
-    """Retrieve healthy model candidates from remaining configured providers."""
+    registry: ModelRegistry | None = None,
+    *,
+    local_only: bool = False,
+    require_vision: bool = False,
+) -> list[ModelEntry]:
+    """Retrieve healthy model candidates from remaining configured providers.
+
+    Constraints (finding M17) — both default off, preserving the
+    unconstrained Epic 5 behaviour for ordinary routes:
+
+    - ``local_only``: only providers whose models run on the user's
+      machine are eligible. A route pinned local (e.g. an explicit
+      local vision override) must fail honestly rather than be
+      re-routed to a cloud provider.
+    - ``require_vision``: only vision-capable models are eligible,
+      so a request carrying images is never retried on a model that
+      cannot see them (which would silently drop the image).
+    """
     reg = registry or GLOBAL_MODEL_REGISTRY
-    candidates: List[ModelEntry] = []
+    candidates: list[ModelEntry] = []
 
     for provider in configured_providers:
         if provider == failed_provider:
             continue
+        if local_only and not is_local_provider(provider):
+            continue
         if health_manager.is_provider_available(provider):
             models = reg.get_models_for_provider(provider)
+            if require_vision:
+                models = [m for m in models if "vision" in m.capabilities]
             if models:
                 candidates.append(models[0])
 

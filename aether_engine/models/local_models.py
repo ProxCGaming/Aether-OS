@@ -2,8 +2,10 @@
 import asyncio
 import json
 import logging
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any
+
 import httpx
 
 from aether_common.contracts import Event, EventType, TaskState
@@ -13,7 +15,7 @@ logger = logging.getLogger("aether_engine.models.local_models")
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
 # Curated library catalog of common local models with sizes
-DEFAULT_LOCAL_CATALOG: List[Dict[str, Any]] = [
+DEFAULT_LOCAL_CATALOG: list[dict[str, Any]] = [
     {"name": "llama3:8b", "size": "~4.7GB", "downloaded": False, "path": ""},
     {"name": "mistral:7b", "size": "~4.1GB", "downloaded": False, "path": ""},
     {"name": "phi3:mini", "size": "~2.3GB", "downloaded": False, "path": ""},
@@ -26,20 +28,20 @@ class OllamaManager:
 
     def __init__(self, base_url: str = OLLAMA_BASE_URL):
         self.base_url = base_url
-        self._downloaded_paths: Dict[str, str] = {}
+        self._downloaded_paths: dict[str, str] = {}
 
     async def is_ollama_running(self) -> bool:
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
                 res = await client.get(f"{self.base_url}/")
                 return res.status_code == 200
-        except Exception:
+        except Exception:  # noqa: BLE001 — reachability probe: any failure means Ollama is not running
             return False
 
-    async def list_models(self) -> List[Dict[str, Any]]:
+    async def list_models(self) -> list[dict[str, Any]]:
         """List local models, placing downloaded models sorted at the top."""
         downloaded_names = set()
-        models_result: List[Dict[str, Any]] = []
+        models_result: list[dict[str, Any]] = []
 
         if await self.is_ollama_running():
             try:
@@ -59,7 +61,7 @@ class OllamaManager:
                                 "downloaded": True,
                                 "path": path,
                             })
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — best-effort delete: any failure reports False  # noqa: BLE001 — download failure is reported as a TASK_FAILED event, never raised  # noqa: BLE001 — best-effort model listing: a dead Ollama yields an empty list
                 logger.warning(f"Error fetching Ollama tags: {e}")
 
         # Add remaining catalog entries below downloaded models
@@ -79,9 +81,9 @@ class OllamaManager:
     async def download_model_task(
         self,
         model_name: str,
-        destination_dir: Optional[str] = None,
-        task_id: Optional[str] = None,
-        request_id: Optional[str] = None,
+        destination_dir: str | None = None,
+        task_id: str | None = None,
+        request_id: str | None = None,
     ) -> AsyncGenerator[Event, None]:
         """Engine task stream for model downloads, reporting live progress percentages."""
         t_id = task_id or "dl-task"
@@ -101,33 +103,35 @@ class OllamaManager:
         ollama_active = await self.is_ollama_running()
         if ollama_active:
             try:
-                async with httpx.AsyncClient(timeout=None) as client:
-                    async with client.stream(
+                async with (
+                    httpx.AsyncClient(timeout=None) as client,
+                    client.stream(
                         "POST",
                         f"{self.base_url}/api/pull",
                         json={"name": model_name, "stream": True},
-                    ) as resp:
-                        async for line in resp.aiter_lines():
-                            if not line:
-                                continue
-                            try:
-                                payload_data = json.loads(line)
-                                total = payload_data.get("total", 0)
-                                completed = payload_data.get("completed", 0)
-                                pct = round((completed / total) * 100, 1) if total > 0 else 0.0
+                    ) as resp,
+                ):
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            payload_data = json.loads(line)
+                            total = payload_data.get("total", 0)
+                            completed = payload_data.get("completed", 0)
+                            pct = round((completed / total) * 100, 1) if total > 0 else 0.0
 
-                                yield Event(
-                                    type=EventType.LOCAL_MODEL_DOWNLOAD_PROGRESS,
-                                    request_id=request_id,
-                                    payload={
-                                        "task_id": t_id,
-                                        "model": model_name,
-                                        "download_percent": pct,
-                                        "status": payload_data.get("status", "downloading"),
-                                    },
-                                )
-                            except Exception:
-                                pass
+                            yield Event(
+                                type=EventType.LOCAL_MODEL_DOWNLOAD_PROGRESS,
+                                request_id=request_id,
+                                payload={
+                                    "task_id": t_id,
+                                    "model": model_name,
+                                    "download_percent": pct,
+                                    "status": payload_data.get("status", "downloading"),
+                                },
+                            )
+                        except Exception as e:  # noqa: BLE001 — progress events are best-effort; a failed emit must not abort the download
+                            logger.debug(f"Download progress emit failed: {e}")
             except asyncio.CancelledError:
                 yield Event(
                     type=EventType.TASK_CANCELLED,
@@ -135,7 +139,7 @@ class OllamaManager:
                     payload={"task_id": t_id, "model": model_name},
                 )
                 raise
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — download failure falls back to the simulated progress stream
                 logger.error(f"Error downloading {model_name} via Ollama: {e}")
                 # Fall back to simulated progress stream if Ollama API pull fails or isn't streaming
                 async for ev in self._simulated_download_stream(model_name, dest, t_id, request_id):
@@ -164,7 +168,7 @@ class OllamaManager:
         model_name: str,
         dest: str,
         t_id: str,
-        request_id: Optional[str],
+        request_id: str | None,
     ) -> AsyncGenerator[Event, None]:
         """Simulated download task stream with fine-grained percentage ticks."""
         for pct in range(0, 101, 10):
@@ -203,7 +207,7 @@ class OllamaManager:
                     if res.status_code == 200:
                         self._downloaded_paths.pop(model_name, None)
                         return True
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — best-effort delete: any failure reports False
                 logger.error(f"Failed to delete model {model_name}: {e}")
 
         self._downloaded_paths.pop(model_name, None)

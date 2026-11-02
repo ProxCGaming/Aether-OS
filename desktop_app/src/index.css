@@ -126,6 +126,37 @@ h1, h2, h3 {
   background: rgba(232, 17, 35, 0.15);
 }
 
+/* Epic 1 UI batch (E1-08): inline session rename affordance, revealed
+   on hover like the delete button next to it. */
+.session-rename-btn {
+  background: transparent;
+  border: none;
+  color: #a78bfa;
+  opacity: 0;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.session-item:hover .session-rename-btn {
+  opacity: 0.6;
+}
+
+.session-rename-btn:hover {
+  opacity: 1 !important;
+  background: rgba(124, 58, 237, 0.18);
+}
+
+@media (hover: none) {
+  .session-rename-btn {
+    opacity: 0.6;
+  }
+}
+
 .close-btn:hover {
   background: #e81123;
   color: white;
@@ -151,3 +182,20 @@ h1, h2, h3 {
   50% { transform: translate(-50%, -60%) scale(1.05); }
   100% { transform: translate(-50%, -50%) scale(1); }
 }
+/* Epic 6, E6-07: a visible keyboard focus ring for every interactive
+   element in the shell. The app is mouse-first visually, but core
+   flows must be completable keyboard-only; :focus-visible keeps the
+   ring off mouse clicks. */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid #a78bfa;
+  outline-offset: 2px;
+}
+
+/* Provider Test spinner (Test-button hardening) */
+@keyframes aether-spin { to { transform: rotate(360deg); } }
+.aether-spinner { animation: aether-spin 0.8s linear infinite; }

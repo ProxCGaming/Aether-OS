@@ -2,6 +2,8 @@
 
 **AETHER** is a local, privacy-first desktop AI operating layer and intelligent assistant built for Windows. It features a hybrid multi-process architecture combining a PySide6 HUD desktop client with an asynchronous FastAPI engine over an authenticated loopback WebSocket.
 
+> **Retirement note:** `aether_ui/` (PySide6) is retired — the live frontend is the Electron + React app in `desktop_app/` (ADR-0019), and PySide6 is installed only via the `legacy-ui` optional extra (`uv sync --extra legacy-ui`). The `aether_ui` descriptions below are kept as historical reference.
+
 ---
 
 ## Table of Contents

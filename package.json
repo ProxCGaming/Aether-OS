@@ -23,6 +23,18 @@
   },
   "homepage": "https://github.com/ProxCGaming/Aether-OS#readme",
   "devDependencies": {
-    "husky": "^9.1.7"
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.6.0"
+  },
+  "lint-staged": {
+    "desktop_app/**/*.{js,jsx}": [
+      "bash scripts/run-oxlint.sh",
+      "bash scripts/run-related-jest.sh"
+    ],
+    "**/*.py": [
+      "bash scripts/run-ruff.sh"
+    ]
   }
 }

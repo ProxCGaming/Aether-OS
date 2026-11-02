@@ -1,11 +1,13 @@
 """Startup consistency validation across config.json, SecretStore, and model registry."""
-from dataclasses import dataclass
 import logging
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
 
 from aether_engine.config import UserConfig
 from aether_engine.routing.health import ProviderHealthManager
-from aether_engine.routing.registry import GLOBAL_MODEL_REGISTRY, ModelEntry, ModelRegistry
+from aether_engine.routing.registry import (
+    GLOBAL_MODEL_REGISTRY,
+    ModelRegistry,
+)
 from aether_engine.secrets.storage import SecretStore
 
 logger = logging.getLogger("aether_engine.routing.startup")
@@ -15,16 +17,16 @@ logger = logging.getLogger("aether_engine.routing.startup")
 class StartupValidationResult:
     active_provider: str
     active_model: str
-    configured_providers: List[str]
+    configured_providers: list[str]
     was_fallback: bool
-    fallback_reason: Optional[str] = None
+    fallback_reason: str | None = None
 
 
 def validate_startup_configuration(
     user_config: UserConfig,
     secret_store: SecretStore,
     health_manager: ProviderHealthManager,
-    registry: Optional[ModelRegistry] = None,
+    registry: ModelRegistry | None = None,
 ) -> StartupValidationResult:
     """
     Validate config/secret/health consistency on Engine startup.
@@ -40,7 +42,7 @@ def validate_startup_configuration(
 
     # 1. Discover all providers that have valid stored secrets and are in registry
     stored_names = set(secret_store.list_providers())
-    configured_providers: List[str] = []
+    configured_providers: list[str] = []
     for m in reg.list_all_models():
         if m.provider in stored_names and m.provider not in configured_providers:
             configured_providers.append(m.provider)

@@ -6,15 +6,13 @@ with one consistent interface, automatic retries, and structured tool calling.
 """
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Dict, List, Optional
-
-import litellm
+from typing import Any
 
 from aether_engine.providers.base import (
     AuthenticationError,
     BaseProvider,
-    InvalidResponseError,
     NetworkError,
     ProviderError,
     RateLimitError,
@@ -22,20 +20,56 @@ from aether_engine.providers.base import (
     TimeoutError,
     ToolCall,
 )
+from aether_engine.providers.discovery import DISCOVERY_TIMEOUT
 
 logger = logging.getLogger("aether_engine.providers.litellm_provider")
 
-# Suppress litellm's noisy debug logs in production
-litellm.suppress_debug_info = True
-litellm.set_verbose = False
+# Bounded timeout for the validation ping (Phase 10.1, B1). Same value as
+# DISCOVERY_TIMEOUT: the ping is the same class of operation as a model-list
+# fetch (one short request to a provider endpoint), so it gets the same bound.
+VALIDATION_TIMEOUT = DISCOVERY_TIMEOUT
+
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
+
+# Epic 9: litellm is imported lazily via module __getattr__ (PEP 562).
+# The real import costs ~4s (it eagerly builds the OpenAI type tree)
+# and every engine start paid it, although no provider call can
+# happen until a key is configured and a task runs. The first
+# ``litellm`` reference in this module loads and caches the real
+# module in globals; ``warm_litellm()`` lets startup pay the cost in
+# a background thread instead. Tests patching
+# ``litellm_provider.litellm.acompletion`` still land on the real
+# module object; inside this module, call sites bind
+# ``litellm = _load_litellm()`` locally as their first step.
+
+
+def _load_litellm():
+    import litellm as real
+
+    # Suppress litellm's noisy debug logs in production.
+    real.suppress_debug_info = True
+    real.set_verbose = False
+    globals()["litellm"] = real
+    return real
+
+
+def __getattr__(name: str):
+    if name == "litellm":
+        return _load_litellm()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def warm_litellm() -> None:
+    """Force the deferred litellm import (background startup warm-up)."""
+    _load_litellm()
 
 # ---------------------------------------------------------------------------
 # LiteLLM model-name mapping
 # ---------------------------------------------------------------------------
 # LiteLLM requires provider-prefixed model names for non-OpenAI providers.
 # This map translates our internal registry IDs → LiteLLM model strings.
-_LITELLM_MODEL_MAP: Dict[str, str] = {
+_LITELLM_MODEL_MAP: dict[str, str] = {
     # Google Gemini (via Google AI Studio)
     "gemini-2.5-flash": "gemini/gemini-2.5-flash",
     "gemini-2.5-pro": "gemini/gemini-2.5-pro",
@@ -53,7 +87,7 @@ _LITELLM_MODEL_MAP: Dict[str, str] = {
 }
 
 # Provider-specific base URLs (only needed for non-standard endpoints)
-_PROVIDER_BASE_URL: Dict[str, str] = {
+_PROVIDER_BASE_URL: dict[str, str] = {
     "deepseek": "https://api.deepseek.com",
     "openrouter": "https://openrouter.ai/api/v1",
 }
@@ -95,8 +129,7 @@ def resolve_litellm_model(model_id: str, provider_name: str = "") -> str:
         return _LITELLM_MODEL_MAP[model_id]
 
     # Clean Google Gemini API format 'models/gemini-...'
-    if model_id.startswith("models/"):
-        model_id = model_id[7:]
+    model_id = model_id.removeprefix("models/")
 
     # If provider is explicitly known, apply provider-specific prefix rules:
     if provider_name == "openrouter":
@@ -160,7 +193,7 @@ class FallbackModel:
     model: str
     api_key: str
     provider_name: str
-    base_url: Optional[str] = None
+    base_url: str | None = None
 
 
 class LiteLLMProvider(BaseProvider):
@@ -174,12 +207,13 @@ class LiteLLMProvider(BaseProvider):
         api_key: str,
         model: str,
         provider_name: str = "google_gemini",
-        base_url: Optional[str] = None,
-        fallback_models: Optional[List[FallbackModel]] = None,
+        base_url: str | None = None,
+        fallback_models: list[FallbackModel] | None = None,
         reasoning_effort: str = "standard",
+        ttsr_rules: list | None = None,
     ):
         api_key = api_key.strip() if api_key else ""
-        if not api_key and provider_name != "custom_openai" and provider_name != "openai_compatible":
+        if not api_key and provider_name not in ("custom_openai", "openai_compatible", "ollama"):
             raise AuthenticationError("API key cannot be empty.")
         
         self.api_key = api_key if api_key else "sk-no-key-required"
@@ -188,18 +222,22 @@ class LiteLLMProvider(BaseProvider):
         self.base_url = base_url.rstrip("/") if base_url else None
         self.litellm_model = resolve_litellm_model(model, provider_name)
         # Per-node fallback: list of FallbackModel with full provider config for cross-provider fallback
-        self.fallback_models: List[FallbackModel] = fallback_models or []
+        self.fallback_models: list[FallbackModel] = fallback_models or []
         # Phase 9, B2: user-selected reasoning depth, forwarded to litellm for
         # reasoning-capable models ("standard" | "medium" | "high").
         self.reasoning_effort = reasoning_effort or "standard"
+        # Epic 7, E7-02: TTSR stream rules (empty = off).
+        from aether_engine.providers.ttsr import StreamRules
+
+        self.stream_rules = StreamRules(ttsr_rules)
 
     def _build_call_kwargs(
         self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """Build the keyword arguments dict for litellm.acompletion()."""
-        kwargs: Dict[str, Any] = {
+        kwargs: dict[str, Any] = {
             "model": self.litellm_model,
             "messages": self._convert_messages(messages),
             "stream": True,
@@ -227,7 +265,7 @@ class LiteLLMProvider(BaseProvider):
 
         return kwargs
 
-    def _convert_messages(self, messages: Any) -> List[Dict[str, Any]]:
+    def _convert_messages(self, messages: Any) -> list[dict[str, Any]]:
         """Convert internal message format to OpenAI-compatible messages for LiteLLM.
 
         Also normalizes turn structure for strict providers like Google Gemini / Vertex AI
@@ -236,7 +274,7 @@ class LiteLLMProvider(BaseProvider):
         if isinstance(messages, str):
             return [{"role": "user", "content": messages}]
 
-        converted: List[Dict[str, Any]] = []
+        converted: list[dict[str, Any]] = []
 
         for msg in messages:
             if isinstance(msg, str):
@@ -280,12 +318,12 @@ class LiteLLMProvider(BaseProvider):
                     "tool_call_id": str(call_id),
                 })
             elif role == "assistant":
-                entry: Dict[str, Any] = {"role": "assistant"}
+                entry: dict[str, Any] = {"role": "assistant"}
                 if content:
                     entry["content"] = content
 
                 # Convert tool_calls to OpenAI format
-                if "tool_calls" in msg and msg["tool_calls"]:
+                if msg.get("tool_calls"):
                     tc_list = []
                     for tc in msg["tool_calls"]:
                         if isinstance(tc, ToolCall):
@@ -345,7 +383,7 @@ class LiteLLMProvider(BaseProvider):
             chat_msgs.insert(0, {"role": "user", "content": "Please proceed with the task."})
 
         # Merge adjacent assistant messages to prevent consecutive model turns
-        normalized_chat: List[Dict[str, Any]] = []
+        normalized_chat: list[dict[str, Any]] = []
         for m in chat_msgs:
             if normalized_chat and normalized_chat[-1].get("role") == "assistant" and m.get("role") == "assistant":
                 prev = normalized_chat[-1]
@@ -362,7 +400,7 @@ class LiteLLMProvider(BaseProvider):
 
         return system_msgs + normalized_chat
 
-    def _convert_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _convert_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Convert internal tool definitions to OpenAI-format function tools.
 
         Handles both formats:
@@ -396,9 +434,9 @@ class LiteLLMProvider(BaseProvider):
 
     async def call_stream(
         self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        node_name: Optional[str] = None,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        node_name: str | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream response chunks from any LiteLLM-supported provider.
 
@@ -407,16 +445,65 @@ class LiteLLMProvider(BaseProvider):
         Logs NODE_FALLBACK_TRIGGERED (distinct from task-level FALLBACK_TRIGGERED)
         when a fallback model succeeds.
         """
+        litellm = _load_litellm()  # Epic 9: deferred import, bound locally
         # Build the list of models to try: primary first, then fallbacks
         # Each entry is a tuple of (model_string, api_key, base_url, provider_name)
-        models_to_try: List[tuple] = [
+        models_to_try: list[tuple] = [
             (self.litellm_model, self.api_key, self.base_url, self.provider_name)
         ] + [
             (fm.model, fm.api_key, fm.base_url, fm.provider_name)
             for fm in self.fallback_models
         ]
 
-        last_error: Optional[Exception] = None
+        # Epic 5, E5-01 — the §6.4 gate on per-call fallback. Fallback
+        # is forbidden (the primary error raises instead) when:
+        # (a) tools have already executed in this task — the
+        #     conversation carries tool results, and switching models
+        #     mid-task after side effects is unsafe; or
+        # (b) this call already yielded output — a restarted stream
+        #     would duplicate text and repeat tool calls.
+        tools_already_executed = any(
+            isinstance(m, dict) and m.get("role") == "tool" for m in (messages or [])
+        )
+        yielded_any = False
+
+        def _fallback_blocked() -> str | None:
+            if tools_already_executed:
+                return "tools have already executed in this task (no mid-task model switch)"
+            if yielded_any:
+                return "this call already streamed output (a restart would duplicate it)"
+            return None
+
+        def _record_attempt_usage(
+            recorded_flag: list[bool],
+            model_idx: int,
+            current_model: str,
+            current_provider: str,
+            usage: tuple[int, int] | None,
+            text_parts: list[str],
+        ) -> None:
+            """Record one attempt's call in the usage ledger, once.
+
+            Finding M19: fires on the success path AND when the
+            consumer closes the generator early (GeneratorExit at a
+            yield — the intent classifier stops reading at its
+            verdict). The call happened either way; the flag keeps
+            the two paths from both recording it.
+            """
+            if recorded_flag[0]:
+                return
+            recorded_flag[0] = True
+            self._record_usage(
+                model_name=self.model if model_idx == 0 else current_model,
+                pricing_model=current_model,
+                provider_name=current_provider,
+                usage=usage,
+                messages=messages,
+                output_text="".join(text_parts),
+                node_name=node_name,
+            )
+
+        last_error: Exception | None = None
         for model_idx, (current_model, current_api_key, current_base_url, current_provider) in enumerate(models_to_try):
             is_fallback = model_idx > 0
             try:
@@ -434,9 +521,24 @@ class LiteLLMProvider(BaseProvider):
 
                 response = await litellm.acompletion(**kwargs)
 
-                accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
+                accumulated_tool_calls: dict[int, dict[str, Any]] = {}
+                # Epic 8, E8-A8.1a: per-attempt usage capture for the
+                # cost ledger. Providers report token usage on the
+                # stream's chunks (typically the last one); text is
+                # accumulated only so token counts can be estimated —
+                # and labelled estimated — when none are reported.
+                call_usage: tuple[int, int] | None = None
+                call_text_parts: list[str] = []
+
+                # Finding M19: per-attempt recording flag for
+                # _record_attempt_usage (success path + GeneratorExit
+                # close path at the yields below share it).
+                attempt_recorded = [False]
 
                 async for chunk in response:
+                    parsed_usage = _parse_usage(getattr(chunk, "usage", None))
+                    if parsed_usage is not None:
+                        call_usage = parsed_usage
                     delta = chunk.choices[0].delta if chunk.choices else None
                     finish_reason = chunk.choices[0].finish_reason if chunk.choices else None
 
@@ -444,6 +546,12 @@ class LiteLLMProvider(BaseProvider):
                         continue
 
                     text = getattr(delta, "content", None) if delta else None
+                    # E1-16: reasoning-capable models expose their
+                    # thinking on the delta (LiteLLM normalises it to
+                    # reasoning_content; some providers use thinking).
+                    thinking = None
+                    if delta:
+                        thinking = getattr(delta, "reasoning_content", None) or getattr(delta, "thinking", None)
                     tool_call_deltas = getattr(delta, "tool_calls", None) if delta else None
 
                     # Accumulate tool call chunks (they arrive incrementally)
@@ -465,11 +573,46 @@ class LiteLLMProvider(BaseProvider):
                                 if tc_delta.function.arguments:
                                     acc["arguments"] += tc_delta.function.arguments
 
-                    # Emit text chunks as they arrive
+                    # Emit text chunks as they arrive (thinking rides
+                    # along on its own field, never inside the text)
                     if text:
-                        yield StreamChunk(text=text, finish_reason=finish_reason)
+                        call_text_parts.append(text)
+                    if text or thinking:
+                        # Epic 7, E7-02: TTSR rules vet the text
+                        # before it leaves the provider. A block rule
+                        # stops the stream (audited); redactions are
+                        # applied in place.
+                        if text and self.stream_rules.active:
+                            text, blocked_rule = self.stream_rules.apply(text)
+                            if blocked_rule is not None:
+                                from aether_engine.audit import AuditLogger
+
+                                AuditLogger().log_event("TTSR_BLOCKED", {
+                                    "node": node_name,
+                                    "rule": blocked_rule,
+                                    "model": self.litellm_model,
+                                })
+                                raise ProviderError(
+                                    f"Stream blocked by TTSR rule '{blocked_rule}'",
+                                    retriable=False,
+                                )
+                        yielded_any = True
+                        try:
+                            yield StreamChunk(text=text, thinking=thinking, finish_reason=finish_reason)
+                        except GeneratorExit:
+                            _record_attempt_usage(
+                                attempt_recorded, model_idx, current_model,
+                                current_provider, call_usage, call_text_parts)
+                            raise
                     elif finish_reason and not accumulated_tool_calls:
-                        yield StreamChunk(finish_reason=finish_reason)
+                        yielded_any = True
+                        try:
+                            yield StreamChunk(finish_reason=finish_reason)
+                        except GeneratorExit:
+                            _record_attempt_usage(
+                                attempt_recorded, model_idx, current_model,
+                                current_provider, call_usage, call_text_parts)
+                            raise
 
                     # When stream is done with tool calls, emit them all at once
                     if finish_reason and accumulated_tool_calls:
@@ -484,10 +627,17 @@ class LiteLLMProvider(BaseProvider):
                                     call_id=call_id,
                                 )
                             )
-                        yield StreamChunk(
-                            tool_calls=parsed_calls,
-                            finish_reason=finish_reason,
-                        )
+                        yielded_any = True
+                        try:
+                            yield StreamChunk(
+                                tool_calls=parsed_calls,
+                                finish_reason=finish_reason,
+                            )
+                        except GeneratorExit:
+                            _record_attempt_usage(
+                                attempt_recorded, model_idx, current_model,
+                                current_provider, call_usage, call_text_parts)
+                            raise
 
                 # If we got here, the call succeeded
                 if is_fallback:
@@ -506,6 +656,12 @@ class LiteLLMProvider(BaseProvider):
                         f"NODE_FALLBACK_TRIGGERED: primary model '{self.litellm_model}' failed, "
                         f"succeeded with fallback model '{current_model}'"
                     )
+                # Epic 8, E8-A8.1a: one ledger row per completed
+                # call, attributed to the model that actually ran
+                # (the fallback's own id when a fallback succeeded).
+                _record_attempt_usage(
+                    attempt_recorded, model_idx, current_model,
+                    current_provider, call_usage, call_text_parts)
                 return  # Success — exit the retry loop
 
             except litellm.AuthenticationError as e:
@@ -525,16 +681,20 @@ class LiteLLMProvider(BaseProvider):
                 import re
                 is_model_not_found = any(re.search(pattern, err_str, re.IGNORECASE) for pattern in model_not_found_indicators)
                 last_error = e
-                if is_model_not_found and (model_idx < len(models_to_try) - 1):
+                if is_model_not_found and (model_idx < len(models_to_try) - 1) and _fallback_blocked() is None:
                     logger.warning(
                         f"Model '{current_model}' failed with retriable error: {e}. "
                         f"Trying next fallback..."
                     )
                     continue
+                if is_model_not_found and _fallback_blocked() is not None:
+                    logger.warning(f"Fallback blocked for model '{current_model}': {_fallback_blocked()}")
                 raise ProviderError(f"Bad request: {e}", retriable=is_model_not_found) from e
             except litellm.NotFoundError as e:
                 last_error = e
-                if model_idx < len(models_to_try) - 1:
+                if _fallback_blocked() is not None and model_idx < len(models_to_try) - 1:
+                    logger.warning(f"Fallback blocked for model '{current_model}': {_fallback_blocked()}")
+                if model_idx < len(models_to_try) - 1 and _fallback_blocked() is None:
                     logger.warning(
                         f"Model '{current_model}' failed with retriable error: {e}. "
                         f"Trying next fallback..."
@@ -546,6 +706,15 @@ class LiteLLMProvider(BaseProvider):
                     getattr(litellm, "MidStreamFallbackError", Exception)) as e:
                 # Retriable errors — try next fallback model if available
                 last_error = e
+                if _fallback_blocked() is not None and model_idx < len(models_to_try) - 1:
+                    logger.warning(f"Fallback blocked for model '{current_model}': {_fallback_blocked()}")
+                    blocked = _fallback_blocked()
+                    if isinstance(e, litellm.RateLimitError) or "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                        raise RateLimitError(f"Rate limit exceeded: {e} (fallback blocked: {blocked})") from e
+                    elif isinstance(e, litellm.Timeout):
+                        raise TimeoutError(f"Request timed out: {e} (fallback blocked: {blocked})") from e
+                    else:
+                        raise NetworkError(f"Network/service error: {e} (fallback blocked: {blocked})") from e
                 if is_fallback or model_idx < len(models_to_try) - 1:
                     logger.warning(
                         f"Model '{current_model}' failed with retriable error: {e}. "
@@ -564,7 +733,7 @@ class LiteLLMProvider(BaseProvider):
                 raise
             except Exception as e:
                 err_str = str(e)
-                if ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower()) and (is_fallback or model_idx < len(models_to_try) - 1):
+                if ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower()) and (is_fallback or model_idx < len(models_to_try) - 1) and _fallback_blocked() is None:
                     logger.warning(
                         f"Model '{current_model}' failed with rate limit/quota error: {e}. Trying next fallback..."
                     )
@@ -577,6 +746,37 @@ class LiteLLMProvider(BaseProvider):
         if last_error:
             raise NetworkError(f"All models failed. Last error: {last_error}") from last_error
 
+    def _record_usage(
+        self,
+        *,
+        model_name: str,
+        pricing_model: str,
+        provider_name: str,
+        usage: tuple[int, int] | None,
+        messages: list[dict[str, Any]],
+        output_text: str,
+        node_name: str | None,
+    ) -> None:
+        """Epic 8, E8-A8.1a: record one completed call in the usage
+        ledger (see aether_engine.cost.ledger). Observational only —
+        a recording failure must never break the call that produced
+        it, so this never raises."""
+        try:
+            from aether_engine.cost.ledger import record_provider_call
+
+            record_provider_call(
+                model_name=model_name,
+                pricing_model=pricing_model,
+                provider_name=provider_name,
+                input_tokens=usage[0] if usage else None,
+                output_tokens=usage[1] if usage else None,
+                agent_name=node_name,
+                messages=messages,
+                output_text=output_text,
+            )
+        except Exception:  # usage recording is observational only.
+            logger.debug("Usage recording failed", exc_info=True)
+
 
 # ---------------------------------------------------------------------------
 # Validation helper — lightweight model list call to verify a key works
@@ -585,19 +785,31 @@ async def validate_api_key(
     provider_name: str,
     api_key: str,
     model: str = "",
-    base_url: Optional[str] = None,
-) -> Dict[str, Any]:
+    base_url: str | None = None,
+    timeout: float = VALIDATION_TIMEOUT,
+) -> dict[str, Any]:
     """Validate a provider API key by making a minimal completion call.
 
     Returns dict with 'status' ('connected', 'invalid_key', 'network_error')
-    and 'message' explaining the result.
+    and 'message' explaining the result. On a timeout the result carries the
+    DiscoveryResult-style error shape: status 'network_error' with a 'code'
+    of None (transport-level failure — no HTTP response was received, same
+    convention as DiscoveryError) and a message naming the bound. A timeout
+    is never reported as a success.
+
+    ``timeout`` bounds the ping in seconds (default VALIDATION_TIMEOUT, 10s,
+    matching DISCOVERY_TIMEOUT). It is enforced twice: passed to LiteLLM so
+    the underlying HTTP client enforces it, and via ``asyncio.wait_for`` so
+    the bound holds even if LiteLLM drops or ignores the kwarg for a provider.
     """
     import time
+
+    litellm = _load_litellm()  # Epic 9: deferred import, bound locally
 
     # Pick a cheap model for the validation ping
     if not model:
         _default_models = {
-            "google_gemini": "gemini-2.0-flash",
+            "google_gemini": "gemini-3.5-flash",
             "openai": "gpt-4o-mini",
             "anthropic": "claude-3-5-haiku",
             "deepseek": "deepseek-chat",
@@ -611,11 +823,12 @@ async def validate_api_key(
     # LiteLLM's OpenAI client requires a non-empty key to bypass client-side validation.
     effective_api_key = api_key if api_key else "sk-no-key-required"
 
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "model": litellm_model,
         "messages": [{"role": "user", "content": "ping"}],
         "max_tokens": 5,
         "api_key": effective_api_key,
+        "timeout": timeout,
         "extra_headers": {"User-Agent": "Cline/1.0.0"}
     }
 
@@ -625,7 +838,10 @@ async def validate_api_key(
 
     start = time.time()
     try:
-        resp = await litellm.acompletion(**kwargs)
+        # wait_for is the backstop: LiteLLM honours `timeout` for most
+        # providers, but a stalled provider must not block validation
+        # indefinitely if the kwarg is dropped anywhere along the path.
+        await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=timeout)
         latency = (time.time() - start) * 1000.0
         return {
             "status": "connected",
@@ -634,7 +850,7 @@ async def validate_api_key(
         }
     except litellm.AuthenticationError:
         return {"status": "invalid_key", "message": "Invalid API key."}
-    except (litellm.RateLimitError,):
+    except litellm.RateLimitError:
         # Rate limit means the key is valid, just throttled
         latency = (time.time() - start) * 1000.0
         return {
@@ -642,8 +858,50 @@ async def validate_api_key(
             "message": "API key is valid (rate limited).",
             "latency_ms": round(latency, 2),
         }
-    except Exception as e:
-        return {"status": "network_error", "message": f"Validation failed: {e}"}
+    except (asyncio.TimeoutError, litellm.Timeout):  # noqa: UP041 — qualified on purpose: bare TimeoutError in this module is the domain error imported from providers.base, not the builtin asyncio raises.
+        # Phase 10.1, B1: a stalled provider previously blocked validation
+        # indefinitely (no timeout anywhere on this call). Return a real
+        # error in the DiscoveryResult shape — code None means no HTTP
+        # response was received, exactly like DiscoveryError — never a
+        # silent success and never an empty success.
+        latency = (time.time() - start) * 1000.0
+        return {
+            "status": "network_error",
+            "message": f"Validation timed out after {timeout}s: provider did not respond.",
+            "code": None,
+            "latency_ms": round(latency, 2),
+        }
+    except Exception as e:  # noqa: BLE001 — validation boundary: any provider failure becomes a structured network_error result, never a crash.
+        return {"status": "network_error", "message": f"Validation failed: {e}", "code": None}
+
+
+# ---------------------------------------------------------------------------
+# Usage helpers (Epic 8, E8-A8.1a)
+# ---------------------------------------------------------------------------
+
+
+def _usage_value(usage: Any, *names: str) -> int | None:
+    for name in names:
+        value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _parse_usage(usage: Any) -> tuple[int, int] | None:
+    """Extract (input_tokens, output_tokens) from a LiteLLM usage
+    payload (object or dict; providers spell the fields both ways).
+    Returns None when the payload carries no token counts at all."""
+    if usage is None:
+        return None
+    input_tokens = _usage_value(usage, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_value(usage, "completion_tokens", "output_tokens")
+    if input_tokens is None and output_tokens is None:
+        return None
+    return (input_tokens or 0, output_tokens or 0)
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +920,7 @@ def _safe_json_dumps(obj: Any) -> str:
         return str(obj)
 
 
-def _safe_json_loads(s: str) -> Dict[str, Any]:
+def _safe_json_loads(s: str) -> dict[str, Any]:
     """Safely parse a JSON string into a dict."""
     if not s:
         return {}

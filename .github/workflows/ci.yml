@@ -1,0 +1,66 @@
+# Minimal CI for Aether-OS (Phase 10.3 D1).
+#
+# Runs the repo's real test commands on every push / PR:
+#   - pytest, with the four PySide6 UI test files ignored: those four
+#     files are kept out of the CI selection (the uv install change does
+#     not alter which tests run). The other UI tests either import only
+#     stdlib-only modules (e.g. tests/test_ui_state.py) or self-skip when
+#     PySide6 is absent (tests/test_approval_drawer_override.py), so they
+#     need no ignore flag.
+#   - Jest in desktop_app/ (npm test -- --watchAll=false).
+#
+# Known limits (do NOT read a green run here as a full release gate):
+#   - The pytest job installs dependencies with `uv sync` from
+#     pyproject.toml / uv.lock, which include APScheduler, so scheduler
+#     tests run with HAS_APSCHEDULER=True rather than the graceful
+#     degradation seen in the old .venv-phase9 environment (see ADR 0025).
+#   - The pytest job does not run the Electron app or the Windows-only
+#     paths (pywin32 is marker-guarded to Windows in pyproject.toml).
+#   - Packaging (electron-builder) is NOT run here; `npm run dist` is a
+#     manual release step until a Windows packaging job is added.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    name: pytest (Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install dependencies
+        run: uv sync
+      - name: Run pytest
+        run: >-
+          uv run python -m pytest -q
+          --ignore=tests/test_provider_health_badge.py
+          --ignore=tests/test_providers_panel_fixes.py
+          --ignore=tests/test_settings_provider_state.py
+          --ignore=tests/test_ui_window_geometry.py
+
+  frontend:
+    name: Jest (desktop_app)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop_app
+    steps:
+      - uses: actions/checkout@v4
+      # Electron 44 (desktop_app/package.json) bundles Node 24; use the
+      # same major line as the local toolchain (node v24.22.1).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: desktop_app/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Run Jest
+        run: npm test -- --watchAll=false

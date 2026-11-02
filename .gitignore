@@ -17,6 +17,7 @@ logs/
 *.sqlite
 *.sqlite3
 *.db
+pytest_output.txt
 
 # Caches
 .pytest_cache/
@@ -40,6 +41,8 @@ Thumbs.db
 
 # Aether-specific secrets / run tokens
 .run/
+*.pem
+*.key
 aether_engine/secrets/*.db
 aether_engine/secrets/*.sqlite*
 exported_keys.json
@@ -50,3 +53,5 @@ dist/
 dist-electron/
 build/
 .venv-phase9/
+!desktop_app/build/
+!desktop_app/build/icon.png

@@ -2,7 +2,7 @@
 import asyncio
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from aether_engine.capability.test_suite import SELF_TEST_SUITE, grade_test
 from aether_engine.providers.litellm_provider import LiteLLMProvider
@@ -15,11 +15,11 @@ async def run_model_self_test(
     model_id: str,
     api_key: str,
     timeout_per_test: float = 8.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Execute the self-test eval suite against a single reachable model."""
     test_results = {}
     latencies = []
-    category_scores: Dict[str, List[bool]] = {}
+    category_scores: dict[str, list[bool]] = {}
 
     prov = LiteLLMProvider(api_key=api_key, model=model_id, provider_name=provider_name)
 
@@ -30,14 +30,14 @@ async def run_model_self_test(
         error_msg = None
 
         try:
-            async def _run():
+            async def _run(prompt_text: str):
                 text = ""
-                async for chunk in prov.call_stream([{"role": "user", "content": test.prompt}]):
+                async for chunk in prov.call_stream([{"role": "user", "content": prompt_text}]):
                     if chunk.text:
                         text += chunk.text
                 return text
 
-            response_text = await asyncio.wait_for(_run(), timeout=timeout_per_test)
+            response_text = await asyncio.wait_for(_run(test.prompt), timeout=timeout_per_test)
             latency_ms = (time.time() - start) * 1000.0
             latencies.append(latency_ms)
 
@@ -48,7 +48,7 @@ async def run_model_self_test(
                 "latency_ms": round(latency_ms, 2),
                 "response_preview": graded["response_preview"],
             }
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — per-test isolation: one failing self-test must not abort the suite
             latency_ms = (time.time() - start) * 1000.0
             error_msg = str(e)
             test_results[test.name] = {
@@ -85,12 +85,12 @@ async def run_model_self_test(
 
 
 async def run_suite_on_reachable_models(
-    model_pairs: List[Tuple[str, str, str]],  # (provider_name, model_id, api_key)
+    model_pairs: list[tuple[str, str, str]],  # (provider_name, model_id, api_key)
     max_concurrency: int = 3,
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """Run Option C self-tests across multiple reachable models with concurrency control."""
     semaphore = asyncio.Semaphore(max_concurrency)
-    results: Dict[str, Dict[str, Any]] = {}
+    results: dict[str, dict[str, Any]] = {}
 
     async def _test_one(prov: str, mid: str, key: str):
         async with semaphore:

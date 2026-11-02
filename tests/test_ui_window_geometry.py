@@ -1,7 +1,10 @@
 import sys
 import unittest
 
-from PySide6.QtCore import Qt
+import pytest
+
+pytest.importorskip("PySide6", reason="PySide6 not installed (legacy-ui extra, F-16)")
+
 from PySide6.QtWidgets import QApplication
 
 from aether_ui.main import AetherWindow

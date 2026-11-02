@@ -5,10 +5,14 @@ import Dropdown from '../../Dropdown';
 import MCPNotice from './MCPNotice';
 import PluginsNotice from './PluginsNotice';
 
-export default function DiagnosticsPanel({ activeMenu }) {
+export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
   const { wsRef, sendMessage } = useAetherSocket();
   const [mcpServers, setMcpServers] = useState({});
-  const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '' });
+  const [mcpResources, setMcpResources] = useState({}); // issue 006: server name -> [{uri, name, description, mimeType}]
+  const [mcpPrompts, setMcpPrompts] = useState({}); // issue 007: server name -> [{name, description, arguments}]
+  const [mcpPromptArgs, setMcpPromptArgs] = useState({}); // issue 007: "server:prompt" -> {arg: value}
+  const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '', url: '', headerKey: '', headerValue: '', envKey: '', envValue: '', cwd: '' });
+  const [mcpTestResult, setMcpTestResult] = useState(null);
   const [plugins, setPlugins] = useState([]);
   const [newPluginSource, setNewPluginSource] = useState('');
   const [agents, setAgents] = useState([]);
@@ -32,10 +36,61 @@ export default function DiagnosticsPanel({ activeMenu }) {
         const data = JSON.parse(event.data);
         if (data.type === 'MCP_SERVER_LIST_RESPONSE') {
           setMcpServers(data.payload.servers || {});
+          if (data.payload.config_error) {
+            // B1: the whole config file failed to parse — surface it.
+            setMcpTestResult(`MCP config file error: ${data.payload.config_error}`);
+          }
+          // Issue 006: list resources for every connected server, so
+          // the tab can offer "Load into chat" per resource.
+          // Issue 007: same for prompt templates.
+          Object.entries(data.payload.servers || {}).forEach(([srvName, srv]) => {
+            if (srv.status === 'connected') {
+              sendMessage('MCP_RESOURCE_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: srvName } });
+              sendMessage('MCP_PROMPT_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: srvName } });
+            }
+          });
+        } else if (data.type === 'MCP_RESOURCE_LIST_RESPONSE') {
+          if (data.payload.success) {
+            setMcpResources(prev => ({ ...prev, [data.payload.name]: data.payload.resources || [] }));
+          }
+        } else if (data.type === 'MCP_PROMPT_LIST_RESPONSE') {
+          if (data.payload.success) {
+            setMcpPrompts(prev => ({ ...prev, [data.payload.name]: data.payload.prompts || [] }));
+          }
+        } else if (data.type === 'MCP_PROMPT_RUN_RESPONSE') {
+          setMcpTestResult(data.payload.success
+            ? `Ran prompt '${data.payload.prompt}' into chat`
+            : `Run prompt '${data.payload.prompt}' failed: ${data.payload.error || 'unknown error'}`);
+        } else if (data.type === 'MCP_RESOURCE_READ_RESPONSE') {
+          setMcpTestResult(data.payload.success
+            ? `Loaded ${data.payload.uri} into chat${data.payload.truncated ? ' (truncated to 20000 chars)' : ''}`
+            : `Load ${data.payload.uri} failed: ${data.payload.error || 'unknown error'}`);
         } else if (data.type === 'MCP_SERVER_ADD_RESPONSE' || data.type === 'MCP_SERVER_REMOVE_RESPONSE') {
           if (data.payload.success) {
             sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+          } else if (data.type === 'MCP_SERVER_ADD_RESPONSE' && data.payload.error) {
+            // A rejected config (e.g. both command and url) must be visible,
+            // not silently ignored.
+            setMcpTestResult(`Add ${data.payload.name} failed: ${data.payload.error}`);
           }
+        } else if (data.type === 'MCP_SERVER_TEST_RESPONSE') {
+          setMcpTestResult(data.payload.success
+            ? `Test ${data.payload.name}: connected — tools: ${(data.payload.tools || []).join(', ') || 'none'}`
+            : `Test ${data.payload.name} failed: ${data.payload.error || 'unknown error'}`);
+          sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+        } else if (data.type === 'MCP_SERVER_UPDATE_RESPONSE') {
+          // Issue 004: a failed toggle must be visible, not silent.
+          if (!data.payload.success) {
+            setMcpTestResult(`Update ${data.payload.name} failed: ${data.payload.error || 'unknown error'}`);
+          }
+          sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+        } else if (data.type === 'MCP_SERVER_CONNECT_RESPONSE' || data.type === 'MCP_SERVER_DISCONNECT_RESPONSE') {
+          // S9: a failed Connect/Disconnect must be visible, not silent.
+          const verb = data.type === 'MCP_SERVER_CONNECT_RESPONSE' ? 'Connect' : 'Disconnect';
+          if (!data.payload.success) {
+            setMcpTestResult(`${verb} ${data.payload.name} failed: ${data.payload.error || 'unknown error'}`);
+          }
+          sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
         } else if (data.type === 'PLUGIN_LIST_RESPONSE') {
           const p = data.payload.plugins;
           setPlugins(Array.isArray(p) ? p : Object.values(p || {}));
@@ -109,21 +164,102 @@ export default function DiagnosticsPanel({ activeMenu }) {
                 placeholder="Arguments (comma separated)" 
                 style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
               />
-              <button 
+              <input
+                type="text"
+                value={newMcpServer.url}
+                onChange={(e) => setNewMcpServer({...newMcpServer, url: e.target.value})}
+                className="ios-glass-input"
+                placeholder="Server URL for remote (Streamable HTTP, e.g. https://21st.dev/api/mcp)"
+                style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
+              />
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <input
+                  type="text"
+                  value={newMcpServer.headerKey}
+                  onChange={(e) => setNewMcpServer({...newMcpServer, headerKey: e.target.value})}
+                  className="ios-glass-input"
+                  placeholder="Header name (e.g. x-api-key)"
+                  style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+                />
+                <input
+                  type="text"
+                  value={newMcpServer.headerValue}
+                  onChange={(e) => setNewMcpServer({...newMcpServer, headerValue: e.target.value})}
+                  className="ios-glass-input"
+                  placeholder="Header value (use ${VAR_NAME} for secrets)"
+                  style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <input
+                  type="text"
+                  value={newMcpServer.envKey}
+                  onChange={(e) => setNewMcpServer({...newMcpServer, envKey: e.target.value})}
+                  className="ios-glass-input"
+                  placeholder="Env var name (local servers)"
+                  style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+                />
+                <input
+                  type="text"
+                  value={newMcpServer.envValue}
+                  onChange={(e) => setNewMcpServer({...newMcpServer, envValue: e.target.value})}
+                  className="ios-glass-input"
+                  placeholder="Env var value"
+                  style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+                />
+              </div>
+              <input
+                type="text"
+                value={newMcpServer.cwd}
+                onChange={(e) => setNewMcpServer({...newMcpServer, cwd: e.target.value})}
+                className="ios-glass-input"
+                placeholder="Working directory (cwd, local servers)"
+                style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
+              />
+              <button
                 onClick={() => {
-                  if (newMcpServer.name && newMcpServer.command) {
+                  // S6: command AND url filled means two transports — warn
+                  // instead of silently sending only the URL.
+                  if (newMcpServer.command.trim() && newMcpServer.url.trim()) {
+                    setMcpTestResult('Both a command and a URL are filled — pick one transport: a local command or a remote URL.');
+                    return;
+                  }
+                  const resetForm = { name: '', command: '', args: '', url: '', headerKey: '', headerValue: '', envKey: '', envValue: '', cwd: '' };
+                  if (newMcpServer.name && newMcpServer.url) {
+                    const headers = newMcpServer.headerKey.trim()
+                      ? { [newMcpServer.headerKey.trim()]: newMcpServer.headerValue }
+                      : undefined;
                     sendMessage('MCP_SERVER_ADD_REQUEST', {
                       schema_version: 1,
                       request_id: Date.now().toString(),
-                      payload: { 
-                        name: newMcpServer.name, 
-                        config: { 
-                          command: newMcpServer.command, 
-                          args: newMcpServer.args.split(',').map(s => s.trim()).filter(Boolean) 
+                      payload: {
+                        name: newMcpServer.name,
+                        config: {
+                          transport: 'streamable_http',
+                          url: newMcpServer.url.trim(),
+                          ...(headers ? { headers } : {}),
                         }
                       }
                     });
-                    setNewMcpServer({ name: '', command: '', args: '' });
+                    setNewMcpServer(resetForm);
+                  } else if (newMcpServer.name && newMcpServer.command) {
+                    const env = newMcpServer.envKey.trim()
+                      ? { [newMcpServer.envKey.trim()]: newMcpServer.envValue }
+                      : undefined;
+                    sendMessage('MCP_SERVER_ADD_REQUEST', {
+                      schema_version: 1,
+                      request_id: Date.now().toString(),
+                      payload: {
+                        name: newMcpServer.name,
+                        config: {
+                          command: newMcpServer.command,
+                          args: newMcpServer.args.split(',').map(s => s.trim()).filter(Boolean),
+                          ...(env ? { env } : {}),
+                          ...(newMcpServer.cwd.trim() ? { cwd: newMcpServer.cwd.trim() } : {}),
+                        }
+                      }
+                    });
+                    setNewMcpServer(resetForm);
                   }
                 }}
                 style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '12px 24px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, alignSelf: 'flex-start' }}
@@ -132,6 +268,10 @@ export default function DiagnosticsPanel({ activeMenu }) {
               </button>
             </div>
           </div>
+
+          {mcpTestResult && (
+            <div style={{ color: '#fbbf24', fontSize: '13px', marginBottom: '16px' }}>{mcpTestResult}</div>
+          )}
 
           <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Configured Servers</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -145,11 +285,112 @@ export default function DiagnosticsPanel({ activeMenu }) {
                   <div>
                     <h4 style={{ fontSize: '15px', fontWeight: 500 }}>{name}</h4>
                     <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px', fontFamily: 'monospace' }}>
-                      {config.command} {config.args?.join(' ')}
+                      {config.url ? config.url : `${config.command || ''} ${config.args?.join(' ') || ''}`}
                     </p>
+                    <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>
+                      Status: {config.status || 'unknown'}{config.tool_count ? ` — ${config.tool_count} tool(s)` : ''}{config.error ? ` — ${config.error}` : ''}
+                    </p>
+                    <div style={{ display: 'flex', gap: '16px', marginTop: '8px' }}>
+                      <label style={{ fontSize: '13px', color: '#c0c0d0', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={config.auto_connect !== false}
+                          onChange={(e) => sendMessage('MCP_SERVER_UPDATE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, auto_connect: e.target.checked } })}
+                          style={{ marginRight: '6px' }}
+                        />
+                        Auto-connect on startup
+                      </label>
+                      <label style={{ fontSize: '13px', color: '#c0c0d0', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={config.enabled !== false}
+                          onChange={(e) => sendMessage('MCP_SERVER_UPDATE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, enabled: e.target.checked } })}
+                          style={{ marginRight: '6px' }}
+                        />
+                        Enabled
+                      </label>
+                    </div>
+                    {(mcpResources[name] || []).length > 0 && (
+                      <div style={{ marginTop: '12px' }}>
+                        <div style={{ fontSize: '13px', color: '#c0c0d0', marginBottom: '6px' }}>Resources:</div>
+                        {(mcpResources[name] || []).map((res) => (
+                          <div key={res.uri} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', padding: '6px 0' }}>
+                            <span style={{ fontSize: '13px', color: '#9090a0', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={res.description || res.uri}>
+                              {res.name || res.uri}
+                            </span>
+                            <button
+                              onClick={() => sendMessage('MCP_RESOURCE_READ_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, uri: res.uri, session_id: activeSession } })}
+                              style={{ background: 'rgba(124, 58, 237, 0.15)', color: '#a78bfa', border: '1px solid rgba(124, 58, 237, 0.4)', padding: '4px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}
+                            >
+                              Load into chat
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {(mcpPrompts[name] || []).length > 0 && (
+                      <div style={{ marginTop: '12px' }}>
+                        <div style={{ fontSize: '13px', color: '#c0c0d0', marginBottom: '6px' }}>Prompts:</div>
+                        {(mcpPrompts[name] || []).map((pr) => (
+                          <div key={pr.name} style={{ padding: '6px 0' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                              <span style={{ fontSize: '13px', color: '#9090a0', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={pr.description || pr.name}>
+                                {pr.name}
+                              </span>
+                              <button
+                                onClick={() => sendMessage('MCP_PROMPT_RUN_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, prompt: pr.name, arguments: mcpPromptArgs[`${name}:${pr.name}`] || {}, session_id: activeSession } })}
+                                style={{ background: 'rgba(124, 58, 237, 0.15)', color: '#a78bfa', border: '1px solid rgba(124, 58, 237, 0.4)', padding: '4px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}
+                              >
+                                Run in chat
+                              </button>
+                            </div>
+                            {(pr.arguments || []).length > 0 && (
+                              <div style={{ display: 'flex', gap: '8px', marginTop: '6px', flexWrap: 'wrap' }}>
+                                {(pr.arguments || []).map((arg) => (
+                                  <input
+                                    key={arg.name}
+                                    type="text"
+                                    placeholder={arg.name}
+                                    title={arg.description || arg.name}
+                                    value={(mcpPromptArgs[`${name}:${pr.name}`] || {})[arg.name] || ''}
+                                    onChange={(e) => setMcpPromptArgs(prev => ({
+                                      ...prev,
+                                      [`${name}:${pr.name}`]: {
+                                        ...(prev[`${name}:${pr.name}`] || {}),
+                                        [arg.name]: e.target.value,
+                                      },
+                                    }))}
+                                    className="ios-glass-input"
+                                    style={{ flex: 1, minWidth: '120px', padding: '8px 12px', color: '#fff', outline: 'none', fontSize: '13px' }}
+                                  />
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                  <div>
-                    <button 
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      onClick={() => sendMessage('MCP_SERVER_TEST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
+                      style={{ background: 'rgba(124, 58, 237, 0.15)', color: '#a78bfa', border: '1px solid rgba(124, 58, 237, 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                    >
+                      Test
+                    </button>
+                    <button
+                      onClick={() => sendMessage('MCP_SERVER_CONNECT_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
+                      style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                    >
+                      Connect
+                    </button>
+                    <button
+                      onClick={() => sendMessage('MCP_SERVER_DISCONNECT_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
+                      style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                    >
+                      Disconnect
+                    </button>
+                    <button
                       onClick={() => sendMessage('MCP_SERVER_REMOVE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
                       style={{ background: 'rgba(242, 65, 91, 0.15)', color: '#FA5870', border: '1px solid rgba(242, 65, 91, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
                     >
@@ -250,6 +491,25 @@ export default function DiagnosticsPanel({ activeMenu }) {
                    <div>
                      <h3 style={{ fontSize: '16px', marginBottom: '4px' }}>{agent.name}</h3>
                      <p style={{ color: '#9090a0', fontSize: '13px' }}>{agent.description}</p>
+                     {/* Epic 1, E1-05: the EFFECTIVE model — the agent's
+                         own override when set, otherwise the global
+                         default it inherits. */}
+                     <p data-testid={`effective-model-${agent.id}`} style={{ color: '#a78bfa', fontSize: '12px', marginTop: '6px', fontFamily: 'monospace' }}>
+                       {(() => {
+                         const override = agent.model && agent.model !== 'inherit' ? agent.model : null;
+                         if (override) {
+                           const sep = override.indexOf(':');
+                           const prov = sep === -1 ? '' : override.slice(0, sep);
+                           const model = sep === -1 ? override : override.slice(sep + 1);
+                           const provLabel = (providers || []).find(p => p.name === prov)?.display_name || prov;
+                           return prov ? `Effective model: ${model} (${provLabel})` : `Effective model: ${model}`;
+                         }
+                         const def = (providers || []).find(p => p.is_default);
+                         return def
+                           ? `Effective model: Inherits ${def.display_name || def.name} / ${def.default_model}`
+                           : 'Effective model: Inherits global default';
+                       })()}
+                     </p>
                    </div>
                  </div>
                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>

@@ -1,7 +1,12 @@
 """Unit test for Settings window provider card states and save state."""
 import pytest
+
+pytest.importorskip("PySide6", reason="PySide6 not installed (legacy-ui extra, F-16)")
+
 from PySide6.QtWidgets import QApplication
-from aether_ui.settings_window import ProviderConfigDialog, _MASKED_PLACEHOLDER
+
+from aether_ui.settings_window import _MASKED_PLACEHOLDER, ProviderConfigDialog
+
 
 @pytest.fixture(scope="session")
 def qapp():

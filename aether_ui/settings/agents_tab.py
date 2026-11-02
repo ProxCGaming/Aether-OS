@@ -1,14 +1,24 @@
 import json
+
 from PySide6.QtCore import Qt, QUrl
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QScrollArea, QFrame, QHBoxLayout,
-    QPushButton, QMessageBox
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 from aether_ui.theme import (
-    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, SURFACE_BG, SURFACE_PANEL, SURFACE_BORDER,
-    BRAND_FRONTEND
+    SURFACE_BORDER,
+    SURFACE_PANEL,
+    TEXT_MUTED,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
 )
 
 
@@ -52,14 +62,14 @@ class AgentsTab(QWidget):
         
         main_layout.addLayout(hdr_layout)
 
-        desc = QLabel("Live routing assignments for LangGraph nodes via CapabilityRouter.")
+        desc = QLabel("Live routing assignments for LangGraph nodes via RoutingPolicy.")
         desc.setStyleSheet(f"font-size: 14px; color: {TEXT_SECONDARY};")
         main_layout.addWidget(desc)
 
         # Scroll Area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(f"QScrollArea {{ border: none; background: transparent; }}")
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         
         self.scroll_content = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_content)

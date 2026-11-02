@@ -1,14 +1,15 @@
-import sys
-import subprocess
-import sqlite3
-import urllib.request
-import urllib.error
 import os
+import sqlite3
+import subprocess
+import sys
 import time
-from typing import List, Dict, Any
+import urllib.error
+import urllib.request
 from pathlib import Path
+from typing import Any
 
-def run_environment_diagnostics() -> List[Dict[str, Any]]:
+
+def run_environment_diagnostics() -> list[dict[str, Any]]:
     logs = []
     
     # 1. Python Environment
@@ -20,7 +21,7 @@ def run_environment_diagnostics() -> List[Dict[str, Any]]:
             "details": f"v{version}",
             "timestamp": time.time()
         })
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — a diagnostics probe records any failure as its result, never raises
         logs.append({
             "target_name": "Python Environment",
             "status": "FAILED",
@@ -30,7 +31,7 @@ def run_environment_diagnostics() -> List[Dict[str, Any]]:
 
     # 2. Terminal Access
     try:
-        result = subprocess.run(["echo", "hello"], capture_output=True, text=True, timeout=2, shell=True)
+        result = subprocess.run(["echo", "hello"], capture_output=True, text=True, timeout=2, shell=True, check=False)
         if result.returncode == 0:
             logs.append({
                 "target_name": "Terminal Access",
@@ -45,7 +46,7 @@ def run_environment_diagnostics() -> List[Dict[str, Any]]:
                 "details": "Process exited with error",
                 "timestamp": time.time()
             })
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — a diagnostics probe records any failure as its result, never raises
         logs.append({
             "target_name": "Terminal Access",
             "status": "FAILED",
@@ -71,7 +72,7 @@ def run_environment_diagnostics() -> List[Dict[str, Any]]:
             "details": "Read/Write verified",
             "timestamp": time.time()
         })
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — a diagnostics probe records any failure as its result, never raises
         logs.append({
             "target_name": "SQLite Storage",
             "status": "FAILED",
@@ -104,7 +105,7 @@ def run_environment_diagnostics() -> List[Dict[str, Any]]:
             "details": "Connection refused",
             "timestamp": time.time()
         })
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — a diagnostics probe records any failure as its result, never raises
         logs.append({
             "target_name": "Ollama Local Service",
             "status": "FAILED",
@@ -128,7 +129,7 @@ def run_environment_diagnostics() -> List[Dict[str, Any]]:
                 "details": "Missing TAVILY_API_KEY",
                 "timestamp": time.time()
             })
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — a diagnostics probe records any failure as its result, never raises
         logs.append({
             "target_name": "Web Search API",
             "status": "FAILED",

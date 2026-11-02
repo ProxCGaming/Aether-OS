@@ -4,14 +4,13 @@ Option A: Static benchmark data cache for known cloud models.
 Option C: Live self-test suite against each configured model via LiteLLM.
 """
 import asyncio
-import datetime
 import json
 import logging
-from pathlib import Path
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional
 import uuid
+from pathlib import Path
+from typing import Any
 
 try:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -34,7 +33,7 @@ DEFAULT_DB_PATH = Path.home() / ".aether" / "capabilities.db"
 # ---------------------------------------------------------------------------
 # Scores are normalized 0-100 from public benchmarks (MMLU, HumanEval, MATH, etc.)
 # Sources: model cards, published evals as of mid-2025. Updated periodically.
-BENCHMARK_CACHE: Dict[str, Dict[str, Any]] = {
+BENCHMARK_CACHE: dict[str, dict[str, Any]] = {
     # Google Gemini
     "gemini-2.0-flash": {
         "mmlu": 84.0, "humaneval": 76.0, "math": 82.0,
@@ -118,7 +117,7 @@ class CapabilitySchedulerManager:
     def __init__(self, db_path: Path = DEFAULT_DB_PATH):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.scheduler: Optional[AsyncIOScheduler] = None
+        self.scheduler: AsyncIOScheduler | None = None
         self._init_db()
         self.current_schedule = "weekly"  # default: weekly
         self.current_method = "Both"       # default: Option A + Option C
@@ -165,7 +164,7 @@ class CapabilitySchedulerManager:
         if saved_method:
             self.current_method = saved_method
 
-    def _get_config(self, key: str) -> Optional[str]:
+    def _get_config(self, key: str) -> str | None:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT value FROM scheduler_config WHERE key = ?", (key,))
@@ -195,8 +194,9 @@ class CapabilitySchedulerManager:
                 self.scheduler = AsyncIOScheduler(event_loop=loop)
                 self.scheduler.start()
                 self._update_job_schedule(self.current_schedule)
+                self._register_memory_prune_job()
                 logger.info("CapabilitySchedulerManager started.")
-            except (RuntimeError, Exception) as e:
+            except Exception as e:  # noqa: BLE001 — scheduler start is deferred to the loop's first tick if no loop is running yet
                 logger.warning(f"AsyncIOScheduler start deferred (no running event loop yet): {e}")
 
     def stop(self):
@@ -236,13 +236,54 @@ class CapabilitySchedulerManager:
         )
         logger.info(f"Updated capability check schedule to '{interval}' with misfire recovery.")
 
-    async def _execute_check_job(self, method: Optional[str] = None) -> Dict[str, Any]:
+    def _register_memory_prune_job(self):
+        """Phase 10.3 A1: weekly retention pruning for all memory tiers.
+
+        This manager is the engine's only background scheduler, so the
+        prune job lives here next to the capability-check job — same
+        pattern, its own fixed weekly trigger, independent of the
+        user-set capability-check schedule. Deliberately NOT run at
+        startup: a startup prune would fire inside EngineState.initialize(),
+        which tests also call, and would prune the live ~/.aether DBs.
+        A weekly interval trigger only fires on schedule, never during a
+        test run. Manual trigger: run_memory_prune_now().
+        """
+        if not HAS_APSCHEDULER or not self.scheduler or not self.scheduler.running:
+            return
+        self.scheduler.add_job(
+            self._run_memory_prune_job,
+            trigger=IntervalTrigger(weeks=1),
+            id="memory_prune_weekly",
+            replace_existing=True,
+        )
+        logger.info("Registered weekly memory pruning job.")
+
+    def _run_memory_prune_job(self) -> dict[str, Any]:
+        """Execute one memory-pruning run (sync job; APScheduler runs it
+        in the default executor). Returns per-tier counts."""
+        from aether_engine.config import load_config
+        from aether_engine.memory.pruning import prune_all
+
+        try:
+            results = prune_all(config=load_config())
+            logger.info(f"Memory pruning complete: {results}")
+            return results
+        except Exception as e:
+            logger.exception("Memory pruning failed")
+            return {"error": str(e)}
+
+    def run_memory_prune_now(self) -> dict[str, Any]:
+        """Manual trigger for memory pruning (mirrors run_now for
+        capability checks)."""
+        return self._run_memory_prune_job()
+
+    async def _execute_check_job(self, method: str | None = None) -> dict[str, Any]:
         """Execute a capability check run using Option A (benchmarks), C (self-tests), or Both."""
         run_method = method or self.current_method
         run_id = str(uuid.uuid4())
         started_at = time.time()
         models_tested = 0
-        errors: List[str] = []
+        errors: list[str] = []
 
         logger.info(f"Running capability check job '{run_id}' using method '{run_method}'...")
 
@@ -257,7 +298,7 @@ class CapabilitySchedulerManager:
 
             status_str = "SUCCESS"
         except Exception as e:
-            logger.error(f"Capability check failed: {e}", exc_info=True)
+            logger.exception("Capability check failed")
             errors.append(str(e))
             status_str = "FAILED"
 
@@ -331,7 +372,7 @@ class CapabilitySchedulerManager:
             return 0
 
         # Build list of (provider, model, key) pairs to test — strictly filter for reachable models
-        test_tuples: List[tuple] = []
+        test_tuples: list[tuple] = []
         cfg = load_config()
 
         for p in CLOUD_PROVIDERS:
@@ -380,7 +421,7 @@ class CapabilitySchedulerManager:
 
                     for model_id in models_to_test:
                         test_tuples.append((p.name, model_id, key))
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — per-provider isolation in the capability sweep
                     logger.warning(f"Option C: Error preparing tests for {p.name}: {e}")
 
         count = 0
@@ -425,12 +466,12 @@ class CapabilitySchedulerManager:
 
                 count += 1
                 logger.info(f"Option C: Tested {provider_name}/{model_id} — pass_rate={st_result.get('pass_rate')}")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — per-model isolation in the capability sweep
                 logger.error(f"Option C: Test failed for {provider_name}/{model_id}: {e}")
 
         return count
 
-    def _record_run(self, record: Dict[str, Any]):
+    def _record_run(self, record: dict[str, Any]):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """
@@ -450,7 +491,7 @@ class CapabilitySchedulerManager:
             )
             conn.commit()
 
-    async def run_now(self, method: Optional[str] = None) -> Dict[str, Any]:
+    async def run_now(self, method: str | None = None) -> dict[str, Any]:
         """Manual trigger ('Run Now' button)."""
         return await self._execute_check_job(method=method)
 
@@ -461,7 +502,7 @@ class CapabilitySchedulerManager:
         self._set_config("method", method)
         self._update_job_schedule(interval)
 
-    def get_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+    def get_history(self, limit: int = 10) -> list[dict[str, Any]]:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -472,7 +513,7 @@ class CapabilitySchedulerManager:
             rows = cursor.fetchall()
             return [dict(r) for r in rows]
 
-    def get_status_summary(self) -> Dict[str, Any]:
+    def get_status_summary(self) -> dict[str, Any]:
         history = self.get_history(limit=1)
         last_run = history[0] if history else None
         next_run_ts = None
@@ -488,7 +529,7 @@ class CapabilitySchedulerManager:
             "next_run_ts": next_run_ts,
         }
 
-    def get_model_capabilities(self, model_id: str) -> Optional[Dict[str, Any]]:
+    def get_model_capabilities(self, model_id: str) -> dict[str, Any] | None:
         """Retrieve cached capability data for a specific model."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -512,12 +553,12 @@ def _infer_provider(model_id: str) -> str:
     mid = model_id.lower()
     if mid.startswith("gemini"):
         return "google_gemini"
-    elif mid.startswith("gpt") or mid.startswith("o1") or mid.startswith("o3") or mid.startswith("text-embedding"):
+    elif mid.startswith(("gpt", "o1", "o3", "text-embedding")):
         return "openai"
     elif mid.startswith("claude"):
         return "anthropic"
     elif mid.startswith("deepseek"):
         return "deepseek"
-    elif "/" in mid or mid.startswith("qwen") or mid.startswith("meta-llama") or mid.startswith("mistral"):
+    elif "/" in mid or mid.startswith(("qwen", "meta-llama", "mistral")):
         return "openrouter"
     return "unknown"

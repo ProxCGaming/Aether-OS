@@ -119,6 +119,26 @@
   opacity: 1;
 }
 
+/* Keyboard users must be able to see the button when it (or anything in
+   the bubble) has focus — hover alone made it undiscoverable. */
+.msg-container:focus-within .msg-edit-btn,
+.msg-edit-btn:focus-visible {
+  opacity: 1;
+}
+
+.msg-edit-btn:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.85);
+  outline-offset: 2px;
+}
+
+/* Touch devices have no hover: keep the button faintly visible so it
+   can actually be found and tapped. */
+@media (hover: none) {
+  .msg-container .msg-edit-btn {
+    opacity: 0.85;
+  }
+}
+
 .msg-edit-btn:hover {
   transform: scale(1.15);
   background: #7c3aed;
@@ -126,6 +146,283 @@
 
 .msg-edit-btn:active {
   transform: scale(0.95);
+}
+
+/* Epic 8, E8-1.1a: per-step ⋯ menu. The button mirrors the edit
+   button's hover-reveal at the bubble's top-right corner; the menu
+   surfaces the step's recorded rewind point (label, checkpoint,
+   files written so far) with rewind/fork honestly disabled until
+   E8-1.1b / E8-1.2 land their execution. */
+.msg-container .msg-step-menu-btn {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  background: rgba(124, 58, 237, 0.9);
+  border: 1px solid rgba(167, 139, 250, 0.5);
+  border-radius: 50%;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  z-index: 10;
+}
+
+.msg-container:hover .msg-step-menu-btn {
+  opacity: 1;
+}
+
+.msg-container:focus-within .msg-step-menu-btn,
+.msg-step-menu-btn:focus-visible {
+  opacity: 1;
+}
+
+.msg-step-menu-btn:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.85);
+  outline-offset: 2px;
+}
+
+@media (hover: none) {
+  .msg-container .msg-step-menu-btn {
+    opacity: 0.85;
+  }
+}
+
+.msg-step-menu-btn:hover {
+  transform: scale(1.15);
+  background: #7c3aed;
+}
+
+.step-menu {
+  position: absolute;
+  top: 22px;
+  right: 0;
+  min-width: 230px;
+  max-width: 300px;
+  background: rgba(24, 24, 32, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  z-index: 30;
+  text-align: left;
+}
+
+.rewind-point-meta {
+  padding: 2px 4px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 8px;
+}
+
+.rewind-point-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.rewind-point-detail {
+  font-size: 11px;
+  color: #a5a5b8;
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+.step-menu-action {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #e2e8f0;
+  margin-top: 6px;
+}
+
+.step-menu-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.step-menu-hint {
+  font-size: 11px;
+  color: #8b8b9e;
+  padding: 4px 2px 0;
+}
+
+.step-menu-action:not(:disabled) {
+  cursor: pointer;
+}
+
+.step-menu-action:not(:disabled):hover {
+  background: rgba(124, 58, 237, 0.35);
+}
+
+/* Epic 8, E8-1.1b: rewind confirmation modal + 5-second undo toast. */
+.rewind-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 8, 14, 0.66);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.rewind-confirm-dialog {
+  background: rgba(24, 24, 32, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  padding: 20px 22px;
+  max-width: 440px;
+  width: calc(100% - 48px);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  color: #e2e8f0;
+}
+
+.rewind-confirm-title {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.rewind-confirm-body {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #b9b9c9;
+}
+
+.rewind-confirm-files {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 12px;
+  color: #fca5a5;
+  word-break: break-all;
+}
+
+.rewind-confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.rewind-confirm-btn {
+  background: #7c3aed;
+  border: 1px solid rgba(167, 139, 250, 0.6);
+  border-radius: 8px;
+  padding: 7px 16px;
+  font-size: 13px;
+  color: #fff;
+  cursor: pointer;
+}
+
+.rewind-confirm-btn:hover {
+  background: #8b5cf6;
+}
+
+.rewind-cancel-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 7px 16px;
+  font-size: 13px;
+  color: #e2e8f0;
+  cursor: pointer;
+}
+
+.rewind-undo-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 108px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(24, 24, 32, 0.97);
+  border: 1px solid rgba(167, 139, 250, 0.5);
+  border-radius: 999px;
+  padding: 8px 8px 8px 16px;
+  font-size: 12px;
+  color: #e2e8f0;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  z-index: 60;
+  white-space: nowrap;
+}
+
+.rewind-undo-toast button {
+  background: #7c3aed;
+  border: none;
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  cursor: pointer;
+}
+
+.rewind-undo-toast button:hover {
+  background: #8b5cf6;
+}
+
+/* Epic 1 UI batch (E1-08): regenerate, shown under the last final
+   agent bubble (errors included) while no task is running. */
+.msg-regenerate-btn {
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 11px;
+  color: #c4b5fd;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.msg-regenerate-btn:hover {
+  background: rgba(124, 58, 237, 0.25);
+  border-color: rgba(167, 139, 250, 0.5);
+  color: #fff;
+}
+
+.msg-regenerate-btn:active {
+  transform: scale(0.96);
+}
+
+/* Epic 1, E1-09 UI: plan-mode toggle next to the composer. */
+.plan-mode-toggle {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  padding: 4px 14px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: #9090a0;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.plan-mode-toggle:hover {
+  color: #fff;
+  border-color: rgba(167, 139, 250, 0.5);
+}
+
+.plan-mode-toggle.active {
+  background: rgba(124, 58, 237, 0.35);
+  border-color: rgba(167, 139, 250, 0.7);
+  color: #fff;
+  box-shadow: 0 0 10px rgba(124, 58, 237, 0.35);
 }
 
 .chat-bubble-agent {

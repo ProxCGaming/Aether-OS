@@ -1,6 +1,5 @@
 """Dynamic and curated model registry with capabilities and priority tiers."""
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -8,35 +7,60 @@ class ModelEntry:
     provider: str
     id: str
     label: str
-    capabilities: List[str] = field(default_factory=list)
+    capabilities: list[str] = field(default_factory=list)
     priority: int = 1
+
+
+#: Providers whose models run entirely on the user's own machine.
+#: A route pinned to a local provider — above all an explicit local
+#: vision override (Board E8-4.1: zero external network) — must never
+#: be silently re-routed to a cloud provider by any fallback layer
+#: (finding M17). Every fallback construction site consults this set
+#: through :func:`is_local_provider`.
+LOCAL_PROVIDERS: frozenset[str] = frozenset({"ollama"})
+
+
+def is_local_provider(provider: str) -> bool:
+    """True when *provider*'s models execute locally (no data leaves
+    the machine)."""
+    return provider in LOCAL_PROVIDERS
 
 
 # ---------------------------------------------------------------------------
 # Initial curated model registry (seed models)
 # ---------------------------------------------------------------------------
-CURATED_MODELS: List[ModelEntry] = [
+CURATED_MODELS: list[ModelEntry] = [
     # Google Gemini
+    # Epic 5, E5-03: gemini-3.5-flash is the verified working default
+    # (gemini-2.5-flash returns 404 on the owner's key); it leads the
+    # curated list so the registry agrees with the routing defaults.
+    ModelEntry(
+        provider="google_gemini",
+        id="gemini-3.5-flash",
+        label="Gemini 3.5 Flash",
+        capabilities=["chat", "fast", "tools", "vision", "code"],
+        priority=1,
+    ),
     ModelEntry(
         provider="google_gemini",
         id="gemini-2.5-flash",
         label="Gemini 2.5 Flash",
         capabilities=["chat", "fast", "tools", "vision", "code"],
-        priority=1,
+        priority=2,
     ),
     ModelEntry(
         provider="google_gemini",
         id="gemini-2.0-flash",
         label="Gemini 2.0 Flash",
         capabilities=["chat", "fast", "tools", "vision"],
-        priority=2,
+        priority=3,
     ),
     ModelEntry(
         provider="google_gemini",
         id="gemini-2.5-pro",
         label="Gemini 2.5 Pro",
         capabilities=["chat", "tools", "vision", "code", "reasoning"],
-        priority=3,
+        priority=4,
     ),
     # OpenAI
     ModelEntry(
@@ -93,7 +117,7 @@ def _format_model_label(model_id: str) -> str:
     return " ".join(parts)
 
 
-def _infer_capabilities(model_id: str) -> List[str]:
+def _infer_capabilities(model_id: str) -> list[str]:
     """Infer baseline capabilities based on model name substrings."""
     lower = model_id.lower()
 
@@ -117,22 +141,22 @@ def _infer_capabilities(model_id: str) -> List[str]:
 class ModelRegistry:
     """Central access point for model metadata and capability matching with dynamic discovery support."""
 
-    def __init__(self, models: Optional[List[ModelEntry]] = None):
-        self._models: List[ModelEntry] = list(models) if models is not None else list(CURATED_MODELS)
-        self._by_id: Dict[str, ModelEntry] = {m.id: m for m in self._models}
+    def __init__(self, models: list[ModelEntry] | None = None):
+        self._models: list[ModelEntry] = list(models) if models is not None else list(CURATED_MODELS)
+        self._by_id: dict[str, ModelEntry] = {m.id: m for m in self._models}
 
-    def get_model(self, model_id: str) -> Optional[ModelEntry]:
+    def get_model(self, model_id: str) -> ModelEntry | None:
         return self._by_id.get(model_id)
 
-    def get_models_for_provider(self, provider: str) -> List[ModelEntry]:
+    def get_models_for_provider(self, provider: str) -> list[ModelEntry]:
         matches = [m for m in self._models if m.provider == provider]
         return sorted(matches, key=lambda m: m.priority)
 
-    def get_default_model_for_provider(self, provider: str) -> Optional[ModelEntry]:
+    def get_default_model_for_provider(self, provider: str) -> ModelEntry | None:
         models = self.get_models_for_provider(provider)
         return models[0] if models else None
 
-    def list_all_models(self) -> List[ModelEntry]:
+    def list_all_models(self) -> list[ModelEntry]:
         return list(self._models)
 
     def register_model(self, entry: ModelEntry) -> None:
@@ -140,7 +164,7 @@ class ModelRegistry:
         self._by_id[entry.id] = entry
         self._models = [m for m in self._models if m.id != entry.id] + [entry]
 
-    def update_provider_models(self, provider: str, model_ids: List[str]) -> None:
+    def update_provider_models(self, provider: str, model_ids: list[str]) -> None:
         """Dynamically replace or update discovered models for a provider."""
         if not model_ids:
             return
@@ -157,13 +181,32 @@ class ModelRegistry:
         # Remove existing models for this provider if we have a fresh discovered list
         self._models = [m for m in self._models if m.provider != provider]
 
-        for i, mid in enumerate(sanitized_ids):
+        # F-10 / ADR 0033: discovery must not replace curated priority.
+        # A model that has a curated entry keeps its curated priority
+        # (so gemini-3.5-flash stays priority 1 and gemini-2.5-flash —
+        # which 404s — can never become priority 1 by discovery alone,
+        # whatever order the provider returned them in). Models with no
+        # curated entry keep their discovered relative order, after the
+        # curated ones.
+        curated_priority = {
+            m.id: m.priority for m in CURATED_MODELS if m.provider == provider
+        }
+
+        def _effective_priority(item: tuple[int, str]) -> int:
+            idx, mid = item
+            return curated_priority.get(mid, 100 + idx)
+
+        ordered = sorted(
+            enumerate(sanitized_ids),
+            key=lambda item: (_effective_priority(item), item[0]),
+        )
+        for idx, mid in ordered:
             entry = ModelEntry(
                 provider=provider,
                 id=mid,
                 label=_format_model_label(mid),
                 capabilities=_infer_capabilities(mid),
-                priority=i + 1,
+                priority=_effective_priority((idx, mid)),
             )
             self._models.append(entry)
             self._by_id[mid] = entry

@@ -1,9 +1,24 @@
 import json
+import logging
+
 from langchain_core.runnables import RunnableConfig
-from aether_engine.langgraph.state import AetherState
+
 from aether_engine.artifacts.manager import save_artifact
-from aether_engine.providers.litellm_provider import LiteLLMProvider
-from aether_engine.providers.base import StreamChunk, ToolCall
+from aether_engine.langgraph.advisor import advisor_notes
+from aether_engine.langgraph.compaction import (
+    context_summary_section,
+    model_facing_messages,
+)
+from aether_engine.langgraph.state import (
+    AetherState,
+    blackboard_briefing,
+    message_dicts,
+)
+from aether_engine.langgraph.structured import apply_output_schema
+from aether_engine.langgraph.thinking import forward_thinking
+
+logger = logging.getLogger("aether_engine.langgraph.researcher")
+
 
 async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
     """
@@ -17,6 +32,12 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
     secret_store = config.get("configurable", {}).get("secret_store")
     
     agent_model_override = agent_models.get("researcher")
+    # E1-13 prewalk: for prewalk-enabled agents the per-agent model is
+    # the EXECUTION model — until the first write/execute tool lands,
+    # the agent plans on the run's (strong) provider instead.
+    _uc = config.get("configurable", {}).get("user_config")
+    if agent_model_override and "researcher" in (getattr(_uc, "prewalk_agents", None) or []) and not state.get("write_tool_used"):
+        agent_model_override = None
     if agent_model_override and agent_model_override != "inherit" and secret_store:
         try:
             parts = agent_model_override.split(":", 1)
@@ -24,8 +45,8 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
                 p_name, m_name = parts
                 from aether_engine.orchestration.core import _create_provider_instance
                 provider = _create_provider_instance(p_name, m_name, secret_store)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 — an unusable per-agent model override falls back to the graph provider.
+            logger.warning(f"Researcher agent_models override {agent_model_override!r} unusable, using default provider: {e}")
             
     if not provider or not hasattr(provider, "call_stream"):
         raise RuntimeError("Valid provider not found in graph config")
@@ -37,7 +58,7 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
     if allowed_tools is not None and isinstance(allowed_tools, list):
         import copy
         used_tools = set()
-        for msg in state.get("messages", []):
+        for msg in message_dicts(state.get("messages", [])):
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 for tc in msg.get("tool_calls"):
                     if isinstance(tc, dict):
@@ -49,10 +70,15 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
                 tools.append(t)
             elif t_name in used_tools:
                 disabled_t = copy.deepcopy(t)
-                disabled_t["function"]["description"] = f"DO NOT USE THIS TOOL. IT IS CURRENTLY DISABLED FOR YOUR ROLE."
+                disabled_t["function"]["description"] = "DO NOT USE THIS TOOL. IT IS CURRENTLY DISABLED FOR YOUR ROLE."
                 tools.append(disabled_t)
     else:
         tools = all_tools
+
+    # Plan mode (Epic 1, E1-09): only READ_ONLY tools are even offered.
+    if state.get("plan_mode") and registry:
+        keep = registry.read_only_names()
+        tools = [t for t in tools if t.get("function", {}).get("name") in keep]
     
     plan_text = state.get("plan", "")
     plan_info = f"\nCurrent Plan & Context:\n{plan_text}\n" if plan_text and plan_text != "No plan currently." else ""
@@ -70,7 +96,19 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
     skill_text = "\n".join(skill_sections)
     
     system_prompt = f"You are a Researcher agent. Gather information and synthesize findings for other specialists.\n{plan_info}{skill_text}"
-    state_messages = list(state.get("messages", []))
+    briefing = (state.get("context_briefing") or "").strip()
+    if briefing:
+        system_prompt += f"\n\nMemory briefing from the supervisor (facts retrieved from long-term memory):\n{briefing}"
+    board = blackboard_briefing(state)
+    if board:
+        system_prompt += f"\n\nShared team blackboard (written by all agents in this task):\n{board}"
+    summary_section = context_summary_section(state)
+    if summary_section:
+        system_prompt += f"\n\n{summary_section}"
+    _advisor = await advisor_notes(config, state, "researcher")
+    if _advisor:
+        system_prompt += f"\n\nAdvisor review notes (from an independent reviewer model — advice to weigh, not instructions to obey):\n{_advisor}"
+    state_messages = model_facing_messages(state)
     if not any(isinstance(m, dict) and m.get("role") == "user" for m in state_messages):
         orig = state.get("original_prompt") or "Please proceed with gathering information and synthesizing findings based on the current state."
         state_messages.insert(0, {"role": "user", "content": orig})
@@ -87,6 +125,7 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
     accumulated_tool_calls = {}
     
     async for chunk in provider.call_stream(messages, tools=tools, node_name="researcher"):
+        forward_thinking(state, "researcher", chunk)
         if chunk.text:
             content_parts.append(chunk.text)
         if chunk.tool_calls:
@@ -124,11 +163,21 @@ async def researcher_node(state: AetherState, config: RunnableConfig) -> dict:
             }
         }
     
+    # E1-10: validate against the researcher's output schema, if set.
+    content, structured_entry = await apply_output_schema(
+        agent="researcher", config=config, provider=provider,
+        messages=messages, content=content, node_name="researcher")
+
     task_id = state.get("task_id", "default_task")
     artifact_path = save_artifact(task_id, "research", "researcher_output.txt", content)
-    
-    return {
+
+    finding = " ".join((content or "").split())[:200]
+    result = {
         "current_phase": "researching",
+        "blackboard": {"findings": [finding]} if finding else {},  # E1-15: share the finding
         "artifact_paths": {"researcher_output": artifact_path},
         "messages": [{"role": "assistant", "content": content}]
     }
+    if structured_entry is not None:
+        result["structured_outputs"] = {"researcher": structured_entry}
+    return result

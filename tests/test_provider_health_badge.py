@@ -1,10 +1,13 @@
 """Unit and integration tests for ProviderHealthBadge and HUD health transitions."""
 import pytest
+
+pytest.importorskip("PySide6", reason="PySide6 not installed (legacy-ui extra, F-16)")
+
 from PySide6.QtWidgets import QApplication
 
 from aether_common.contracts import Event, EventType
-from aether_engine.routing.health import ProviderHealthManager, ProviderHealthState
-from aether_ui.hud import HudWidget, _format_provider_name
+from aether_engine.routing.health import ProviderHealthManager
+from aether_ui.hud import HudWidget
 from aether_ui.state import UIStateMachine
 from aether_ui.widgets.provider_health_badge import ProviderHealthBadge
 

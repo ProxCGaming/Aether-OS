@@ -2,9 +2,10 @@
 import asyncio
 import inspect
 import logging
-from pathlib import Path
-from typing import Callable, Optional
 import uuid
+from collections.abc import Callable
+from pathlib import Path
+
 import websockets
 
 from aether_common.auth import DEFAULT_TOKEN_PATH, read_token
@@ -22,7 +23,7 @@ def _ws_header_kwarg(headers: dict) -> dict:
             return {"additional_headers": headers}
         if "extra_headers" in params:
             return {"extra_headers": headers}
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 — legacy client: header probing is best-effort
         pass
     return {}
 
@@ -33,7 +34,7 @@ class AetherWSClient:
         state_machine: UIStateMachine,
         server_uri: str = "ws://127.0.0.1:8000/ws/tasks",
         token_path: Path = DEFAULT_TOKEN_PATH,
-        on_event: Optional[Callable[[Event], None]] = None,
+        on_event: Callable[[Event], None] | None = None,
     ):
         self.sm = state_machine
         self.uri = server_uri
@@ -41,7 +42,7 @@ class AetherWSClient:
         self.on_event = on_event
         self.ws = None
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
 
     async def connect_and_listen(self):
         self._running = True
@@ -56,10 +57,13 @@ class AetherWSClient:
                     await asyncio.sleep(1.0)
                     continue
 
-                url = f"{self.uri}?token={token}"
+                # Header only: a token in the URL query string leaks
+                # into logs and history. The engine accepts the
+                # Authorization header, and the live Electron client
+                # authenticates the same way (ADR 0024).
                 kwargs = _ws_header_kwarg({"Authorization": f"Bearer {token}"})
 
-                async with websockets.connect(url, **kwargs) as ws:
+                async with websockets.connect(self.uri, **kwargs) as ws:
                     self.ws = ws
                     logger.info("Connected to AETHER Engine.")
                     # Automatically request initial provider & model list upon connection
@@ -71,7 +75,7 @@ class AetherWSClient:
                             self.sm.transition_on_event(ev)
                             if self.on_event:
                                 self.on_event(ev)
-                        except Exception as e:
+                        except Exception as e:  # noqa: BLE001 — legacy client: a bad frame must not kill the receive loop
                             logger.error(f"Parse error: {e}")
 
             except (websockets.ConnectionClosed, ConnectionRefusedError, OSError) as e:
@@ -80,7 +84,7 @@ class AetherWSClient:
                 self.ws = None
                 if self._running:
                     await asyncio.sleep(1.5)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — legacy client error boundary
                 logger.error(f"WS client error: {e}")
                 self.sm.set_error(str(e))
                 self.ws = None
@@ -99,8 +103,8 @@ class AetherWSClient:
         self,
         prompt: str = "Say hello",
         model: str = "gemini-2.0-flash",
-        session_id: Optional[str] = None,
-        request_id: Optional[str] = None,
+        session_id: str | None = None,
+        request_id: str | None = None,
     ):
         self.sm.clear_error()
         req_id = request_id or str(uuid.uuid4())
@@ -116,14 +120,14 @@ class AetherWSClient:
             )
         )
 
-    async def cancel_task(self, request_id: Optional[str] = None):
+    async def cancel_task(self, request_id: str | None = None):
         await self._send(Event(
             type=EventType.CANCEL_TASK,
             request_id=request_id or str(uuid.uuid4()),
         ))
 
     # Provider management & health helpers
-    async def request_provider_list(self, request_id: Optional[str] = None):
+    async def request_provider_list(self, request_id: str | None = None):
         await self._send(Event(
             type=EventType.PROVIDER_LIST_REQUEST,
             request_id=request_id or str(uuid.uuid4()),
@@ -133,8 +137,8 @@ class AetherWSClient:
         self,
         provider: str,
         api_key: str,
-        base_url: Optional[str] = None,
-        request_id: Optional[str] = None,
+        base_url: str | None = None,
+        request_id: str | None = None,
     ):
         payload = {"provider": provider, "api_key": api_key}
         if base_url:
@@ -147,8 +151,8 @@ class AetherWSClient:
 
     async def save_provider(
         self, provider: str, api_key: str, is_default: bool, default_model: str,
-        base_url: Optional[str] = None, display_name: Optional[str] = None, provider_type: Optional[str] = None,
-        models: Optional[list] = None, request_id: Optional[str] = None,
+        base_url: str | None = None, display_name: str | None = None, provider_type: str | None = None,
+        models: list | None = None, request_id: str | None = None,
     ):
         payload = {
             "provider": provider,
@@ -170,21 +174,21 @@ class AetherWSClient:
             payload=payload,
         ))
 
-    async def remove_provider(self, provider: str, request_id: Optional[str] = None):
+    async def remove_provider(self, provider: str, request_id: str | None = None):
         await self._send(Event(
             type=EventType.PROVIDER_REMOVE_REQUEST,
             request_id=request_id or str(uuid.uuid4()),
             payload={"provider": provider},
         ))
 
-    async def reveal_provider_key(self, provider: str, request_id: Optional[str] = None):
+    async def reveal_provider_key(self, provider: str, request_id: str | None = None):
         await self._send(Event(
             type=EventType.PROVIDER_REVEAL_KEY_REQUEST,
             request_id=request_id or str(uuid.uuid4()),
             payload={"provider": provider},
         ))
 
-    async def set_default_model(self, provider: str, model: str, request_id: Optional[str] = None):
+    async def set_default_model(self, provider: str, model: str, request_id: str | None = None):
         await self._send(Event(
             type=EventType.MODEL_SET_DEFAULT,
             request_id=request_id or str(uuid.uuid4()),
@@ -192,20 +196,20 @@ class AetherWSClient:
         ))
 
     # Local Models (Ollama) helpers
-    async def request_local_models_list(self, request_id: Optional[str] = None):
+    async def request_local_models_list(self, request_id: str | None = None):
         await self._send(Event(
             type=EventType.LOCAL_MODEL_LIST_REQUEST,
             request_id=request_id or str(uuid.uuid4()),
         ))
 
-    async def start_local_model_download(self, model: str, destination_dir: Optional[str] = None, request_id: Optional[str] = None):
+    async def start_local_model_download(self, model: str, destination_dir: str | None = None, request_id: str | None = None):
         await self._send(Event(
             type=EventType.LOCAL_MODEL_DOWNLOAD_START,
             request_id=request_id or str(uuid.uuid4()),
             payload={"model": model, "destination_dir": destination_dir},
         ))
 
-    async def delete_local_model(self, model: str, request_id: Optional[str] = None):
+    async def delete_local_model(self, model: str, request_id: str | None = None):
         await self._send(Event(
             type=EventType.LOCAL_MODEL_DELETE_REQUEST,
             request_id=request_id or str(uuid.uuid4()),
@@ -213,14 +217,14 @@ class AetherWSClient:
         ))
 
     # Capabilities Check Scheduler helpers
-    async def set_capability_schedule(self, schedule: str, method: str, request_id: Optional[str] = None):
+    async def set_capability_schedule(self, schedule: str, method: str, request_id: str | None = None):
         await self._send(Event(
             type=EventType.CAPABILITY_CHECK_SET_SCHEDULE,
             request_id=request_id or str(uuid.uuid4()),
             payload={"schedule": schedule, "method": method},
         ))
 
-    async def run_capability_check_now(self, method: Optional[str] = None, request_id: Optional[str] = None):
+    async def run_capability_check_now(self, method: str | None = None, request_id: str | None = None):
         await self._send(Event(
             type=EventType.CAPABILITY_CHECK_RUN_NOW,
             request_id=request_id or str(uuid.uuid4()),
@@ -229,10 +233,10 @@ class AetherWSClient:
 
     async def refresh_models(
         self, 
-        provider: Optional[str] = None, 
-        api_key: Optional[str] = None, 
-        base_url: Optional[str] = None, 
-        request_id: Optional[str] = None
+        provider: str | None = None, 
+        api_key: str | None = None, 
+        base_url: str | None = None, 
+        request_id: str | None = None
     ):
         payload = {"provider": provider} if provider else {}
         if api_key:
@@ -246,41 +250,41 @@ class AetherWSClient:
             payload=payload,
         ))
 
-    async def request_capability_history(self, request_id: Optional[str] = None):
+    async def request_capability_history(self, request_id: str | None = None):
         await self._send(Event(
             type=EventType.CAPABILITY_CHECK_GET_HISTORY,
             request_id=request_id or str(uuid.uuid4()),
         ))
 
     # Session System helpers
-    async def fetch_sessions(self, request_id: Optional[str] = None):
+    async def fetch_sessions(self, request_id: str | None = None):
         await self._send(Event(
             type=EventType.SESSION_LIST_REQUEST,
             request_id=request_id or str(uuid.uuid4()),
         ))
 
-    async def get_session(self, session_id: str, request_id: Optional[str] = None):
+    async def get_session(self, session_id: str, request_id: str | None = None):
         await self._send(Event(
             type=EventType.SESSION_GET_REQUEST,
             request_id=request_id or str(uuid.uuid4()),
             payload={"session_id": session_id}
         ))
 
-    async def create_session(self, title: str = "New Chat", request_id: Optional[str] = None):
+    async def create_session(self, title: str = "New Chat", request_id: str | None = None):
         await self._send(Event(
             type=EventType.SESSION_CREATE_REQUEST,
             request_id=request_id or str(uuid.uuid4()),
             payload={"title": title}
         ))
 
-    async def delete_session(self, session_id: str, request_id: Optional[str] = None):
+    async def delete_session(self, session_id: str, request_id: str | None = None):
         await self._send(Event(
             type=EventType.SESSION_DELETE_REQUEST,
             request_id=request_id or str(uuid.uuid4()),
             payload={"session_id": session_id}
         ))
 
-    async def send_approval(self, granted: bool, approval_key: Optional[str] = None, request_id: Optional[str] = None, override_class: Optional[str] = None):
+    async def send_approval(self, granted: bool, approval_key: str | None = None, request_id: str | None = None, override_class: str | None = None):
         payload = {}
         if approval_key:
             payload["approval_key"] = approval_key

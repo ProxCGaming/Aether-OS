@@ -1,18 +1,19 @@
 import json
 from pathlib import Path
+
 from pydantic import BaseModel, Field
-from typing import List, Optional
+
 
 class SkillTrigger(BaseModel):
-    description_embedding: Optional[List[float]] = None
-    keywords: List[str] = Field(default_factory=list)
-    slash_commands: List[str] = Field(default_factory=list)
+    description_embedding: list[float] | None = None
+    keywords: list[str] = Field(default_factory=list)
+    slash_commands: list[str] = Field(default_factory=list)
     auto_match: bool = True
 
 class SkillRequirements(BaseModel):
-    tools: List[str] = Field(default_factory=list)
-    agents: List[str] = Field(default_factory=list)
-    capabilities: List[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    agents: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
 
 class SkillInjection(BaseModel):
     mode: str = "system_prompt_append"
@@ -22,7 +23,7 @@ class SkillInjection(BaseModel):
 class SkillSource(BaseModel):
     type: str = "local"
     origin: str = "builtin"
-    installed_at: Optional[str] = None
+    installed_at: str | None = None
 
 class SkillManifest(BaseModel):
     name: str

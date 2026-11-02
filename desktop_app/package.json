@@ -1,12 +1,13 @@
 {
   "name": "desktop_app",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.3.5",
   "type": "module",
   "main": "main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "dist": "npm run build && electron-builder",
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "jest",
@@ -15,6 +16,7 @@
   "dependencies": {
     "framer-motion": "^13.4.0",
     "lucide-react": "^1.47.0",
+    "mermaid": "^12.2.0",
     "node-addon-api": "^8.9.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -45,5 +47,28 @@
     "oxlint": "^1.81.0",
     "vite": "^8.3.0",
     "wait-on": "^9.1.0"
+  },
+  "build": {
+    "appId": "com.aether-os.desktop",
+    "productName": "Aether-OS",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "dist/**/*",
+      "main.cjs",
+      "preload.cjs",
+      "package.json",
+      "electron/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Aether-OS"
+    }
   }
 }

@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 _DEFAULT_ARTIFACTS_DIR = Path.home() / ".aether" / "artifacts"
