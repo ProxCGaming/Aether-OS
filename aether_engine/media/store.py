@@ -549,6 +549,13 @@ class MediaStore:
         search. Returned dicts are full media items plus ``score``.
         With no query vector the lexical leg alone answers, which is
         how recall degrades while the embedding endpoint is down.
+
+        Known limit (S4-N2): both legs scan in memory — the candidate
+        list is loaded whole (``list_media(limit=None)``) and every
+        stored embedding is decoded per query. That is fine at a
+        personal library's scale (hundreds to a few thousand items);
+        a much larger library would need the lexical leg pushed into
+        SQL/FTS and an indexed vector lookup instead.
         """
         self.init_db()
         limit = max(1, int(limit or 10))
