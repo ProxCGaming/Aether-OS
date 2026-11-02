@@ -31,7 +31,7 @@ from contextlib import AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import httpx
 from mcp import ClientSession
@@ -88,8 +88,10 @@ MCP_STDIO_ENV_ALLOWLIST = frozenset(
         "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
         "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
         "VIRTUAL_ENV", "PYTHONPATH", "SHELL", "TERM", "OS",
-        # Proxy / CA-bundle config (no credentials, just endpoints and
-        # file paths). npx/npm resolve packages through the registry
+        # Proxy / CA-bundle config — endpoints and file paths. (A
+        # proxy URL can embed credentials as userinfo; those are
+        # stripped where the child env is built — S2-N2.) npx/npm
+        # resolve packages through the registry
         # even when cached: without these, a stdio server started via
         # npx hangs on registry access instead of starting (verified:
         # filesystem server answers in ~1s with them, never without).
@@ -100,6 +102,32 @@ MCP_STDIO_ENV_ALLOWLIST = frozenset(
         "GIT_SSL_CAINFO",
     }
 )
+
+_PROXY_ENV_KEYS = frozenset(
+    {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"}
+)
+
+
+def _strip_url_userinfo(value: str) -> str:
+    """Remove any userinfo (``user:password@``) from a URL value.
+
+    S2-N2: proxy variables pass to untrusted stdio children, and a
+    proxy URL is a normal place for embedded credentials
+    (``http://user:pass@host:port``). The child needs the endpoint,
+    never the credential. Values without userinfo — and non-URL
+    values — pass through untouched.
+    """
+    if "://" not in value:
+        return value
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return value
+    if "@" not in parts.netloc:
+        return value
+    netloc = parts.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
 
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -496,6 +524,11 @@ class MCPClientManager:
                 for k, v in (config.get("env") or {}).items()
             }
         )
+        # S2-N2: proxy values (from the host env or the server config)
+        # reach an untrusted child — strip any embedded userinfo.
+        for key in _PROXY_ENV_KEYS:
+            if key in env:
+                env[key] = _strip_url_userinfo(env[key])
         cpu_cap, memory_cap = _stdio_resource_caps(config)
         params = StdioServerParameters(
             command=sys.executable,
