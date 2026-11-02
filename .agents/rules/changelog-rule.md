@@ -11,3 +11,4 @@ Follow these strict requirements for every change:
    - `- [YYYY-MM-DD HH:MM] Changed: [Description]` (for refactors/modifications)
 4. Execute this update immediately alongside your code changes, without asking for permission or a secondary prompt.
 5. If you are creating a git commit, ensure the `CHANGELOG.md` file is staged and included in the exact same commit.
+6. Write in a plain register, in the changelog and in `PRODUCT.md` alike: state what changed and how it is observable. No exclamation marks, and no superlatives or marketing adjectives (e.g. "premium", "impeccable", "next-generation").
