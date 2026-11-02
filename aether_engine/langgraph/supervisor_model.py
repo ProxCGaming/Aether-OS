@@ -59,6 +59,7 @@ from aether_engine.langgraph.nodes.supervisor import (
     repo_map_context,
 )
 from aether_engine.langgraph.state import blackboard_briefing, message_dicts
+from aether_engine.providers.base import ProviderError
 from aether_engine.tools.policy import resolve_policy_by_name
 
 logger = logging.getLogger("aether_engine.langgraph.supervisor_model")
@@ -322,7 +323,15 @@ class AetherSupervisorModel(BaseChatModel):
             logger.warning(f"Supervisor adapter call with tools failed: {e}; falling back to text prompt")
             try:
                 content, tool_calls = await self._call_provider(provider, dict_messages, None)
-            except Exception as retry_error:  # noqa: BLE001 — S1-N5: the tool-less retry was unguarded — a provider down on both attempts escaped as a raw exception and killed the routing step. Degrade to an end result instead.
+            except ProviderError:
+                # Typed provider failures are the graph/pump's
+                # signal, not a routing outcome (F09: TASK_FAILED
+                # carries the retriable classification the task-level
+                # fallback reads). Degrading one to an END would
+                # report a task that never ran as completed — let it
+                # propagate.
+                raise
+            except Exception as retry_error:  # noqa: BLE001 — S1-N5: the tool-less retry was unguarded — an unexpected failure on both attempts escaped raw and killed the routing step. Degrade to an end result instead.
                 logger.warning(f"Supervisor adapter text fallback also failed: {retry_error}")
                 return _end_result(f"Supervisor model call failed: {retry_error}")
 

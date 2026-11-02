@@ -145,3 +145,32 @@ async def test_supervisor_provider_down_on_both_attempts_ends_task():
     assert provider.calls == 2  # with-tools attempt + tool-less retry
     assert "failed" in str(message.content)
     assert message.additional_kwargs["aether_decision"]["next"] == "END"
+
+
+
+from aether_engine.providers.base import RateLimitError
+
+
+class RateLimitedProvider:
+    """Provider failing with a typed provider error on every call."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def call_stream(self, messages, tools=None, node_name=None, **kwargs):
+        self.calls += 1
+        raise RateLimitError("slow down")
+        yield  # pragma: no cover — makes this an async generator
+
+
+@pytest.mark.asyncio
+async def test_supervisor_typed_provider_error_propagates():
+    """S1-N5/F09 reconciliation: a typed provider failure (the
+    providers.base taxonomy) on both attempts must NOT degrade to an
+    end result — it propagates so the graph fails the task and the
+    pump can read the retriable classification (F09). Only
+    unexpected, non-provider failures degrade (previous test)."""
+    provider = RateLimitedProvider()
+    with pytest.raises(RateLimitError):
+        await _generate(provider=provider)
+    assert provider.calls == 2
