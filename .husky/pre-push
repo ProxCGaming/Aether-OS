@@ -19,7 +19,7 @@
 #     The hook therefore parses pytest's output and deliberately ignores
 #     its exit code. If no test summary is found at all, the push is
 #     blocked (fail closed): an unreadable result is never a pass.
-# Jest is 30/30 green, so it is a straight pass/fail gate on exit code.
+# Jest is green, so it is a straight pass/fail gate on exit code.
 # Either suite failing blocks the push, and the hook prints which one.
 #
 # uv is resolved PATH-first, then $HOME/.local/bin/uv — a non-login

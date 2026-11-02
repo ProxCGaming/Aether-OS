@@ -84,3 +84,14 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+
+# Ruff (S5-N5): the lint gate (scripts/run-ruff.sh, via lint-staged)
+# previously ran on ambient defaults alone — nothing in the repo said
+# which Python or line length the linter should assume. The values
+# the gate has always effectively used are declared here; the rule
+# selection itself is intentionally left to the defaults, so this
+# section changes no lint outcome (verified: identical full-tree
+# output before and after).
+[tool.ruff]
+target-version = "py312"
+line-length = 88
