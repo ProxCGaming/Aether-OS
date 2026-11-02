@@ -53,6 +53,9 @@ exported_keys.json
 node_modules/
 dist/
 dist-electron/
+# E10-F06: the assembled bundled-engine payload is a build artifact
+# (scripts/assemble_engine_payload.py), never committed.
+engine-payload/
 build/
 .venv-phase9/
 !desktop_app/build/

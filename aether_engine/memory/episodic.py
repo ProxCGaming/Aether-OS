@@ -132,6 +132,9 @@ def init_episodic_db() -> None:
     # Phase 10.3 A2: collapse any duplicate FTS rows left by the old
     # plain-INSERT store_episode (once per process per DB file).
     _ensure_episodic_deduped()
+    # E4-F04: drop embedding rows whose episode is gone (split-delete
+    # residue) once per process per DB pair.
+    _ensure_episodic_reconciled()
 
 def init_embeddings_db() -> None:
     with _get_conn(EMBEDDINGS_DB_PATH) as conn:
@@ -177,6 +180,81 @@ def _store_embedding_row(task_id: str, embedding: list[float]) -> None:
              resolve_embedder(), len(embedding)),
         )
         conn.commit()
+
+def _episodic_db_file() -> str:
+    """The file the episodic store's own connections actually serve.
+
+    Resolved through ``_get_conn`` rather than read off the
+    ``DB_PATH`` constant: embedders of this module (and several test
+    suites) redirect connections, not constants, and the E4-F03
+    fence must guard the store the writers are really using.
+    """
+    with _get_conn() as conn:
+        for row in conn.execute("PRAGMA database_list"):
+            if row[1] == "main" and row[2]:
+                return str(row[2])
+    return str(DB_PATH)
+
+def _embeddings_db_file() -> str:
+    """The file the embeddings store's own connections actually
+    serve — the mirror of :func:`_episodic_db_file`, for the
+    cross-database delete/reconcile paths (E4-F04)."""
+    with _get_conn(EMBEDDINGS_DB_PATH) as conn:
+        for row in conn.execute("PRAGMA database_list"):
+            if row[1] == "main" and row[2]:
+                return str(row[2])
+    return str(EMBEDDINGS_DB_PATH)
+
+def _delete_embedding_row(task_id: str) -> None:
+    """Drop any embedding row for ``task_id`` (mark it unembedded)."""
+    with _get_conn(EMBEDDINGS_DB_PATH) as conn:
+        conn.execute(
+            "DELETE FROM episodic_embeddings WHERE task_id = ?",
+            (task_id,),
+        )
+        conn.commit()
+
+def _store_embedding_row_if_current(task_id: str, embedding: list[float],
+                                    expected_summary: str) -> bool:
+    """Fenced embedding write (E4-F03): store ``embedding`` for
+    ``task_id`` only if the episode still exists AND its stored
+    ``task_summary`` is still exactly ``expected_summary`` — the text
+    that was embedded.
+
+    Embedding is awaited, so between reading a summary and writing
+    its vector the episode can be revised (a newer store has already
+    written its own vector — this one is stale) or deleted (this one
+    would resurrect as an orphan row). The existence + currency
+    check and the write are a SINGLE SQL statement — the embeddings
+    connection ATTACHes the episodic store, so the ``WHERE EXISTS``
+    guard and the ``INSERT`` commit atomically with respect to every
+    other writer, coroutine or thread; there is no check-then-write
+    window. The currency signal is the summary text itself: a vector
+    is a pure function of (summary, embedder), so an unchanged
+    summary makes this vector correct whatever else about the row
+    changed, and a changed summary makes it stale whatever else
+    stayed the same. (The schema carries no revision counter, and
+    the store timestamp has one-second resolution — two revisions
+    inside one second would be indistinguishable by it.)
+
+    Callers must have initialised both stores (both existing callers
+    do). Returns True when the row was written.
+    """
+    with _get_conn(EMBEDDINGS_DB_PATH) as conn:
+        conn.execute("ATTACH DATABASE ? AS episodic_mem",
+                     (_episodic_db_file(),))
+        cur = conn.execute(
+            "INSERT OR REPLACE INTO episodic_embeddings"
+            " (task_id, embedding, model, dimension)"
+            " SELECT ?, ?, ?, ? WHERE EXISTS ("
+            " SELECT 1 FROM episodic_mem.episodic_memory"
+            " WHERE task_id = ? AND task_summary IS ?)",
+            (task_id, encode_embedding(embedding),
+             resolve_embedder(), len(embedding),
+             task_id, expected_summary),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def reset_episodic_embeddings_for_embedder(embedder: str) -> dict[str, Any]:
@@ -452,20 +530,29 @@ async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags:
         conn.commit()
     
     # Generate and store embedding
-    embedding = await _embed_text(task_summary, task_id=task_id)
+    try:
+        embedding = await _embed_text(task_summary, task_id=task_id)
+    except asyncio.CancelledError:
+        # E4-F03: a cancelled embed must leave the same truthful state
+        # as a failed one. Without this, the previous revision's
+        # vector stays attached to the new text — the episode remains
+        # semantically recallable for the OLD summary and reads as
+        # embedded to embedding_stats/backfill, so it is never
+        # rebuilt. Drop the stale row exactly as the failure branch
+        # below does, then let the cancellation propagate.
+        _delete_embedding_row(task_id)
+        raise
     if embedding:
-        _store_embedding_row(task_id, embedding)
+        # E4-F03 fence: a revision or delete may have landed while
+        # the embed was awaited; write only if this episode is still
+        # the revision that was embedded.
+        _store_embedding_row_if_current(task_id, embedding, task_summary)
     else:
         # Embedding failed (already logged distinctly by _embed_text).
         # Make "unembedded" explicit: drop any stale row for this task so
         # absence from episodic_embeddings is a truthful marker, and the
         # EPISODIC_MEMORY_STORED audit below records embedded=False.
-        with _get_conn(EMBEDDINGS_DB_PATH) as conn:
-            conn.execute(
-                "DELETE FROM episodic_embeddings WHERE task_id = ?",
-                (task_id,)
-            )
-            conn.commit()
+        _delete_embedding_row(task_id)
 
     _audit_logger.log_event("EPISODIC_MEMORY_STORED", {
         "task_id": task_id,
@@ -688,8 +775,11 @@ async def backfill_episodic_embeddings(limit: int | None = None,
     — the same text ``store_episode`` embeds. A failed embed is already
     logged distinctly by ``_embed_text``; the episode simply stays
     unembedded and is retried on the next backfill. Episodes with an
-    empty summary are skipped (nothing to embed). Returns counts and
-    logs them (EPISODIC_EMBEDDINGS_BACKFILLED).
+    empty summary are skipped (nothing to embed). Writes are fenced
+    (E4-F03): an episode revised or deleted while its embed was in
+    flight is counted under ``fenced`` and its stale vector is never
+    written. Returns counts and logs them
+    (EPISODIC_EMBEDDINGS_BACKFILLED).
     """
     init_episodic_db()
     init_embeddings_db()
@@ -718,19 +808,30 @@ async def backfill_episodic_embeddings(limit: int | None = None,
         missing = missing[:limit]
 
     backfilled = 0
+    fenced = 0
     failed_ids: list[str] = []
     for r in missing:
         embedding = await _embed_text(
             r["task_summary"], task_id=r["task_id"], context="backfill"
         )
         if embedding:
-            _store_embedding_row(r["task_id"], embedding)
-            backfilled += 1
+            # E4-F03 fence: the snapshot above is only a read; the
+            # episode may have been revised (its own store wrote a
+            # newer vector) or deleted while this embed was awaited.
+            # Write only if the episode still exists with exactly
+            # the snapshotted summary — otherwise this vector is
+            # already stale, or an orphan for a deleted episode.
+            if _store_embedding_row_if_current(
+                    r["task_id"], embedding, r["task_summary"]):
+                backfilled += 1
+            else:
+                fenced += 1
         else:
             failed_ids.append(r["task_id"])
 
     result: dict[str, Any] = {
         "backfilled": backfilled,
+        "fenced": fenced,
         "failed": len(failed_ids),
         "failed_task_ids": failed_ids,
         "skipped_empty": skipped_empty,
@@ -752,31 +853,175 @@ def get_all_episodes(limit: int = 50) -> list[dict[str, Any]]:
         """, (limit,))
         return [dict(row) for row in cur.fetchall()]
 
+# ---------------------------------------------------------------------------
+# E4-F04: episode deletion spans two databases (episodes + thinking in
+# memory.db, vectors in embeddings.db) and must land — or not land —
+# as one unit. The old code committed memory.db first and embeddings.db
+# second as independent transactions: a failure at the second commit
+# left the episode gone and its vector orphaned (stats 0 / 1 / -1),
+# with no way to roll the first commit back. All three delete paths
+# (single, clear-all, prune) now funnel through
+# ``_delete_episode_data``, which runs every delete on ONE connection
+# with the embeddings file ATTACHed — the same cross-database
+# mechanism the E4-F03 fence uses — under a single transaction with a
+# single commit. A failure at any statement reaches the connection's
+# rollback and undoes BOTH sides.
+#
+# Crash honesty: with rollback-journal files that single commit is
+# also atomic across the two files (SQLite's master-journal commit).
+# memory.db, however, is shared with the knowledge-graph and session
+# stores, which put it in WAL mode, and SQLite does not guarantee
+# cross-file atomicity for a transaction spanning a WAL database if
+# the process dies DURING the commit. A kill before the commit is
+# still fully safe (uncommitted work is never visible, in any journal
+# mode). The only residue a mid-commit WAL split could leave is an
+# orphan vector — never a missing one, which is the store's ordinary
+# "unembedded" state that backfill rebuilds — and
+# ``_ensure_episodic_reconciled`` removes exactly those orphans at
+# init, which also heals splits the pre-fix two-commit code may have
+# left on existing disks.
+# ---------------------------------------------------------------------------
+
+def _delete_episode_data(task_ids: list[str] | None) -> dict[str, int]:
+    """Delete episode rows from BOTH stores in one transaction.
+
+    ``task_ids=None`` deletes every episode (clear-all). Returns row
+    counts per table. See the E4-F04 note above for the atomicity
+    argument and its one bounded residual.
+    """
+    counts = {"episodes": 0, "thinking_rows": 0, "embedding_rows": 0}
+    if task_ids is not None and not task_ids:
+        return counts
+    emb_file = _embeddings_db_file()
+    attached = emb_file != _episodic_db_file()
+    emb = "episodic_emb." if attached else ""
+    with _get_conn() as conn:
+        if attached:
+            conn.execute("ATTACH DATABASE ? AS episodic_emb", (emb_file,))
+        cur = conn.cursor()
+        if task_ids is None:
+            counts["episodes"] = cur.execute(
+                "DELETE FROM episodic_memory").rowcount
+            counts["thinking_rows"] = cur.execute(
+                "DELETE FROM episodic_thinking").rowcount
+            counts["embedding_rows"] = cur.execute(
+                f"DELETE FROM {emb}episodic_embeddings").rowcount
+        else:
+            params = [(t,) for t in task_ids]
+            counts["episodes"] = cur.executemany(
+                "DELETE FROM episodic_memory WHERE task_id = ?",
+                params).rowcount
+            counts["thinking_rows"] = cur.executemany(
+                "DELETE FROM episodic_thinking WHERE task_id = ?",
+                params).rowcount
+            counts["embedding_rows"] = cur.executemany(
+                f"DELETE FROM {emb}episodic_embeddings WHERE task_id = ?",
+                params).rowcount
+        conn.commit()
+    return counts
+
+
 def delete_episode(task_id: str) -> bool:
     init_episodic_db()
     init_embeddings_db()
-    with _get_conn() as conn:
-        conn.execute("DELETE FROM episodic_memory WHERE task_id = ?", (task_id,))
-        conn.execute("DELETE FROM episodic_thinking WHERE task_id = ?", (task_id,))
-        conn.commit()
-    with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
-        e_conn.execute("DELETE FROM episodic_embeddings WHERE task_id = ?", (task_id,))
-        e_conn.commit()
+    _delete_episode_data([task_id])
     _audit_logger.log_event("EPISODIC_MEMORY_DELETED", {"task_id": task_id})
     return True
 
 def clear_all_episodes() -> bool:
     init_episodic_db()
     init_embeddings_db()
-    with _get_conn() as conn:
-        conn.execute("DELETE FROM episodic_memory")
-        conn.execute("DELETE FROM episodic_thinking")
-        conn.commit()
-    with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
-        e_conn.execute("DELETE FROM episodic_embeddings")
-        e_conn.commit()
+    _delete_episode_data(None)
     _audit_logger.log_event("EPISODIC_MEMORY_CLEARED_ALL", {})
     return True
+
+# (mem_file, emb_file) pairs the orphan reconciliation has already
+# run for in this process — the same once-per-process-per-DB guard
+# shape as _DEDUPED_DB_PATHS.
+_RECONCILED_DB_PAIRS: set = set()
+
+
+def _sweep_orphan_embeddings() -> list[str]:
+    """Delete embedding rows whose episode no longer exists.
+
+    An embedding row is legitimate only alongside its episode row:
+    every writer commits the episode first (store) or fences on its
+    existence (backfill, E4-F03), so a vector without an episode is
+    residue — of the pre-fix split delete (E4-F04), or of the one
+    bounded WAL crash window the delete note above describes. The
+    delete touches only the embeddings store, so it is atomic on its
+    own; the episode set it judges against is read through an ATTACH
+    in the same statement. Returns the removed task_ids.
+    """
+    mem_file = _episodic_db_file()
+    with _get_conn(EMBEDDINGS_DB_PATH) as conn:
+        tables = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        if "episodic_embeddings" not in tables:
+            return []
+        if mem_file == _embeddings_db_file():
+            episode_tables = tables
+            mem_schema = ""
+        else:
+            conn.execute("ATTACH DATABASE ? AS episodic_mem", (mem_file,))
+            episode_tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM episodic_mem.sqlite_master"
+                    " WHERE type = 'table'")
+            }
+            mem_schema = "episodic_mem."
+        if "episodic_memory" not in episode_tables:
+            return []
+        orphans = [
+            row[0] for row in conn.execute(
+                "SELECT task_id FROM episodic_embeddings"
+                f" WHERE task_id NOT IN (SELECT task_id FROM {mem_schema}episodic_memory)")
+        ]
+        if orphans:
+            conn.execute(
+                "DELETE FROM episodic_embeddings"
+                f" WHERE task_id NOT IN (SELECT task_id FROM {mem_schema}episodic_memory)")
+            conn.commit()
+        return orphans
+
+
+def reconcile_episodic_orphans() -> dict[str, Any]:
+    """Remove embedding rows left orphaned by a split delete.
+
+    The repair half of E4-F04; runs automatically once per process
+    per DB pair at init (see ``_ensure_episodic_reconciled``) and is
+    safe to call again — a second run finds nothing. Removed rows
+    are logged to the audit log (EPISODIC_ORPHAN_EMBEDDINGS_REMOVED),
+    never silently dropped. Note the counts here cover this call's
+    own sweep: on a fresh process the init above runs the guarded
+    sweep first (logging its batch under the same event), so this
+    call then reports only what was orphaned since.
+    """
+    init_episodic_db()
+    init_embeddings_db()
+    removed = _sweep_orphan_embeddings()
+    result: dict[str, Any] = {"removed": len(removed), "task_ids": removed}
+    if removed:
+        _audit_logger.log_event("EPISODIC_ORPHAN_EMBEDDINGS_REMOVED", result)
+        logger.warning("EPISODIC_ORPHAN_EMBEDDINGS_REMOVED %s", result)
+    return result
+
+
+def _ensure_episodic_reconciled() -> None:
+    """Run the orphan sweep once per process per DB pair, from
+    ``init_episodic_db`` — existing deployments heal themselves on
+    first use, the same pattern as the dedupe migration."""
+    key = (_episodic_db_file(), _embeddings_db_file())
+    if key in _RECONCILED_DB_PAIRS:
+        return
+    _RECONCILED_DB_PAIRS.add(key)
+    removed = _sweep_orphan_embeddings()
+    if removed:
+        details = {"removed": len(removed), "task_ids": removed}
+        _audit_logger.log_event("EPISODIC_ORPHAN_EMBEDDINGS_REMOVED", details)
+        logger.warning("EPISODIC_ORPHAN_EMBEDDINGS_REMOVED %s", details)
 
 # ---------------------------------------------------------------------------
 # Phase 10.3 A1: retention / pruning. Before this, episodic memory had no
@@ -789,26 +1034,13 @@ def clear_all_episodes() -> bool:
 def _delete_episode_rows(task_ids: list[str]) -> dict[str, int]:
     """Delete the FTS, thinking, and embedding rows for ``task_ids``.
 
-    An episode is three rows in two DBs; they are always deleted together
-    so pruning never leaves an orphan embedding/thinking row behind.
-    Returns row counts per table.
+    An episode is three rows in two DBs; they are deleted together in
+    ONE transaction (``_delete_episode_data``, E4-F04) so pruning
+    never leaves an orphan embedding/thinking row behind — and a
+    failure midway leaves all of them in place. Returns row counts
+    per table.
     """
-    counts = {"episodes": 0, "thinking_rows": 0, "embedding_rows": 0}
-    if not task_ids:
-        return counts
-    with _get_conn() as conn:
-        cur = conn.cursor()
-        cur.executemany("DELETE FROM episodic_memory WHERE task_id = ?", [(t,) for t in task_ids])
-        counts["episodes"] = cur.rowcount
-        cur.executemany("DELETE FROM episodic_thinking WHERE task_id = ?", [(t,) for t in task_ids])
-        counts["thinking_rows"] = cur.rowcount
-        conn.commit()
-    with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
-        e_cur = e_conn.cursor()
-        e_cur.executemany("DELETE FROM episodic_embeddings WHERE task_id = ?", [(t,) for t in task_ids])
-        counts["embedding_rows"] = e_cur.rowcount
-        e_conn.commit()
-    return counts
+    return _delete_episode_data(task_ids)
 
 def prune_episodes(retention_days: int | None = None,
                    max_episodes: int | None = None,

@@ -2,7 +2,7 @@
 
 **AETHER** is a local, privacy-first desktop AI operating layer and intelligent assistant built for Windows. It features a hybrid multi-process architecture combining an Electron + React desktop client (`desktop_app/`) with an asynchronous FastAPI engine over an authenticated loopback WebSocket. (The original frontend was a PySide6 HUD in `aether_ui/`; it is retired — see the retirement note below.)
 
-> **Retirement note:** `aether_ui/` (PySide6) is retired — the live frontend is the Electron + React app in `desktop_app/` (ADR-0019), and PySide6 is installed only via the `legacy-ui` optional extra (`uv sync --extra legacy-ui`). The `aether_ui` descriptions below are kept as historical reference.
+> **Retirement note:** `aether_ui/` (PySide6) is retired — the live frontend is the Electron + React app in `desktop_app/` (ADR-0019). The directory itself was deleted on 2 Nov 2026, together with its tests and the `legacy-ui` optional extra that carried PySide6/qasync/markdown. The `aether_ui` descriptions below are kept as historical reference.
 
 ---
 
@@ -78,7 +78,7 @@ The current frontend is the Electron + React app in `desktop_app/`. It talks to 
 
 #### Historical: the retired PySide6 client (`aether_ui`)
 
-The table below describes the original PySide6 frontend. It is kept as historical reference only: `aether_ui/` is retired (ADR-0019), is not the shipped UI, and its dependencies install only via the `legacy-ui` optional extra.
+The table below describes the original PySide6 frontend. It is kept as historical reference only: `aether_ui/` was retired (ADR-0019), was never the shipped UI in this line, and was deleted on 2 Nov 2026.
 
 | File / Component | Responsibility |
 | :--- | :--- |
@@ -225,7 +225,6 @@ Aether-OS/
 │   ├── electron/           # Main-process helpers: window state, notifications, snip geometry
 │   ├── index.html          # Vite entry page
 │   └── src/                # React UI: App.jsx, chat window, SettingsPanel, components/
-├── aether_ui/              # Retired PySide6 frontend (historical; `legacy-ui` extra only)
 ├── run_engine.py           # Backend engine launcher
 └── run_ui.py               # Desktop frontend launcher (launches the Electron app)
 ```

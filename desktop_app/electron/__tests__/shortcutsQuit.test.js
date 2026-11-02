@@ -2,7 +2,7 @@
  * F-14 — pinning tests: global shortcuts must not survive app quit.
  *
  * EGM supplementary finding claimed the summon (Alt+Space) and snip
- * (CommandOrControl+Shift+S) global shortcuts survive app quit.
+ * (Ctrl+S / Cmd+S by default) global shortcuts survive app quit.
  * Provenance check (git log -S 'unregisterAll' / git blame) shows
  * the quit cleanup landed in 7e1ae19 ("shell standard", 31 Oct
  * 2026) — BEFORE the EGM snapshot 71594ce, whose own main.cjs
@@ -43,11 +43,15 @@ describe('F-14 pinning: quit cleanup exists', () => {
   it('both global shortcuts are registered in the main process', () => {
     // Summon hotkey, registered once when the app is ready.
     expect(mainSource).toContain("globalShortcut.register('Alt+Space', toggleMainWindow)");
-    // Snip hotkey, (re)registered through one helper that first
-    // unregisters the previous accelerator.
+    // Snip hotkey, (re)registered through one helper. Open Point
+    // 13 changed the helper's shape: the initial value is the
+    // decided platform default (Ctrl+S, Cmd+S on macOS) resolved
+    // by electron/snipShortcut.cjs, and the superseded accelerator
+    // is unregistered only AFTER its replacement registers, so a
+    // failed change leaves the working hotkey active.
     expect(mainSource).toContain('globalShortcut.register(currentSnipShortcut, triggerSnipFlow)');
-    expect(mainSource).toContain("let currentSnipShortcut = 'CommandOrControl+Shift+S'");
-    expect(mainSource).toContain('globalShortcut.unregister(currentSnipShortcut)');
+    expect(mainSource).toContain('let currentSnipShortcut = defaultSnipAccelerator(process.platform)');
+    expect(mainSource).toContain('globalShortcut.unregister(previous)');
     // Exactly two register call sites — no stray registrations.
     expect(mainSource.match(/globalShortcut\.register\(/g)).toHaveLength(2);
   });

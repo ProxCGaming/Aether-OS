@@ -356,6 +356,10 @@ class AetherState(TypedDict):
     # survives the approval pause via the checkpointer — most
     # generated files are written by the approved tool call itself,
     # which executes on the resume path.
+    # PF-3: applying a steer replaces this with the steer message's
+    # own id (see steering.steer_state_update), so media generated
+    # during the steered continuation attributes to the message that
+    # prompted it rather than the turn's original message.
     message_id: str | None
 
     context_briefing: str | None

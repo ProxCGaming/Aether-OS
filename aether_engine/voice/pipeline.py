@@ -28,10 +28,15 @@ or a backchannel doesn't count — is a barge-in: playback stops at
 once via ``interrupt_output()``, the captured frames are replayed
 into the main path as the next utterance, and history keeps only
 the words actually heard. Heard words are tracked at word
-granularity: a sentence's audio is fully synthesized before
-emission so the chunk total is known, and a sentence interrupted
-mid-emission contributes the chunk-proportional prefix of its
-words.
+granularity (N09): every emitted audio chunk carries a
+session-monotonic ``chunk_seq`` and the renderer reports the
+highest seq it has FINISHED playing; once a session's renderer
+reports playback progress, a sentence counts only through its
+played chunks — the first partially played one as its
+chunk-proportional word prefix — because the desktop's playback
+queue runs behind emission and buffered audio was never heard.
+A renderer that never reports progress keeps the older estimate
+(the same walk over emitted counts).
 
 Turns route two ways (grill Q27/Q28): the talker answers chat;
 a turn the optional escalation classifier calls work launches a
@@ -241,14 +246,28 @@ class VoicePipeline:
         # announcement can tag its event with it.
         self._announcing_id: str | None = None
         self._interrupt_requested = False
-        # Heard-words tracking (E8-5.1b): _heard_text holds the
-        # fully-heard sentences of the current output activity; the
-        # in-flight sentence contributes its chunk-proportional
-        # word prefix until it completes.
-        self._heard_text = ""
-        self._inflight_sentence: str | None = None
-        self._inflight_total = 0
-        self._inflight_emitted = 0
+        # Heard-words tracking (E8-5.1b, N09): _heard_entries holds
+        # one record per sentence whose audio the current output
+        # activity has emitted — its text, its first chunk_seq, its
+        # chunk total and how many chunks were emitted — in
+        # emission order; _heard_text_now() derives the heard text
+        # from these records (playback reports when the renderer
+        # sends them, emission counts when it never does).
+        self._heard_entries: list[dict] = []
+        # N09 playback accounting: session-scoped, so both survive
+        # _reset_heard() — chunk seqs are never reused, and a late
+        # report for a previous activity's chunks can only name
+        # seqs below the next activity's first chunk. _played_seq
+        # is the highest chunk_seq the renderer confirmed FINISHED
+        # playing; _progress_seen flips on the first well-formed
+        # report (including the -1 "reporting live" one).
+        self._next_chunk_seq = 0
+        self._played_seq = -1
+        self._progress_seen = False
+        # The heard text published at a barge-in cut, frozen so the
+        # history commit — which lands when the output loop notices
+        # the interrupt — is exactly the published text.
+        self._frozen_heard: str | None = None
         # Barge-in detection state (E8-5.1b): a separate endpointer
         # watches frames while output plays, so the main
         # endpointer's utterance state is never corrupted.
@@ -271,22 +290,65 @@ class VoicePipeline:
         return self._turn_active or self._announcing
 
     def _reset_heard(self) -> None:
-        self._heard_text = ""
-        self._inflight_sentence = None
-        self._inflight_total = 0
-        self._inflight_emitted = 0
+        self._heard_entries = []
+        self._frozen_heard = None
+
+    def note_playback_progress(self, played_seq: int) -> None:
+        """Record a renderer playback report (N09): the highest
+        chunk_seq the desktop has FINISHED playing, or -1 for
+        "reporting live, nothing finished yet". Fire-and-forget —
+        the websocket layer calls this per inbound
+        VOICE_PLAYBACK_PROGRESS event; malformed values are
+        ignored, never fatal, and reports only ever move the
+        position forward. A report arriving after a cut was
+        published for the current activity does not move that
+        activity's accounting (the cut is final); it still arms
+        playback mode for what follows."""
+        try:
+            seq = int(played_seq)
+        except (TypeError, ValueError):
+            return
+        self._progress_seen = True
+        if self._frozen_heard is not None:
+            return
+        self._played_seq = max(self._played_seq, seq)
+
+    def _played_count(self, entry: dict) -> int:
+        """How many of one emitted sentence's chunks the renderer
+        has confirmed played. A sentence's chunk seqs are
+        contiguous, assigned in emission order."""
+        played = self._played_seq - entry["first_seq"] + 1
+        return max(0, min(entry["total"], played))
 
     def _heard_text_now(self) -> str:
         """Everything the listener has actually heard of the
-        current output: completed sentences plus the in-flight
-        sentence's heard word prefix."""
-        if self._inflight_sentence is None:
-            return self._heard_text
-        return self._heard_text + _heard_prefix(
-            self._inflight_sentence,
-            self._inflight_emitted,
-            self._inflight_total,
-        )
+        current output activity.
+
+        Once the renderer has reported any playback progress this
+        session, only PLAYED chunks count (N09): fully-played
+        sentences in full, the first partially played one as its
+        chunk-proportional word prefix, and nothing from later
+        sentences however much of them was emitted. When no
+        progress has ever been reported (a client without playback
+        reporting), the same walk runs on EMITTED counts — the
+        pre-N09 estimate the older suites pin."""
+        if self._frozen_heard is not None:
+            return self._frozen_heard
+        parts: list[str] = []
+        for entry in self._heard_entries:
+            total = entry["total"]
+            if self._progress_seen:
+                available = self._played_count(entry)
+            else:
+                available = min(entry["emitted"], total)
+            if available >= total:
+                parts.append(entry["sentence"])
+                continue
+            if available > 0:
+                parts.append(_heard_prefix(
+                    entry["sentence"], available, total))
+            break
+        return "".join(parts)
 
     # -- availability --------------------------------------------------
 
@@ -390,6 +452,15 @@ class VoicePipeline:
 
     # -- barge-in -------------------------------------------------------
 
+    async def _await_output_settle(self) -> None:
+        """Bounded wait for the in-flight output activity (a reply
+        turn or an announcement) to wind down once the interrupt
+        flag is set."""
+        for _ in range(2000):
+            if not self._output_active:
+                break
+            await asyncio.sleep(0.002)
+
     async def interrupt_output(self) -> dict:
         """Stop the in-flight output (a reply turn or an
         announcement); report what was actually heard.
@@ -397,7 +468,22 @@ class VoicePipeline:
         Returns the VOICE_BARGE_IN payload fields:
         ``{"stopped_at_char", "committed_text"}``. The committed
         text — only the words actually heard, at word granularity —
-        is also what ``on_assistant_final`` commits for the turn.
+        is also what ``on_assistant_final`` commits for the turn:
+        the snapshot published here is frozen, and the commit reads
+        exactly it.
+
+        Timing (N09): when the renderer reports playback progress,
+        the accounting is independent of the output loop, so the
+        cut is published IMMEDIATELY — the pre-N09 code first polled
+        up to ~4 s for the output task to settle, while the desktop
+        kept playing the unheard tail. The settle wait still runs
+        afterwards in that mode, but only as sequencing for the
+        caller (the barge-in path replays the interrupting frames
+        once the old output has wound down). With emission-based
+        accounting (no progress ever reported) the heard text is
+        only final once the output loop has noticed the interrupt,
+        so the settle still precedes the snapshot, as it did
+        pre-N09.
 
         When the interrupted output is an announcement, the event
         also carries its ``announcement_id`` (N10): the heard prefix
@@ -408,11 +494,10 @@ class VoicePipeline:
         announcement_id = self._announcing_id if self._announcing else None
         if self._output_active:
             self._interrupt_requested = True
-            for _ in range(2000):
-                if not self._output_active:
-                    break
-                await asyncio.sleep(0.002)
+            if not self._progress_seen:
+                await self._await_output_settle()
             heard = self._heard_text_now()
+            self._frozen_heard = heard
             payload = {
                 "session_id": self.session_id,
                 "stopped_at_char": len(heard),
@@ -424,6 +509,8 @@ class VoicePipeline:
                 type=EventType.VOICE_BARGE_IN,
                 payload=payload,
             ))
+            if self._progress_seen:
+                await self._await_output_settle()
         heard = self._heard_text_now()
         return {
             "stopped_at_char": len(heard),
@@ -771,12 +858,18 @@ class VoicePipeline:
         """Synthesize one sentence and push its audio chunks.
 
         The sentence's audio is fully synthesized BEFORE emission
-        so the chunk total is known: the heard-words tracker can
-        then credit exactly the words whose chunks were emitted
-        when a barge-in lands mid-sentence (E8-5.1b). The sentence
-        joins the heard text only for the audio actually emitted —
-        fully, or as its heard word prefix. A TTS failure degrades
-        the turn to text-only, never fatal.
+        so the chunk total is known. Emission registers the
+        sentence in the heard accounting together with its chunks'
+        seq range (N09); how much of it counts as heard is decided
+        at read time — played chunks when the renderer reports
+        playback progress, emitted chunks when it never does — so
+        an interrupt landing mid-sentence needs no fold-in here.
+        A TTS failure degrades the turn to text-only, never fatal.
+        A silent synthesis (zero chunks) registers nothing: no
+        audio means nothing was heard, so the sentence can never
+        be credited on the interrupted path (it still stands in
+        the full commit of an uninterrupted reply, which
+        ``_deliver_reply`` builds from the reply text itself).
         """
         chunks: list[bytes] = []
         try:
@@ -788,38 +881,35 @@ class VoicePipeline:
             logger.warning("voice TTS failed; continuing text-only", exc_info=True)
             return
         if not chunks:
-            # A silent synthesis still "says" the sentence (the
-            # transcript streamed it): count it as heard, as 5.1a did.
-            self._heard_text += sentence
             return
-        self._inflight_sentence = sentence
-        self._inflight_total = len(chunks)
-        self._inflight_emitted = 0
+        entry = {
+            "sentence": sentence,
+            "first_seq": self._next_chunk_seq,
+            "total": len(chunks),
+            "emitted": 0,
+        }
+        self._next_chunk_seq += len(chunks)
+        self._heard_entries.append(entry)
+        seq = entry["first_seq"]
         for audio in chunks:
             if self._interrupt_requested or self._stopping:
-                self._heard_text += _heard_prefix(
-                    sentence, self._inflight_emitted, self._inflight_total)
-                self._inflight_sentence = None
-                self._inflight_total = 0
-                self._inflight_emitted = 0
                 return
             await self._emit_chunk(
                 text_delta="",
                 audio_chunk=base64.b64encode(audio).decode("ascii"),
                 announcement_id=announcement_id,
                 announcement_kind=announcement_kind, message_id=message_id,
+                chunk_seq=seq,
             )
-            self._inflight_emitted += 1
-        self._heard_text += sentence
-        self._inflight_sentence = None
-        self._inflight_total = 0
-        self._inflight_emitted = 0
+            entry["emitted"] += 1
+            seq += 1
 
     async def _emit_chunk(
         self, *, text_delta: str, audio_chunk: str | None,
         announcement_id: str | None = None,
         announcement_kind: str | None = None,
         message_id: str | None = None,
+        chunk_seq: int | None = None,
     ) -> None:
         payload: dict = {
             "session_id": self.session_id,
@@ -828,6 +918,11 @@ class VoicePipeline:
             "audio_chunk": audio_chunk,
             "timestamp": time.time(),
         }
+        if chunk_seq is not None:
+            # N09: the audio chunk's session-monotonic identity.
+            # The renderer reports finished seqs back as playback
+            # progress — the input the heard accounting reads.
+            payload["chunk_seq"] = chunk_seq
         if announcement_id is not None:
             # N10: this chunk is an announcement, not a reply turn.
             # The identity is stable per announced event, so the

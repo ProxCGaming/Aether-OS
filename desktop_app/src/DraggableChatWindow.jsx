@@ -1565,6 +1565,7 @@ export default function DraggableChatWindow({
   voiceRtcRemoteCandidate = null,
   onVoiceRtcOffer = () => {},
   onVoiceRtcIceCandidate = () => {},
+  onVoicePlaybackProgress = () => {},
   dictationState = null,
   readAloudState = null,
   onDictationStart = null,
@@ -3376,6 +3377,7 @@ export default function DraggableChatWindow({
             onRtcOffer={onVoiceRtcOffer}
             rtcAnswer={voiceRtcAnswer}
             onRtcIceCandidate={onVoiceRtcIceCandidate}
+            onPlaybackProgress={onVoicePlaybackProgress}
             rtcRemoteCandidate={voiceRtcRemoteCandidate}
           />
         )}

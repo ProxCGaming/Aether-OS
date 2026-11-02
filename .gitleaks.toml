@@ -22,6 +22,9 @@ regexes = [
   '''secret-123''',
   '''<redacted>''',
   '''secret-token-xyz-12345''',
+  # Synthetic marker planted by the E7-F07 reasoning-redaction tests to
+  # prove secrets are stripped from tool results — a fixture, not a key:
+  '''SYNTHETIC_SECRET_THINKING_7''',
   # RFC 6238 base32 test seed used by the vault TOTP tests
   # (desktop_app/src/components/Settings/__tests__/VaultPanelTotp.test.jsx)
   # — a published test vector, not a credential:

@@ -191,6 +191,14 @@ class EventType(str, Enum):
     # Epic 8, E8-4.2: Media index + Library section
     MEDIA_LIST_REQUEST = "MEDIA_LIST_REQUEST"
     MEDIA_LIST_RESPONSE = "MEDIA_LIST_RESPONSE"
+    # OP12: MEDIA_DELETE_REQUEST payload: {"media_id": str,
+    # "delete_underlying_file": bool (optional, default False)} —
+    # False removes only the library index entry; True also unlinks
+    # the file from disk. MEDIA_DELETE_RESPONSE payload:
+    # {"deleted": bool, "media_id": str, "file_deleted": bool} —
+    # file_deleted is False when the unlink was not requested, the
+    # file was already gone, or it failed; a client that requested it
+    # must surface that shortfall honestly.
     MEDIA_DELETE_REQUEST = "MEDIA_DELETE_REQUEST"
     MEDIA_DELETE_RESPONSE = "MEDIA_DELETE_RESPONSE"
     MEDIA_METADATA_UPDATE_REQUEST = "MEDIA_METADATA_UPDATE_REQUEST"
@@ -223,6 +231,9 @@ class EventType(str, Enum):
     # VOICE_OUTPUT_CHUNK is an outbound push for the talker's reply:
     # {"session_id", "speaker": "assistant", "text_delta": str,
     # "audio_chunk": str | None (base64 audio), "timestamp": float}.
+    # A chunk carrying audio also carries "chunk_seq": a
+    # session-monotonic int identifying the chunk in emission
+    # order (N09).
     # Announcement chunks (N10) additionally carry "announcement_id"
     # (stable per announced event, derived from the child task and
     # the event kind) and "announcement_kind" ("approval" |
@@ -245,6 +256,15 @@ class EventType(str, Enum):
     VOICE_PARTIAL_TRANSCRIPT = "VOICE_PARTIAL_TRANSCRIPT"
     VOICE_OUTPUT_CHUNK = "VOICE_OUTPUT_CHUNK"
     VOICE_BARGE_IN = "VOICE_BARGE_IN"
+    # N09: VOICE_PLAYBACK_PROGRESS is the renderer -> engine report
+    # of playback position: {"session_id", "played_seq": int} —
+    # the highest chunk_seq the renderer has FINISHED playing
+    # (-1 = reporting live, nothing finished yet). Heard-word
+    # accounting is derived from these reports, never from the
+    # engine's emission count: emitted-but-unplayed audio was not
+    # heard. Fire-and-forget: there is no response event, and a
+    # stale or malformed report is ignored, never fatal.
+    VOICE_PLAYBACK_PROGRESS = "VOICE_PLAYBACK_PROGRESS"
     # F-12a: RTC negotiation for the streaming voice session rides
     # this same socket. The renderer holds the microphone, so it is
     # the offerer. OFFER_REQUEST payload: {"session_id", "sdp":
@@ -397,6 +417,17 @@ class EventType(str, Enum):
     WORKSPACE_REMOVE_RESPONSE = "WORKSPACE_REMOVE_RESPONSE"
     WORKSPACE_SET_ACTIVE_REQUEST = "WORKSPACE_SET_ACTIVE_REQUEST"
     WORKSPACE_SET_ACTIVE_RESPONSE = "WORKSPACE_SET_ACTIVE_RESPONSE"
+
+    # Project config layer (Epic 1, E1-14 layers; the editor is the
+    # Epic 6 handoff, E6-F05): view/edit the active workspace's
+    # `.aether/config.json` — the layer config_layers merges over the
+    # global config. GET answers with the file's raw text plus its
+    # parsed form (or the parse error); UPDATE validates and writes
+    # it. Roots are confined to the configured workspace_roots.
+    PROJECT_CONFIG_GET_REQUEST = "PROJECT_CONFIG_GET_REQUEST"
+    PROJECT_CONFIG_GET_RESPONSE = "PROJECT_CONFIG_GET_RESPONSE"
+    PROJECT_CONFIG_UPDATE_REQUEST = "PROJECT_CONFIG_UPDATE_REQUEST"
+    PROJECT_CONFIG_UPDATE_RESPONSE = "PROJECT_CONFIG_UPDATE_RESPONSE"
 
     # Workspace RAG prose index (Epic 8, E8-3.2, E8-3.3): consent-first
     # indexing lifecycle. START without confirm answers with the

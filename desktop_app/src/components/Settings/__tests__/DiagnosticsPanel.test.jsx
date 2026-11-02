@@ -484,4 +484,88 @@ describe('DiagnosticsPanel', () => {
       expect.objectContaining({ payload: {} })
     );
   });
+
+  // E7-F05: the panel displays plugin.manifest.name but used to send
+  // plugin.name (undefined on real LIST entries) on both management
+  // buttons — JSON dropped the field, toggle failed unseen and
+  // uninstall silently "succeeded". A real LIST record carries the
+  // name only under manifest; the buttons must send THAT identity.
+  const renderWithPlugin = () => {
+    const listeners = {};
+    const mockWs = {
+      addEventListener: jest.fn((type, fn) => { listeners[type] = fn; }),
+      removeEventListener: jest.fn(),
+    };
+    useAetherSocket.mockReturnValue({
+      wsRef: { current: mockWs },
+      sendMessage: mockSendMessage,
+    });
+    render(<DiagnosticsPanel activeMenu="Plugins" />);
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'PLUGIN_LIST_RESPONSE',
+          payload: {
+            plugins: [{
+              manifest: { name: 'CoolPlugin', version: '2.0', description: 'A cool plugin' },
+              enabled: true,
+              installed_skills: [],
+              installed_tools: [],
+              installed_mcp: [],
+            }],
+          },
+        }),
+      });
+    });
+    return listeners;
+  };
+
+  it('sends the manifest name on plugin toggle and uninstall (E7-F05)', () => {
+    renderWithPlugin();
+    expect(screen.getByText('CoolPlugin')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Enabled'));
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'PLUGIN_TOGGLE_REQUEST',
+      expect.objectContaining({
+        payload: { name: 'CoolPlugin', enabled: false },
+      })
+    );
+
+    fireEvent.click(screen.getByText('Uninstall'));
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'PLUGIN_UNINSTALL_REQUEST',
+      expect.objectContaining({
+        payload: { name: 'CoolPlugin' },
+      })
+    );
+  });
+
+  it('shows a visible error when a plugin toggle fails (E7-F05)', () => {
+    const listeners = renderWithPlugin();
+    fireEvent.click(screen.getByText('Enabled'));
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'PLUGIN_TOGGLE_RESPONSE',
+          payload: { success: false, name: 'CoolPlugin', error: 'Plugin not found: CoolPlugin' },
+        }),
+      });
+    });
+    expect(screen.getByText('Toggle CoolPlugin failed: Plugin not found: CoolPlugin')).toBeInTheDocument();
+  });
+
+  it('shows a visible error when a plugin uninstall fails (E7-F05)', () => {
+    const listeners = renderWithPlugin();
+    fireEvent.click(screen.getByText('Uninstall'));
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'PLUGIN_UNINSTALL_RESPONSE',
+          payload: { success: false, name: 'CoolPlugin', error: 'Plugin not found: CoolPlugin' },
+        }),
+      });
+    });
+    expect(screen.getByText('Uninstall CoolPlugin failed: Plugin not found: CoolPlugin')).toBeInTheDocument();
+  });
 });

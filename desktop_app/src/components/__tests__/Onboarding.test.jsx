@@ -16,6 +16,7 @@ describe('Onboarding (Epic 6, E6-02)', () => {
     listeners = [];
     useAetherSocket.mockReturnValue({
       sendMessage: mockSendMessage,
+      isConnected: true,
       wsRef: {
         current: {
           addEventListener: jest.fn((ev, cb) => { if (ev === 'message') listeners.push(cb); }),
@@ -57,6 +58,8 @@ describe('Onboarding (Epic 6, E6-02)', () => {
     expect(mockSendMessage).toHaveBeenCalledWith('APPROVAL_MODE_SET_REQUEST', expect.objectContaining({
       payload: { mode: 'ask' },
     }));
+    // E6-F03: the step advances on the engine's acknowledgement.
+    emit({ type: 'APPROVAL_MODE_SET_RESPONSE', payload: { success: true, mode: 'ask' } });
     fireEvent.click(screen.getByText('Start chatting'));
     expect(onDone).toHaveBeenCalledTimes(1);
   });

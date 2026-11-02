@@ -94,7 +94,7 @@ async def test_registry_execute_honours_grant(tmp_path):
     from aether_engine.workers import sandbox
     from aether_worker.__main__ import run_worker
 
-    async def _in_process(tool_name, args, task_class="standard", audit_logger=None):
+    async def _in_process(tool_name, args, task_class="standard", audit_logger=None, task_classes=None):
         return await run_worker({"tool_name": tool_name, "args": args})
 
     from unittest import mock

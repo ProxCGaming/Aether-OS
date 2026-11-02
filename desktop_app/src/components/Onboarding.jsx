@@ -12,13 +12,17 @@ import { useAetherSocket } from '../contexts/SocketContext';
  * call onDone, which persists the flag engine-side.
  */
 export default function Onboarding({ providers = [], onDone }) {
-  const { wsRef, sendMessage } = useAetherSocket();
+  const { wsRef, sendMessage, isConnected } = useAetherSocket();
   const [step, setStep] = useState(0);
   const [providerName, setProviderName] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [saveState, setSaveState] = useState(null); // null | 'saving' | 'error'
   const [workspacePath, setWorkspacePath] = useState('');
+  const [workspaceState, setWorkspaceState] = useState(null); // null | 'saving' | 'error'
+  const [workspaceError, setWorkspaceError] = useState('');
+  const [workspaceSaved, setWorkspaceSaved] = useState(false);
   const [approvalMode, setApprovalMode] = useState('ask');
+  const [approvalState, setApprovalState] = useState(null); // null | 'saving' | 'error'
 
   useEffect(() => {
     if (!providerName && providers.length > 0) {
@@ -30,15 +34,36 @@ export default function Onboarding({ providers = [], onDone }) {
     const handleMessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        const payload = data.payload || {};
         if (data.type === 'PROVIDER_SAVE_RESPONSE') {
-          if (data.payload.success) {
+          if (payload.success) {
             setSaveState(null);
-            setStep(1);
+            // Advance only if the user is still on this step — a save
+            // queued while offline can be acknowledged after they have
+            // skipped ahead, and must not yank them back.
+            setStep((s) => (s === 0 ? 1 : s));
           } else {
             setSaveState('error');
           }
-        } else if (data.type === 'WORKSPACE_ADD_RESPONSE' && data.payload.success) {
-          setStep(2);
+        } else if (data.type === 'WORKSPACE_ADD_RESPONSE') {
+          if (payload.success) {
+            setWorkspaceState(null);
+            setWorkspaceError('');
+            setWorkspaceSaved(true);
+            setStep((s) => (s === 1 ? 2 : s));
+          } else {
+            // A rejection is a real outcome: surface it and let the
+            // step offer the picker again (see the step render).
+            setWorkspaceState('error');
+            setWorkspaceError(payload.error || '');
+          }
+        } else if (data.type === 'APPROVAL_MODE_SET_RESPONSE') {
+          if (payload.success) {
+            setApprovalState(null);
+            setStep((s) => (s === 2 ? 3 : s));
+          } else {
+            setApprovalState('error');
+          }
         }
       } catch (e) {
         // ignore malformed frames
@@ -68,6 +93,9 @@ export default function Onboarding({ providers = [], onDone }) {
     });
     if (selected) {
       setWorkspacePath(selected);
+      setWorkspaceSaved(false);
+      setWorkspaceState('saving');
+      setWorkspaceError('');
       sendMessage('WORKSPACE_ADD_REQUEST', {
         schema_version: 1,
         request_id: Date.now().toString(),
@@ -77,12 +105,15 @@ export default function Onboarding({ providers = [], onDone }) {
   };
 
   const saveApprovalMode = () => {
+    if (approvalState === 'saving') return;
+    setApprovalState('saving');
     sendMessage('APPROVAL_MODE_SET_REQUEST', {
       schema_version: 1,
       request_id: Date.now().toString(),
       payload: { mode: approvalMode },
     });
-    setStep(3);
+    // No optimistic advance: the APPROVAL_MODE_SET_RESPONSE handler
+    // moves to the summary on success and surfaces a refusal here.
   };
 
   const panelStyle = {
@@ -101,6 +132,37 @@ export default function Onboarding({ providers = [], onDone }) {
     padding: '12px 16px', color: '#fff', outline: 'none', width: '100%',
     background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '10px',
   };
+  const queuedStyle = { color: '#f59e0b', fontSize: '13px' };
+  const errorStyle = { color: '#ef4444', fontSize: '13px' };
+
+  // The summary may claim a full save only for choices the engine has
+  // actually acknowledged. A choice whose save is still queued (sent
+  // while offline, not yet answered) or was refused is named honestly
+  // instead of being swept into "everything is saved".
+  const pendingLabels = [];
+  const failedLabels = [];
+  if (saveState === 'saving') pendingLabels.push('your provider key');
+  else if (saveState === 'error') failedLabels.push('your provider key');
+  if (workspaceState === 'saving') pendingLabels.push('your workspace folder');
+  else if (workspaceState === 'error') failedLabels.push('your workspace folder');
+  if (approvalState === 'saving') pendingLabels.push('your approval default');
+  else if (approvalState === 'error') failedLabels.push('your approval default');
+  const joinLabels = (labels) => (labels.length <= 1
+    ? labels[0] || ''
+    : `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`);
+  let summaryText;
+  if (pendingLabels.length === 0 && failedLabels.length === 0) {
+    summaryText = 'Everything you chose is saved in the engine and can be changed in Settings. Say hello, or hand Aether a task.';
+  } else {
+    const clauses = [];
+    if (pendingLabels.length > 0) {
+      clauses.push(`${joinLabels(pendingLabels)} ${pendingLabels.length > 1 ? 'are' : 'is'} queued and will be sent when the engine reconnects — not saved yet`);
+    }
+    if (failedLabels.length > 0) {
+      clauses.push(`${joinLabels(failedLabels)} could not be saved`);
+    }
+    summaryText = `Everything else you chose is saved in the engine, but ${clauses.join('; ')}. You can change any of it in Settings. Say hello, or hand Aether a task.`;
+  }
 
   return (
     <div
@@ -114,6 +176,15 @@ export default function Onboarding({ providers = [], onDone }) {
         <div style={{ fontSize: '12px', color: '#a78bfa', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '8px' }}>
           Welcome to Aether-OS · Step {Math.min(step + 1, 3)} of 3
         </div>
+
+        {!isConnected && (
+          <div style={{
+            background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.4)', color: '#fbbf24',
+            borderRadius: '10px', padding: '10px 12px', fontSize: '13px', marginBottom: '16px',
+          }}>
+            You're not connected to the engine. Nothing is saved yet — saves are queued and sent when the connection returns, or skip setup and finish later in Settings.
+          </div>
+        )}
 
         {step === 0 && (
           <>
@@ -143,7 +214,10 @@ export default function Onboarding({ providers = [], onDone }) {
                 style={inputStyle}
               />
               {saveState === 'error' && (
-                <div style={{ color: '#ef4444', fontSize: '13px' }}>That key could not be saved — check it and try again, or skip this step.</div>
+                <div style={errorStyle}>That key could not be saved — check it and try again, or skip this step.</div>
+              )}
+              {saveState === 'saving' && !isConnected && (
+                <div style={queuedStyle}>Queued — the engine is unreachable, so this key isn't saved yet. It will be sent when the connection returns, or skip this step.</div>
               )}
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '20px' }}>
@@ -165,15 +239,31 @@ export default function Onboarding({ providers = [], onDone }) {
               The folder Aether works in by default. Tools stay inside your workspace roots unless you approve otherwise.
             </p>
             {workspacePath ? (
-              <div style={{ fontFamily: 'monospace', fontSize: '13px', color: '#10b981' }}>{workspacePath}</div>
-            ) : (
-              <button style={primaryBtn} onClick={pickWorkspace}>Choose folder…</button>
+              <div style={{ fontFamily: 'monospace', fontSize: '13px', color: workspaceSaved ? '#10b981' : '#f0f0f5' }}>{workspacePath}</div>
+            ) : null}
+            {(!workspacePath || workspaceState === 'error') && (
+              <button style={{ ...primaryBtn, marginTop: workspacePath ? '10px' : 0 }} onClick={pickWorkspace}>Choose folder…</button>
+            )}
+            {workspaceState === 'saving' && isConnected && (
+              <div style={{ color: '#9090a0', fontSize: '13px', marginTop: '10px' }}>Saving…</div>
+            )}
+            {workspaceState === 'saving' && !isConnected && (
+              <div style={{ ...queuedStyle, marginTop: '10px' }}>
+                Queued — the engine is unreachable, so this folder isn't saved yet. It will be sent when the connection returns, or skip this step.
+              </div>
+            )}
+            {workspaceState === 'error' && (
+              <div style={{ ...errorStyle, marginTop: '10px' }}>
+                {workspaceError
+                  ? `That folder could not be added: ${workspaceError}`
+                  : 'That folder could not be added — try another, or skip this step.'}
+              </div>
             )}
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '20px' }}>
               <button style={ghostBtn} onClick={onDone}>Skip setup</button>
               <div>
                 <button style={ghostBtn} onClick={() => setStep(2)}>Skip step</button>
-                <button style={primaryBtn} onClick={() => setStep(2)} disabled={!workspacePath}>Continue</button>
+                <button style={primaryBtn} onClick={() => setStep(2)} disabled={!workspaceSaved}>Continue</button>
               </div>
             </div>
           </>
@@ -195,9 +285,17 @@ export default function Onboarding({ providers = [], onDone }) {
                 <span><strong>Write freely</strong><br /><span style={{ color: '#9090a0', fontSize: '13px' }}>File writes inside the workspace run without asking; risky actions still ask.</span></span>
               </label>
             </div>
+            {approvalState === 'error' && (
+              <div style={{ ...errorStyle, marginTop: '10px' }}>That approval default could not be saved — try again, or skip setup.</div>
+            )}
+            {approvalState === 'saving' && !isConnected && (
+              <div style={{ ...queuedStyle, marginTop: '10px' }}>Queued — the engine is unreachable, so this choice isn't saved yet. It will be sent when the connection returns, or skip setup.</div>
+            )}
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '20px' }}>
               <button style={ghostBtn} onClick={onDone}>Skip setup</button>
-              <button style={primaryBtn} onClick={saveApprovalMode}>Continue</button>
+              <button style={primaryBtn} onClick={saveApprovalMode} disabled={approvalState === 'saving'}>
+                {approvalState === 'saving' ? 'Saving…' : 'Continue'}
+              </button>
             </div>
           </>
         )}
@@ -206,7 +304,7 @@ export default function Onboarding({ providers = [], onDone }) {
           <>
             <h2 style={{ margin: '0 0 8px 0', fontSize: '22px' }}>You're set</h2>
             <p style={{ color: '#9090a0', fontSize: '14px', marginTop: 0 }}>
-              Everything you chose is saved in the engine and can be changed in Settings. Say hello, or hand Aether a task.
+              {summaryText}
             </p>
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '20px' }}>
               <button style={primaryBtn} onClick={onDone}>Start chatting</button>

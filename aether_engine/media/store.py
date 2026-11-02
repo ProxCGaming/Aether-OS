@@ -275,6 +275,26 @@ class MediaStore:
                 return None
             return self._row_to_dict(row)
 
+    def get_by_path(self, file_path: str) -> dict[str, Any] | None:
+        """Fetch the entry indexing an exact in-place path, if any.
+
+        The index references files in place (they are never moved),
+        so the path is the file's library identity: registration
+        seams use this to avoid entering the same file twice.
+        """
+        self.init_db()
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM media_items WHERE file_path = ? "
+                "ORDER BY created_at ASC LIMIT 1",
+                (str(file_path),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_dict(row)
+
     def list_media(
         self,
         collection: str = "all",

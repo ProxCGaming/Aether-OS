@@ -84,12 +84,19 @@ async def fetch_available_models(
     base_url: str | None = None,
     filter_reachability: bool = False,
     force_reachability: bool = False,
+    provider_flavor: str | None = None,
 ) -> DiscoveryResult:
     """Dynamically fetch available models for a provider and API key.
 
     Returns a DiscoveryResult with the filtered chat-capable list, the
     excluded list, and an optional DiscoveryError (with HTTP status code)
     when the fetch failed. Never returns hardcoded fallback models.
+
+    ``provider_flavor`` is the saved integration flavour of a custom
+    provider (``config.custom_provider_flavor``): an ``"anthropic"``
+    custom is discovered through the Anthropic protocol against its
+    own base URL, not the OpenAI-compatible branch (E5-F05). It only
+    affects custom providers; built-in routing is unchanged.
     """
     key = api_key.strip() if api_key else ""
     has_custom_url = bool(base_url and base_url.strip())
@@ -116,7 +123,11 @@ async def fetch_available_models(
         elif provider_name == "openrouter":
             models, excluded = await _discover_openrouter_models(key)
         elif is_custom:
-            models, excluded = await _discover_openai_compatible_models(base_url=base_url or "", api_key=key)
+            if provider_flavor == "anthropic":
+                models, excluded = await _discover_anthropic_custom_models(
+                    base_url=base_url or "", api_key=key)
+            else:
+                models, excluded = await _discover_openai_compatible_models(base_url=base_url or "", api_key=key)
         else:
             logger.warning(f"Model discovery not implemented for provider '{provider_name}'")
             return DiscoveryResult()
@@ -353,6 +364,83 @@ async def _discover_openrouter_models(api_key: str) -> tuple[list[str], list[dic
             continue
         discovered.append(model_id)
 
+    return discovered, excluded
+
+
+async def _discover_anthropic_custom_models(
+    base_url: str, api_key: str
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Fetch available models from a custom Anthropic-protocol endpoint.
+
+    The Anthropic counterpart of ``_discover_openai_compatible_models``
+    (E5-F05): the request goes to the endpoint's ``/v1/models`` with
+    ``x-api-key`` auth and the ``anthropic-version`` header, and the
+    catalog is parsed with the Anthropic branch's rules (``data``
+    entries, ``claude-`` chat models kept, the rest excluded) — the
+    same semantics as ``_discover_anthropic_models``, but against the
+    provider's saved base URL instead of api.anthropic.com.
+    """
+    if not base_url or not base_url.strip():
+        return [], []
+
+    base_url = base_url.strip().rstrip("/")
+    headers: dict[str, str] = {"anthropic-version": "2023-06-01"}
+    if api_key:
+        headers["x-api-key"] = api_key
+    candidates: list[str] = []
+    if base_url.endswith("/models"):
+        candidates.append(base_url)
+    elif base_url.endswith("/v1"):
+        candidates.append(f"{base_url}/models")
+    else:
+        candidates.append(f"{base_url}/v1/models")
+        candidates.append(f"{base_url}/models")
+
+    raw_models: list[Any] = []
+    tried: list[str] = []
+    last_error: DiscoveryError | None = None
+    async with httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT) as client:
+        for url in candidates:
+            tried.append(url)
+            try:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, dict) and isinstance(data.get("data"), list):
+                        raw_models = data["data"]
+                        break
+                    last_error = DiscoveryError(
+                        code=resp.status_code,
+                        message=f"Anthropic model list at {url} had an unexpected shape: {resp.text[:200]}",
+                    )
+                else:
+                    last_error = DiscoveryError(
+                        code=resp.status_code,
+                        message=f"Anthropic model list request to {url} returned HTTP {resp.status_code}: {resp.text[:200]}",
+                    )
+            except DiscoveryError:
+                raise
+            except Exception as e:  # noqa: BLE001 — per-endpoint probe: failure moves on to the next candidate URL
+                logger.debug(f"Failed querying {url}: {e}")
+                last_error = DiscoveryError(code=None, message=f"Request to {url} failed: {e}")
+                continue
+
+    if not raw_models:
+        raise last_error or DiscoveryError(
+            code=None,
+            message=f"No model list returned by any candidate endpoint: {', '.join(tried)}",
+        )
+
+    discovered: list[str] = []
+    excluded: list[dict[str, str]] = []
+    for m in raw_models:
+        model_id = m.get("id", "") if isinstance(m, dict) else ""
+        if not model_id:
+            continue
+        if model_id.startswith("claude-"):
+            discovered.append(model_id)
+        else:
+            excluded.append(_excluded(model_id))
     return discovered, excluded
 
 

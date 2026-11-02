@@ -236,23 +236,26 @@ def test_kg_age_pruning_keeps_sole_fact_of_entity(isolated_memory):
 
     result = knowledge_graph.prune_facts(retention_days=365, max_facts=0)
 
-    assert result["pruned_facts"] == 2
-    assert result["kept_referenced"] == 1
-    assert result["pruned_entities"] == 1
+    assert result["pruned_facts"] == 1
+    assert result["kept_referenced"] == 2
+    assert result["pruned_entities"] == 0
     by_entity = _facts_by_entity()
     # The sole fact of Solo Entity survives: deleting it would erase the
-    # entity's only record. Both of Multi Entity's facts go, and the
-    # now-empty entity is removed with them.
-    assert by_entity == {
-        "Solo Entity": ["only fact, very old"],
-        "Fresh Entity": ["recent fact"],
-    }
-    assert _entities() == {"Solo Entity", "Fresh Entity"}
+    # entity's only record. E4-F02: the same last-record guard covers
+    # Multi Entity — it keeps exactly one of its two facts (the two are
+    # tied on timestamp and confidence, so either text may be the
+    # survivor) instead of losing both and being removed itself. This
+    # assertion previously pinned the erase-the-entity behaviour.
+    assert by_entity["Solo Entity"] == ["only fact, very old"]
+    assert by_entity["Fresh Entity"] == ["recent fact"]
+    assert len(by_entity["Multi Entity"]) == 1
+    assert set(by_entity["Multi Entity"]) <= {"old fact one", "old fact two"}
+    assert _entities() == {"Solo Entity", "Multi Entity", "Fresh Entity"}
 
     pruned = _audit_calls(isolated_memory["kg_log"], "KNOWLEDGE_GRAPH_PRUNED")
     assert len(pruned) == 1
-    assert pruned[0].args[1]["pruned_facts"] == 2
-    assert pruned[0].args[1]["kept_referenced"] == 1
+    assert pruned[0].args[1]["pruned_facts"] == 1
+    assert pruned[0].args[1]["kept_referenced"] == 2
 
 
 def test_kg_count_cap_keeps_newest(isolated_memory):
@@ -321,7 +324,10 @@ def test_prune_all_runs_all_tiers_and_logs(isolated_memory):
     results = prune_all(config=cfg)
 
     assert results["episodic"]["pruned_episodes"] == 1
-    assert results["knowledge_graph"]["pruned_facts"] == 2
+    # E4-F02: Multi Entity keeps its last record — 1 of its 2 old
+    # facts is pruned, not both (previously pinned as 2, which erased
+    # the entity entirely).
+    assert results["knowledge_graph"]["pruned_facts"] == 1
     assert results["sessions"]["pruned_sessions"] == 1
     assert session_store.get_session(old_session) is None
     logged = _audit_calls(isolated_memory["prune_log"], "MEMORY_PRUNED_ALL")

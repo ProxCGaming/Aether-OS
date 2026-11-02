@@ -259,6 +259,14 @@ async def learn_fast_chat_exchange(
                 assistant_response=response_text,
                 task_id=task_id,
             )
+            # Epic 4, E4-10: fast-chat completions feed the learn
+            # loop too — lessons from a chat exchange are lessons.
+            await backend.learn_lessons(
+                provider=provider,
+                user_prompt=prompt,
+                assistant_response=response_text,
+                task_id=task_id,
+            )
     except Exception as e:  # noqa: BLE001 — background learn must never surface in the chat path
         logger.warning(f"Fast-chat memory learn failed for {task_id}: {e}")
 

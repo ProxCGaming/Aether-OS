@@ -234,6 +234,9 @@ def _resolve_supervisor_provider(config: RunnableConfig):
                     p_name, m_name, secret_store,
                     local_only=bool(_cfg.get("local_only")),
                     require_vision=bool(_cfg.get("require_vision")),
+                    # E5-F02: the run's effective config governs this
+                    # construction's fallback policy too.
+                    user_config=_cfg.get("user_config"),
                 )
         except Exception as e:  # noqa: BLE001 — an unusable override falls back to the graph provider, as the node always has.
             logger.warning(f"Supervisor agent_models override {agent_model_override!r} unusable, using default provider: {e}")
@@ -309,8 +312,20 @@ def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: 
         skill_catalog = GLOBAL_SKILL_MANAGER.catalogue()
     except Exception:  # noqa: BLE001 — a broken skills dir must never break routing
         skill_catalog = ""
+    # Epic 4, E4-10 (addendum omp #29): the learn loop closes here —
+    # lessons recorded at task end in learned.md are injected into
+    # the next session's briefing (this prompt), capped by
+    # learned_briefing. A missing/broken document means no section,
+    # never a routing failure.
+    try:
+        from aether_engine.memory.learned import learned_briefing
+
+        lessons_section = learned_briefing()
+    except Exception:  # noqa: BLE001 — lessons must never break routing
+        lessons_section = ""
     return (
         f"{skill_catalog}\n"
+        f"{lessons_section + chr(10) if lessons_section else ''}"
         f"You are the Supervisor agent. Your task is to delegate the user's request to one of the specialists: "
         f"{options_str}, or 'END' if the task is complete.\n"
         f"User Request: {original_prompt}\n"

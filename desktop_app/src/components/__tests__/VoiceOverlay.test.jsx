@@ -140,4 +140,101 @@ describe('VoiceOverlay (E8-5.1a)', () => {
     expect(screen.getByTestId('voice-mic-error')).toBeInTheDocument();
     expect(screen.queryByTestId('voice-mic-indicator')).toBeNull();
   });
+
+  // N09: playback progress reporting — the engine's heard-word
+  // accounting reads these reports, so a chunk counts as heard
+  // only when its source ends naturally, never when a cut stops
+  // it, and reporting arms (-1) as soon as the session is live.
+  describe('playback progress reporting (N09)', () => {
+    const installAudioCapture = () => {
+      const state = { sources: [] };
+      window.AudioContext = jest.fn(() => ({
+        currentTime: 0,
+        destination: {},
+        decodeAudioData: jest.fn(() => Promise.resolve({ duration: 0.5 })),
+        createBufferSource: jest.fn(() => {
+          const source = {
+            connect: jest.fn(), start: jest.fn(), stop: jest.fn(),
+            buffer: null, onended: null,
+          };
+          state.sources.push(source);
+          return source;
+        }),
+        close: jest.fn(),
+      }));
+      return state;
+    };
+
+    it('arms playback reporting (-1) when the session goes live', async () => {
+      const onPlaybackProgress = jest.fn();
+      render(<VoiceOverlay {...baseProps} onPlaybackProgress={onPlaybackProgress} />);
+      await flush();
+      expect(onPlaybackProgress).toHaveBeenCalledWith(-1);
+    });
+
+    it('reports a chunk as played when its source ends naturally', async () => {
+      const audio = installAudioCapture();
+      const onPlaybackProgress = jest.fn();
+      const { rerender } = render(
+        <VoiceOverlay {...baseProps} onPlaybackProgress={onPlaybackProgress} />);
+      await flush();
+      const wavB64 = btoa('RIFFfake-wav-bytes');
+      rerender(<VoiceOverlay
+        {...baseProps}
+        onPlaybackProgress={onPlaybackProgress}
+        audioChunk={{ seq: 1, engineSeq: 7, data: wavB64 }}
+      />);
+      await flush();
+      expect(audio.sources).toHaveLength(1);
+      expect(onPlaybackProgress).not.toHaveBeenCalledWith(7);
+      act(() => { audio.sources[0].onended(); });
+      expect(onPlaybackProgress).toHaveBeenCalledWith(7);
+    });
+
+    it('never reports a chunk stopped by a playback cut', async () => {
+      const audio = installAudioCapture();
+      const onPlaybackProgress = jest.fn();
+      const { rerender } = render(
+        <VoiceOverlay {...baseProps} onPlaybackProgress={onPlaybackProgress} />);
+      await flush();
+      const wavB64 = btoa('RIFFfake-wav-bytes');
+      rerender(<VoiceOverlay
+        {...baseProps}
+        onPlaybackProgress={onPlaybackProgress}
+        audioChunk={{ seq: 1, engineSeq: 7, data: wavB64 }}
+      />);
+      await flush();
+      expect(audio.sources).toHaveLength(1);
+      // A barge-in cut stops the scheduled source; Web Audio still
+      // fires its onended — that end must NOT be reported as heard.
+      rerender(<VoiceOverlay
+        {...baseProps}
+        onPlaybackProgress={onPlaybackProgress}
+        playbackCut={1}
+      />);
+      await flush();
+      expect(audio.sources[0].stop).toHaveBeenCalled();
+      act(() => { audio.sources[0].onended(); });
+      expect(onPlaybackProgress).not.toHaveBeenCalledWith(7);
+    });
+
+    it('does not report chunks that carry no engine sequence', async () => {
+      const audio = installAudioCapture();
+      const onPlaybackProgress = jest.fn();
+      const { rerender } = render(
+        <VoiceOverlay {...baseProps} onPlaybackProgress={onPlaybackProgress} />);
+      await flush();
+      const wavB64 = btoa('RIFFfake-wav-bytes');
+      rerender(<VoiceOverlay
+        {...baseProps}
+        onPlaybackProgress={onPlaybackProgress}
+        audioChunk={{ seq: 1, data: wavB64 }}
+      />);
+      await flush();
+      expect(audio.sources).toHaveLength(1);
+      act(() => { audio.sources[0].onended(); });
+      expect(onPlaybackProgress).toHaveBeenCalledTimes(1);
+      expect(onPlaybackProgress).toHaveBeenCalledWith(-1);
+    });
+  });
 });

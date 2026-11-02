@@ -48,7 +48,7 @@ from aether_engine.langgraph.steering import (
     drain_steers,
     enqueue_steer,
     has_pending_steers,
-    steer_message_dicts,
+    steer_state_update,
 )
 from aether_engine.memory import session_store
 from aether_engine.memory.facade import backend_or_none
@@ -635,8 +635,10 @@ async def run_langgraph_task(
                                 for steer in steers:
                                     await event_queue.put(
                                         ("steering_applied", steer))
-                                segment_input = {
-                                    "messages": steer_message_dicts(steers)}
+                                # PF-3: the update also moves the
+                                # state's message_id provenance to the
+                                # steer message (steer_state_update).
+                                segment_input = steer_state_update(steers)
                                 steered = True
                                 break
                     finally:
@@ -654,8 +656,7 @@ async def run_langgraph_task(
                         steers = drain_steers(steering_key)
                         for steer in steers:
                             await event_queue.put(("steering_applied", steer))
-                        segment_input = {
-                            "messages": steer_message_dicts(steers)}
+                        segment_input = steer_state_update(steers)
                         continue
                     break
                 await event_queue.put(("graph_done", None))
@@ -956,6 +957,21 @@ async def run_langgraph_task(
                             )
                         except Exception as mem_e:  # noqa: BLE001 — best-effort fact extraction (provider + DB): failure is logged and must not fail the completed task
                             logger.warning(f"Memory storage failed: {mem_e}")
+                        # Epic 4, E4-10 (addendum omp #29): the learn
+                        # loop — explicit lessons from this task go
+                        # into learned.md for the next session's
+                        # briefing. Same best-effort contract as fact
+                        # extraction, its own guard so a lesson
+                        # failure can never mask or break the rest.
+                        try:
+                            await memory_backend.learn_lessons(
+                                provider=provider,
+                                user_prompt=prompt,
+                                assistant_response=full_response,
+                                task_id=task_id,
+                            )
+                        except Exception as lesson_e:  # noqa: BLE001 — best-effort lesson extraction: failure is logged and must not fail the completed task
+                            logger.warning(f"Lesson extraction failed: {lesson_e}")
 
                 # Epic 8, E8-2.4: auto-record task final summary as a report document artifact
                 final_summary_text = full_response or "(task completed)"
@@ -1358,7 +1374,7 @@ async def resume_langgraph_task(
                         },
                     )
                 async for _ev in _consume_segment(
-                        {"messages": steer_message_dicts(steers_to_apply)}):
+                        steer_state_update(steers_to_apply)):
                     yield _ev
             if pending_steers:
                 # Paused again before the steers could be applied:
@@ -1396,6 +1412,14 @@ async def resume_langgraph_task(
                     try:
                         await memory_backend.record_episode(task_id, orig_prompt, full_response, ["task", "completed", "resumed"], TaskState.SUCCEEDED.value)
                         await memory_backend.learn(
+                            provider=provider,
+                            user_prompt=orig_prompt,
+                            assistant_response=full_response,
+                            task_id=task_id
+                        )
+                        # Epic 4, E4-10: lessons on the resume path
+                        # too — a resumed task ends the same way.
+                        await memory_backend.learn_lessons(
                             provider=provider,
                             user_prompt=orig_prompt,
                             assistant_response=full_response,

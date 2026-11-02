@@ -96,7 +96,12 @@ def apply_tool_call_hooks(tool_name: str, args: dict, *, audit_logger: Any = Non
             raise
         except Exception as e:
             _audit(audit_logger, "HOOK_FAILED", {"tool_name": tool_name, "hook": name, "error": str(e)})
-            raise HookBlock(f"Hook '{name}' failed and fails closed: {e}") from e
+            # The block message reaches the caller (via the registry's
+            # ToolExecutionError), so it is fixed-form — hook name and
+            # the fact of failure only. Exception text stays in the
+            # audit event above: a hook's exception can embed the call
+            # arguments it was vetting (E7-F06).
+            raise HookBlock(f"Hook '{name}' failed and fails closed") from e
         if isinstance(outcome, dict):
             current = outcome
             _audit(audit_logger, "HOOK_REWRITTEN", {"tool_name": tool_name, "hook": name})
@@ -116,7 +121,13 @@ def apply_tool_result_hooks(tool_name: str, args: dict, result: Any, *, audit_lo
             outcome = fn(tool_name, args, current, {})
         except Exception as e:  # noqa: BLE001 — fail-closed: unvetted output is withheld
             _audit(audit_logger, "HOOK_FAILED", {"tool_name": tool_name, "hook": name, "error": str(e)})
-            return f"[tool output withheld: result hook '{name}' failed: {e}]"
+            # The notice REPLACES the tool result the caller sees, so
+            # it must be safe by construction: hook name and the fact
+            # of failure only — never the exception text, which for a
+            # parsing/validation hook routinely quotes the very result
+            # it failed to vet (E7-F06). The full error detail is in
+            # the HOOK_FAILED audit event above (operator's channel).
+            return f"[tool output withheld: result hook '{name}' failed]"
         if isinstance(outcome, str):
             current = outcome
             _audit(audit_logger, "HOOK_RESULT_REPLACED", {"tool_name": tool_name, "hook": name})

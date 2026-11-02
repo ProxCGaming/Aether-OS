@@ -142,11 +142,39 @@ class ModelRegistry:
     """Central access point for model metadata and capability matching with dynamic discovery support."""
 
     def __init__(self, models: list[ModelEntry] | None = None):
+        # ``_models`` is the single source of truth. There is no
+        # by-ID index: two providers can offer the same bare model ID
+        # (E5-F03), so any index keyed by ID alone either collides or
+        # drifts from the list — lookups below derive from the list.
         self._models: list[ModelEntry] = list(models) if models is not None else list(CURATED_MODELS)
-        self._by_id: dict[str, ModelEntry] = {m.id: m for m in self._models}
 
-    def get_model(self, model_id: str) -> ModelEntry | None:
-        return self._by_id.get(model_id)
+    def get_models_by_id(self, model_id: str) -> list[ModelEntry]:
+        """Every entry offering *model_id*, across all providers."""
+        return [m for m in self._models if m.id == model_id]
+
+    def get_model(self, model_id: str, provider: str | None = None) -> ModelEntry | None:
+        """Look up a model entry.
+
+        With ``provider``, the lookup is provider-qualified: it
+        returns exactly that provider's entry for the ID, or None —
+        an explicit provider choice always wins (E5-F03).
+
+        Without a provider, a bare ID offered by several providers
+        resolves deterministically and independently of registration
+        order: lowest priority first, then provider name. Callers
+        that know the user's configuration (the routing policy)
+        resolve through :meth:`get_models_by_id` instead, so the
+        configuration — not this context-free rule — decides.
+        """
+        matches = self.get_models_by_id(model_id)
+        if provider is not None:
+            for entry in matches:
+                if entry.provider == provider:
+                    return entry
+            return None
+        if not matches:
+            return None
+        return min(matches, key=lambda m: (m.priority, m.provider))
 
     def get_models_for_provider(self, provider: str) -> list[ModelEntry]:
         matches = [m for m in self._models if m.provider == provider]
@@ -160,9 +188,16 @@ class ModelRegistry:
         return list(self._models)
 
     def register_model(self, entry: ModelEntry) -> None:
-        """Register or update a model entry in the registry."""
-        self._by_id[entry.id] = entry
-        self._models = [m for m in self._models if m.id != entry.id] + [entry]
+        """Register or update a model entry in the registry.
+
+        Identity is (provider, ID): refreshing one provider's entry
+        never disturbs another provider's entry for the same bare
+        model ID (E5-F03).
+        """
+        self._models = [
+            m for m in self._models
+            if not (m.id == entry.id and m.provider == entry.provider)
+        ] + [entry]
 
     def update_provider_models(self, provider: str, model_ids: list[str]) -> None:
         """Dynamically replace or update discovered models for a provider."""
@@ -209,12 +244,10 @@ class ModelRegistry:
                 priority=_effective_priority((idx, mid)),
             )
             self._models.append(entry)
-            self._by_id[mid] = entry
 
     def remove_provider_models(self, provider: str) -> None:
         """Drop all model entries for a provider (used when a provider is disconnected)."""
         self._models = [m for m in self._models if m.provider != provider]
-        self._by_id = {m.id: m for m in self._models}
 
 
 GLOBAL_MODEL_REGISTRY = ModelRegistry()

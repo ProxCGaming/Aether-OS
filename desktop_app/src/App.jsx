@@ -8,6 +8,7 @@ const ForceGraph3D = React.lazy(() => import('react-force-graph-3d'));
 import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu, Pencil, Upload, Layers } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
 import SettingsPanel from './SettingsPanel';
+import { resolveSnipHotkey } from './snipHotkey';
 import Dashboard from './Dashboard';
 import Projects from './Projects';
 import Onboarding from './components/Onboarding';
@@ -94,7 +95,7 @@ function AppContent() {
   // Phase 10.3 C1: the engine-message facade lives in SocketContext, not
   // here. AppContent consumes its wsRef/isConnected; it builds no mock of
   // its own and subscribes to nothing directly.
-  const { wsRef, isConnected } = useAetherSocket();
+  const { wsRef, isConnected, sendMessage } = useAetherSocket();
 
   const [status, setStatus] = useState('Initializing');
   const [isThinking, setIsThinking] = useState(false);
@@ -110,6 +111,22 @@ function AppContent() {
   const [providerHealth, setProviderHealth] = useState({});
   // Epic 6: engine config (onboarding flag, reset), palette + shortcuts UI.
   const [engineConfig, setEngineConfig] = useState(null);
+  // E6-F02: the onboarding completion send is issued at most once per
+  // renderer session (see handleOnboardingDone).
+  const onboardingCompletionSentRef = useRef(false);
+  // Open Point 13: apply the stored snip hotkey (engine config
+  // `snip_hotkey`) to the main process as soon as the config
+  // loads, and whenever it changes — main registers its platform
+  // default at startup, so this is what makes a user's own
+  // choice the live global accelerator without an app restart.
+  // Re-applying the live value is a no-op in main.
+  const snipAccelerator = engineConfig ? resolveSnipHotkey(engineConfig.snip_hotkey).accelerator : null;
+  useEffect(() => {
+    if (!snipAccelerator) return;
+    if (window.electronAPI?.registerSnipShortcut) {
+      window.electronAPI.registerSnipShortcut(snipAccelerator);
+    }
+  }, [snipAccelerator]);
   const [providersLoaded, setProvidersLoaded] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -406,6 +423,19 @@ function AppContent() {
     sendVoiceRequest('VOICE_RTC_ICE_REQUEST', {
       session_id: current.sessionId || activeSessionRef.current,
       candidate,
+    });
+  }, [sendVoiceRequest]);
+
+  // N09: the overlay reports the highest engine chunk_seq it has
+  // FINISHED playing; the engine's heard-word accounting reads
+  // these reports, never its own emission count. Fire-and-forget —
+  // no response rides back.
+  const handleVoicePlaybackProgress = useCallback((playedSeq) => {
+    const current = voiceStateRef.current;
+    if (!current) return;
+    sendVoiceRequest('VOICE_PLAYBACK_PROGRESS', {
+      session_id: current.sessionId || activeSessionRef.current,
+      played_seq: playedSeq,
     });
   }, [sendVoiceRequest]);
 
@@ -1310,6 +1340,14 @@ function AppContent() {
           if (data.payload.health && typeof data.payload.health === 'object') setProviderHealth(data.payload.health);
         } else if (data.type === 'CONFIG_GET_RESPONSE' || data.type === 'CONFIG_UPDATE_RESPONSE' || data.type === 'CONFIG_RESET_RESPONSE') {
           if (data.payload && data.payload.config) setEngineConfig(data.payload.config);
+          if (data.type === 'CONFIG_RESET_RESPONSE' && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            // E6-F04: the provider list carries the defaults the
+            // chat model display derives from (is_default /
+            // default_model) — refetch it after a reset, like
+            // provider save/remove below, or Chat keeps displaying
+            // the pre-reset model until a restart.
+            wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+          }
         } else if (data.type === 'PROVIDER_REMOVE_RESPONSE' || data.type === 'PROVIDER_SAVE_RESPONSE') {
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
@@ -1443,7 +1481,15 @@ function AppContent() {
             }
             if (p.audio_chunk) {
               voiceChunkSeqRef.current += 1;
-              setVoiceAudioChunk({ seq: voiceChunkSeqRef.current, data: p.audio_chunk });
+              setVoiceAudioChunk({
+                seq: voiceChunkSeqRef.current,
+                // N09: the engine's chunk identity, when the
+                // engine stamps one — the overlay reports finished
+                // seqs back as playback progress. Absent (an older
+                // engine), the chunk is simply never reported.
+                engineSeq: typeof p.chunk_seq === 'number' ? p.chunk_seq : null,
+                data: p.audio_chunk,
+              });
             }
           }
         } else if (data.type === 'VOICE_BARGE_IN') {
@@ -2062,16 +2108,34 @@ function AppContent() {
 
   // Epic 6, E6-02: completing or skipping onboarding persists the
   // flag engine-side so the overlay appears exactly once.
+  //
+  // E6-F02: the send goes through the SocketContext facade's
+  // sendMessage, which QUEUES while the socket is down and flushes
+  // on reconnect — the old raw-socket send was guarded by an OPEN
+  // check, so a Finish/Skip pressed while disconnected was dropped
+  // entirely and the engine's still-false flag resurrected the
+  // wizard on the next config reply. The send is issued at most
+  // once per renderer session: the facade queue drains each entry
+  // exactly once, the local flag set below hides the wizard, and
+  // the only way onDone can fire again is a stale engine config
+  // reply briefly resurrecting the wizard before the update reply
+  // lands — that must not duplicate the request. A restarted
+  // renderer resets the guard, which is correct: it re-reads the
+  // engine flag, and the wizard legitimately returns (and can be
+  // finished again) only if the flag never landed. Completion
+  // also hands the user into Chat, wherever they finished from.
   const handleOnboardingDone = useCallback(() => {
     setEngineConfig(prev => (prev ? { ...prev, onboarding_completed: true } : prev));
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'CONFIG_UPDATE_REQUEST', schema_version: 1,
+    if (!onboardingCompletionSentRef.current) {
+      onboardingCompletionSentRef.current = true;
+      sendMessage('CONFIG_UPDATE_REQUEST', {
+        schema_version: 1,
         request_id: Date.now().toString(),
         payload: { config: { onboarding_completed: true } },
-      }));
+      });
     }
-  }, [wsRef]);
+    setActiveTab('Chat');
+  }, [sendMessage]);
 
   // Epic 6, E6-03: palette items — only entries that really act.
   const paletteItems = useMemo(() => {
@@ -2765,6 +2829,7 @@ function AppContent() {
           voiceRtcRemoteCandidate={voiceRtcRemoteCandidate}
           onVoiceRtcOffer={handleVoiceRtcOffer}
           onVoiceRtcIceCandidate={handleVoiceRtcIceCandidate}
+          onVoicePlaybackProgress={handleVoicePlaybackProgress}
           dictationState={dictationState}
           readAloudState={readAloudState}
           onDictationStart={handleDictationStart}
@@ -2843,39 +2908,46 @@ function AppContent() {
               />
             )}
             {activeTab === 'Projects' && <Projects wsRef={wsRef} />}
-            {!isFloating && engineConfig && !engineConfig.onboarding_completed && providersLoaded
-              && !(Array.isArray(providers) && providers.some(p => p.has_key)) && (
-              <Onboarding providers={providers} onDone={handleOnboardingDone} />
-            )}
-            {!isFloating && (
-              <CommandPalette open={paletteOpen} items={paletteItems} onClose={() => setPaletteOpen(false)} />
-            )}
-            {!isFloating && shortcutsOpen && (
-              <div data-testid="shortcuts-dialog" style={{ position: 'fixed', inset: 0, background: 'rgba(5,5,10,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 205 }} onClick={() => setShortcutsOpen(false)}>
-                <div style={{ background: 'rgba(20,20,28,0.98)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '16px', padding: '24px', width: '380px', maxWidth: '92vw', color: '#f0f0f5' }} onClick={(e) => e.stopPropagation()}>
-                  <h3 style={{ margin: '0 0 14px 0' }}>Keyboard shortcuts</h3>
-                  {[
-                    ['Ctrl+K', 'Command palette'],
-                    ['Ctrl+N', 'New chat'],
-                    ['Ctrl+,', 'Open Settings'],
-                    ['Alt+Space', 'Show / hide Aether-OS (global)'],
-                    [engineConfig?.snip_hotkey || 'Ctrl+Shift+S', 'Snip & ask (global)'],
-                    ['Esc', 'Close palette / dialogs'],
-                  ].map(([keys, desc]) => (
-                    <div key={keys} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.06)', fontSize: '14px' }}>
-                      <span style={{ fontFamily: 'monospace', color: '#a78bfa' }}>{keys}</span>
-                      <span style={{ color: '#c9c9d4' }}>{desc}</span>
-                    </div>
-                  ))}
-                  <button onClick={() => setShortcutsOpen(false)} style={{ marginTop: '16px', background: '#7c3aed', color: '#fff', border: 'none', padding: '8px 18px', borderRadius: '10px', cursor: 'pointer' }}>Done</button>
-                </div>
-              </div>
-            )}
             {activeTab !== 'Settings' && activeTab !== 'Dashboard' && activeTab !== 'Artifacts' && activeTab !== 'Projects' && (
                <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: '#9090a0' }}>
                  <h2>{activeTab} view coming soon.</h2>
                </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* E6-F01: shell-level overlays. Onboarding, the command palette and
+          shortcuts help mount here — independent of the active tab — so
+          they render on the default Chat tab exactly as on every other
+          tab. Each keeps its own visibility condition unchanged, and all
+          three roots are position:fixed, so the mount point does not
+          change their placement. */}
+      {!isFloating && engineConfig && !engineConfig.onboarding_completed && providersLoaded
+        && !(Array.isArray(providers) && providers.some(p => p.has_key)) && (
+        <Onboarding providers={providers} onDone={handleOnboardingDone} />
+      )}
+      {!isFloating && (
+        <CommandPalette open={paletteOpen} items={paletteItems} onClose={() => setPaletteOpen(false)} />
+      )}
+      {!isFloating && shortcutsOpen && (
+        <div data-testid="shortcuts-dialog" style={{ position: 'fixed', inset: 0, background: 'rgba(5,5,10,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 205 }} onClick={() => setShortcutsOpen(false)}>
+          <div style={{ background: 'rgba(20,20,28,0.98)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '16px', padding: '24px', width: '380px', maxWidth: '92vw', color: '#f0f0f5' }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ margin: '0 0 14px 0' }}>Keyboard shortcuts</h3>
+            {[
+              ['Ctrl+K', 'Command palette'],
+              ['Ctrl+N', 'New chat'],
+              ['Ctrl+,', 'Open Settings'],
+              ['Alt+Space', 'Show / hide Aether-OS (global)'],
+              [resolveSnipHotkey(engineConfig?.snip_hotkey).accelerator, 'Snip & ask (global)'],
+              ['Esc', 'Close palette / dialogs'],
+            ].map(([keys, desc]) => (
+              <div key={keys} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.06)', fontSize: '14px' }}>
+                <span style={{ fontFamily: 'monospace', color: '#a78bfa' }}>{keys}</span>
+                <span style={{ color: '#c9c9d4' }}>{desc}</span>
+              </div>
+            ))}
+            <button onClick={() => setShortcutsOpen(false)} style={{ marginTop: '16px', background: '#7c3aed', color: '#fff', border: 'none', padding: '8px 18px', borderRadius: '10px', cursor: 'pointer' }}>Done</button>
           </div>
         </div>
       )}
@@ -2911,9 +2983,21 @@ function AppContent() {
 }
 
 function NavItem({ icon, label, activeTab, setActiveTab }) {
+  const activate = () => setActiveTab(label);
   return (
-    <div 
-      onClick={() => setActiveTab(label)}
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={activate}
+      onKeyDown={(e) => {
+        // E6-F06: keyboard activation does exactly what a click does.
+        // (role="button" also opts the item into the global
+        // :focus-visible ring in index.css.)
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          activate();
+        }
+      }}
       style={{
         display: 'flex',
         alignItems: 'center',

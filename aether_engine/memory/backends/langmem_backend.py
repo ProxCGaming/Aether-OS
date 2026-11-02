@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -44,20 +45,71 @@ _DEFAULT_PATH = Path.home() / ".aether" / "langmem_store.json"
 
 class JsonFileStore:
     """A minimal persistent store with the LangGraph BaseStore item
-    shape. Every mutation rewrites the file atomically."""
+    shape. Every mutation rewrites the file atomically.
+
+    Two durability rules guard that rewrite:
+
+    - Serialisation (E4-F06): one lock covers each mutation AND its
+      save. The async wrappers run the sync core in threads, so
+      without the lock two concurrent puts could snapshot the shared
+      dict at different moments and the older snapshot's replace
+      would silently discard a write that already reported success.
+      Atomic rename alone does not serialise competing snapshots.
+
+    - Load failure (E4-F07): if the file exists but cannot be loaded
+      (transient I/O error, corrupt or wrong-shaped JSON), the store
+      must NOT become a writable empty snapshot — the next save would
+      overwrite valid data it never saw. Writes reload-or-refuse:
+      retry the load, and if it still fails raise instead of saving.
+    """
 
     def __init__(self, path: Path | None = None):
         self._path = path or _DEFAULT_PATH
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
         self._items: dict[str, dict] = {}
+        self._load_failed = False
         if self._path.exists():
             try:
-                raw = json.loads(self._path.read_text("utf-8"))
-                if isinstance(raw, dict):
-                    self._items = raw
-            except (OSError, ValueError):
-                logger.warning("LangMem store at %s is unreadable; starting empty", self._path)
-                self._items = {}
+                self._items = self._read_items()
+            except (OSError, ValueError, TypeError) as e:
+                logger.warning(
+                    "LangMem store at %s could not be loaded (%s); "
+                    "writes are refused until it loads", self._path, e)
+                self._load_failed = True
+
+    def _read_items(self) -> dict:
+        raw = json.loads(self._path.read_text("utf-8"))
+        if not isinstance(raw, dict):
+            raise TypeError(f"{self._path} does not contain a store object")
+        return raw
+
+    def _attempt_reload(self) -> bool:
+        """Retry a failed initial load; True when the snapshot is
+        trustworthy afterwards. Caller holds the lock."""
+        if not self._load_failed:
+            return True
+        if not self._path.exists():
+            # The unreadable file is gone; writing a fresh store now
+            # destroys nothing.
+            self._items = {}
+            self._load_failed = False
+            return True
+        try:
+            self._items = self._read_items()
+        except (OSError, ValueError, TypeError):
+            return False
+        self._load_failed = False
+        return True
+
+    def _ensure_writable(self) -> None:
+        """Caller holds the lock. Refuse to save a snapshot that never
+        loaded — saving it would overwrite the existing store (E4-F07)."""
+        if self._load_failed and not self._attempt_reload():
+            raise RuntimeError(
+                f"LangMem store at {self._path} could not be loaded; "
+                "refusing to write, because saving would overwrite the "
+                "existing store. Repair or remove the file, then retry.")
 
     @staticmethod
     def _ns_key(namespace: tuple, key: str) -> str:
@@ -83,36 +135,44 @@ class JsonFileStore:
     # are called from inside the engine's event loop, so they must
     # never need asyncio.run. Async wrappers delegate via to_thread.
     def put(self, namespace: tuple, key: str, value: dict) -> None:
-        ns_key = self._ns_key(namespace, key)
-        now = time.time()
-        created = self._items.get(ns_key, {}).get("created_at", now)
-        self._items[ns_key] = {"value": value, "created_at": created, "updated_at": now}
-        self._save()
+        with self._lock:
+            self._ensure_writable()
+            ns_key = self._ns_key(namespace, key)
+            now = time.time()
+            created = self._items.get(ns_key, {}).get("created_at", now)
+            self._items[ns_key] = {"value": value, "created_at": created, "updated_at": now}
+            self._save()
 
     def get(self, namespace: tuple, key: str) -> SimpleNamespace | None:
-        ns_key = self._ns_key(namespace, key)
-        record = self._items.get(ns_key)
-        return self._item(ns_key, record) if record else None
+        with self._lock:
+            self._attempt_reload()
+            ns_key = self._ns_key(namespace, key)
+            record = self._items.get(ns_key)
+            return self._item(ns_key, record) if record else None
 
     def delete(self, namespace: tuple, key: str) -> bool:
-        if self._items.pop(self._ns_key(namespace, key), None) is not None:
-            self._save()
-            return True
-        return False
+        with self._lock:
+            self._ensure_writable()
+            if self._items.pop(self._ns_key(namespace, key), None) is not None:
+                self._save()
+                return True
+            return False
 
     def search(self, namespace: tuple, query: str | None = None, limit: int = 10) -> list:
-        prefix = "/".join(namespace) + "::"
-        records = [
-            (ns_key, rec) for ns_key, rec in self._items.items() if ns_key.startswith(prefix)
-        ]
-        if query:
-            needle = query.lower()
+        with self._lock:
+            self._attempt_reload()
+            prefix = "/".join(namespace) + "::"
             records = [
-                (k, r) for k, r in records
-                if needle in json.dumps(r["value"]).lower()
+                (ns_key, rec) for ns_key, rec in self._items.items() if ns_key.startswith(prefix)
             ]
-        records.sort(key=lambda kv: kv[1]["updated_at"], reverse=True)
-        return [self._item(k, r) for k, r in records[:limit]]
+            if query:
+                needle = query.lower()
+                records = [
+                    (k, r) for k, r in records
+                    if needle in json.dumps(r["value"]).lower()
+                ]
+            records.sort(key=lambda kv: kv[1]["updated_at"], reverse=True)
+            return [self._item(k, r) for k, r in records[:limit]]
 
     async def aput(self, namespace: tuple, key: str, value: dict) -> None:
         await asyncio.to_thread(self.put, namespace, key, value)

@@ -18,8 +18,17 @@ class ProviderHealthState:
     def is_available(self, now: float | None = None) -> bool:
         current_time = now if now is not None else time.time()
         if self.status == "offline":
-            # If offline due to temporary failures and cooldown expired, allow a probe attempt
-            if self.consecutive_failures > 0 and self.consecutive_failures < 5:
+            # Once the cooldown expires, allow a probe attempt regardless of
+            # how many failures accumulated (E5-F08: a former count cap made
+            # the 5th transient failure permanently unprobeable, so the
+            # advertised cooldown could never restore the provider). The
+            # cooldown itself is the anti-hammer guard: a failed probe
+            # records another failure and re-arms a fresh cooldown, a
+            # successful one resets the state. This branch intentionally
+            # covers nonretriable-offline states too — it always has (a
+            # single auth failure was already probe-eligible after its
+            # 1-hour cooldown); their far longer cooldown is the difference.
+            if self.consecutive_failures > 0:
                 return current_time >= self.cooldown_until
             return False
         if self.status == "degraded":

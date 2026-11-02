@@ -19,8 +19,12 @@ const path = require('path');
 const fs = require('fs');
 const WebSocket = require('ws');
 const { createWindowStateStore } = require('./electron/windowState.cjs');
+const { createEngineLifecycle } = require('./electron/engineLifecycle.cjs');
+const http = require('http');
+const { spawn: spawnChildProcess } = require('child_process');
 const { shouldNotify, notificationContent } = require('./electron/notify.cjs');
 const { computeCaptureGeometry, selectScreenSource } = require('./electron/snipGeometry.cjs');
+const { defaultSnipAccelerator } = require('./electron/snipShortcut.cjs');
 const { createTransferStateStore } = require('./electron/transferState.cjs');
 const {
   DEV_ORIGIN,
@@ -168,7 +172,50 @@ function toggleMainWindow() {
   }
 }
 
+// E10-F06: bundled-engine lifecycle (electron/engineLifecycle.cjs
+// owns every decision; this is wiring). Lazily created so the dev
+// flow only pays for what it uses.
+let engineLifecycle = null;
+function getEngineLifecycle() {
+  if (!engineLifecycle) {
+    engineLifecycle = createEngineLifecycle({
+      spawn: spawnChildProcess,
+      httpGet: (url, timeoutMs) => new Promise((resolve, reject) => {
+        const req = http.get(url, { timeout: timeoutMs }, (res) => {
+          res.resume();
+          resolve(res.statusCode || 0);
+        });
+        req.on('timeout', () => req.destroy(new Error('engine health probe timed out')));
+        req.on('error', reject);
+      }),
+      fs,
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      userDataPath: app.getPath('userData'),
+      baseEnv: process.env,
+      log: (...args) => console.log(...args),
+    });
+  }
+  return engineLifecycle;
+}
+
 function getToken() {
+  // E10-F06: when the shell spawned the bundled engine, read THAT
+  // engine's token file (the engine writes .run/engine.token
+  // relative to its own CWD, which the lifecycle set to the engine
+  // run directory). The token still travels only as an Authorization
+  // header from this process — see connectEngine below.
+  if (engineLifecycle) {
+    const spawnedTokenPath = engineLifecycle.tokenFilePath();
+    if (spawnedTokenPath) {
+      try {
+        return fs.readFileSync(spawnedTokenPath, 'utf8').trim();
+      } catch (err) {
+        console.error('Failed to read spawned-engine token:', err);
+      }
+    }
+  }
   try {
     const tokenPath = path.join(__dirname, '..', '.run', 'engine.token');
     return fs.readFileSync(tokenPath, 'utf8').trim();
@@ -358,7 +405,14 @@ function createFloatingChat(sessionId) {
 }
 
 // Epic 8, E8-4.1: global snip shortcut & capture manager
-let currentSnipShortcut = 'CommandOrControl+Shift+S';
+// Open Point 13 (DECIDED 1 Nov 2026): the snip hotkey is
+// user-changeable in Settings; the default is Ctrl+S on
+// Windows/Linux and Cmd+S on macOS (electron/snipShortcut.cjs
+// owns the resolution). The stored preference lives in the
+// engine user config (snip_hotkey); the renderer applies it at
+// startup and on change through the register-snip-shortcut IPC.
+let currentSnipShortcut = defaultSnipAccelerator(process.platform);
+let snipShortcutActive = false;
 
 function triggerSnipFlow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -372,23 +426,45 @@ function triggerSnipFlow() {
   }
 }
 
+// Failure rule (Open Point 13): a new accelerator is registered
+// BEFORE the old one is dropped, so when registration fails —
+// the accelerator is taken by the OS or another app, or invalid
+// on this platform — the previous working hotkey stays active
+// and currentSnipShortcut keeps pointing at it. Returns true
+// only when `shortcut` is the live accelerator afterwards.
 function registerSnipGlobalShortcut(shortcut) {
-  if (currentSnipShortcut) {
-    try { globalShortcut.unregister(currentSnipShortcut); } catch (e) { /* ignore */ }
-  }
-  currentSnipShortcut = shortcut || 'CommandOrControl+Shift+S';
+  const previous = currentSnipShortcut;
+  const target = shortcut || previous;
+  if (target === previous && snipShortcutActive) return true;
+  currentSnipShortcut = target;
+  let registered = false;
   try {
-    globalShortcut.register(currentSnipShortcut, triggerSnipFlow);
+    registered = globalShortcut.register(currentSnipShortcut, triggerSnipFlow) !== false;
   } catch (err) {
     console.error('Failed to register snip shortcut:', err);
   }
+  if (!registered) {
+    currentSnipShortcut = previous;
+    return false;
+  }
+  if (previous !== target) {
+    try { globalShortcut.unregister(previous); } catch (e) { /* ignore */ }
+  }
+  snipShortcutActive = true;
+  return true;
 }
 
 app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return;
   installSecurityPolicy();
   createWindow();
-  connectEngine();
+  // E10-F06: if no engine already answers on the engine port, start
+  // the bundled one first (packaged builds); connectEngine() itself
+  // is unchanged and its reconnect loop covers every outcome,
+  // including the dev case where no payload exists.
+  void getEngineLifecycle().start()
+    .catch((err) => console.error('Engine lifecycle start failed:', err))
+    .finally(() => connectEngine());
   createTray();
   // Epic 6, E6-01: global summon hotkey (Alt+Space toggles the window).
   try {
@@ -396,7 +472,9 @@ app.whenReady().then(() => {
   } catch (err) {
     console.error('Failed to register summon hotkey:', err);
   }
-  // Epic 8, E8-4.1: global screen snip hotkey (Settings-changeable, default Ctrl+Shift+S / Cmd+Shift+S)
+  // Epic 8, E8-4.1: global screen snip hotkey (Settings-changeable;
+  // Open Point 13 default Ctrl+S, Cmd+S on macOS). The renderer
+  // re-applies the stored preference as soon as the config loads.
   registerSnipGlobalShortcut(currentSnipShortcut);
 
   app.on('activate', () => {
@@ -408,6 +486,17 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  // E10-F06: the spawned engine belongs to this app instance; it
+  // must not outlive it. stop() issues the SIGTERM synchronously;
+  // the process 'exit' killSync below is the backstop if the app
+  // process dies before the graceful stop completes.
+  if (engineLifecycle) void engineLifecycle.stop();
+});
+
+// E10-F06: last resort for abrupt exits, where no async quit hook
+// runs — a synchronous kill attempt on the spawned engine.
+process.on('exit', () => {
+  if (engineLifecycle) engineLifecycle.killSync();
 });
 
 app.on('window-all-closed', () => {
@@ -586,14 +675,24 @@ ipcMain.handle('get-snip-shortcut', (event) => {
 });
 
 ipcMain.handle('register-snip-shortcut', (event, shortcut) => {
-  if (!isTrustedIpcSender(event, 'register-snip-shortcut')) return currentSnipShortcut;
+  // Open Point 13: the reply reports the outcome honestly —
+  // `ok` says whether the requested accelerator is now live,
+  // and `shortcut` names the accelerator that IS live (the
+  // previous one when a change failed), so Settings can show
+  // the failure instead of saving a hotkey that does not work.
+  if (!isTrustedIpcSender(event, 'register-snip-shortcut')) {
+    return { ok: false, shortcut: currentSnipShortcut };
+  }
   const check = validateAccelerator(shortcut);
   if (!check.ok) {
     console.warn(`[ipc] Refused snip shortcut: ${check.error}`);
-    return currentSnipShortcut;
+    return { ok: false, shortcut: currentSnipShortcut };
   }
-  registerSnipGlobalShortcut(check.value);
-  return currentSnipShortcut;
+  const ok = registerSnipGlobalShortcut(check.value);
+  if (!ok) {
+    console.warn(`[ipc] Snip shortcut '${check.value}' could not be registered; '${currentSnipShortcut}' is still active.`);
+  }
+  return { ok, shortcut: currentSnipShortcut };
 });
 
 // N04: capture the display the overlay window is actually on, in

@@ -296,8 +296,11 @@ describe('E8-4.1: Snip Flow (Composer attachment & capture overlay)', () => {
       return { wsRef, getHandler: () => messageHandler };
     }
 
-    it('allows viewing and updating screen snip hotkey in Advanced settings', () => {
-      const registerShortcutMock = jest.fn();
+    it('allows viewing and updating screen snip hotkey in Advanced settings', async () => {
+      // The IPC resolves with the main process's verdict:
+      // { ok, shortcut } — the accelerator that is actually live.
+      const registerShortcutMock = jest.fn(
+        (shortcut) => Promise.resolve({ ok: true, shortcut }));
       window.electronAPI = {
         registerSnipShortcut: registerShortcutMock,
       };
@@ -308,14 +311,20 @@ describe('E8-4.1: Snip Flow (Composer attachment & capture overlay)', () => {
       // Switch to Advanced tab
       fireEvent.click(screen.getByText('Advanced'));
 
-      // Check input presence
+      // Check input presence. Open Point 13 (DECIDED): the default
+      // is Ctrl+S on Windows/Linux, Cmd+S on macOS — jsdom's UA is
+      // not a Mac, so the platform default here is Control+S. The
+      // rejected Ctrl+Shift+S recommendation must not appear.
       const input = screen.getByTestId('snip-hotkey-input');
       expect(input).toBeInTheDocument();
-      expect(input.value).toBe('CommandOrControl+Shift+S');
+      expect(input.value).toBe('Control+S');
+
+      // The control states plainly that the shortcut is global.
+      expect(screen.getByTestId('snip-hotkey-note')).toHaveTextContent(/global/i);
 
       // Update hotkey
       fireEvent.change(input, { target: { value: 'CommandOrControl+Alt+S' } });
-      fireEvent.blur(input);
+      await act(async () => { fireEvent.blur(input); });
 
       expect(registerShortcutMock).toHaveBeenCalledWith('CommandOrControl+Alt+S');
       const updateCall = wsRef.current.send.mock.calls.find(c => c[0].includes('CONFIG_UPDATE_REQUEST'));
@@ -324,6 +333,7 @@ describe('E8-4.1: Snip Flow (Composer attachment & capture overlay)', () => {
         type: 'CONFIG_UPDATE_REQUEST',
         payload: { config: { snip_hotkey: 'CommandOrControl+Alt+S' } },
       });
+      expect(screen.queryByTestId('snip-hotkey-error')).not.toBeInTheDocument();
 
       // Verify incoming CONFIG_GET_RESPONSE updates the state
       act(() => {
@@ -340,6 +350,94 @@ describe('E8-4.1: Snip Flow (Composer attachment & capture overlay)', () => {
       });
 
       expect(input.value).toBe('Ctrl+Shift+X');
+    });
+
+    it('surfaces a failed registration and keeps the working hotkey', async () => {
+      // Main process verdict: the requested accelerator could not
+      // be registered (e.g. taken by another app); the previously
+      // working one is still live and is what comes back.
+      const registerShortcutMock = jest.fn(
+        () => Promise.resolve({ ok: false, shortcut: 'Control+S' }));
+      window.electronAPI = {
+        registerSnipShortcut: registerShortcutMock,
+      };
+
+      const { wsRef } = makeWsRef();
+      render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+      fireEvent.click(screen.getByText('Advanced'));
+
+      const input = screen.getByTestId('snip-hotkey-input');
+      fireEvent.change(input, { target: { value: 'Ctrl+Alt+S' } });
+      await act(async () => { fireEvent.blur(input); });
+
+      // The failure is visible, the input reverts to the hotkey
+      // that is actually live, and the failed value is NOT saved.
+      const error = screen.getByTestId('snip-hotkey-error');
+      expect(error).toHaveTextContent(/could not/i);
+      expect(error).toHaveTextContent(/Control\+S/);
+      expect(input.value).toBe('Control+S');
+      const updateCall = wsRef.current.send.mock.calls.find(c => c[0].includes('CONFIG_UPDATE_REQUEST'));
+      expect(updateCall).toBeUndefined();
+    });
+
+    it('resets the snip hotkey to the platform default', async () => {
+      const registerShortcutMock = jest.fn(
+        (shortcut) => Promise.resolve({ ok: true, shortcut }));
+      window.electronAPI = {
+        registerSnipShortcut: registerShortcutMock,
+      };
+
+      const { wsRef, getHandler } = makeWsRef();
+      render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+      fireEvent.click(screen.getByText('Advanced'));
+
+      // A stored custom hotkey is in effect.
+      act(() => {
+        getHandler()({
+          data: JSON.stringify({
+            type: 'CONFIG_GET_RESPONSE',
+            payload: { config: { snip_hotkey: 'Ctrl+Shift+X' } },
+          }),
+        });
+      });
+      const input = screen.getByTestId('snip-hotkey-input');
+      expect(input.value).toBe('Ctrl+Shift+X');
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('snip-hotkey-reset'));
+      });
+
+      expect(registerShortcutMock).toHaveBeenCalledWith('Control+S');
+      expect(input.value).toBe('Control+S');
+      const updateCall = wsRef.current.send.mock.calls.find(c => c[0].includes('CONFIG_UPDATE_REQUEST'));
+      expect(updateCall).toBeDefined();
+      expect(JSON.parse(updateCall[0])).toMatchObject({
+        type: 'CONFIG_UPDATE_REQUEST',
+        payload: { config: { snip_hotkey: 'Control+S' } },
+      });
+    });
+
+    it('shows the decided default when the stored value is the legacy default', () => {
+      window.electronAPI = {
+        registerSnipShortcut: jest.fn(
+          (shortcut) => Promise.resolve({ ok: true, shortcut })),
+      };
+      const { wsRef, getHandler } = makeWsRef();
+      render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+      fireEvent.click(screen.getByText('Advanced'));
+
+      // Installs that never changed the setting carry the engine's
+      // pre-decision default; it counts as "no preference".
+      act(() => {
+        getHandler()({
+          data: JSON.stringify({
+            type: 'CONFIG_GET_RESPONSE',
+            payload: { config: { snip_hotkey: 'CommandOrControl+Shift+S' } },
+          }),
+        });
+      });
+
+      expect(screen.getByTestId('snip-hotkey-input').value).toBe('Control+S');
     });
   });
 });

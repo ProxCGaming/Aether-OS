@@ -120,6 +120,14 @@ def _node_state():
 
 
 class TestSpecialistConstructionHonoursConstraints:
+    # E5-F02 alignment (a312ce0): every node construction now also
+    # receives the run's effective user_config, so the fallback
+    # configuration governs graph-internal constructions too. The
+    # pins below include that kwarg and assert it is the identical
+    # object the node was handed — the passthrough is part of the
+    # construction contract now. The local_only / require_vision
+    # expectations are unchanged from the M17 originals.
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "agent,node",
@@ -129,11 +137,15 @@ class TestSpecialistConstructionHonoursConstraints:
     )
     async def test_specialist_override_construction_is_constrained(
             self, recording_factory, agent, node):
-        await node(_node_state(), _node_config(
-            agent, local_only=True, require_vision=True))
+        config = _node_config(agent, local_only=True, require_vision=True)
+        await node(_node_state(), config)
         assert recording_factory == [
-            ("ollama", "llava", {"local_only": True, "require_vision": True})
+            ("ollama", "llava", {
+                "local_only": True, "require_vision": True,
+                "user_config": config["configurable"]["user_config"]})
         ]
+        assert recording_factory[0][2]["user_config"] is \
+            config["configurable"]["user_config"]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -144,19 +156,29 @@ class TestSpecialistConstructionHonoursConstraints:
     )
     async def test_specialist_override_unconstrained_by_default(
             self, recording_factory, agent, node):
-        await node(_node_state(), _node_config(agent))
+        config = _node_config(agent)
+        await node(_node_state(), config)
         assert recording_factory == [
-            ("ollama", "llava", {"local_only": False, "require_vision": False})
+            ("ollama", "llava", {
+                "local_only": False, "require_vision": False,
+                "user_config": config["configurable"]["user_config"]})
         ]
+        assert recording_factory[0][2]["user_config"] is \
+            config["configurable"]["user_config"]
 
     def test_supervisor_override_construction_is_constrained(
             self, recording_factory):
-        provider = _resolve_supervisor_provider(_node_config(
-            "supervisor", local_only=True, require_vision=True))
+        config = _node_config(
+            "supervisor", local_only=True, require_vision=True)
+        provider = _resolve_supervisor_provider(config)
         assert isinstance(provider, _StubProvider)
         assert recording_factory == [
-            ("ollama", "llava", {"local_only": True, "require_vision": True})
+            ("ollama", "llava", {
+                "local_only": True, "require_vision": True,
+                "user_config": config["configurable"]["user_config"]})
         ]
+        assert recording_factory[0][2]["user_config"] is \
+            config["configurable"]["user_config"]
 
 
 # ---------------------------------------------------------------------------

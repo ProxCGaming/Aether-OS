@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import hashlib
 import hmac
@@ -158,6 +159,65 @@ def resolve_mcp_server_configs(source: Any, manifest: PluginManifest) -> list[tu
     return resolved
 
 
+# ---------------------------------------------------------------------------
+# E7-F08 — capability ownership and conflict handling.
+#
+# What was wrong: install copied skills into a bare global skill name and
+# assigned MCP configs by bare server name with no check against any
+# other owner's claim, so a second plugin's body/config silently replaced
+# the first's — and disable/uninstall then removed those bare names
+# without checking who owned them NOW, deleting the surviving plugin's
+# live registrations. There was no ownership record at all.
+#
+# The model added here (the smallest one that closes the repro):
+#
+# * Every successful install records CLAIMS in its registry entry:
+#   ``skill_claims`` / ``mcp_claims`` map each capability name to the
+#   SHA-256 fingerprint of what was installed (skill body bytes /
+#   canonical normalised config), plus a ``preexisting`` flag when the
+#   identical content was already there, unowned by any plugin, before
+#   this install (user content the plugin merely matches).
+# * Install (and prepare) REFUSES a claim whose live content differs
+#   from the incoming content when any other plugin owns the name, or
+#   when the content is unowned user content — no silent overwrite.
+#   Identical content collapses into a shared claim. A plugin may
+#   always overwrite its OWN claims (upgrades).
+# * Teardown (disable / uninstall / upgrade stale-removal) removes a
+#   registration only when (a) no other ENABLED plugin claims the name,
+#   (b) the claim is not pre-existing user content, and (c) the live
+#   content still matches the fingerprint this plugin installed.
+#   Anything else is left in place with a warning — teardown can never
+#   destroy another owner's live registration.
+# * Entries written before claims existed (no claim maps) keep the old
+#   bare-name teardown behaviour for their OWN artefacts, but still
+#   count as claimants for other plugins' conflict checks.
+# * A qualified ``<ns>/<name>`` skill name is logical only: on disk it
+#   is flattened to one segment (``ns+name`` — '+' is outside the safe
+#   name alphabet, so a flattened dir can never collide with, or be
+#   produced by, a bare name). The logical name is what the skill
+#   manager indexes and what claims are keyed by.
+# ---------------------------------------------------------------------------
+
+
+class PluginConflictError(ValueError):
+    """A capability claim collides with another owner's live content."""
+
+
+def _fingerprint_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _fingerprint_config(config: dict) -> str:
+    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _skill_dir_name(skill_name: str) -> str:
+    """On-disk directory name for a skill: the logical name with the
+    qualified-name separator flattened to '+', a single safe segment."""
+    return skill_name.replace("/", "+")
+
+
 class PluginInstaller:
     def __init__(self, plugins_dir: Path, audit_logger=None):
         self.plugins_dir = plugins_dir
@@ -185,6 +245,180 @@ class PluginInstaller:
         tmp_file = self.registry_file.with_name(self.registry_file.name + ".tmp")
         tmp_file.write_text(json.dumps(self._registry, indent=2))
         os.replace(tmp_file, self.registry_file)
+
+    # -- E7-F08: capability ownership / conflicts ----------------------
+
+    def _read_package_bytes(self, source: Path, file_path: str) -> bytes | None:
+        """Raw bytes of one package file, or None when unreadable.
+
+        Same containment guards as ``_read_mcp_config_file``. Returning
+        None (instead of raising) mirrors install's existing tolerance:
+        a skill file that cannot be read is skipped by install, so the
+        conflict check simply has nothing to check for it.
+        """
+        path = Path(file_path)
+        if path.is_absolute() or ".." in path.parts:
+            return None
+        try:
+            if source.is_file() and source.suffix == ".zip":
+                with zipfile.ZipFile(source, "r") as z:
+                    try:
+                        return z.read(file_path)
+                    except KeyError:
+                        return None
+            elif source.is_dir():
+                target = (source / file_path).resolve()
+                if not target.is_relative_to(source.resolve()):
+                    return None
+                if not target.exists():
+                    return None
+                return target.read_bytes()
+        except (OSError, zipfile.BadZipFile):
+            return None
+        return None
+
+    def _entry_claim(self, entry: dict, kind: str, name: str) -> dict | None:
+        """The recorded E7-F08 claim of ``entry`` on a capability, or
+        None when the entry predates claims (or does not claim it)."""
+        key = "skill_claims" if kind == "skill" else "mcp_claims"
+        raw = (entry.get(key) or {}).get(name)
+        if isinstance(raw, dict) and "sha256" in raw:
+            return {"sha256": raw["sha256"],
+                    "preexisting": bool(raw.get("preexisting"))}
+        return None
+
+    def _entry_claims_name(self, entry: dict, kind: str, name: str) -> bool:
+        """Does this registry entry claim the capability at all?
+        Legacy entries (no claim maps) claim via their installed
+        artefact lists — the only record they have."""
+        if self._entry_claim(entry, kind, name) is not None:
+            return True
+        if kind == "skill":
+            return any(
+                Path(p).name == _skill_dir_name(name)
+                for p in entry.get("installed_skills", [])
+            )
+        return name in entry.get("installed_mcp", [])
+
+    def _claimants(self, kind: str, name: str, exclude: str) -> list[str]:
+        return [
+            plugin for plugin, entry in self._registry.items()
+            if plugin != exclude and self._entry_claims_name(entry, kind, name)
+        ]
+
+    def _teardown_allowed(
+        self, plugin_name: str, entry: dict, kind: str, name: str,
+        current_fp: str | None,
+    ) -> bool:
+        """E7-F08 ownership check for removing one live registration.
+
+        Removal is allowed only when no other ENABLED plugin claims
+        the name, the departing plugin's claim is not pre-existing
+        user content, and the live content still matches the
+        fingerprint that plugin installed. Legacy entries (no
+        recorded claim) keep the old bare-name behaviour for their
+        own artefacts.
+        """
+        for other, other_entry in self._registry.items():
+            if other == plugin_name:
+                continue
+            if not other_entry.get("enabled", True):
+                continue
+            if self._entry_claims_name(other_entry, kind, name):
+                return False
+        claim = self._entry_claim(entry, kind, name)
+        if claim is None:
+            return True
+        if claim["preexisting"]:
+            return False
+        if current_fp is None:
+            return False
+        return current_fp == claim["sha256"]
+
+    def _check_capability_conflicts(
+        self, source: Path, manifest: PluginManifest,
+        mcp_configs: list[tuple[str, dict]],
+    ) -> dict[str, dict]:
+        """Refuse claims that would silently overwrite another owner.
+
+        Returns the claim plan to record on a successful install:
+        ``{"skills": {name: claim}, "mcp": {name: claim}}``. Raises
+        PluginConflictError (audited as PLUGIN_INSTALL_REFUSED) when a
+        skill body or server config differs from live content owned
+        by another plugin or by no plugin (user content). Identical
+        content collapses; a plugin's own claims never conflict.
+        """
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
+        skills_dest = Path.home() / ".aether" / "skills"
+        own_entry = self._registry.get(manifest.name) or {}
+        plan: dict[str, dict] = {"skills": {}, "mcp": {}}
+
+        def owner_text(claimants: list[str]) -> str:
+            return (f"plugin '{claimants[0]}'" if claimants
+                    else "content not owned by any plugin")
+
+        for skill in manifest.skills:
+            if not skill.file_path:
+                continue
+            raw = self._read_package_bytes(source, skill.file_path)
+            if raw is None:
+                continue
+            fp = _fingerprint_bytes(raw)
+            claimants = self._claimants("skill", skill.name, manifest.name)
+            own = self._entry_claims_name(own_entry, "skill", skill.name)
+            dest = skills_dest / _skill_dir_name(skill.name)
+            if not dest.exists():
+                plan["skills"][skill.name] = {"sha256": fp, "preexisting": False}
+                continue
+            body_path = dest / "SKILL.md"
+            current_fp = (
+                _fingerprint_bytes(body_path.read_bytes())
+                if body_path.exists() else None
+            )
+            if current_fp == fp:
+                plan["skills"][skill.name] = {
+                    "sha256": fp,
+                    "preexisting": not claimants and not own,
+                }
+            elif own and not claimants:
+                plan["skills"][skill.name] = {"sha256": fp, "preexisting": False}
+            else:
+                reason = (
+                    f"skill '{skill.name}' is already provided by "
+                    f"{owner_text(claimants)} with different content; "
+                    "refusing to overwrite it"
+                )
+                self._audit("PLUGIN_INSTALL_REFUSED", manifest.name,
+                            reason, str(source))
+                raise PluginConflictError(
+                    f"Plugin capability conflict: {reason}")
+
+        for name, config in mcp_configs:
+            fp = _fingerprint_config(config)
+            claimants = self._claimants("mcp", name, manifest.name)
+            own = self._entry_claims_name(own_entry, "mcp", name)
+            existing = GLOBAL_MCP_REGISTRY.get_server(name)
+            if existing is None:
+                plan["mcp"][name] = {"sha256": fp, "preexisting": False}
+            elif _fingerprint_config(existing) == fp:
+                plan["mcp"][name] = {
+                    "sha256": fp,
+                    "preexisting": not claimants and not own,
+                }
+            elif own and not claimants:
+                plan["mcp"][name] = {"sha256": fp, "preexisting": False}
+            else:
+                reason = (
+                    f"MCP server '{name}' is already registered by "
+                    f"{owner_text(claimants)} with a different "
+                    "configuration; refusing to overwrite it"
+                )
+                self._audit("PLUGIN_INSTALL_REFUSED", manifest.name,
+                            reason, str(source))
+                raise PluginConflictError(
+                    f"Plugin capability conflict: {reason}")
+        return plan
 
     # -- Phase 10.2 B2: refusal + zip validation -------------------------
 
@@ -368,7 +602,11 @@ class PluginInstaller:
         # Issue 008: fail fast, before the approval step — a manifest
         # whose MCP servers do not validate is rejected here with the
         # named error, not after the user approves the install.
-        resolve_mcp_server_configs(src_path, manifest)
+        mcp_configs = resolve_mcp_server_configs(src_path, manifest)
+        # E7-F08: fail fast on capability conflicts too — a claim that
+        # would overwrite another owner's live content is refused here,
+        # before approval, and again authoritatively in install().
+        self._check_capability_conflicts(src_path, manifest, mcp_configs)
         return {
             "source": source,
             "manifest": manifest.model_dump()
@@ -390,6 +628,11 @@ class PluginInstaller:
         # previous install (if any) is left untouched.
         try:
             mcp_configs = resolve_mcp_server_configs(source, manifest)
+            # E7-F08: the authoritative conflict check — prepare data
+            # may be stale or tampered with, and ownership may have
+            # changed since prepare ran.
+            claim_plan = self._check_capability_conflicts(
+                source, manifest, mcp_configs)
         except Exception as e:  # noqa: BLE001 — install boundary: any validation failure becomes the rollback RuntimeError
             raise RuntimeError(f"Installation failed, rolled back. Error: {e}")
 
@@ -424,7 +667,7 @@ class PluginInstaller:
             if snapshot_dir.exists():
                 shutil.rmtree(snapshot_dir)
             touched_skill_dirs = {
-                skills_dest / skill.name
+                skills_dest / _skill_dir_name(skill.name)
                 for skill in manifest.skills if skill.file_path
             }
             if old_entry:
@@ -476,7 +719,9 @@ class PluginInstaller:
                     src_skill = self._contained_path(
                         target_dir, skill.file_path, "skill file_path")
                     if src_skill.exists():
-                        dest_skill_dir = skills_dest / skill.name
+                        # E7-F08: a qualified skill name is logical —
+                        # its directory is the flattened single segment.
+                        dest_skill_dir = skills_dest / _skill_dir_name(skill.name)
                         dest_skill_dir.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(src_skill, dest_skill_dir / "SKILL.md")
                         installed_skills.append(dest_skill_dir)
@@ -498,16 +743,60 @@ class PluginInstaller:
             # manifest no longer declares, so a successful upgrade
             # leaves nothing stale behind. Both sets are covered by the
             # snapshots above, so a failure later still restores them.
-            new_skill_names = {skill.name for skill in manifest.skills}
+            # E7-F08: stale removal is ownership-checked like every
+            # other teardown — an artefact another enabled plugin has
+            # since claimed is left in place, never deleted from under
+            # its new owner.
+            new_skill_dir_names = {
+                _skill_dir_name(skill.name) for skill in manifest.skills}
             if old_entry:
                 for old_path in old_entry.get("installed_skills", []):
                     stale_dir = Path(old_path)
-                    if stale_dir.name not in new_skill_names and stale_dir.exists():
+                    if stale_dir.name in new_skill_dir_names:
+                        continue
+                    if not stale_dir.exists():
+                        continue
+                    stale_name = next(
+                        (n for n in (old_entry.get("skill_claims") or {})
+                         if _skill_dir_name(n) == stale_dir.name), None)
+                    stale_body = stale_dir / "SKILL.md"
+                    stale_fp = (
+                        _fingerprint_bytes(stale_body.read_bytes())
+                        if stale_body.exists() else None)
+                    if stale_name is not None:
+                        stale_allowed = self._teardown_allowed(
+                            plugin_name, old_entry, "skill", stale_name,
+                            stale_fp)
+                    else:
+                        # Legacy entries (no claims) keep bare-name
+                        # removal; a claims-bearing entry whose dir
+                        # maps to no claim is left alone.
+                        stale_allowed = not old_entry.get("skill_claims")
+                    if stale_allowed:
                         shutil.rmtree(stale_dir)
+                    else:
+                        logger.warning(
+                            "Upgrade of %s: leaving stale skill dir %s "
+                            "in place — its content is no longer solely "
+                            "owned by this plugin (E7-F08)",
+                            plugin_name, stale_dir)
             new_mcp_names = {name for name, _ in mcp_configs}
             if old_entry:
                 for old_name in old_entry.get("installed_mcp", []):
                     if old_name not in new_mcp_names:
+                        current = GLOBAL_MCP_REGISTRY.get_server(old_name)
+                        current_fp = (
+                            _fingerprint_config(current)
+                            if current is not None else None)
+                        if not self._teardown_allowed(
+                                plugin_name, old_entry, "mcp", old_name,
+                                current_fp):
+                            logger.warning(
+                                "Upgrade of %s: leaving stale MCP server "
+                                "%s registered — it is no longer solely "
+                                "owned by this plugin (E7-F08)",
+                                plugin_name, old_name)
+                            continue
                         try:
                             GLOBAL_MCP_REGISTRY.remove_server_sync(old_name)
                         except Exception as rm_err:  # noqa: BLE001 — a connected stale server must not fail an otherwise-good upgrade; it stays registered and the skip is logged
@@ -521,12 +810,25 @@ class PluginInstaller:
             # it (atomically — see _save_registry). Everything before
             # this is restorable from the snapshots; once the save
             # lands, the new installation is the recorded truth.
+            # E7-F08: record the ownership claims for exactly the
+            # artefacts this install landed.
+            installed_dir_names = {p.name for p in installed_skills}
             self._registry[plugin_name] = {
                 "manifest": manifest.model_dump(),
                 "enabled": True,
                 "installed_skills": [str(p) for p in installed_skills],
                 "installed_tools": installed_tools,
-                "installed_mcp": installed_mcp
+                "installed_mcp": installed_mcp,
+                "skill_claims": {
+                    name: claim for name, claim
+                    in claim_plan["skills"].items()
+                    if _skill_dir_name(name) in installed_dir_names
+                },
+                "mcp_claims": {
+                    name: claim for name, claim
+                    in claim_plan["mcp"].items()
+                    if name in installed_mcp
+                },
             }
             self._save_registry()
 
@@ -607,6 +909,17 @@ class PluginInstaller:
                     + f". Error: {e}")
             raise RuntimeError(f"Installation failed, rolled back. Error: {e}")
 
+        # E7-F02: the install is committed — invalidate the live skill
+        # index so the new skills are advertised / resolvable /
+        # loadable without a restart, and bodies overwritten by an
+        # upgrade are not served stale from the content cache. This
+        # mirrors toggle()'s refresh and sits AFTER the commit point
+        # on purpose: a failed install (rolled back above) must leave
+        # the live index exactly as it was.
+        from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+
+        GLOBAL_SKILL_MANAGER.refresh()
+
         # Committed. Backup/snapshot cleanup is best-effort only: a
         # cleanup failure must never roll back a landed install (the
         # pre-fix code deleted the backup inside the try, so a cleanup
@@ -621,21 +934,67 @@ class PluginInstaller:
                         plugin_name, debris, cleanup_err)
 
     def uninstall(self, plugin_name: str):
+        # E7-F05: an unknown (or missing) name must fail loudly,
+        # exactly as toggle() does below. This used to return
+        # silently, so the websocket branch reported success for a
+        # no-op uninstall — the plugin stayed installed while the
+        # Settings UI believed it was gone (the panel's buttons sent
+        # an undefined name, which JSON serialisation dropped).
         if plugin_name not in self._registry:
-            return
+            raise KeyError(f"Plugin not found: {plugin_name}")
 
         data = self._registry[plugin_name]
 
-        # Remove MCP
+        # Remove MCP — E7-F08: ownership-checked. A server another
+        # enabled plugin has since claimed (or whose live config no
+        # longer matches what this plugin installed) is left
+        # registered; uninstalling must not delete the new owner's
+        # server from under it.
         from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
         for mcp_name in data.get("installed_mcp", []):
+            current = GLOBAL_MCP_REGISTRY.get_server(mcp_name)
+            if current is None:
+                continue
+            current_fp = _fingerprint_config(current)
+            if not self._teardown_allowed(
+                    plugin_name, data, "mcp", mcp_name, current_fp):
+                logger.warning(
+                    "Uninstall of %s: leaving MCP server %s registered "
+                    "— it is no longer solely owned by this plugin "
+                    "(E7-F08)", plugin_name, mcp_name)
+                continue
             GLOBAL_MCP_REGISTRY.remove_server_sync(mcp_name)
 
-        # Remove skills
+        # Remove skills — same ownership rule for the skill dirs.
         for skill_path_str in data.get("installed_skills", []):
             skill_dir = Path(skill_path_str)
-            if skill_dir.exists():
-                shutil.rmtree(skill_dir)
+            if not skill_dir.exists():
+                continue
+            skill_name = next(
+                (n for n in (data.get("skill_claims") or {})
+                 if _skill_dir_name(n) == skill_dir.name), None)
+            if skill_name is not None:
+                body_path = skill_dir / "SKILL.md"
+                current_fp = (
+                    _fingerprint_bytes(body_path.read_bytes())
+                    if body_path.exists() else None)
+                if not self._teardown_allowed(
+                        plugin_name, data, "skill", skill_name, current_fp):
+                    logger.warning(
+                        "Uninstall of %s: leaving skill dir %s in "
+                        "place — its content is no longer solely owned "
+                        "by this plugin (E7-F08)", plugin_name, skill_dir)
+                    continue
+            shutil.rmtree(skill_dir)
+
+        # E7-F08: skills this plugin parked in the holding area when
+        # it was disabled are exclusively its own (the holding path is
+        # namespaced by plugin name) — an uninstall must not orphan
+        # them there forever.
+        holding = (Path.home() / ".aether" / "skills"
+                   / ".disabled-by-plugin" / plugin_name)
+        if holding.exists():
+            shutil.rmtree(holding)
 
         # Remove plugin files
         target_dir = self.plugins_dir / plugin_name
@@ -644,6 +1003,17 @@ class PluginInstaller:
 
         del self._registry[plugin_name]
         self._save_registry()
+
+        # E7-F02: invalidate the live skill index now the uninstall
+        # has landed. refresh() rebuilds from disk and clears the
+        # content cache, so the removed skills stop being advertised
+        # and resolved — and a body cached before the uninstall is
+        # never served for a skill whose directory is gone. Mirrors
+        # toggle()'s refresh; a failed uninstall raises before this
+        # point and leaves the live index untouched.
+        from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+
+        GLOBAL_SKILL_MANAGER.refresh()
 
     def toggle(self, plugin_name: str, enabled: bool):
         """Enable/disable with real teardown and rebuild (Epic 7, E7-05).
@@ -663,34 +1033,168 @@ class PluginInstaller:
         if data.get("enabled", True) == enabled:
             return
 
-        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY, MCPConfigError
         from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
 
         skills_root = Path.home() / ".aether" / "skills"
         holding = skills_root / ".disabled-by-plugin" / plugin_name
 
         if not enabled:
+            # E7-F08: teardown is ownership-checked first — a server or
+            # skill another enabled plugin has claimed, or whose live
+            # content no longer matches what this plugin installed, is
+            # NOT this plugin's to remove and stays in place.
+            mcp_to_remove: list[str] = []
             for mcp_name in data.get("installed_mcp", []):
-                try:
-                    GLOBAL_MCP_REGISTRY.remove_server_sync(mcp_name)
-                except Exception as e:  # noqa: BLE001 — teardown is best-effort per server; the toggle itself must complete
-                    logger.warning(f"Disable {plugin_name}: could not remove MCP server {mcp_name}: {e}")
+                current = GLOBAL_MCP_REGISTRY.get_server(mcp_name)
+                if current is None:
+                    continue
+                if self._teardown_allowed(
+                        plugin_name, data, "mcp", mcp_name,
+                        _fingerprint_config(current)):
+                    mcp_to_remove.append(mcp_name)
+                else:
+                    logger.warning(
+                        "Disable of %s: leaving MCP server %s "
+                        "registered — it is no longer solely owned by "
+                        "this plugin (E7-F08)", plugin_name, mcp_name)
+            # E7-F01: a live MCP session can only be closed by its
+            # owner task, so remove_server_sync REFUSES a connected
+            # server while an event loop is running in this thread.
+            # The websocket toggle handler disconnects first (the
+            # uninstall handler's pattern); a caller that did not must
+            # get that refusal as a failure BEFORE anything mutates —
+            # never a swallowed warning that lets the disable persist
+            # ``enabled=False`` over a still-callable session. Raising
+            # here keeps a failed disable atomic: flag unsaved, skills
+            # unmoved, sessions untouched. The check covers only the
+            # servers this disable will actually remove (E7-F08).
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                loop_running = False
+            else:
+                loop_running = True
+            if loop_running:
+                for mcp_name in mcp_to_remove:
+                    status = GLOBAL_MCP_REGISTRY.get_server_status(mcp_name)
+                    if status.get("status") == "connected":
+                        raise MCPConfigError(
+                            f"Cannot disable {plugin_name}: MCP server "
+                            f"'{mcp_name}' is still connected; disconnect "
+                            "it first (await remove_server) — refusing "
+                            "to disable over a live session."
+                        )
+            for mcp_name in mcp_to_remove:
+                GLOBAL_MCP_REGISTRY.remove_server_sync(mcp_name)
             for skill_path_str in data.get("installed_skills", []):
                 src = Path(skill_path_str)
-                if src.exists():
-                    holding.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(src), str(holding / src.name))
+                if not src.exists():
+                    continue
+                skill_name = next(
+                    (n for n in (data.get("skill_claims") or {})
+                     if _skill_dir_name(n) == src.name), None)
+                if skill_name is not None:
+                    body_path = src / "SKILL.md"
+                    current_fp = (
+                        _fingerprint_bytes(body_path.read_bytes())
+                        if body_path.exists() else None)
+                    if not self._teardown_allowed(
+                            plugin_name, data, "skill", skill_name,
+                            current_fp):
+                        logger.warning(
+                            "Disable of %s: leaving skill dir %s in "
+                            "place — its content is no longer solely "
+                            "owned by this plugin (E7-F08)",
+                            plugin_name, src)
+                        continue
+                holding.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(holding / src.name))
         else:
-            if holding.exists():
-                for skill_dir in list(holding.iterdir()):
-                    shutil.move(str(skill_dir), str(skills_root / skill_dir.name))
-                holding.rmdir()
-            # Re-validate before re-adding: the manifest on record is
-            # re-resolved against the installed plugin dir, exactly
-            # as at install time.
+            # E7-F03: validate BEFORE restoring anything. The stored
+            # manifest is re-resolved against the installed plugin
+            # dir, exactly as at install time — and it must run
+            # before the first held skill moves: pre-fix the moves
+            # (and the holding dir's deletion) happened first, so a
+            # validation failure left the plugin persisted disabled
+            # with its skills restored into the scan root, fully
+            # reachable by any skill manager. A failure here now
+            # leaves the holding area intact, the scan root
+            # unchanged and nothing re-registered.
             manifest = PluginManifest(**data["manifest"])
             plugin_dir = self.plugins_dir / plugin_name
-            for mcp_name, config_dict in resolve_mcp_server_configs(plugin_dir, manifest):
+            mcp_configs = resolve_mcp_server_configs(plugin_dir, manifest)
+            # E7-F08: conflict validation joins the validate-first
+            # phase. While this plugin was disabled, another plugin
+            # may legitimately have taken over its names; re-enabling
+            # must refuse rather than overwrite the new owner. An
+            # identical live body/config is a shared claim and
+            # collapses (nothing to restore over it).
+            for mcp_name, config_dict in mcp_configs:
+                existing = GLOBAL_MCP_REGISTRY.get_server(mcp_name)
+                if existing is not None and (
+                    _fingerprint_config(existing)
+                    != _fingerprint_config(config_dict)
+                ):
+                    raise MCPConfigError(
+                        f"Cannot enable {plugin_name}: MCP server "
+                        f"'{mcp_name}' is now registered with a "
+                        "different configuration by another owner; "
+                        "refusing to overwrite it (capability conflict)."
+                    )
+            held_dirs = (
+                list(holding.iterdir()) if holding.exists() else [])
+            collapse_dirs: set[str] = set()
+            for skill_dir in held_dirs:
+                dest = skills_root / skill_dir.name
+                if not dest.exists():
+                    continue
+                claim_name = next(
+                    (n for n in (data.get("skill_claims") or {})
+                     if _skill_dir_name(n) == skill_dir.name), None)
+                if claim_name is None:
+                    continue  # legacy entry: restore as before
+                dest_body = dest / "SKILL.md"
+                dest_fp = (
+                    _fingerprint_bytes(dest_body.read_bytes())
+                    if dest_body.exists() else None)
+                claim = self._entry_claim(data, "skill", claim_name)
+                if claim is not None and dest_fp != claim["sha256"]:
+                    raise MCPConfigError(
+                        f"Cannot enable {plugin_name}: skill "
+                        f"'{claim_name}' is now provided with "
+                        "different content by another owner; refusing "
+                        "to overwrite it (capability conflict)."
+                    )
+                collapse_dirs.add(skill_dir.name)
+            if holding.exists():
+                for skill_dir in held_dirs:
+                    dest = skills_root / skill_dir.name
+                    if skill_dir.name in collapse_dirs and dest.exists():
+                        # Identical body already live under the name:
+                        # the held copy is a duplicate — drop it.
+                        shutil.rmtree(skill_dir)
+                    else:
+                        shutil.move(str(skill_dir), str(dest))
+                holding.rmdir()
+            # E7-F08: a claimed skill whose live dir is gone entirely
+            # (it was shared at disable time, then removed by the last
+            # other claimant) is recreated from the installed package,
+            # exactly as install placed it.
+            for skill in manifest.skills:
+                if not skill.file_path:
+                    continue
+                if not self._entry_claims_name(data, "skill", skill.name):
+                    continue
+                dest = skills_root / _skill_dir_name(skill.name)
+                if dest.exists():
+                    continue
+                src_skill = self._contained_path(
+                    plugin_dir, skill.file_path, "skill file_path")
+                if src_skill.exists():
+                    dest.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_skill, dest / "SKILL.md")
+            for mcp_name, config_dict in mcp_configs:
                 GLOBAL_MCP_REGISTRY.add_server(mcp_name, config_dict)
 
         GLOBAL_SKILL_MANAGER.refresh()

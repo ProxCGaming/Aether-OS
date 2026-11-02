@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from aether_engine.routing.health import ProviderHealthManager
+from aether_engine.routing.latency import get_latency_store
 from aether_engine.routing.registry import (
     GLOBAL_MODEL_REGISTRY,
     ModelEntry,
@@ -107,8 +108,70 @@ def local_only_from_vision_override(
 class RoutingPolicy:
     """Evaluates task requirements, provider availability, and user preferences to select models."""
 
-    def __init__(self, registry: ModelRegistry | None = None):
+    def __init__(
+        self,
+        registry: ModelRegistry | None = None,
+        latency_store=None,
+    ):
         self.registry = registry or GLOBAL_MODEL_REGISTRY
+        # E5-F11: the measured-latency store consulted by the
+        # tie-break in _pick. None resolves the process-global store
+        # lazily at selection time; tests inject a tmp store.
+        self._latency_store = latency_store
+
+    def _pick(self, candidates: list[ModelEntry]) -> tuple[ModelEntry, bool]:
+        """Choose from an already-ordered candidate list.
+
+        Returns ``(chosen, latency_decided)``. The default is
+        exactly today's behaviour — the first candidate.
+
+        E5-F11 measured-latency tie-break: within one priority tier,
+        candidates WITH a measured TTFT percentile are re-ordered
+        among their own slots by p50 TTFT (fastest first). This is
+        deliberately the weakest rule that honours "routing uses
+        measured latency":
+
+        * it never crosses a priority tier;
+        * it never displaces a candidate with no measurements —
+          unmeasured models keep their exact slots, so cold start
+          (no measurements anywhere) is byte-identical to the
+          pre-E5-F11 selection;
+        * it is consulted only where the existing order picks from
+          a candidate list — never on the explicit-request path,
+          the vision-override path, or the user's default-model
+          pin, and health eligibility has already filtered the list
+          before this runs;
+        * any store failure degrades to today's order (fail-open).
+        """
+        if len(candidates) < 2:
+            return candidates[0], False
+        try:
+            store = (
+                self._latency_store
+                if self._latency_store is not None
+                else get_latency_store()
+            )
+            scores: dict[int, float] = {}
+            for idx, entry in enumerate(candidates):
+                value = store.ttft_p50_ms(entry.provider, entry.id)
+                if value is not None:
+                    scores[idx] = value
+        except Exception:  # noqa: BLE001 — measured latency is an input, never a gate.
+            return candidates[0], False
+        if len(scores) < 2:
+            return candidates[0], False
+        slots_by_priority: dict[int, list[int]] = {}
+        for idx, entry in enumerate(candidates):
+            slots_by_priority.setdefault(entry.priority, []).append(idx)
+        ordered = list(candidates)
+        for slots in slots_by_priority.values():
+            measured = [i for i in slots if i in scores]
+            if len(measured) < 2:
+                continue
+            ranked = sorted(measured, key=lambda i: (scores[i], i))
+            for slot, source in zip(measured, ranked, strict=True):
+                ordered[slot] = candidates[source]
+        return ordered[0], ordered[0] is not candidates[0]
 
     def select_route(
         self,
@@ -126,16 +189,34 @@ class RoutingPolicy:
 
         # If user explicitly requested a specific model and its provider is healthy
         if requested_model:
-            model_entry = self.registry.get_model(requested_model)
-            if model_entry and (model_entry.provider in configured_providers):
-                if health_manager.is_provider_available(model_entry.provider):
-                    return RoutingDecision(
-                        provider=model_entry.provider,
-                        model=model_entry.id,
-                        reason=f"User selected {model_entry.label}",
-                        capabilities=list(model_entry.capabilities),
-                    )
-            elif not model_entry:
+            # E5-F03: a bare model ID can be offered by several
+            # providers at once, so no single registry entry decides
+            # the route. Resolution is by configuration, never by
+            # registry registration order: the entry from the user's
+            # configured default provider wins first, then providers
+            # in configured order; the first candidate in that
+            # precedence whose provider is available serves.
+            model_entries = self.registry.get_models_by_id(requested_model)
+            if model_entries:
+                offering = [
+                    e for e in model_entries
+                    if e.provider in configured_providers
+                ]
+
+                def _precedence(entry: ModelEntry) -> tuple[int, int]:
+                    if entry.provider == user_default_provider:
+                        return (0, 0)
+                    return (1, configured_providers.index(entry.provider))
+
+                for model_entry in sorted(offering, key=_precedence):
+                    if health_manager.is_provider_available(model_entry.provider):
+                        return RoutingDecision(
+                            provider=model_entry.provider,
+                            model=model_entry.id,
+                            reason=f"User selected {model_entry.label}",
+                            capabilities=list(model_entry.capabilities),
+                        )
+            else:
                 # Infer provider from model naming patterns if not in registry
                 inferred_prov = None
                 if ("/" in requested_model and not requested_model.startswith("models/")) and "openrouter" in configured_providers:
@@ -175,7 +256,10 @@ class RoutingPolicy:
                     o_provider in configured_providers
                     and health_manager.is_provider_available(o_provider)
                 ):
-                    o_entry = self.registry.get_model(o_model)
+                    # E5-F03: provider-qualified — the override names
+                    # its provider explicitly, so only THAT provider's
+                    # entry for the model may supply the capabilities.
+                    o_entry = self.registry.get_model(o_model, provider=o_provider or None)
                     if o_entry and o_entry.provider == o_provider:
                         return RoutingDecision(
                             provider=o_provider,
@@ -230,11 +314,14 @@ class RoutingPolicy:
                 )
             vision_models = [m for m in available_models if "vision" in m.capabilities]
             if vision_models:
-                best = vision_models[0]
+                best, by_latency = self._pick(vision_models)
+                reason = f"Routed to {best.label} — vision & image processing"
+                if by_latency:
+                    reason += " (fastest measured TTFT among equal-priority candidates)"
                 return RoutingDecision(
                     provider=best.provider,
                     model=best.id,
-                    reason=f"Routed to {best.label} — vision & image processing",
+                    reason=reason,
                     capabilities=list(best.capabilities),
                 )
 
@@ -248,11 +335,14 @@ class RoutingPolicy:
                 )
             reasoning_models = [m for m in available_models if "reasoning" in m.capabilities]
             if reasoning_models:
-                best = reasoning_models[0]
+                best, by_latency = self._pick(reasoning_models)
+                reason = f"Routed to {best.label} — deep reasoning & complex logic"
+                if by_latency:
+                    reason += " (fastest measured TTFT among equal-priority candidates)"
                 return RoutingDecision(
                     provider=best.provider,
                     model=best.id,
-                    reason=f"Routed to {best.label} — deep reasoning & complex logic",
+                    reason=reason,
                     capabilities=list(best.capabilities),
                 )
 
@@ -266,11 +356,14 @@ class RoutingPolicy:
                 )
             code_models = [m for m in available_models if "code" in m.capabilities]
             if code_models:
-                best = code_models[0]
+                best, by_latency = self._pick(code_models)
+                reason = f"Routed to {best.label} — code generation & tool capabilities"
+                if by_latency:
+                    reason += " (fastest measured TTFT among equal-priority candidates)"
                 return RoutingDecision(
                     provider=best.provider,
                     model=best.id,
-                    reason=f"Routed to {best.label} — code generation & tool capabilities",
+                    reason=reason,
                     capabilities=list(best.capabilities),
                 )
 
@@ -284,10 +377,12 @@ class RoutingPolicy:
             )
 
         # Otherwise pick the highest priority available model for user default provider or next provider
-        fallback_model = available_models[0]
+        fallback_model, by_latency = self._pick(available_models)
         reason = f"Routed to {fallback_model.label} — optimal available model"
         if fallback_model.provider != user_default_provider:
             reason = f"Routed to {fallback_model.label} — fallback from {user_default_provider}"
+        if by_latency:
+            reason += " (fastest measured TTFT among equal-priority candidates)"
 
         return RoutingDecision(
             provider=fallback_model.provider,

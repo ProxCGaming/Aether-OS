@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import logging
 from collections.abc import Callable
@@ -334,6 +335,34 @@ def _call_kwargs(
     return kwargs
 
 
+async def _run_sync_tool(tool: Tool, kwargs: dict[str, Any]) -> Any:
+    """Run a synchronous ``execute_fn`` off the event loop (E2-F06).
+
+    Native dispatch used to call sync functions inline, so a slow
+    scan or a pathological regex stalled every connection and task
+    the loop serves, and ``Tool.timeout_s`` was consumed nowhere.
+    The codebase's established offload is ``asyncio.to_thread``
+    (executor, WS routes, media analyzer); the await is bounded by
+    the tool's own ``timeout_s``. A thread cannot be killed, so on
+    timeout the caller is released at the deadline and the late
+    result is discarded — the same semantics as every other
+    ``to_thread`` user here. Synchronous tool functions in this
+    codebase are stateless over their arguments (filesystem scans,
+    web-search dispatch), so running them on a worker thread is
+    safe; coroutine functions never come through here — they are
+    awaited directly, as before.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(tool.execute_fn, **kwargs),
+            timeout=tool.timeout_s,
+        )
+    except TimeoutError as exc:
+        raise ToolExecutionError(
+            f"Tool '{tool.name}' timed out after {tool.timeout_s}s."
+        ) from exc
+
+
 class ToolRegistry:
     """Registry holding tool definitions and handling on-demand asynchronous tool executions."""
 
@@ -386,6 +415,7 @@ class ToolRegistry:
         *,
         workspace_roots: list | None = None,
         task_class: str = "standard",
+        task_classes: dict[str, dict[str, int]] | None = None,
         policies: dict[str, str] | None = None,
         approved: bool = False,
         audit_logger: Any = None,
@@ -408,8 +438,11 @@ class ToolRegistry:
           2.6. Caller-supplied final-args gate (M03) — vets the exact
              arguments that will execute, post-edit and post-hook.
           3. Sandbox routing (ADR 0010) — non-READ_ONLY tools run in the
-             ``aether_worker`` subprocess via ``execute_tool_in_worker``;
-             READ_ONLY tools run in-process.
+             ``aether_worker`` subprocess via ``execute_tool_in_worker``
+             under the caller's configured resource profiles
+             (``task_classes``, E2-F05); READ_ONLY tools run in-process,
+             with synchronous functions offloaded off the event loop
+             under their ``timeout_s`` (E2-F06).
 
         There is intentionally no silent direct-execution path anymore:
         ``ToolRegistry.execute`` used to call ``tool.execute_fn`` with zero
@@ -449,7 +482,17 @@ class ToolRegistry:
             # "allow" — never a "deny", never a floored path (the cache
             # itself refuses those), and the hit is audited with its grant.
             if policy == "ask" and not approved and approval_cache is not None:
-                grant = approval_cache.covering_grant(risk=tool.risk.value, args=check_args)
+                try:
+                    grant = approval_cache.covering_grant(risk=tool.risk.value, args=check_args)
+                except Exception:
+                    # PF-5: a cache failure must degrade to the normal
+                    # ask, never break execution — the same guard
+                    # tool_router (langgraph/graph.py) wraps around
+                    # its covering_grant check. The grant is treated
+                    # as absent, so the ordinary policy flow below
+                    # decides (ask → approval refusal, fail-closed).
+                    logger.debug("Approval-cache check failed in registry.execute", exc_info=True)
+                    grant = None
                 if grant is not None:
                     policy = "allow"
                     try:
@@ -559,7 +602,7 @@ class ToolRegistry:
                 if inspect.iscoroutinefunction(tool.execute_fn):
                     result = await tool.execute_fn(**call_args)
                 else:
-                    result = tool.execute_fn(**call_args)
+                    result = await _run_sync_tool(tool, call_args)
                 if isinstance(result, str) and len(result) > tool.max_output_chars:
                     result = (
                         result[: tool.max_output_chars]
@@ -578,11 +621,13 @@ class ToolRegistry:
                     args=call_args,
                     task_class=task_class,
                     audit_logger=log,
+                    task_classes=task_classes,
                 )
             elif inspect.iscoroutinefunction(tool.execute_fn):
                 result = await tool.execute_fn(**_call_kwargs(tool, call_args, workspace_roots, path_rules))
             else:
-                result = tool.execute_fn(**_call_kwargs(tool, call_args, workspace_roots, path_rules))
+                result = await _run_sync_tool(
+                    tool, _call_kwargs(tool, call_args, workspace_roots, path_rules))
         except ToolExecutionError:
             raise
         except Exception as e:

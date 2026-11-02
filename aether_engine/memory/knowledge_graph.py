@@ -134,8 +134,22 @@ def dedupe_facts() -> dict[str, Any]:
     """One-time migration: collapse duplicate KG facts.
 
     For each (normalised entity name, normalised fact text) group with
-    more than one row, the highest-confidence copy survives (ties break
-    by earliest timestamp, then lowest id) and the rest are deleted.
+    more than one row, one copy survives and the rest are deleted.
+    Survivor selection (E4-F01): a CURRENT copy always beats history —
+    an active row wins over a superseded one, because a superseded
+    copy of the same text is the earlier assertion of a fact that was
+    later renewed, and deleting the renewal on reopen loses current
+    knowledge. Within the same status, the highest-confidence copy
+    survives (ties break by earliest timestamp, then lowest id).
+
+    Deleting a copy must not break the supersede chain: any row whose
+    superseded_by pointed at a deleted copy is re-pointed at the
+    surviving copy of that same fact (the two rows assert identical
+    text, so the link keeps its meaning). A survivor whose own
+    superseded_by pointed at a deleted group-mate would end up
+    pointing at itself; that link is cleared instead — the replacer
+    and the replaced were the same assertion.
+
     Nothing is silently dropped: the removed rows are logged to the
     audit log (KNOWLEDGE_GRAPH_DEDUPED) with their entity / text.
     Entities left with no facts are removed, mirroring delete_fact().
@@ -146,7 +160,8 @@ def dedupe_facts() -> dict[str, Any]:
     groups_deduped = 0
     with _get_conn() as conn:
         rows = conn.execute(
-            "SELECT f.id, e.name, f.fact_text, f.confidence, f.timestamp "
+            "SELECT f.id, e.name, f.fact_text, f.confidence, f.timestamp, "
+            "COALESCE(f.status, 'active') AS status, f.superseded_by "
             "FROM facts f JOIN entities e ON f.entity_id = e.id"
         ).fetchall()
         groups: dict[tuple, list[sqlite3.Row]] = {}
@@ -154,13 +169,18 @@ def dedupe_facts() -> dict[str, Any]:
             key = (_normalise_kg_text(row["name"]),
                    _normalise_kg_text(row["fact_text"]))
             groups.setdefault(key, []).append(row)
+        survivor_of: dict[str, str] = {}
         for members in groups.values():
             if len(members) < 2:
                 continue
             groups_deduped += 1
-            members.sort(key=lambda r: (-_confidence_value(r),
-                                        r["timestamp"], r["id"]))
+            members.sort(key=lambda r: (
+                0 if r["status"] == "active" else 1,
+                -_confidence_value(r),
+                r["timestamp"], r["id"]))
+            survivor_id = members[0]["id"]
             for victim in members[1:]:
+                survivor_of[victim["id"]] = survivor_id
                 conn.execute("DELETE FROM facts WHERE id = ?",
                              (victim["id"],))
                 removed.append({
@@ -168,6 +188,27 @@ def dedupe_facts() -> dict[str, Any]:
                     "entity_name": victim["name"],
                     "fact_text": victim["fact_text"],
                 })
+        if survivor_of:
+            def _resolve(fact_id: str) -> str:
+                # Follow victim -> survivor links to a surviving row.
+                seen = set()
+                while fact_id in survivor_of and fact_id not in seen:
+                    seen.add(fact_id)
+                    fact_id = survivor_of[fact_id]
+                return fact_id
+
+            dangling = conn.execute(
+                "SELECT id, superseded_by FROM facts "
+                "WHERE superseded_by IS NOT NULL"
+            ).fetchall()
+            for row in dangling:
+                if row["superseded_by"] not in survivor_of:
+                    continue
+                target = _resolve(row["superseded_by"])
+                conn.execute(
+                    "UPDATE facts SET superseded_by = ? WHERE id = ?",
+                    (None if target == row["id"] else target, row["id"]),
+                )
         conn.execute(
             "DELETE FROM entities WHERE id NOT IN "
             "(SELECT DISTINCT entity_id FROM facts)"
@@ -525,13 +566,18 @@ def search_facts(query: str, limit: int = 10, include_history: bool = False) -> 
 # explicit args here override them, and a bound <= 0 disables pruning on
 # that axis.
 #
-# Safety guard — never delete the only record of a fact that is still
-# referenced: a fact that is the ONLY fact of its entity is never pruned,
-# because deleting it would erase the entity's sole record (nothing else
-# points at a fact, and facts only point outward via entity_id /
-# source_task_id, so the entity's last fact is the one live reference).
-# Kept facts are counted as kept_referenced. Entities left with no facts
-# after pruning are removed, mirroring delete_fact().
+# Safety guard — never delete an entity's LAST record: each entity's
+# most current fact is never pruned, because deleting it would erase
+# the entity from the graph entirely (nothing else points at a fact,
+# and facts only point outward via entity_id / source_task_id, so the
+# entity's current fact is the one live reference). "Most current"
+# follows the store's own currency signals (the same ordering dedupe
+# uses for survivors): status first — an active row is current truth,
+# a superseded row is history — then newest timestamp, then highest
+# confidence, then lowest id. Kept facts are counted as
+# kept_referenced. Entities left with no facts after pruning are
+# removed, mirroring delete_fact() — under this guard that can only
+# be an entity that already had no facts when the run started.
 # ---------------------------------------------------------------------------
 
 def prune_facts(retention_days: int | None = None,
@@ -541,10 +587,12 @@ def prune_facts(retention_days: int | None = None,
     """Prune KG facts by age, then by count (oldest first).
 
     Age: facts with ``timestamp`` older than ``retention_days`` are
-    removed, unless they are their entity's only fact. Count: if more
-    than ``max_facts`` remain, the oldest beyond the cap are removed,
-    with the same guard. Returns counts and logs them to the audit log
-    (KNOWLEDGE_GRAPH_PRUNED).
+    removed, unless the fact is its entity's most current record.
+    Count: if more than ``max_facts`` remain, the oldest beyond the
+    cap are removed, with the same guard — the guard wins over the
+    cap, so a store with more entities than ``max_facts`` keeps one
+    record per entity and prunes fewer than the excess. Returns
+    counts and logs them to the audit log (KNOWLEDGE_GRAPH_PRUNED).
     """
     cfg = config if config is not None else load_config()
     if retention_days is None:
@@ -559,17 +607,33 @@ def prune_facts(retention_days: int | None = None,
 
     with _get_conn() as conn:
         cur = conn.cursor()
-        # Snapshot of entities with exactly one fact, taken before any
-        # delete: those facts are protected for this whole run.
-        sole_entity_ids = {
-            r[0] for r in cur.execute(
-                "SELECT entity_id FROM facts GROUP BY entity_id HAVING COUNT(*) = 1"
+        # E4-F02: protect each entity's most current fact — its last
+        # record — for this whole run, selected before any deletion
+        # (deletions afterwards can never take a protected row, so no
+        # entity can be pruned out of existence mid-run). The earlier
+        # guard snapshotted only entities that STARTED with exactly
+        # one fact and never rechecked the remaining count, so an
+        # initially multi-fact entity could lose every fact — and
+        # then the entity itself — to the loops below.
+        best_by_entity: dict[str, tuple] = {}
+        for row in cur.execute(
+            "SELECT id, entity_id, timestamp, confidence, "
+            "COALESCE(status, 'active') AS status FROM facts"
+        ).fetchall():
+            rank = (
+                0 if row["status"] == "active" else 1,
+                -row["timestamp"],
+                -_confidence_value(row),
+                row["id"],
             )
-        }
+            current = best_by_entity.get(row["entity_id"])
+            if current is None or rank < current[0]:
+                best_by_entity[row["entity_id"]] = (rank, row["id"])
+        protected_fact_ids = {fact_id for _, fact_id in best_by_entity.values()}
 
-        def _delete_if_unreferenced(fact_id: str, entity_id: str) -> bool:
+        def _delete_if_unreferenced(fact_id: str) -> bool:
             nonlocal pruned
-            if entity_id in sole_entity_ids:
+            if fact_id in protected_fact_ids:
                 kept_ids.add(fact_id)
                 return False
             cur.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
@@ -582,8 +646,8 @@ def prune_facts(retention_days: int | None = None,
                 "SELECT id, entity_id FROM facts WHERE timestamp < ?",
                 (cutoff,),
             ).fetchall()
-            for fact_id, entity_id in rows:
-                _delete_if_unreferenced(fact_id, entity_id)
+            for fact_id, _entity_id in rows:
+                _delete_if_unreferenced(fact_id)
 
         if max_facts and max_facts > 0:
             total = cur.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
@@ -592,10 +656,10 @@ def prune_facts(retention_days: int | None = None,
                 rows = cur.execute(
                     "SELECT id, entity_id FROM facts ORDER BY timestamp ASC"
                 ).fetchall()
-                for fact_id, entity_id in rows:
+                for fact_id, _entity_id in rows:
                     if excess <= 0:
                         break
-                    if _delete_if_unreferenced(fact_id, entity_id):
+                    if _delete_if_unreferenced(fact_id):
                         excess -= 1
 
         cur.execute("DELETE FROM entities WHERE id NOT IN (SELECT DISTINCT entity_id FROM facts)")

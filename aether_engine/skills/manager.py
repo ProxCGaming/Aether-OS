@@ -1,5 +1,9 @@
+import hashlib
+import json
 import logging
+import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -54,19 +58,77 @@ class SkillManager:
         return self.global_dir / "disabled.json"
 
     def _load_disabled(self) -> set:
-        try:
-            import json
-
-            data = json.loads(self._disabled_file.read_text(encoding="utf-8"))
-            return set(data) if isinstance(data, list) else set()
-        except Exception:  # noqa: BLE001 — missing/corrupt file = nothing disabled (best-effort state load)
+        path = self._disabled_file
+        if not path.exists():
             return set()
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            # Unreadable is NOT corrupt (the E6-F07 rule): the file
+            # may be perfectly valid (permissions, a transient I/O
+            # error). Never quarantine or overwrite evidence that
+            # could not even be read — log loudly and run this
+            # session with nothing disabled; the file stays untouched
+            # and a later successful save replaces it atomically.
+            logger.error(
+                "Could not read skill disable-state file %s (%s); "
+                "treating all skills as enabled for this session. "
+                "The file was left untouched.", path, exc)
+            return set()
+        try:
+            data = json.loads(raw.decode("utf-8"))
+            if not isinstance(data, list) or not all(
+                    isinstance(item, str) for item in data):
+                raise ValueError(
+                    "disable state is not a JSON list of skill names")
+        except Exception as exc:  # noqa: BLE001 — corrupt state must never silently drop saved disables (E7-F04)
+            # Corrupt: preserve the evidence under a quarantine name
+            # instead of silently reloading as "nothing disabled"
+            # (E7-F04, mirroring E6-F07), log loudly, and only then
+            # fall back to nothing-disabled for this session. The
+            # live path is left clear, so the next save starts clean
+            # and is never blocked by the quarantined copy.
+            quarantine = path.with_name(
+                f"{path.name}.corrupt-"
+                f"{datetime.now(UTC):%Y%m%d-%H%M%S-%f}")
+            try:
+                os.replace(path, quarantine)
+            except OSError as move_exc:
+                logger.error(
+                    "Skill disable-state file %s is corrupt (%s) and "
+                    "could not be quarantined (%s); treating all "
+                    "skills as enabled for this session.",
+                    path, exc, move_exc)
+            else:
+                logger.error(
+                    "Skill disable-state file %s is corrupt (%s); "
+                    "moved to %s and treating all skills as enabled "
+                    "for this session.", path, exc, quarantine)
+            return set()
+        return set(data)
 
-    def _save_disabled(self) -> None:
-        import json
-
-        self._disabled_file.write_text(
-            json.dumps(sorted(self._disabled), indent=2), encoding="utf-8")
+    def _save_disabled(self, disabled: set) -> None:
+        # E7-F04: atomic write — serialise to a temp file in the same
+        # directory, flush/fsync, then os.replace() it over the live
+        # file (the pattern E3-F04 added for the MCP server config
+        # and E6-F07 for UserConfig). A failed save (disk full, crash
+        # mid-write) leaves the previous valid file fully intact
+        # instead of a truncated fragment.
+        path = self._disabled_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(path.name + ".tmp")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as f:
+                f.write(json.dumps(sorted(disabled), indent=2))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     def is_enabled(self, name: str) -> bool:
         return name not in self._disabled
@@ -77,12 +139,20 @@ class SkillManager:
         Disabled skills are excluded from the index itself, so every
         consumer (list for agents, slash resolution, auto-match,
         content load) stops seeing them at once.
+
+        E7-F04: the persisted file is the source of truth. The new
+        set is written FIRST (atomically); the in-memory set and the
+        live index follow only after the write succeeds, so a failed
+        save raises with live state — summaries, slash resolution,
+        content serving — still exactly matching the on-disk state.
         """
+        new_disabled = set(self._disabled)
         if disabled:
-            self._disabled.add(name)
+            new_disabled.add(name)
         else:
-            self._disabled.discard(name)
-        self._save_disabled()
+            new_disabled.discard(name)
+        self._save_disabled(new_disabled)
+        self._disabled = new_disabled
         self._content_cache.pop(name, None)
         self._rebuild_index()
 
@@ -116,30 +186,66 @@ class SkillManager:
             self.workspace_dirs = new_dirs
             self._rebuild_index()
             
+    @staticmethod
+    def _body_fingerprint(skill_dir: Path, manifest: SkillManifest) -> str:
+        """Hash of the body discovery would serve for this candidate.
+
+        The first existing SKILL.md variant (the same files, in the
+        same order, that content loading reads); for manifest-only
+        skills, the manifest file itself; as a last resort the
+        manifest's canonical JSON. Two candidates for one name are
+        "the same body" iff their fingerprints match (E7-F08).
+        """
+        md_paths = [
+            skill_dir / "SKILL.md",
+            skill_dir / f"{skill_dir.name}_SKILL.md",
+            skill_dir / f"{skill_dir.name}-skill.md",
+        ]
+        for md_path in md_paths:
+            if md_path.exists():
+                return hashlib.sha256(md_path.read_bytes()).hexdigest()
+        manifest_path = skill_dir / "manifest.json"
+        if manifest_path.exists():
+            return hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        return hashlib.sha256(
+            manifest.model_dump_json().encode("utf-8")).hexdigest()
+
     def _rebuild_index(self):
         """Scan skills_dirs and build manifest index + slash command map."""
         self._index.clear()
         self._slash_map.clear()
         self._skill_paths.clear()
         self._all_manifests: dict[str, SkillManifest] = {}
-        
+
         # Priority: Global < Workspace 1 < Workspace 2 ...
         dirs_to_scan = [self.global_dir] + self.workspace_dirs
-        
+
+        # E7-F08: candidates are collected first, then same-name
+        # conflicts are resolved EXPLICITLY — never a silent overwrite.
+        # Identical bodies collapse quietly into one registration.
+        # Differing bodies resolve by the manifests' numeric injection
+        # priority (higher wins); a priority tie falls back to the
+        # documented scan-order override (the later-scanned root/dir
+        # wins). Every differing-body conflict is logged as a warning
+        # naming both candidates and the winner. Directory iteration
+        # is sorted so the tie-break is deterministic.
+        winners: dict[str, tuple[SkillManifest, Path]] = {}
+        winner_fps: dict[str, str] = {}
+
         for base_dir in dirs_to_scan:
             if not base_dir.exists() or not base_dir.is_dir():
                 continue
-                
-            for skill_dir in base_dir.iterdir():
+
+            for skill_dir in sorted(base_dir.iterdir(), key=lambda p: p.name):
                 if not skill_dir.is_dir():
                     continue
-                
+
                 md_paths = [
                     skill_dir / "SKILL.md",
                     skill_dir / f"{skill_dir.name}_SKILL.md",
                     skill_dir / f"{skill_dir.name}-skill.md"
                 ]
-                
+
                 manifest = None
                 for md_path in md_paths:
                     if md_path.exists():
@@ -148,7 +254,7 @@ class SkillManager:
                             break
                         except Exception as e:  # noqa: BLE001 — one bad skill file must not break discovery; it is logged and skipped
                             logger.warning(f"Failed to parse SKILL.md at {md_path}: {e}")
-                
+
                 if not manifest:
                     manifest_path = skill_dir / "manifest.json"
                     if manifest_path.exists():
@@ -156,18 +262,48 @@ class SkillManager:
                             manifest = SkillManifest.from_file(manifest_path)
                         except Exception as e:  # noqa: BLE001 — one bad manifest must not break discovery; it is logged and skipped
                             logger.warning(f"Failed to load manifest.json at {manifest_path}: {e}")
-                
-                if manifest:
-                    if manifest.name != skill_dir.name:
-                        logger.warning(f"Skill name mismatch: {manifest.name} != {skill_dir.name}")
 
-                    self._all_manifests[manifest.name] = manifest
-                    if manifest.name in self._disabled:
-                        continue  # E7-03: disabled = invisible to agents
-                    self._index[manifest.name] = manifest
-                    self._skill_paths[manifest.name] = skill_dir
-                    for cmd in manifest.trigger.slash_commands:
-                        self._slash_map[cmd] = manifest.name
+                if not manifest:
+                    continue
+
+                if manifest.name != skill_dir.name:
+                    logger.warning(f"Skill name mismatch: {manifest.name} != {skill_dir.name}")
+
+                fingerprint = self._body_fingerprint(skill_dir, manifest)
+                current = winners.get(manifest.name)
+                if current is None:
+                    winners[manifest.name] = (manifest, skill_dir)
+                    winner_fps[manifest.name] = fingerprint
+                    continue
+                if winner_fps[manifest.name] == fingerprint:
+                    continue  # Same body under the same name: collapse.
+                cur_manifest, cur_dir = current
+                new_priority = manifest.injection.priority
+                cur_priority = cur_manifest.injection.priority
+                if new_priority >= cur_priority:
+                    winners[manifest.name] = (manifest, skill_dir)
+                    winner_fps[manifest.name] = fingerprint
+                    kept_dir, kept_pri = skill_dir, new_priority
+                    lost_dir, lost_pri = cur_dir, cur_priority
+                else:
+                    kept_dir, kept_pri = cur_dir, cur_priority
+                    lost_dir, lost_pri = skill_dir, new_priority
+                logger.warning(
+                    f"Skill name conflict for {manifest.name!r}: "
+                    f"{lost_dir} (priority {lost_pri}) vs "
+                    f"{kept_dir} (priority {kept_pri}) have different "
+                    f"bodies — keeping {kept_dir} "
+                    f"({'priority' if new_priority != cur_priority else 'scan order'} decides)"
+                )
+
+        for name, (manifest, skill_dir) in winners.items():
+            self._all_manifests[name] = manifest
+            if name in self._disabled:
+                continue  # E7-03: disabled = invisible to agents
+            self._index[name] = manifest
+            self._skill_paths[name] = skill_dir
+            for cmd in manifest.trigger.slash_commands:
+                self._slash_map[cmd] = name
     
     def resolve_slash_command(self, command: str) -> SkillManifest | None:
         """Resolve a slash command to its skill manifest."""

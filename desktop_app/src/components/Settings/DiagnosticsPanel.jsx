@@ -14,6 +14,7 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
   const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '', url: '', headerKey: '', headerValue: '', envKey: '', envValue: '', cwd: '' });
   const [mcpTestResult, setMcpTestResult] = useState(null);
   const [plugins, setPlugins] = useState([]);
+  const [pluginActionResult, setPluginActionResult] = useState(null);
   const [newPluginSource, setNewPluginSource] = useState('');
   const [agents, setAgents] = useState([]);
   const [tools, setTools] = useState([]);
@@ -96,7 +97,16 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
           setPlugins(Array.isArray(p) ? p : Object.values(p || {}));
         } else if (data.type === 'PLUGIN_INSTALL_RESPONSE' || data.type === 'PLUGIN_UNINSTALL_RESPONSE' || data.type === 'PLUGIN_TOGGLE_RESPONSE') {
           if (data.payload.success) {
+            setPluginActionResult(null);
             sendMessage('PLUGIN_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+          } else if (data.payload.error) {
+            // E7-F05: a failed install/toggle/uninstall must be
+            // visible, not silently ignored (the MCP action-result
+            // idiom above) — a refused uninstall previously left the
+            // plugin installed with no sign anything went wrong.
+            const verb = data.type === 'PLUGIN_UNINSTALL_RESPONSE' ? 'Uninstall'
+              : data.type === 'PLUGIN_TOGGLE_RESPONSE' ? 'Toggle' : 'Install';
+            setPluginActionResult(`${verb}${data.payload.name ? ` ${data.payload.name}` : ''} failed: ${data.payload.error}`);
           }
         } else if (data.type === 'AGENT_LIST_RESPONSE') {
           setAgents(data.payload.agents || []);
@@ -437,6 +447,10 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
             </div>
           </div>
 
+          {pluginActionResult && (
+            <div style={{ color: '#fbbf24', fontSize: '13px', marginBottom: '16px' }}>{pluginActionResult}</div>
+          )}
+
           <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Installed Plugins</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             {plugins.length === 0 ? (
@@ -445,7 +459,7 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
               </div>
             ) : (
               plugins.map(plugin => (
-                <div key={plugin.name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div key={plugin.manifest?.name || plugin.name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
                     <h4 style={{ fontSize: '15px', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '8px' }}>
                       {plugin.manifest?.name || plugin.name}
@@ -457,13 +471,13 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <button 
-                      onClick={() => sendMessage('PLUGIN_TOGGLE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: plugin.name, enabled: !plugin.enabled } })}
+                      onClick={() => sendMessage('PLUGIN_TOGGLE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: plugin.manifest?.name || plugin.name, enabled: !plugin.enabled } })}
                       style={{ background: plugin.enabled ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255, 255, 255, 0.1)', color: plugin.enabled ? '#10b981' : '#fff', border: `1px solid ${plugin.enabled ? 'rgba(16, 185, 129, 0.3)' : 'rgba(255, 255, 255, 0.2)'}`, padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', width: '80px' }}
                     >
                       {plugin.enabled ? 'Enabled' : 'Disabled'}
                     </button>
                     <button 
-                      onClick={() => sendMessage('PLUGIN_UNINSTALL_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: plugin.name } })}
+                      onClick={() => sendMessage('PLUGIN_UNINSTALL_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: plugin.manifest?.name || plugin.name } })}
                       style={{ background: 'rgba(242, 65, 91, 0.15)', color: '#FA5870', border: '1px solid rgba(242, 65, 91, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
                     >
                       Uninstall

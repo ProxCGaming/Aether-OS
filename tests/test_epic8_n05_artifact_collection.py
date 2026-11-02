@@ -33,7 +33,7 @@ def _build_harness(tmp_path, monkeypatch, outside_dir: Path):
     workspace.mkdir()
     calls: list[tuple[str, dict]] = []
 
-    async def _fake_worker(tool_name, args, task_class="standard", audit_logger=None):
+    async def _fake_worker(tool_name, args, task_class="standard", audit_logger=None, task_classes=None):
         calls.append((tool_name, dict(args)))
         if tool_name == "write_file":
             p = Path(args["path"])

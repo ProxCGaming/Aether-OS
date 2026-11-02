@@ -20,6 +20,14 @@ steer carries the message's attachments (PF-1, xref M16), and its
 graph message is built by the same ``multimodal_user_content()`` the
 initial turn uses — one construction for both paths, never a parallel
 renderer here.
+
+Applying a steer also moves the graph state's provenance
+(``state["message_id"]``, N08) to the steer message's own id
+(PF-3): media generated during the steered continuation is
+registered against the message that actually prompted it, not the
+turn's original message. ``steer_state_update()`` builds the state
+update for an applied batch so every executor seam (mid-run drain,
+end-of-run drain, approval-resume drain) threads it identically.
 """
 from collections import deque
 from dataclasses import dataclass, field
@@ -164,3 +172,23 @@ def steer_message_dicts(steers: list[Steer]) -> list[dict[str, Any]]:
             content = steer.text
         messages.append({"role": "user", "content": content})
     return messages
+
+
+def steer_state_update(steers: list[Steer]) -> dict[str, Any]:
+    """The graph state update for applying a batch of steers (PF-3).
+
+    The messages are the rendered steers (``steer_message_dicts``).
+    Provenance moves with them: ``message_id`` becomes the LAST
+    steer id in the batch that carries one — the most recent user
+    message the continuation responds to — so media generated from
+    here on is registered against that message (N08). A batch whose
+    steers carry no ids (older clients) omits the key entirely,
+    leaving the state's existing provenance untouched rather than
+    erasing it.
+    """
+    update: dict[str, Any] = {"messages": steer_message_dicts(steers)}
+    for steer in reversed(steers):
+        if steer.message_id:
+            update["message_id"] = steer.message_id
+            break
+    return update

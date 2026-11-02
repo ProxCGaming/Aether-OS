@@ -282,7 +282,9 @@ def resolve_summariser_provider(user_config: Any | None, secret_store: Any, fall
             try:
                 from aether_engine.orchestration.core import _create_provider_instance
 
-                return _create_provider_instance(p_name, m_name, secret_store, local_only=local_only)
+                return _create_provider_instance(
+                    p_name, m_name, secret_store, local_only=local_only,
+                    user_config=user_config)
             except Exception as e:  # noqa: BLE001 — an unusable compression override falls back to the run provider; compaction must not fail the task.
                 logger.warning(
                     f"Compression auxiliary override {override!r} unusable, "

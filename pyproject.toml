@@ -43,17 +43,14 @@ dependencies = [
     "playwright>=1.64.1",
 ]
 
+# Skill registry CLI (Epic 7, E7-F09; addendum omp #28): install /
+# search / list over skills.lock.json. The module entry point is the
+# same function run_skills.py calls; `python -m aether_engine.skills.cli`
+# works too.
+[project.scripts]
+aether-skills = "aether_engine.skills.cli:main"
+
 [project.optional-dependencies]
-# Retired PySide6 UI (aether_ui/, superseded by the Electron app in
-# desktop_app/ — ADR-0019): NOT installed by default. Its modules and
-# their tests are the only consumers of these packages. Install with:
-#   uv sync --extra legacy-ui
-legacy-ui = [
-    "PySide6>=6.6.0",
-    "qasync>=0.27.1",
-    # aether_ui/components/chat_bubble.py imports markdown.
-    "markdown>=3.0",
-]
 # Local voice stack (aether_engine/voice/ — Silero VAD, faster-whisper
 # STT, Kokoro TTS): NOT installed by default. Its stages are the only
 # consumers of these packages; they probe with find_spec, import

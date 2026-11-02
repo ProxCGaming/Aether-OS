@@ -129,7 +129,7 @@ def graph_env(store_env, monkeypatch):
     from aether_worker.__main__ import run_worker
 
     async def _in_process_worker(tool_name, args, task_class="standard",
-                                 audit_logger=None):
+                                 audit_logger=None, task_classes=None):
         return await run_worker({"tool_name": tool_name, "args": args})
 
     monkeypatch.setattr(sandbox, "execute_tool_in_worker", _in_process_worker)

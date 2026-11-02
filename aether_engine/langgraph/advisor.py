@@ -41,7 +41,8 @@ def resolve_advisor_provider(user_config: Any | None, secret_store: Any) -> Any 
     try:
         from aether_engine.orchestration.core import _create_provider_instance
 
-        return _create_provider_instance(p_name, m_name, secret_store)
+        return _create_provider_instance(
+            p_name, m_name, secret_store, user_config=user_config)
     except Exception as e:  # noqa: BLE001 — an unusable advisor override disables the advisor; it must never break a task.
         logger.warning(f"Advisor auxiliary override {override!r} unusable, advisor disabled: {e}")
         return None

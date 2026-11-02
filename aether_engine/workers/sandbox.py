@@ -118,7 +118,25 @@ async def execute_tool_in_worker(
         Falls back to built-in defaults when *None*.
     """
     profiles = task_classes or _DEFAULT_TASK_CLASSES
-    limits = profiles.get(task_class, profiles.get("standard", {"time_cap_seconds": 1800, "memory_cap_mb": 4096}))
+    limits = profiles.get(task_class)
+    if limits is None:
+        # E2-F05: the selected profile must be the enforced profile.
+        # The old fallback silently ran the call under another class's
+        # caps — limits the user never selected. An unknown class is a
+        # configuration error: refuse loudly, fail closed, in the same
+        # shape as every other unenforceable-limits refusal below.
+        reason = (
+            f"unknown task_class {task_class!r}: no resource profile "
+            f"configured under that name (configured: {sorted(profiles)})"
+        )
+        logger.error(f"Refusing to execute '{tool_name}': {reason}")
+        if audit_logger:
+            audit_logger.log_event("WORKER_EXECUTION_REFUSED", {
+                "tool": tool_name,
+                "task_class": task_class,
+                "reason": reason,
+            })
+        raise RuntimeError(f"Refusing to execute '{tool_name}': {reason}")
     time_cap = limits["time_cap_seconds"]
     mem_cap = limits["memory_cap_mb"]
 

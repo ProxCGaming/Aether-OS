@@ -77,6 +77,9 @@ Per-epic detail lives in `docs/audits/`; decisions in `docs/adr/`
 - **[2026-09-23 04:22] Environment Diagnostics Engine**: Replaced the static UI mockup in the Settings page with a live, dynamic capability-check runner. Pressing "Run Diagnostics Now" triggers a true backend test for the Python environment, terminal access, SQLite read/write permissions, local Ollama daemon connectivity, and `TAVILY_API_KEY` verification, with live results rendering directly into the UI!
 - **[2026-09-23 03:53] Auto-Title Generation**: Newly created conversations (previously generic "New Conversation") are now automatically renamed to a brief summary of the first user prompt sent in the session.
 
+### Removed
+- **[2026-11-02] Retired PySide6 UI deleted**: `aether_ui/` removed outright (owner directive) with its six dedicated test files (`test_provider_health_badge`, `test_providers_panel_fixes`, `test_settings_provider_state`, `test_ui_window_geometry`, `test_approval_drawer_override`, `test_ui_state`) and the `legacy-ui` optional extra — PySide6, qasync and markdown had zero imports left outside the deleted tree. The Electron app in `desktop_app/` is the only frontend. The two baseline entries naming the deleted panel tests were removed from `scripts/pytest-known-failures.txt`; `tests/test_legacy_ui_retirement.py` keeps its guards (legacy deps never return as hard dependencies; default-path code never imports the legacy stack).
+
 ### Fixed
 - **[2026-09-30] Session Load Latency**: Eliminated extreme UI locking when switching chats by adding `CREATE INDEX IF NOT EXISTS idx_session_messages_session_id`, caching DB initialization state globally, and wrapping SQLite synchronous `session_store.py` calls in `asyncio.to_thread`.
 - **[2026-09-30] WebSocket Initialization**: Fixed a bug where `SLASH_COMMAND_LIST_REQUEST` and `PLUGIN_LIST_REQUEST` were skipped on hot-reload/mount if the WebSocket was already connected.

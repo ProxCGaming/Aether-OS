@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from aether_common.contracts import SCHEMA_VERSION
-from aether_engine.config import save_config
+from aether_engine.config import custom_provider_flavor, save_config
 from aether_engine.providers.discovery import fetch_available_models
 from aether_engine.routes.websocket import router as ws_router
 from aether_engine.secrets.storage import SecretStore
@@ -92,7 +92,9 @@ async def lifespan(_app: FastAPI):
             is_custom = pname == "custom_openai" or cfg.custom_provider_types.get(pname) == "openai_compatible"
             if key or is_custom:
                 base_url = cfg.custom_base_urls.get(pname)
-                disc = await fetch_available_models(pname, key, base_url=base_url)
+                disc = await fetch_available_models(
+                    pname, key, base_url=base_url,
+                    provider_flavor=custom_provider_flavor(pname, cfg))
                 if disc.models:
                     cfg.provider_models[pname] = disc.models
                     cfg.provider_excluded_models[pname] = disc.excluded

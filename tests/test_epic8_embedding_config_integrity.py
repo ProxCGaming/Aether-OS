@@ -254,6 +254,22 @@ def test_cosine_similarity_never_truncates_mismatched_dimensions():
 
 
 async def test_legacy_rows_without_identity_are_unknown_model(isolated_episodic):
+    # Episode first, then its vector — the production write order.
+    # (Test-contract alignment, E4-F04: this test originally seeded
+    # the legacy vector and initialised before the episode existed,
+    # but a vector with no episode is exactly the orphan state the
+    # E4-F04 init-time reconciliation removes; a real legacy
+    # deployment's memory.db holds the episode — that is why its
+    # vector exists. The identity assertions below are unaffected
+    # by the seeding order.)
+    episodic.init_episodic_db()
+    with episodic._get_conn() as conn:
+        conn.execute(
+            "INSERT INTO episodic_memory (task_id, timestamp, user_prompt, task_summary, tags, outcome)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ("t-legacy", 1, PROMPT, SUMMARY, "zebra", "SUCCESS"),
+        )
+        conn.commit()
     # Build the embeddings DB with the PRE-fix schema (no identity
     # columns) and a row in it, as an existing deployment would have.
     # The pickle blob below is deliberate: it simulates a legacy row
@@ -273,14 +289,6 @@ async def test_legacy_rows_without_identity_are_unknown_model(isolated_episodic)
         conn.commit()
     finally:
         conn.close()
-    episodic.init_episodic_db()
-    with episodic._get_conn() as conn:
-        conn.execute(
-            "INSERT INTO episodic_memory (task_id, timestamp, user_prompt, task_summary, tags, outcome)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            ("t-legacy", 1, PROMPT, SUMMARY, "zebra", "SUCCESS"),
-        )
-        conn.commit()
 
     # The migration adds the identity columns; the legacy row's model
     # stays NULL (unknown) and it must NOT be treated as a model-A

@@ -2,7 +2,7 @@
 import logging
 from dataclasses import dataclass
 
-from aether_engine.config import UserConfig
+from aether_engine.config import CLOUD_PROVIDERS, UserConfig
 from aether_engine.routing.health import ProviderHealthManager
 from aether_engine.routing.registry import (
     GLOBAL_MODEL_REGISTRY,
@@ -20,6 +20,75 @@ class StartupValidationResult:
     configured_providers: list[str]
     was_fallback: bool
     fallback_reason: str | None = None
+
+
+_CLOUD_PROVIDER_NAMES = {p.name for p in CLOUD_PROVIDERS}
+
+
+def is_keyless_custom_provider(provider_name: str, user_config: UserConfig) -> bool:
+    """True when *provider_name* is a custom OpenAI-compatible provider
+    whose saved configuration is complete WITHOUT a secret (ADR 0013).
+
+    Self-hosted OpenAI-compatible servers are first-class and
+    legitimately keyless: PROVIDER_SAVE accepts them with no key, and
+    a saved base URL is the act of configuration. The provider's
+    saved SHAPE decides — never the name alone:
+
+    - a non-empty saved base URL is required (without one there is
+      no endpoint to talk to, so the configuration is incomplete);
+    - the provider must be an OpenAI-compatible custom: a recorded
+      ``custom_provider_types`` entry is authoritative (the anthropic
+      flavour still requires its key — its dispatch is E5-F05's
+      territory); with no recorded type, the legacy ``custom_openai``
+      slot qualifies, and so does any dynamic provider absent from
+      CLOUD_PROVIDERS (dynamic customs default to openai_compatible,
+      the same default the provider-list builders use). Built-in
+      cloud providers always require a key.
+    """
+    if provider_name == "ollama":
+        # The local daemon's keylessness is the factory's own rule;
+        # it is not a custom provider and never decided by this shape.
+        return False
+    base_url = (user_config.custom_base_urls.get(provider_name) or "").strip()
+    if not base_url:
+        return False
+    provider_type = user_config.custom_provider_types.get(provider_name)
+    if provider_type is not None:
+        return provider_type == "openai_compatible"
+    if provider_name == "custom_openai":
+        return True
+    return provider_name not in _CLOUD_PROVIDER_NAMES
+
+
+def derive_configured_providers(
+    user_config: UserConfig,
+    secret_store: SecretStore,
+    registry: ModelRegistry | None = None,
+) -> list[str]:
+    """The single derivation of "configured" (E5-F04).
+
+    A provider is configured when it has a stored secret OR it is a
+    keyless custom provider whose saved configuration is complete
+    (:func:`is_keyless_custom_provider`). Catalog presence is
+    enforced by iterating the registry — a provider with no known
+    models cannot be routed to and is not listed.
+
+    Startup validation, engine state initialisation and the START
+    handler all derive from here, so "configured" means one thing
+    everywhere. Previously each site re-derived it from secrets
+    alone, and a saved keyless custom provider — accepted by
+    PROVIDER_SAVE and shown as configured on its provider card —
+    was invisible to all of them.
+    """
+    reg = registry or GLOBAL_MODEL_REGISTRY
+    stored_names = set(secret_store.list_providers())
+    configured_providers: list[str] = []
+    for m in reg.list_all_models():
+        if m.provider in configured_providers:
+            continue
+        if m.provider in stored_names or is_keyless_custom_provider(m.provider, user_config):
+            configured_providers.append(m.provider)
+    return configured_providers
 
 
 def validate_startup_configuration(
@@ -40,12 +109,10 @@ def validate_startup_configuration(
     """
     reg = registry or GLOBAL_MODEL_REGISTRY
 
-    # 1. Discover all providers that have valid stored secrets and are in registry
-    stored_names = set(secret_store.list_providers())
-    configured_providers: list[str] = []
-    for m in reg.list_all_models():
-        if m.provider in stored_names and m.provider not in configured_providers:
-            configured_providers.append(m.provider)
+    # 1. Discover all configured providers (stored secrets, plus
+    # keyless custom providers with a complete saved configuration)
+    # — the single shared derivation (E5-F04).
+    configured_providers = derive_configured_providers(user_config, secret_store, reg)
 
     desired_provider = user_config.default_provider
     desired_model = user_config.default_model

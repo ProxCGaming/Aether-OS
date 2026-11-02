@@ -71,6 +71,13 @@ class Mem0MemoryBackend(MemoryBackend):
             return list(payload.get("results") or [])
         return list(payload or [])
 
+    @staticmethod
+    def _is_episode(item: dict) -> bool:
+        # Facts and episodes share one Mem0 user; the metadata marker
+        # record_episode() writes is the ONLY thing that separates the
+        # two scopes (E4-F05). Every fact-side operation must honour it.
+        return (item.get("metadata") or {}).get("aether_type") == "episode"
+
     # -- writes -------------------------------------------------------
     async def record_episode(self, task_id, user_prompt, task_summary, tags, outcome, thinking_log=None):
         body = f"Task: {user_prompt}\nOutcome: {outcome}"
@@ -100,13 +107,16 @@ class Mem0MemoryBackend(MemoryBackend):
 
     # -- reads ----------------------------------------------------------
     def search_facts(self, query, limit=10, include_history=False):
-        payload = self._m.search(query, user_id=_USER_ID, limit=limit)
-        return [self._fact_shape(i) for i in self._results(payload)]
+        # Over-fetch like search_episodes does, then drop episodes:
+        # without the marker filter an episode stored under the same
+        # user came back shaped as a fact (E4-F05).
+        payload = self._m.search(query, user_id=_USER_ID, limit=limit * 3)
+        items = [i for i in self._results(payload) if not self._is_episode(i)]
+        return [self._fact_shape(i) for i in items[:limit]]
 
     def list_facts(self, limit=100, include_history=False):
         payload = self._m.get_all(user_id=_USER_ID)
-        items = [i for i in self._results(payload)
-                 if (i.get("metadata") or {}).get("aether_type") != "episode"]
+        items = [i for i in self._results(payload) if not self._is_episode(i)]
         return [self._fact_shape(i) for i in items[:limit]]
 
     def get_entity_facts(self, entity_name, include_history=False):
@@ -156,22 +166,29 @@ class Mem0MemoryBackend(MemoryBackend):
         raise NotImplementedError("Mem0 has no entity concept; delete individual facts instead.")
 
     def delete_episode(self, task_id):
-        for episode in self.list_episodes(limit=100_000):
-            if episode.get("task_id") == task_id:
-                # list_episodes drops the mem0 id; re-fetch raw to find it.
-                for item in self._results(self._m.get_all(user_id=_USER_ID)):
-                    if (item.get("metadata") or {}).get("task_id") == task_id:
-                        self._m.delete(item.get("id"))
-                        return True
-        return False
+        # Match the task ID AND the episode marker: facts learned from
+        # the same task carry the task ID in their metadata too, and
+        # matching the ID alone deleted the fact while the episode
+        # itself survived (E4-F05).
+        deleted = False
+        for item in self._results(self._m.get_all(user_id=_USER_ID)):
+            if (item.get("metadata") or {}).get("task_id") == task_id \
+                    and self._is_episode(item):
+                self._m.delete(item.get("id"))
+                deleted = True
+        return deleted
 
     def clear_facts(self):
-        self._m.delete_all(user_id=_USER_ID)
+        # delete_all(user_id) is user-wide: it would take every episode
+        # with it. Clear fact records one by one instead (E4-F05).
+        for item in self._results(self._m.get_all(user_id=_USER_ID)):
+            if not self._is_episode(item):
+                self._m.delete(item.get("id"))
         return True
 
     def clear_episodes(self):
         for item in self._results(self._m.get_all(user_id=_USER_ID)):
-            if (item.get("metadata") or {}).get("aether_type") == "episode":
+            if self._is_episode(item):
                 self._m.delete(item.get("id"))
         return True
 

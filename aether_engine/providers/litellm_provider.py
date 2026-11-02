@@ -6,6 +6,7 @@ with one consistent interface, automatic retries, and structured tool calling.
 """
 import asyncio
 import logging
+import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +22,7 @@ from aether_engine.providers.base import (
     ToolCall,
 )
 from aether_engine.providers.discovery import DISCOVERY_TIMEOUT
+from aether_engine.providers.serving import note_serving_provider
 
 logger = logging.getLogger("aether_engine.providers.litellm_provider")
 
@@ -112,12 +114,22 @@ _KNOWN_LITELLM_PREFIXES = (
 )
 
 
-def resolve_litellm_model(model_id: str, provider_name: str = "") -> str:
+def resolve_litellm_model(
+    model_id: str,
+    provider_name: str = "",
+    provider_flavor: str | None = None,
+) -> str:
     """Resolve internal model ID to LiteLLM-compatible model string.
 
     Ensures that every model passed to LiteLLM has the correct provider prefix,
     even for provider catalogs that use slash-formatted model IDs (e.g. OpenRouter's
     'moonshotai/kimi-k3' -> 'openrouter/moonshotai/kimi-k3').
+
+    ``provider_flavor`` is the saved integration flavour of a custom
+    provider (``config.custom_provider_flavor``): an ``"anthropic"``
+    custom resolves to the Anthropic protocol form, not OpenAI's
+    (E5-F05). It is consulted only inside the custom-provider branch —
+    built-in providers resolve exactly as before, with or without it.
     """
     if not model_id:
         return model_id
@@ -156,6 +168,14 @@ def resolve_litellm_model(model_id: str, provider_name: str = "") -> str:
         return model_id
 
     if provider_name in ("custom_openai", "custom") or provider_name.startswith("custom_"):
+        # E5-F05: the saved flavour controls the protocol. An
+        # anthropic-flavour custom endpoint speaks the Anthropic
+        # protocol; the historical OpenAI form applies otherwise
+        # (including when no flavour was recorded or passed).
+        if provider_flavor == "anthropic":
+            if not model_id.startswith("anthropic/"):
+                return f"anthropic/{model_id}"
+            return model_id
         if not model_id.startswith("openai/"):
             return f"openai/{model_id}"
         return model_id
@@ -187,6 +207,17 @@ def resolve_litellm_model(model_id: str, provider_name: str = "") -> str:
     return model_id
 
 
+def _bare_model_id(litellm_model: str) -> str:
+    """Strip a leading LiteLLM provider prefix ("anthropic/claude-x"
+    -> "claude-x") so a sample keys to the same (provider, model)
+    identity the registry uses (E5-F03). A model whose ID carries no
+    known prefix is returned unchanged."""
+    for prefix in _KNOWN_LITELLM_PREFIXES:
+        if litellm_model.startswith(prefix):
+            return litellm_model[len(prefix):]
+    return litellm_model
+
+
 @dataclass
 class FallbackModel:
     """Configuration for a fallback model including its provider-specific credentials."""
@@ -212,6 +243,7 @@ class LiteLLMProvider(BaseProvider):
         reasoning_effort: str = "standard",
         ttsr_rules: list | None = None,
         record_usage: bool = True,
+        provider_flavor: str | None = None,
     ):
         api_key = api_key.strip() if api_key else ""
         if not api_key and provider_name not in ("custom_openai", "openai_compatible", "ollama"):
@@ -220,8 +252,15 @@ class LiteLLMProvider(BaseProvider):
         self.api_key = api_key if api_key else "sk-no-key-required"
         self.model = model
         self.provider_name = provider_name
+        # E5-F05: the saved flavour of a custom provider, when the
+        # construction site knows it (the factory resolves it from
+        # config via custom_provider_flavor). It steers model
+        # resolution to the endpoint's actual protocol; None keeps
+        # the historical OpenAI-compatible form for custom names.
+        self.provider_flavor = provider_flavor
         self.base_url = base_url.rstrip("/") if base_url else None
-        self.litellm_model = resolve_litellm_model(model, provider_name)
+        self.litellm_model = resolve_litellm_model(
+            model, provider_name, provider_flavor=provider_flavor)
         # Per-node fallback: list of FallbackModel with full provider config for cross-provider fallback
         self.fallback_models: list[FallbackModel] = fallback_models or []
         # Phase 9, B2: user-selected reasoning depth, forwarded to litellm for
@@ -511,6 +550,103 @@ class LiteLLMProvider(BaseProvider):
                 node_name=node_name,
             )
 
+        def _record_attempt_latency(
+            recorded_flag: list[bool],
+            model_idx: int,
+            current_model: str,
+            current_provider: str,
+            usage: tuple[int, int] | None,
+            started: float,
+            first_event: list[float | None],
+        ) -> None:
+            """Record one attempt's measured latency, once (E5-F11).
+
+            Fires at exactly the points _record_attempt_usage does —
+            this attempt produced output the consumer used, on the
+            success path or an early close — so the per-model
+            latency percentiles describe real served calls (the M19
+            discipline), keyed to the model that actually served:
+            the fallback's own identity when a fallback served
+            (E5-F03). ``first_event`` is the perf_counter stamp of
+            the first streamed event; TTFT is dispatch -> that
+            stamp. When no event was ever observed the sample
+            carries a total only — no TTFT is invented.
+            """
+            if recorded_flag[0]:
+                return
+            recorded_flag[0] = True
+            now = time.perf_counter()
+            first = first_event[0]
+            self._record_latency(
+                model_name=self.model if model_idx == 0 else _bare_model_id(current_model),
+                provider_name=current_provider,
+                ttft_ms=(first - started) * 1000.0 if first is not None else None,
+                total_ms=(now - started) * 1000.0,
+                decode_ms=(now - first) * 1000.0 if first is not None else None,
+                output_tokens=usage[1] if usage else None,
+            )
+
+        def _record_fallback_triggered(
+            recorded_flag: list[bool],
+            model_idx: int,
+            current_model: str,
+            current_provider: str,
+        ) -> None:
+            """Audit one successful per-call fallback, once.
+
+            Finding E5-F01: fires on the success path AND when the
+            consumer closes the generator early (GeneratorExit at a
+            yield). Consumers legitimately stop at the terminal chunk
+            — every stream consumer in the codebase breaks on
+            finish_reason — or at a verdict (the intent classifier),
+            and that close skips the post-loop audit, so a fallback
+            whose answer was consumed still left no
+            NODE_FALLBACK_TRIGGERED. The callers are exactly the
+            points where this attempt has yielded output, so the
+            fallback demonstrably produced the consumed response;
+            the flag keeps the paths from both auditing it, mirroring
+            _record_attempt_usage.
+            """
+            if recorded_flag[0] or model_idx == 0:
+                return
+            recorded_flag[0] = True
+            # Phase 9, A4: this must be visible in the audit log as its own
+            # event, distinct from task-level FALLBACK_TRIGGERED (Phase 5.1
+            # acceptance test #4). stdlib logging alone is not enough.
+            from aether_engine.audit import AuditLogger
+
+            AuditLogger().log_event("NODE_FALLBACK_TRIGGERED", {
+                "node": node_name,
+                "primary_model": self.litellm_model,
+                "failed_provider": self.provider_name,
+                "fallback_model": current_model,
+                "fallback_provider": current_provider,
+            })
+            logger.info(
+                f"NODE_FALLBACK_TRIGGERED: primary model '{self.litellm_model}' failed, "
+                f"succeeded with fallback model '{current_model}'"
+            )
+
+        def _raise_ttsr_blocked(blocked_rule: str) -> None:
+            """Audit + stop the stream for a TTSR block match (E7-02).
+
+            Shared by the content and reasoning channels so a block
+            on either produces the identical outcome: a TTSR_BLOCKED
+            audit event naming the rule and a non-retriable
+            ProviderError (E7-F07).
+            """
+            from aether_engine.audit import AuditLogger
+
+            AuditLogger().log_event("TTSR_BLOCKED", {
+                "node": node_name,
+                "rule": blocked_rule,
+                "model": self.litellm_model,
+            })
+            raise ProviderError(
+                f"Stream blocked by TTSR rule '{blocked_rule}'",
+                retriable=False,
+            )
+
         last_error: Exception | None = None
         for model_idx, (current_model, current_api_key, current_base_url, current_provider) in enumerate(models_to_try):
             is_fallback = model_idx > 0
@@ -527,6 +663,11 @@ class LiteLLMProvider(BaseProvider):
                 else:
                     kwargs.pop("api_base", None)
 
+                # E5-F11: per-attempt latency timing. TTFT is the
+                # span from this dispatch stamp to the first streamed
+                # event (stamped in the chunk loop below).
+                attempt_started = time.perf_counter()
+
                 response = await litellm.acompletion(**kwargs)
 
                 accumulated_tool_calls: dict[int, dict[str, Any]] = {}
@@ -542,6 +683,14 @@ class LiteLLMProvider(BaseProvider):
                 # _record_attempt_usage (success path + GeneratorExit
                 # close path at the yields below share it).
                 attempt_recorded = [False]
+                # Finding E5-F01: the same sharing for the fallback
+                # success audit (_record_fallback_triggered).
+                attempt_fallback_audited = [False]
+                # E5-F11: the same sharing for the latency sample,
+                # plus the first-streamed-event stamp (None until
+                # the chunk loop observes one).
+                attempt_latency_recorded = [False]
+                attempt_first_event: list[float | None] = [None]
 
                 async for chunk in response:
                     parsed_usage = _parse_usage(getattr(chunk, "usage", None))
@@ -552,6 +701,11 @@ class LiteLLMProvider(BaseProvider):
 
                     if not delta and not finish_reason:
                         continue
+
+                    # E5-F11: the first streamed event ends the
+                    # time-to-first-token span for this attempt.
+                    if attempt_first_event[0] is None:
+                        attempt_first_event[0] = time.perf_counter()
 
                     text = getattr(delta, "content", None) if delta else None
                     # E1-16: reasoning-capable models expose their
@@ -589,37 +743,66 @@ class LiteLLMProvider(BaseProvider):
                         # Epic 7, E7-02: TTSR rules vet the text
                         # before it leaves the provider. A block rule
                         # stops the stream (audited); redactions are
-                        # applied in place.
-                        if text and self.stream_rules.active:
-                            text, blocked_rule = self.stream_rules.apply(text)
-                            if blocked_rule is not None:
-                                from aether_engine.audit import AuditLogger
-
-                                AuditLogger().log_event("TTSR_BLOCKED", {
-                                    "node": node_name,
-                                    "rule": blocked_rule,
-                                    "model": self.litellm_model,
-                                })
-                                raise ProviderError(
-                                    f"Stream blocked by TTSR rule '{blocked_rule}'",
-                                    retriable=False,
-                                )
+                        # applied in place. E7-F07: the reasoning
+                        # channel is vetted identically, chunk by
+                        # chunk — it leaves on its own field and is
+                        # republished as THINKING deltas, so leaving
+                        # it unvetted let every enabled rule be
+                        # bypassed by a reasoning-capable model.
+                        if self.stream_rules.active:
+                            if text:
+                                text, blocked_rule = self.stream_rules.apply(text)
+                                if blocked_rule is not None:
+                                    _raise_ttsr_blocked(blocked_rule)
+                            if thinking:
+                                thinking, blocked_rule = self.stream_rules.apply(thinking)
+                                if blocked_rule is not None:
+                                    _raise_ttsr_blocked(blocked_rule)
                         yielded_any = True
                         try:
-                            yield StreamChunk(text=text, thinking=thinking, finish_reason=finish_reason)
+                            # E5-F01: finish_reason belongs on the
+                            # terminal chunk only. While tool calls
+                            # are still accumulated, the tool-calls
+                            # chunk below is the terminal one and
+                            # carries it; stamping it here makes
+                            # break-on-finish consumers stop one
+                            # chunk early and lose the calls.
+                            yield StreamChunk(
+                                text=text,
+                                thinking=thinking,
+                                finish_reason=finish_reason if not accumulated_tool_calls else None,
+                            )
                         except GeneratorExit:
+                            _record_fallback_triggered(
+                                attempt_fallback_audited, model_idx,
+                                current_model, current_provider)
                             _record_attempt_usage(
                                 attempt_recorded, model_idx, current_model,
                                 current_provider, call_usage, call_text_parts)
+                            _record_attempt_latency(
+                                attempt_latency_recorded, model_idx,
+                                current_model, current_provider,
+                                call_usage, attempt_started,
+                                attempt_first_event)
+                            note_serving_provider(current_provider)
                             raise
                     elif finish_reason and not accumulated_tool_calls:
                         yielded_any = True
                         try:
                             yield StreamChunk(finish_reason=finish_reason)
                         except GeneratorExit:
+                            _record_fallback_triggered(
+                                attempt_fallback_audited, model_idx,
+                                current_model, current_provider)
                             _record_attempt_usage(
                                 attempt_recorded, model_idx, current_model,
                                 current_provider, call_usage, call_text_parts)
+                            _record_attempt_latency(
+                                attempt_latency_recorded, model_idx,
+                                current_model, current_provider,
+                                call_usage, attempt_started,
+                                attempt_first_event)
+                            note_serving_provider(current_provider)
                             raise
 
                     # When stream is done with tool calls, emit them all at once
@@ -642,34 +825,42 @@ class LiteLLMProvider(BaseProvider):
                                 finish_reason=finish_reason,
                             )
                         except GeneratorExit:
+                            _record_fallback_triggered(
+                                attempt_fallback_audited, model_idx,
+                                current_model, current_provider)
                             _record_attempt_usage(
                                 attempt_recorded, model_idx, current_model,
                                 current_provider, call_usage, call_text_parts)
+                            _record_attempt_latency(
+                                attempt_latency_recorded, model_idx,
+                                current_model, current_provider,
+                                call_usage, attempt_started,
+                                attempt_first_event)
+                            note_serving_provider(current_provider)
                             raise
 
-                # If we got here, the call succeeded
-                if is_fallback:
-                    # Phase 9, A4: this must be visible in the audit log as its own
-                    # event, distinct from task-level FALLBACK_TRIGGERED (Phase 5.1
-                    # acceptance test #4). stdlib logging alone is not enough.
-                    from aether_engine.audit import AuditLogger
-                    AuditLogger().log_event("NODE_FALLBACK_TRIGGERED", {
-                        "node": node_name,
-                        "primary_model": self.litellm_model,
-                        "failed_provider": self.provider_name,
-                        "fallback_model": current_model,
-                        "fallback_provider": current_provider,
-                    })
-                    logger.info(
-                        f"NODE_FALLBACK_TRIGGERED: primary model '{self.litellm_model}' failed, "
-                        f"succeeded with fallback model '{current_model}'"
-                    )
+                # If we got here, the call succeeded. The fallback
+                # audit goes through the shared recorder: a consumer
+                # that closed the stream at the terminal chunk has
+                # already fired it via the GeneratorExit path
+                # (E5-F01), and the flag keeps it to exactly one.
+                _record_fallback_triggered(
+                    attempt_fallback_audited, model_idx,
+                    current_model, current_provider)
                 # Epic 8, E8-A8.1a: one ledger row per completed
                 # call, attributed to the model that actually ran
                 # (the fallback's own id when a fallback succeeded).
                 _record_attempt_usage(
                     attempt_recorded, model_idx, current_model,
                     current_provider, call_usage, call_text_parts)
+                _record_attempt_latency(
+                    attempt_latency_recorded, model_idx, current_model,
+                    current_provider, call_usage, attempt_started,
+                    attempt_first_event)
+                # Finding E5-F07: note who actually served this call
+                # so the task pump can credit the completion to the
+                # serving provider, not the instance's primary.
+                note_serving_provider(current_provider)
                 return  # Success — exit the retry loop
 
             except litellm.AuthenticationError as e:
@@ -788,6 +979,40 @@ class LiteLLMProvider(BaseProvider):
         except Exception:  # usage recording is observational only.
             logger.debug("Usage recording failed", exc_info=True)
 
+    def _record_latency(
+        self,
+        *,
+        model_name: str,
+        provider_name: str,
+        ttft_ms: float | None,
+        total_ms: float | None,
+        decode_ms: float | None,
+        output_tokens: int | None,
+    ) -> None:
+        """E5-F11: record one completed call's measured latency in
+        the per-model latency store (aether_engine.routing.latency),
+        so routing can use measured latency. Observational only —
+        a recording failure must never break the call that produced
+        it, so this never raises. Instances built with
+        ``record_usage=False`` (probes and self-tests — R2-NEW-1)
+        never record: their traffic is not agent work and would
+        pollute the percentiles exactly as it would the ledger."""
+        if not self._usage_recording:
+            return
+        try:
+            from aether_engine.routing.latency import record_latency_sample
+
+            record_latency_sample(
+                provider_name=provider_name,
+                model_name=model_name,
+                ttft_ms=ttft_ms,
+                total_ms=total_ms,
+                decode_ms=decode_ms,
+                output_tokens=output_tokens,
+            )
+        except Exception:  # latency recording is observational only.
+            logger.debug("Latency recording failed", exc_info=True)
+
 
 # ---------------------------------------------------------------------------
 # Validation helper — lightweight model list call to verify a key works
@@ -798,6 +1023,7 @@ async def validate_api_key(
     model: str = "",
     base_url: str | None = None,
     timeout: float = VALIDATION_TIMEOUT,
+    provider_flavor: str | None = None,
 ) -> dict[str, Any]:
     """Validate a provider API key by making a minimal completion call.
 
@@ -829,7 +1055,8 @@ async def validate_api_key(
         }
         model = _default_models.get(provider_name, "gpt-3.5-turbo")
 
-    litellm_model = resolve_litellm_model(model, provider_name=provider_name)
+    litellm_model = resolve_litellm_model(
+        model, provider_name=provider_name, provider_flavor=provider_flavor)
 
     # LiteLLM's OpenAI client requires a non-empty key to bypass client-side validation.
     effective_api_key = api_key if api_key else "sk-no-key-required"

@@ -532,3 +532,145 @@ describe('MediaLibrary N07 — analysis events + backend recall search', () => {
     }
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// OP12 (Epic 8 PRD Open Point 12): deleting a library entry is
+// index-only by default; "also delete the file" is an explicit
+// per-delete choice. The engine answers with file_deleted — when the
+// user asked for the file to go and it did NOT, the UI must say so
+// honestly instead of implying both are gone; when the engine says
+// the entry itself was not deleted, the card must come back.
+// ---------------------------------------------------------------------------
+describe('MediaLibrary OP12 — also-delete-file option + honest outcome', () => {
+  const sessions = [{ id: 'sess-1', title: 'UX Research' }];
+
+  function makeWs() {
+    const handlers = [];
+    const ws = {
+      readyState: 1,
+      send: jest.fn(),
+      addEventListener: jest.fn((event, handler) => {
+        if (event === 'message') handlers.push(handler);
+      }),
+      removeEventListener: jest.fn(),
+    };
+    const deliver = (msg) => {
+      act(() => {
+        handlers[handlers.length - 1]({ data: JSON.stringify(msg) });
+      });
+    };
+    return { ws, deliver };
+  }
+
+  const item = {
+    id: 'med-1',
+    session_id: 'sess-1',
+    message_id: 'msg-1',
+    collection: 'user',
+    media_type: 'image',
+    file_path: '/home/user/photos/keepme.png',
+    file_size: 12000,
+    mime_type: 'image/png',
+    status: 'analyzed',
+    probe_metadata: { origin: 'user_upload' },
+    origin: 'user_upload',
+    tags: [],
+    user_notes: '',
+    created_at: 5000,
+    file_exists: true,
+  };
+
+  function renderLibrary(ws) {
+    return render(
+      <MediaLibrary
+        initialMedia={[item]}
+        sessions={sessions}
+        wsRef={{ current: ws }}
+        onNavigateToSession={jest.fn()}
+      />
+    );
+  }
+
+  function openDeleteModal() {
+    fireEvent.click(screen.getByTestId('media-delete-btn-med-1'));
+    expect(screen.getByTestId('delete-confirm-modal')).toBeInTheDocument();
+  }
+
+  function lastSentPayload(ws) {
+    const calls = ws.send.mock.calls;
+    return JSON.parse(calls[calls.length - 1][0]).payload;
+  }
+
+  test('unchecked checkbox sends an index-only delete', () => {
+    const { ws } = makeWs();
+    renderLibrary(ws);
+
+    openDeleteModal();
+    const checkbox = screen.getByTestId('delete-file-checkbox');
+    expect(checkbox).not.toBeChecked();
+
+    fireEvent.click(screen.getByTestId('confirm-delete-action-btn'));
+
+    expect(lastSentPayload(ws)).toMatchObject({
+      media_id: 'med-1',
+      delete_underlying_file: false,
+    });
+  });
+
+  test('file-delete failure is surfaced honestly, entry still removed', () => {
+    const { ws, deliver } = makeWs();
+    renderLibrary(ws);
+
+    openDeleteModal();
+    fireEvent.click(screen.getByTestId('delete-file-checkbox'));
+    fireEvent.click(screen.getByTestId('confirm-delete-action-btn'));
+    expect(lastSentPayload(ws)).toMatchObject({ delete_underlying_file: true });
+
+    deliver({
+      type: 'MEDIA_DELETE_RESPONSE',
+      payload: { media_id: 'med-1', deleted: true, file_deleted: false },
+    });
+
+    const notice = screen.getByTestId('media-delete-notice');
+    expect(notice).toHaveTextContent(/could not be deleted from disk/i);
+    expect(notice).toHaveTextContent(/keepme\.png/);
+    // The entry itself is gone — the notice must not resurrect it.
+    expect(screen.queryByTestId('media-card-med-1')).not.toBeInTheDocument();
+  });
+
+  test('confirmed file deletion shows no failure notice', () => {
+    const { ws, deliver } = makeWs();
+    renderLibrary(ws);
+
+    openDeleteModal();
+    fireEvent.click(screen.getByTestId('delete-file-checkbox'));
+    fireEvent.click(screen.getByTestId('confirm-delete-action-btn'));
+
+    deliver({
+      type: 'MEDIA_DELETE_RESPONSE',
+      payload: { media_id: 'med-1', deleted: true, file_deleted: true },
+    });
+
+    expect(screen.queryByTestId('media-delete-notice')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('media-card-med-1')).not.toBeInTheDocument();
+  });
+
+  test('engine refusing the entry delete restores the card and says so', () => {
+    const { ws, deliver } = makeWs();
+    renderLibrary(ws);
+
+    openDeleteModal();
+    fireEvent.click(screen.getByTestId('confirm-delete-action-btn'));
+    // Optimistic removal happened on confirm.
+    expect(screen.queryByTestId('media-card-med-1')).not.toBeInTheDocument();
+
+    deliver({
+      type: 'MEDIA_DELETE_RESPONSE',
+      payload: { media_id: 'med-1', deleted: false, file_deleted: false },
+    });
+
+    expect(screen.getByTestId('media-delete-notice')).toHaveTextContent(/still there/i);
+    expect(screen.getByTestId('media-card-med-1')).toBeInTheDocument();
+  });
+});

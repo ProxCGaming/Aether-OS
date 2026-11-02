@@ -27,7 +27,13 @@ from aether_engine.tools.registry import Tool, ToolRisk
 logger = logging.getLogger("aether_engine.mcp.registry")
 
 _MCP_CONFIG_PATH = Path.home() / ".aether" / "mcp_servers.json"
-_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,100}$")
+# E7-F08: a server name may be a logical qualified ``<ns>/<name>`` —
+# exactly one '/' joining two segments of the historical charset. Server
+# names are registry/config keys, never filesystem paths, so the slash
+# is inert; anything with more separators (``a/b/c``, ``a//b``, ``/a``,
+# ``a/``) is still refused. Total length stays capped at 100 (checked in
+# validate_mcp_server_config).
+_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+(/[A-Za-z0-9_.\-]+)?$")
 
 
 class MCPConfigError(ValueError):
@@ -90,9 +96,10 @@ def validate_mcp_server_config(name: str, config: dict) -> dict:
     format); ``headers``/``env`` are string dicts; timeout 1–300s,
     default 30; ``enabled``/``auto_connect`` default true.
     """
-    if not isinstance(name, str) or not _NAME_RE.match(name):
+    if not isinstance(name, str) or len(name) > 100 or not _NAME_RE.match(name):
         raise MCPConfigError(
-            f"Invalid MCP server name {name!r}: use 1-100 letters, digits, '_', '.' or '-'."
+            f"Invalid MCP server name {name!r}: use 1-100 letters, digits, '_', '.' or '-', "
+            "optionally qualified as '<ns>/<name>'."
         )
     if not isinstance(config, dict):
         raise MCPConfigError(f"MCP server config for {name!r} must be an object.")

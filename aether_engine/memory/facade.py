@@ -49,6 +49,21 @@ class MemoryBackend:
         """Extract and store durable facts from one exchange."""
         raise NotImplementedError
 
+    async def learn_lessons(self, provider, user_prompt: str, assistant_response: str, task_id: str) -> list[str]:
+        """Epic 4, E4-10 (addendum omp #29): extract explicit
+        lessons from one completed exchange into learned.md.
+
+        Unlike the store operations above, this default is the real
+        implementation for every backend: learned.md is a curated
+        document in the data home, not a backend store, so there is
+        nothing per-backend to override. Returns the lessons that
+        were actually added (deduped against the document).
+        Best-effort — extraction failures return []."""
+        from aether_engine.memory import learned
+
+        return await learned.extract_and_record_lessons(
+            provider, user_prompt, assistant_response, task_id)
+
     # -- reads -------------------------------------------------------
     def search_facts(self, query: str, limit: int = 10, include_history: bool = False) -> list[dict]:
         raise NotImplementedError

@@ -130,13 +130,18 @@ async def _query_with_vec(isolated, vec):
 async def test_episodic_embedding_round_trips_in_new_format(isolated_episodic):
     vec = [0.1, 0.2, 0.3]
     episodic.init_embeddings_db()
+    # Episode first, then its vector — the production write order.
+    # (Test-contract alignment, E4-F04: this test originally seeded
+    # the vector first, but a vector with no episode is exactly the
+    # orphan state the E4-F04 init-time reconciliation removes; the
+    # codec assertions below are unaffected by the seeding order.)
+    _insert_episode_row("t-rt", "zebra handling field guide")
     episodic._store_embedding_row("t-rt", vec)
 
     blob = _raw_embedding_blob(isolated_episodic, "t-rt")
     assert not blob.startswith(b"\x80")  # not a pickle stream
 
     # Behavioural round-trip: the stored vector is recallable.
-    _insert_episode_row("t-rt", "zebra handling field guide")
     results = await _query_with_vec(isolated_episodic, vec)
     assert [r["task_id"] for r in results] == ["t-rt"]
 

@@ -2,26 +2,37 @@
 #
 # Runs the repo's real test commands on every push / PR:
 #   - pytest over the full tests/ selection — the same suite the local
-#     gate runs. There are NO --ignore flags (S5-M6): the four legacy
-#     PySide6 UI test files that used to be ignored
-#     (tests/test_provider_health_badge.py,
-#     tests/test_providers_panel_fixes.py,
-#     tests/test_settings_provider_state.py,
-#     tests/test_ui_window_geometry.py) each self-skip at module level
-#     via pytest.importorskip("PySide6"), and this job installs with a
-#     plain `uv sync` (no legacy-ui extra), so in CI they are skipped,
-#     not failed. The ignore flags only made CI judge a smaller suite
-#     than the local gate for no benefit.
-#     Caveat if the install ever gains --extra legacy-ui: all four
-#     files then pass in a clean environment (locally verified
-#     2 Nov 2026 with QT_QPA_PLATFORM=offscreen: 36 passed). Two tests
-#     in tests/test_providers_panel_fixes.py are nevertheless listed
-#     in scripts/pytest-known-failures.txt: they fail only when the
-#     environment carries a proxy NO_PROXY value that httpx cannot
-#     parse (as in the Muse VM), and pass with a clean env. CI has
-#     no baseline mechanism, so an env-dependent failure like that
-#     would redden this job where the local subset rule tolerates it.
+#     gate runs. There are NO --ignore flags (S5-M6): the suite is
+#     judged whole. (The four legacy PySide6 UI test files that once
+#     self-skipped via pytest.importorskip("PySide6") were deleted
+#     with the retired aether_ui/ tree on 2 Nov 2026, together with
+#     the legacy-ui extra; their two baseline entries left
+#     scripts/pytest-known-failures.txt with them.)
+#     The pytest job is therefore judged by the F-18 SUBSET RULE —
+#     the same rule .husky/pre-push applies locally (owner decision,
+#     1 Nov 2026): pytest writes a JUnit report, and
+#     scripts/ci_pytest_subset.py fails the job ONLY when a failure
+#     is not listed in scripts/pytest-known-failures.txt. Baseline
+#     entries that now pass are noted in the log, never a failure.
+#     A missing/empty report fails closed — an unjudgeable run is
+#     never a pass.
 #   - Jest in desktop_app/ (npm test -- --watchAll=false).
+#   - Lint, mirroring the local commit gate (lint-staged): oxlint
+#     over the whole desktop_app (the repo's `npm run lint` scope;
+#     warnings do not block, errors do), and Ruff via the repo's
+#     scripts/run-ruff.sh over the Python files CHANGED by the
+#     push/PR — the same file set lint-staged judges locally. A
+#     whole-tree Ruff run is not green today and cannot gate yet:
+#     it reports 136 findings, almost all pre-existing debt in
+#     tests/ (129) and scripts/ (5) that the staged-file hooks never
+#     judged (aether_engine itself carries 2). The retired aether_ui/
+#     tree's 170 findings left with the tree when it was deleted on
+#     2 Nov 2026. Until the remaining debt is cleared, changed-file
+#     gating is the honest equivalent of the local rule.
+#   - Gitleaks over the full git history (the local pre-commit hook
+#     only sees staged files via `protect --staged`; CI catches
+#     what hooks cannot, e.g. commits made through the web UI),
+#     using the repo's .gitleaks.toml allowlist.
 #   - Coverage on both jobs (S5-M11): measured and uploaded as
 #     artifacts, with NO failing threshold — measurement first.
 #
@@ -32,8 +43,9 @@
 #     degradation seen in the old .venv-phase9 environment (see ADR 0025).
 #   - The pytest job does not run the Electron app or the Windows-only
 #     paths (pywin32 is marker-guarded to Windows in pyproject.toml).
-#   - Packaging (electron-builder) is NOT run here; `npm run dist` is a
-#     manual release step until a Windows packaging job is added.
+#   - Packaging (electron-builder) is NOT run here; it lives in
+#     .github/workflows/release.yml, which builds the Windows NSIS
+#     and Linux AppImage installers when a version tag is pushed.
 name: CI
 
 on:
@@ -54,12 +66,22 @@ jobs:
       - name: Install dependencies
         run: uv sync
       - name: Run pytest with coverage
+        # pytest's exit code is deliberately discarded (|| true): the
+        # suite is judged by its failure LIST via the subset rule in
+        # the next step, exactly as .husky/pre-push judges it locally
+        # (there, pytest can even exit 139 on Qt teardown after a
+        # complete run). A crash that leaves no JUnit report fails
+        # closed in the judge step instead of passing silently.
         run: >-
           uv run python -m pytest -q
           --cov=aether_engine
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
           --cov-report=html:htmlcov
+          --junitxml=pytest-results.xml
+          || true
+      - name: Judge pytest against the known-failures baseline
+        run: uv run python scripts/ci_pytest_subset.py pytest-results.xml
       - name: Upload Python coverage report
         if: always()
         uses: actions/upload-artifact@v4
@@ -68,6 +90,7 @@ jobs:
           path: |
             coverage.xml
             htmlcov/
+            pytest-results.xml
           if-no-files-found: ignore
 
   frontend:
@@ -96,3 +119,77 @@ jobs:
           name: jest-coverage
           path: desktop_app/coverage/
           if-no-files-found: ignore
+
+  lint:
+    name: lint (ruff + oxlint)
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: the Ruff step diffs the push/PR against its base.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install Python dependencies
+        run: uv sync
+      - name: Ruff on changed Python files (repo script)
+        # Same judgement as the local commit gate: lint-staged runs
+        # scripts/run-ruff.sh on the files being committed, so CI runs
+        # it on the files this push/PR changes. Whole-tree Ruff is
+        # not green yet (see the header comment) and cannot gate.
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          if [ -z "$BASE" ] \
+            || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+            || ! git rev-parse --verify --quiet "$BASE^{commit}" > /dev/null; then
+            BASE="HEAD~1"
+          fi
+          echo "Diffing against $BASE"
+          git diff --name-only --diff-filter=ACMR "$BASE" HEAD -- '*.py' > changed-py.txt
+          if [ -s changed-py.txt ]; then
+            echo "Ruff judging the changed Python files:"
+            cat changed-py.txt
+            xargs -a changed-py.txt -r bash scripts/run-ruff.sh
+          else
+            echo "No Python files changed — nothing for Ruff to judge."
+          fi
+      # Electron 44 bundles Node 24 — same major line as CI's Jest job.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: desktop_app/package-lock.json
+      - name: Install desktop_app dependencies
+        working-directory: desktop_app
+        run: npm ci
+      - name: oxlint on desktop_app (repo script)
+        # scripts/run-oxlint.sh cds into desktop_app and honours its
+        # .oxlintrc.json; "." lints the whole app, the same scope as
+        # `npm run lint`. Errors block; warnings do not (the script's
+        # own semantics, same as the local gate).
+        run: bash scripts/run-oxlint.sh .
+
+  gitleaks:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: the point of this job is to scan commits the
+      # local staged-file hook never saw.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan git history for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The repo's own allowlist (placeholder VALUES only — real
+          # keys are flagged even in test files, per S5-M10). For a
+          # personal-account repo no GITLEAKS_LICENSE is required.
+          GITLEAKS_CONFIG: .gitleaks.toml

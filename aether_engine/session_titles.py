@@ -79,7 +79,8 @@ def resolve_title_provider(user_config: Any, secret_store: Any, fallback: Any) -
             try:
                 from aether_engine.orchestration.core import _create_provider_instance
 
-                return _create_provider_instance(p_name, m_name, secret_store)
+                return _create_provider_instance(
+                    p_name, m_name, secret_store, user_config=user_config)
             except Exception as e:  # noqa: BLE001 — unusable title override falls back to the task provider.
                 logger.warning(f"Title auxiliary override {override!r} unusable, using the task provider: {e}")
     return fallback

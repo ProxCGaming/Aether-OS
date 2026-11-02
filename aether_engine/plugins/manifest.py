@@ -12,6 +12,15 @@ from pydantic import BaseModel, Field, field_validator
 # leading dot (so ``.`` / ``..`` can never match), no empty string.
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+# E7-F08: capabilities may also be addressed by a logical qualified name
+# ``<ns>/<name>`` — exactly two segments, each a safe name. The qualified
+# form is a LOGICAL identifier only: it is never joined into a filesystem
+# path (the installer flattens it to a single segment), so accepting it
+# does not weaken the containment rule above. Anything else with a
+# separator — ``a/b/c``, ``a//b``, ``/a``, ``a/``, ``a/../x`` — is refused.
+QUALIFIED_NAME_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -22,6 +31,16 @@ def _validate_safe_name(value: str, field: str) -> str:
             "(letters, digits, '.', '_' or '-', not starting with '.')"
         )
     return value
+
+
+def _validate_capability_name(value: str, field: str) -> str:
+    if SAFE_NAME_RE.match(value) or QUALIFIED_NAME_RE.match(value):
+        return value
+    raise ValueError(
+        f"Invalid {field} {value!r}: must be a single path segment "
+        "(letters, digits, '.', '_' or '-', not starting with '.') or a "
+        "qualified '<ns>/<name>' whose two segments each follow that rule"
+    )
 
 
 def _validate_relative_path(value: str, field: str) -> str:
@@ -48,7 +67,7 @@ class CapabilityDef(BaseModel):
     @field_validator("name")
     @classmethod
     def _name_is_safe(cls, v: str) -> str:
-        return _validate_safe_name(v, "capability name")
+        return _validate_capability_name(v, "capability name")
 
     @field_validator("file_path")
     @classmethod

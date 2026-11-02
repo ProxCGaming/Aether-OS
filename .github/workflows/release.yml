@@ -1,0 +1,236 @@
+# Release workflow for Aether-OS — the CD half of CI/CD.
+#
+# What it does:
+#   - On a pushed version tag (v*), or manually via workflow_dispatch:
+#     build the desktop installers with desktop_app's `npm run dist`
+#     (electron-builder) — NSIS on windows-latest, AppImage on
+#     ubuntu-latest — and upload each OS's installer plus a sha256
+#     checksum file as workflow artifacts.
+#   - On a tag push only, a final job then creates a GitHub Release
+#     for that tag with the installers and checksums attached.
+#     Release notes are the CHANGELOG.md section for the version when
+#     one exists, and a plain fallback note when it does not.
+#
+# Honest limits:
+#   - Installers are UNSIGNED. No code-signing certificate exists for
+#     this project, so Windows SmartScreen / macOS Gatekeeper-style
+#     warnings are expected; nothing here pretends otherwise.
+#   - Nothing is published anywhere except the GitHub Release, and
+#     nothing is deployed to any server. CD here means exactly:
+#     tag -> built installers attached to a GitHub Release.
+#   - The version is single-sourced (aether_engine/version.py, with
+#     desktop_app/package.json as a pinned mirror). The build jobs
+#     fail loudly if a tag disagrees with it, so a release can never
+#     be labelled with a version the app itself does not carry.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional tag label for this build (e.g. v0.3.5). Manual runs build and upload artifacts only — no GitHub Release is created."
+        required: false
+        type: string
+
+# Build jobs only read the repo; the write grant is scoped to the
+# release job below.
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build installer (Windows NSIS)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop_app
+    steps:
+      - uses: actions/checkout@v4
+      # Same Node line as CI (Electron 44 bundles Node 24).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: desktop_app/package-lock.json
+      - name: Check version consistency
+        shell: bash
+        run: |
+          expected="${{ inputs.tag }}"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            expected="${GITHUB_REF_NAME}"
+          fi
+          expected="${expected#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          engine="$(sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p' ../aether_engine/version.py)"
+          echo "tag/input: '${expected}'  package.json: '${pkg}'  version.py: '${engine}'"
+          if [ -n "$expected" ] && [ "$expected" != "$pkg" ]; then
+            echo "::error::Tag v${expected} does not match desktop_app/package.json version ${pkg} (single-sourced from aether_engine/version.py). Bump the version everywhere or fix the tag."
+            exit 1
+          fi
+          if [ "$pkg" != "$engine" ]; then
+            echo "::error::desktop_app/package.json (${pkg}) and aether_engine/version.py (${engine}) disagree — the version mirrors have drifted."
+            exit 1
+          fi
+      - name: Install dependencies
+        run: npm ci
+      # E10-F06: assemble the bundled engine payload (portable
+      # Python + the engine's code and libraries, as files) that
+      # package.json's extraResources carries into the installer.
+      # Without this step the installer ships the shell alone and
+      # the app has no engine to connect to.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Assemble bundled engine payload
+        shell: bash
+        run: python ../scripts/assemble_engine_payload.py --platform win32
+      - name: Build installer (NSIS)
+        run: npm run dist
+      - name: List installer output
+        shell: bash
+        run: ls -la dist-electron/
+      - name: Write sha256 checksums
+        shell: bash
+        run: |
+          cd dist-electron
+          sha256sum *.exe > SHA256SUMS-windows.txt
+          cat SHA256SUMS-windows.txt
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aether-OS-Windows-NSIS
+          path: |
+            desktop_app/dist-electron/*.exe
+            desktop_app/dist-electron/SHA256SUMS-windows.txt
+          if-no-files-found: error
+
+  build-linux:
+    name: Build installer (Linux AppImage)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: desktop_app/package-lock.json
+      - name: Check version consistency
+        shell: bash
+        run: |
+          expected="${{ inputs.tag }}"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            expected="${GITHUB_REF_NAME}"
+          fi
+          expected="${expected#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          engine="$(sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p' ../aether_engine/version.py)"
+          echo "tag/input: '${expected}'  package.json: '${pkg}'  version.py: '${engine}'"
+          if [ -n "$expected" ] && [ "$expected" != "$pkg" ]; then
+            echo "::error::Tag v${expected} does not match desktop_app/package.json version ${pkg} (single-sourced from aether_engine/version.py). Bump the version everywhere or fix the tag."
+            exit 1
+          fi
+          if [ "$pkg" != "$engine" ]; then
+            echo "::error::desktop_app/package.json (${pkg}) and aether_engine/version.py (${engine}) disagree — the version mirrors have drifted."
+            exit 1
+          fi
+      - name: Install dependencies
+        run: npm ci
+      # E10-F06: assemble the bundled engine payload (portable
+      # Python + the engine's code and libraries, as files) that
+      # package.json's extraResources carries into the installer.
+      # Without this step the installer ships the shell alone and
+      # the app has no engine to connect to.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Assemble bundled engine payload
+        shell: bash
+        run: python ../scripts/assemble_engine_payload.py --platform linux
+      - name: Build installer (AppImage)
+        run: npm run dist
+      - name: List installer output
+        shell: bash
+        run: ls -la dist-electron/
+      - name: Write sha256 checksums
+        shell: bash
+        run: |
+          cd dist-electron
+          sha256sum *.AppImage > SHA256SUMS-linux.txt
+          cat SHA256SUMS-linux.txt
+      - name: Upload Linux installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aether-OS-Linux-AppImage
+          path: |
+            desktop_app/dist-electron/*.AppImage
+            desktop_app/dist-electron/SHA256SUMS-linux.txt
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    # Tag pushes only — manual dispatch runs stop at the artifacts.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download built installers
+        uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PYEOF'
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          version = tag.lstrip("v")
+          changelog = Path("CHANGELOG.md")
+          notes = ""
+          if changelog.is_file():
+              text = changelog.read_text(encoding="utf-8")
+              match = re.search(
+                  rf"^## \[{re.escape(version)}\].*?(?=^## \[|\Z)",
+                  text,
+                  re.M | re.S,
+              )
+              if match:
+                  notes = match.group(0).strip() + "\n"
+          if not notes:
+              notes = (
+                  f"Aether-OS {tag}\n\n"
+                  "No CHANGELOG.md section for this version — "
+                  "see CHANGELOG.md for the full history.\n"
+              )
+          Path("release-notes.md").write_text(notes, encoding="utf-8")
+          print(notes)
+          PYEOF
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Aether-OS ${{ github.ref_name }}
+          body_path: release-notes.md
+          fail_on_unmatched_files: true
+          files: |
+            release-files/*.exe
+            release-files/*.AppImage
+            release-files/SHA256SUMS-windows.txt
+            release-files/SHA256SUMS-linux.txt

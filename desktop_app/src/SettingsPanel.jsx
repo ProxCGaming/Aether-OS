@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock, Scissors, Globe, CircleDollarSign, Mic } from 'lucide-react';
 import Dropdown from './Dropdown';
+import { resolveSnipHotkey, defaultSnipHotkey } from './snipHotkey';
 import LocalModelsTab from './LocalModelsTab';
 import './chat.css';
 import ProviderSettings from './components/Settings/ProviderSettings';
@@ -10,6 +11,9 @@ import WorkspaceIndexingPanel from './components/Settings/WorkspaceIndexingPanel
 import BrowserPolicyPanel from './components/Settings/BrowserPolicyPanel';
 import UsageSettingsPanel from './components/Settings/UsageSettingsPanel';
 import VaultPanel from './components/Settings/VaultPanel';
+import OrchestrationPanel from './components/Settings/OrchestrationPanel';
+import PathRulesPanel from './components/Settings/PathRulesPanel';
+import ProjectConfigPanel from './components/Settings/ProjectConfigPanel';
 
 export default function SettingsPanel({ wsRef, providers = [], providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
@@ -47,7 +51,64 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
   // Advanced Config State
   const [disableFallbacks, setDisableFallbacks] = useState(false);
   const [fallbackChain, setFallbackChain] = useState('');
-  const [snipHotkey, setSnipHotkey] = useState('CommandOrControl+Shift+S');
+  // E6-F05: the last applied engine config — the controlled panels
+  // for the Epic 1/2 handed-off surfaces (OrchestrationPanel,
+  // PathRulesPanel) render from it — plus the most recent strict
+  // CONFIG_UPDATE refusal to show in them, and the project config
+  // layer state for the Advanced editor.
+  const [engineConfig, setEngineConfig] = useState(null);
+  const [configUpdateError, setConfigUpdateError] = useState('');
+  const [projectLayer, setProjectLayer] = useState({
+    workspaceRoot: '', content: '', exists: false,
+    forbiddenKeys: [], warning: '', status: '',
+  });
+  // Open Point 13 (DECIDED): snip hotkey defaults to Ctrl+S
+  // (Cmd+S on macOS) and is user-changeable; resolution rules
+  // live in ./snipHotkey (mirror of electron/snipShortcut.cjs).
+  const [snipHotkey, setSnipHotkey] = useState(() => defaultSnipHotkey());
+  const [snipHotkeyError, setSnipHotkeyError] = useState('');
+
+  // Apply a snip hotkey through the main process first; only a
+  // registration the main process confirms is persisted to the
+  // engine config. On failure the previous working hotkey stays
+  // active, the input reverts to it, and the failure is shown —
+  // a hotkey that does not work is never saved.
+  const applySnipHotkey = async (requested) => {
+    const hotkey = (requested || '').trim() || defaultSnipHotkey();
+    let actual = hotkey;
+    let ok = true;
+    if (window.electronAPI?.registerSnipShortcut) {
+      try {
+        const result = await window.electronAPI.registerSnipShortcut(hotkey);
+        if (typeof result === 'string') {
+          actual = result;
+          ok = result === hotkey;
+        } else if (result && typeof result === 'object') {
+          actual = result.shortcut || hotkey;
+          ok = result.ok !== false && actual === hotkey;
+        }
+      } catch (e) {
+        ok = false;
+        actual = snipHotkey;
+      }
+    }
+    if (!ok) {
+      setSnipHotkey(actual);
+      setSnipHotkeyError(`Could not set "${hotkey}" — it may be invalid or already used by another app. "${actual}" is still your snip hotkey.`);
+      return false;
+    }
+    setSnipHotkey(hotkey);
+    setSnipHotkeyError('');
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'CONFIG_UPDATE_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { config: { snip_hotkey: hotkey } }
+      }));
+    }
+    return true;
+  };
   // Voice Tuning State (E8-5.2)
   const [vadThreshold, setVadThreshold] = useState(0.5);
   const [silenceDurationMs, setSilenceDurationMs] = useState(700);
@@ -126,6 +187,30 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
     }
   };
 
+  // E6-F05: the handed-off panels report edits as partial config
+  // objects; they go out through the one CONFIG_UPDATE flow.
+  const sendConfigUpdate = (partial) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'CONFIG_UPDATE_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { config: partial }
+      }));
+    }
+  };
+
+  const handleProjectLayerSave = (content) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'PROJECT_CONFIG_UPDATE_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { workspace_root: projectLayer.workspaceRoot, content }
+      }));
+    }
+  };
+
   const handleApprovalModeChange = (mode) => {
     // Optimistic: the selector reflects the choice immediately; the
     // APPROVAL_MODE_SET_RESPONSE confirms (or the next TOOL_LIST_RESPONSE
@@ -168,7 +253,38 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
 
   useEffect(() => {
     if (!wsRef.current) return;
-    
+
+    // Apply a full config payload (CONFIG_GET / CONFIG_UPDATE /
+    // CONFIG_RESET replies all carry one) to the live controls.
+    const applyConfigValues = (config) => {
+      // E6-F05: the handed-off panels are controlled from the same
+      // applied payload, and a successful apply clears any refusal.
+      setEngineConfig(config);
+      setConfigUpdateError('');
+      setDisableFallbacks(config.disable_fallbacks || false);
+      setFallbackChain((config.fallback_chain || []).join(', '));
+      if (config.snip_hotkey) {
+        const resolvedSnip = resolveSnipHotkey(config.snip_hotkey);
+        setSnipHotkey(resolvedSnip.accelerator);
+        if (resolvedSnip.storedInvalid) {
+          setSnipHotkeyError(`Your saved snip hotkey "${config.snip_hotkey}" is not a valid shortcut, so the default (${resolvedSnip.accelerator}) is being used.`);
+        }
+      }
+      if (config.vad_threshold !== undefined && config.vad_threshold !== null) {
+        setVadThreshold(config.vad_threshold);
+      }
+      if (config.silence_duration_ms !== undefined && config.silence_duration_ms !== null) {
+        setSilenceDurationMs(config.silence_duration_ms);
+      }
+      // Phase 9, B1/B2: engine-persisted auxiliary models and reasoning effort.
+      setAuxModels(config.auxiliary_models || {});
+      const serverEffort = config.reasoning_effort;
+      if (serverEffort) {
+        setReasoningEffort(serverEffort);
+        localStorage.setItem('reasoning_effort', serverEffort);
+      }
+    };
+
     const handleMessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -255,6 +371,13 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
         } else if (data.type === 'CONFIG_RESET_RESPONSE') {
           setResetArmed(false);
           setResetDone(true);
+          // E6-F04: the reply carries the full default config —
+          // apply it like any other config reply, or every control
+          // keeps displaying the pre-reset values until the panel
+          // is remounted.
+          if (data.payload && data.payload.config) {
+            applyConfigValues(data.payload.config);
+          }
         } else if (data.type === 'BACKUP_CREATE_RESPONSE') {
           setBackupStatus(data.payload.success
             ? `Backup saved: ${data.payload.path} (${data.payload.files} files)`
@@ -283,25 +406,48 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
               : `You're on the latest version (${data.payload.current}).`)
             : `Couldn't check for updates: ${data.payload.error}`);
         } else if (data.type === 'CONFIG_GET_RESPONSE' || data.type === 'CONFIG_UPDATE_RESPONSE') {
-          if (data.payload.config) {
-            setDisableFallbacks(data.payload.config.disable_fallbacks || false);
-            setFallbackChain((data.payload.config.fallback_chain || []).join(', '));
-            if (data.payload.config.snip_hotkey) {
-              setSnipHotkey(data.payload.config.snip_hotkey);
-            }
-            if (data.payload.config.vad_threshold !== undefined && data.payload.config.vad_threshold !== null) {
-              setVadThreshold(data.payload.config.vad_threshold);
-            }
-            if (data.payload.config.silence_duration_ms !== undefined && data.payload.config.silence_duration_ms !== null) {
-              setSilenceDurationMs(data.payload.config.silence_duration_ms);
-            }
-            // Phase 9, B1/B2: engine-persisted auxiliary models and reasoning effort.
-            setAuxModels(data.payload.config.auxiliary_models || {});
-            const serverEffort = data.payload.config.reasoning_effort;
-            if (serverEffort) {
-              setReasoningEffort(serverEffort);
-              localStorage.setItem('reasoning_effort', serverEffort);
-            }
+          if (data.type === 'CONFIG_UPDATE_RESPONSE' && data.payload.success === false) {
+            // E6-F05: a refused strict-field write carries no config
+            // — surface the error to the handed-off panels instead
+            // of applying anything.
+            setConfigUpdateError(data.payload.error || 'The update was rejected.');
+          } else if (data.payload.config) {
+            applyConfigValues(data.payload.config);
+          }
+        } else if (data.type === 'PROJECT_CONFIG_GET_RESPONSE') {
+          const p = data.payload || {};
+          if (p.success === false) {
+            setProjectLayer((prev) => ({
+              ...prev, workspaceRoot: '',
+              warning: p.error || 'The project layer could not be loaded.', status: '',
+            }));
+          } else {
+            setProjectLayer({
+              workspaceRoot: p.workspace_root || '',
+              content: p.content || '',
+              exists: Boolean(p.exists),
+              forbiddenKeys: p.forbidden_keys || [],
+              warning: p.parse_error || '',
+              status: '',
+            });
+          }
+        } else if (data.type === 'PROJECT_CONFIG_UPDATE_RESPONSE') {
+          const p = data.payload || {};
+          if (p.success === false) {
+            setProjectLayer((prev) => ({
+              ...prev,
+              warning: p.error || 'The project layer could not be saved.', status: '',
+            }));
+          } else {
+            setProjectLayer((prev) => ({
+              ...prev,
+              exists: true,
+              warning: '',
+              // The engine writes the validated layer in canonical
+              // form — show exactly what is now on disk.
+              content: JSON.stringify(p.config || {}, null, 2),
+              status: 'Saved — the layer applies to tasks run in this workspace.',
+            }));
           }
         } else if (data.type === 'AUXILIARY_MODEL_SET_RESPONSE') {
           if (data.payload.success) {
@@ -338,6 +484,14 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
         request_id: Date.now().toString(),
         payload: {}
       }));
+      // E6-F05: the path-rule editor is controlled from the applied
+      // config, so opening Tools fetches it too.
+      wsRef.current.send(JSON.stringify({
+        type: 'CONFIG_GET_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
     } else if (activeMenu === 'Agents' && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'AGENT_LIST_REQUEST',
@@ -348,6 +502,14 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
       // Also fetch tools for the agent tool selector
       wsRef.current.send(JSON.stringify({
         type: 'TOOL_LIST_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+      // E6-F05: the orchestration panel is controlled from the
+      // applied config, so opening Agents fetches it too.
+      wsRef.current.send(JSON.stringify({
+        type: 'CONFIG_GET_REQUEST',
         schema_version: 1,
         request_id: Date.now().toString(),
         payload: {}
@@ -389,6 +551,16 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
     } else if ((activeMenu === 'Advanced' || activeMenu === 'Models' || activeMenu === 'Voice') && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'CONFIG_GET_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+    }
+    // E6-F05: opening Advanced also fetches the project config layer
+    // for its editor.
+    if (activeMenu === 'Advanced' && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'PROJECT_CONFIG_GET_REQUEST',
         schema_version: 1,
         request_id: Date.now().toString(),
         payload: {}
@@ -486,8 +658,8 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
   const menuItems = [
     { keywords: 'api key provider connect model list', id: 'Providers', icon: <Key size={18} />, label: 'API Providers' },
     { keywords: 'default model local ollama tasks auxiliary vision', id: 'Models', icon: <Cpu size={18} />, label: 'Models & Tasks' },
-    { keywords: 'agent models supervisor planner researcher coder', id: 'Agents', icon: <Network size={18} />, label: 'Agents' },
-    { keywords: 'tools approval grants policy risk', id: 'Tools', icon: <Wrench size={18} />, label: 'Tools' },
+    { keywords: 'agent models supervisor planner researcher coder spawn policy prewalk output schemas compaction delegation', id: 'Agents', icon: <Network size={18} />, label: 'Agents' },
+    { keywords: 'tools approval grants policy risk path rules', id: 'Tools', icon: <Wrench size={18} />, label: 'Tools' },
     { keywords: 'mcp servers tools resources prompts', id: 'MCP', icon: <Server size={18} />, label: 'MCP Servers' },
     { keywords: 'plugins install enable disable', id: 'Plugins', icon: <Plug size={18} />, label: 'Plugins' },
     { keywords: 'skills slash commands enable disable', id: 'Skills', icon: <Box size={18} />, label: 'Skills' },
@@ -498,8 +670,17 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
     { keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
     { keywords: 'capabilities diagnostics environment scheduler', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
     { keywords: 'voice tuning audio vad endpointing silence threshold mic speech', id: 'Voice', icon: <Mic size={18} />, label: 'Voice Tuning' },
-    { keywords: 'advanced routing fallbacks reset defaults developer', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' }
+    { keywords: 'advanced routing fallbacks reset defaults developer project config layer overlay', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' }
   ];
+
+  // The sections surviving the search filter, in nav order. The list
+  // render and the search box's Enter-to-jump (E6-F06) share this one
+  // derivation so they can never disagree about what "first match" is.
+  const visibleMenuItems = menuItems.filter(item => {
+    const q = settingsQuery.trim().toLowerCase();
+    if (!q) return true;
+    return item.label.toLowerCase().includes(q) || (item.keywords || '').toLowerCase().includes(q);
+  });
 
   return (
     <div style={{ display: 'flex', height: '100%', gap: '32px' }}>
@@ -519,16 +700,29 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
           placeholder="Search settings…"
           value={settingsQuery}
           onChange={(e) => setSettingsQuery(e.target.value)}
+          onKeyDown={(e) => {
+            // E6-F06: Enter jumps to the first section the filter leaves.
+            if (e.key === 'Enter' && visibleMenuItems.length > 0) {
+              setActiveMenu(visibleMenuItems[0].id);
+            }
+          }}
           style={{ padding: '10px 14px', borderRadius: '10px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', outline: 'none', fontSize: '13px', marginBottom: '4px' }}
         />
-        {menuItems.filter(item => {
-          const q = settingsQuery.trim().toLowerCase();
-          if (!q) return true;
-          return item.label.toLowerCase().includes(q) || (item.keywords || '').toLowerCase().includes(q);
-        }).map(item => (
+        {visibleMenuItems.map(item => (
           <div
             key={item.id}
+            role="button"
+            tabIndex={0}
             onClick={() => setActiveMenu(item.id)}
+            onKeyDown={(e) => {
+              // E6-F06: keyboard activation does exactly what a click
+              // does. (role="button" also opts the item into the global
+              // :focus-visible ring in index.css.)
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                setActiveMenu(item.id);
+              }
+            }}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -747,7 +941,10 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
         )}
 
         {activeMenu === 'Agents' && (
-          <DiagnosticsPanel activeMenu='Agents' />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
+            <DiagnosticsPanel activeMenu='Agents' />
+            <OrchestrationPanel config={engineConfig} configError={configUpdateError} onConfigUpdate={sendConfigUpdate} />
+          </div>
         )}
 
         {activeMenu === 'Capabilities' && (
@@ -872,6 +1069,8 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                 </div>
               )}
             </div>
+
+            <PathRulesPanel rules={engineConfig ? engineConfig.path_rules : undefined} configError={configUpdateError} onConfigUpdate={sendConfigUpdate} />
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               {tools.length === 0 ? (
@@ -1220,6 +1419,16 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
               )}
             </div>
 
+            <ProjectConfigPanel
+              workspaceRoot={projectLayer.workspaceRoot}
+              content={projectLayer.content}
+              exists={projectLayer.exists}
+              forbiddenKeys={projectLayer.forbiddenKeys}
+              warning={projectLayer.warning}
+              status={projectLayer.status}
+              onSave={handleProjectLayerSave}
+            />
+
             <div style={{
               background: 'rgba(255,255,255,0.02)',
               border: '1px solid rgba(255,255,255,0.06)',
@@ -1232,29 +1441,18 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                 <div style={{ fontWeight: 500, fontSize: '14px' }}>Screen Snip Hotkey</div>
               </div>
               <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
-                Global accelerator to trigger screen region snipping (e.g., <code>CommandOrControl+Shift+S</code>).
+                Accelerator to trigger screen region snipping (e.g., <code>Ctrl+Alt+S</code>). Applies as soon as you leave the field — no restart needed.
+              </div>
+              <div data-testid="snip-hotkey-note" style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
+                This shortcut is global: it works system-wide while Aether is running, so it can override the same keys in other apps.
               </div>
               <input
                 type="text"
                 value={snipHotkey}
                 data-testid="snip-hotkey-input"
                 onChange={(e) => setSnipHotkey(e.target.value)}
-                onBlur={() => {
-                  const hotkey = snipHotkey.trim() || 'CommandOrControl+Shift+S';
-                  setSnipHotkey(hotkey);
-                  if (window.electronAPI?.registerSnipShortcut) {
-                    window.electronAPI.registerSnipShortcut(hotkey);
-                  }
-                  if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                    wsRef.current.send(JSON.stringify({
-                      type: 'CONFIG_UPDATE_REQUEST',
-                      schema_version: 1,
-                      request_id: Date.now().toString(),
-                      payload: { config: { snip_hotkey: hotkey } }
-                    }));
-                  }
-                }}
-                placeholder="CommandOrControl+Shift+S"
+                onBlur={() => { void applySnipHotkey(snipHotkey); }}
+                placeholder={defaultSnipHotkey()}
                 style={{
                   width: '100%',
                   background: 'rgba(0,0,0,0.2)',
@@ -1265,6 +1463,28 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                   fontSize: '13px'
                 }}
               />
+              {snipHotkeyError && (
+                <div data-testid="snip-hotkey-error" style={{ fontSize: '12px', color: '#f87171', marginTop: '8px' }}>
+                  {snipHotkeyError}
+                </div>
+              )}
+              <button
+                type="button"
+                data-testid="snip-hotkey-reset"
+                onClick={() => { void applySnipHotkey(defaultSnipHotkey()); }}
+                style={{
+                  marginTop: '12px',
+                  background: 'rgba(255,255,255,0.06)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: '6px',
+                  padding: '8px 12px',
+                  color: '#fff',
+                  fontSize: '12px',
+                  cursor: 'pointer'
+                }}
+              >
+                Reset to default ({defaultSnipHotkey()})
+              </button>
             </div>
           </div>
         )}

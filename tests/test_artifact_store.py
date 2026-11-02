@@ -241,7 +241,7 @@ async def test_execute_tool_node_auto_collection(tmp_path, monkeypatch):
     test_target = tmp_path / "target.txt"
     test_target.write_text("line1\nline2\n", encoding="utf-8")
 
-    async def _in_process_worker(tool_name, args, task_class="standard", audit_logger=None):
+    async def _in_process_worker(tool_name, args, task_class="standard", audit_logger=None, task_classes=None):
         if tool_name == "write_file":
             p = Path(args["path"])
             p.parent.mkdir(parents=True, exist_ok=True)

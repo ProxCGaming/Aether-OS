@@ -100,55 +100,118 @@ class OllamaManager:
             },
         )
 
-        ollama_active = await self.is_ollama_running()
-        if ollama_active:
-            try:
-                async with (
-                    httpx.AsyncClient(timeout=None) as client,
-                    client.stream(
-                        "POST",
-                        f"{self.base_url}/api/pull",
-                        json={"name": model_name, "stream": True},
-                    ) as resp,
-                ):
-                    async for line in resp.aiter_lines():
-                        if not line:
-                            continue
-                        try:
-                            payload_data = json.loads(line)
-                            total = payload_data.get("total", 0)
-                            completed = payload_data.get("completed", 0)
-                            pct = round((completed / total) * 100, 1) if total > 0 else 0.0
+        def _failed(error: str, retriable: bool) -> Event:
+            return Event(
+                type=EventType.TASK_FAILED,
+                request_id=request_id,
+                payload={
+                    "task_id": t_id,
+                    "model": model_name,
+                    "state": TaskState.FAILED.value,
+                    "error": error,
+                    "retriable": retriable,
+                },
+            )
 
-                            yield Event(
-                                type=EventType.LOCAL_MODEL_DOWNLOAD_PROGRESS,
-                                request_id=request_id,
-                                payload={
-                                    "task_id": t_id,
-                                    "model": model_name,
-                                    "download_percent": pct,
-                                    "status": payload_data.get("status", "downloading"),
-                                },
-                            )
-                        except Exception as e:  # noqa: BLE001 — progress events are best-effort; a failed emit must not abort the download
-                            logger.debug(f"Download progress emit failed: {e}")
-            except asyncio.CancelledError:
-                yield Event(
-                    type=EventType.TASK_CANCELLED,
-                    request_id=request_id,
-                    payload={"task_id": t_id, "model": model_name},
-                )
-                raise
-            except Exception as e:  # noqa: BLE001 — download failure falls back to the simulated progress stream
-                logger.error(f"Error downloading {model_name} via Ollama: {e}")
-                # Fall back to simulated progress stream if Ollama API pull fails or isn't streaming
-                async for ev in self._simulated_download_stream(model_name, dest, t_id, request_id):
-                    yield ev
-                return
-        else:
-            # Fall back to simulated progress stream if Ollama server is offline
-            async for ev in self._simulated_download_stream(model_name, dest, t_id, request_id):
-                yield ev
+        # E5-F09: the lifecycle is truthful end to end. There is no simulated
+        # progress fallback: a pull counts as downloaded only when the daemon
+        # confirms it (HTTP 200 and a terminal "success" status in the pull
+        # stream). Every other outcome — daemon offline, connection failure,
+        # non-200 status, a streamed error event, or a stream that ends
+        # before success — yields TASK_FAILED with the real cause and records
+        # no downloaded-path metadata. Partial blobs from an interrupted pull
+        # belong to the daemon's own store; this layer simply never claims
+        # the model exists until the daemon says the pull succeeded.
+        if not await self.is_ollama_running():
+            yield _failed(
+                f"Ollama is not running (daemon unreachable at {self.base_url}); "
+                f"cannot download {model_name}.",
+                retriable=True,
+            )
+            return
+
+        saw_success = False
+        try:
+            async with (
+                httpx.AsyncClient(timeout=None) as client,
+                client.stream(
+                    "POST",
+                    f"{self.base_url}/api/pull",
+                    json={"name": model_name, "stream": True},
+                ) as resp,
+            ):
+                if resp.status_code != 200:
+                    body = (await resp.aread()).decode("utf-8", errors="replace").strip()
+                    detail = f": {body}" if body else ""
+                    yield _failed(
+                        f"Ollama pull for {model_name} failed with "
+                        f"HTTP {resp.status_code}{detail}",
+                        retriable=resp.status_code >= 500,
+                    )
+                    return
+
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        payload_data = json.loads(line)
+                    except json.JSONDecodeError:
+                        yield _failed(
+                            f"Ollama pull for {model_name} returned a malformed "
+                            f"progress line: {line!r}",
+                            retriable=False,
+                        )
+                        return
+
+                    streamed_error = payload_data.get("error")
+                    if streamed_error:
+                        yield _failed(
+                            f"Ollama pull for {model_name} failed: {streamed_error}",
+                            retriable=False,
+                        )
+                        return
+
+                    if payload_data.get("status") == "success":
+                        # Terminal marker: TASK_COMPLETED below supersedes a
+                        # progress event for this line.
+                        saw_success = True
+                        continue
+
+                    total = payload_data.get("total", 0)
+                    completed = payload_data.get("completed", 0)
+                    pct = round((completed / total) * 100, 1) if total > 0 else 0.0
+
+                    yield Event(
+                        type=EventType.LOCAL_MODEL_DOWNLOAD_PROGRESS,
+                        request_id=request_id,
+                        payload={
+                            "task_id": t_id,
+                            "model": model_name,
+                            "download_percent": pct,
+                            "status": payload_data.get("status", "downloading"),
+                        },
+                    )
+        except asyncio.CancelledError:
+            yield Event(
+                type=EventType.TASK_CANCELLED,
+                request_id=request_id,
+                payload={"task_id": t_id, "model": model_name},
+            )
+            raise
+        except Exception as e:  # noqa: BLE001 — download failure is reported as a TASK_FAILED event, never raised
+            logger.error(f"Error downloading {model_name} via Ollama: {e}")
+            yield _failed(
+                f"Ollama pull for {model_name} failed: {e}",
+                retriable=True,
+            )
+            return
+
+        if not saw_success:
+            yield _failed(
+                f"Ollama pull for {model_name} ended before the daemon "
+                "confirmed success (stream truncated).",
+                retriable=True,
+            )
             return
 
         self._downloaded_paths[model_name] = str(Path(dest) / model_name)
@@ -163,52 +226,28 @@ class OllamaManager:
             },
         )
 
-    async def _simulated_download_stream(
-        self,
-        model_name: str,
-        dest: str,
-        t_id: str,
-        request_id: str | None,
-    ) -> AsyncGenerator[Event, None]:
-        """Simulated download task stream with fine-grained percentage ticks."""
-        for pct in range(0, 101, 10):
-            await asyncio.sleep(0.15)
-            yield Event(
-                type=EventType.LOCAL_MODEL_DOWNLOAD_PROGRESS,
-                request_id=request_id,
-                payload={
-                    "task_id": t_id,
-                    "model": model_name,
-                    "download_percent": float(pct),
-                    "status": "downloading",
-                },
-            )
-
-        self._downloaded_paths[model_name] = str(Path(dest) / model_name)
-        yield Event(
-            type=EventType.TASK_COMPLETED,
-            request_id=request_id,
-            payload={
-                "task_id": t_id,
-                "model": model_name,
-                "path": str(Path(dest) / model_name),
-                "response": f"Downloaded {model_name} to {dest}",
-            },
-        )
-
     async def delete_model(self, model_name: str) -> bool:
-        if await self.is_ollama_running():
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    res = await client.delete(
-                        f"{self.base_url}/api/delete",
-                        json={"name": model_name},
-                    )
-                    if res.status_code == 200:
-                        self._downloaded_paths.pop(model_name, None)
-                        return True
-            except Exception as e:  # noqa: BLE001 — best-effort delete: any failure reports False
-                logger.error(f"Failed to delete model {model_name}: {e}")
-
-        self._downloaded_paths.pop(model_name, None)
-        return True
+        # E5-F09: metadata is cleared and success returned ONLY when the
+        # daemon confirms the deletion (HTTP 200/204). Offline, non-200 and
+        # exception paths return False and RETAIN the recorded path — the
+        # model is still on disk as far as anyone knows.
+        if not await self.is_ollama_running():
+            logger.error(f"Cannot delete {model_name}: Ollama is not running")
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.delete(
+                    f"{self.base_url}/api/delete",
+                    json={"name": model_name},
+                )
+                if res.status_code in (200, 204):
+                    self._downloaded_paths.pop(model_name, None)
+                    return True
+                logger.error(
+                    f"Failed to delete model {model_name}: "
+                    f"Ollama returned HTTP {res.status_code}"
+                )
+                return False
+        except Exception as e:  # noqa: BLE001 — delete failure reports False; metadata retained
+            logger.error(f"Failed to delete model {model_name}: {e}")
+            return False

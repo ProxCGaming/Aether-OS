@@ -1087,6 +1087,134 @@ class TestAgentSave:
 
 
 # ---------------------------------------------------------------------
+# Agent save binds to the LIVE page, not the session cache (PF-4)
+# ---------------------------------------------------------------------
+
+class TestAgentSaveBindsToLivePage:
+    """The save derived the entry's site from ``session.current_url``
+    and its form from ``session.last_page_content`` — caches from the
+    last browser action — while the field VALUES were read live
+    through the driver. A page that moved after the last action
+    (redirect, script navigation) therefore had its credential
+    stored bound to the site the cache remembered: the fill path
+    stopped trusting those caches in M07, the save path did not.
+    The save now derives site + form from the live page (the same
+    ``read_live_page`` the fill trusts), re-verifies immediately
+    before storing, and refuses when the live page cannot be read.
+    """
+
+    async def _session_on_signup(self, tmp_path, driver):
+        manager = make_manager(tmp_path, driver)
+        session = await session_on(manager, "https://example.com/signup")
+        driver.field_values["input[name=\"email\"]"] = "newdev"
+        driver.field_values["input[name=\"pw\"]"] = CANARY
+        return session
+
+    def _two_signup_driver(self):
+        # Identical form shape on both sites (same selectors): the
+        # clone shape, where a save aimed from the stale snapshot
+        # reads the live page's fields without any error.
+        return FakeDriver({
+            "https://example.com/signup":
+                ("Create account", EXAMPLE_LOGIN),
+            "https://other.test/signup":
+                ("Create account", EXAMPLE_LOGIN),
+        })
+
+    async def test_silent_navigation_to_another_site_binds_the_live_site(
+            self, tmp_path):
+        vault = make_vault(tmp_path)
+        driver = self._two_signup_driver()
+        session = await self._session_on_signup(tmp_path, driver)
+        service = make_service(tmp_path, vault)
+        # The page moves to another site's signup form after the
+        # last browser action — driven straight on the driver, as a
+        # real redirect bypasses every session-level cache. The
+        # clone's form holds ITS OWN values.
+        await driver.goto("https://other.test/signup")
+        assert session.current_url == "https://example.com/signup"
+        driver.field_values["input[name=\"email\"]"] = "cloneuser"
+        driver.field_values["input[name=\"pw\"]"] = CANARY2
+        result = await service.save_login_from_page(session)
+        assert result["saved"] is True
+        # The entry is bound to the site whose form the values came
+        # from — never to the site the stale cache remembered.
+        assert result["site"] == "other.test"
+        entries = vault.list_entries()
+        assert len(entries) == 1
+        assert entries[0]["site"] == "other.test"
+        assert entries[0]["username"] == "cloneuser"
+        assert vault.reveal_password(entries[0]["id"]) == CANARY2
+        assert CANARY2 not in json.dumps(result)
+        assert CANARY2 not in audit_text(tmp_path)
+
+    async def test_live_page_without_a_form_refuses_despite_cached_form(
+            self, tmp_path):
+        vault = make_vault(tmp_path)
+        driver = self._two_signup_driver()
+        driver.add_page("https://example.com/welcome", "Welcome",
+                        NO_FORM_PAGE)
+        session = await self._session_on_signup(tmp_path, driver)
+        service = make_service(tmp_path, vault)
+        # Signup completed and the page moved on (same site, form
+        # gone) before the save was called; the cache still holds
+        # the signup form.
+        await driver.goto("https://example.com/welcome")
+        result = await service.save_login_from_page(session)
+        assert result["saved"] is False
+        assert result["reason"] == "no_login_form"
+        assert vault.list_entries() == []
+
+    async def test_unreadable_live_page_refuses_the_save(self, tmp_path):
+        vault = make_vault(tmp_path)
+        driver = self._two_signup_driver()
+        session = await self._session_on_signup(tmp_path, driver)
+        service = make_service(tmp_path, vault)
+
+        async def _gone():
+            raise RuntimeError("driver connection lost")
+
+        driver.current_url = _gone
+        driver.page_content = _gone
+        result = await service.save_login_from_page(session)
+        assert result["saved"] is False
+        assert result["reason"] == "page_unverifiable"
+        assert vault.list_entries() == []
+        audit = audit_text(tmp_path)
+        assert "VAULT_SAVE_REFUSED" in audit
+        assert "page_unverifiable" in audit
+        assert CANARY not in audit
+
+    async def test_navigation_while_saving_refuses_at_the_store_gate(
+            self, tmp_path):
+        vault = make_vault(tmp_path)
+        driver = self._two_signup_driver()
+        session = await self._session_on_signup(tmp_path, driver)
+        service = make_service(tmp_path, vault)
+        # The page holds still for the first live read and the field
+        # reads, then moves to the clone before the entry is stored:
+        # the pre-store re-verification must refuse rather than bind
+        # the first page's site to a save completed on the second.
+        real_current_url = driver.current_url
+        url_reads = 0
+
+        async def url_then_moves():
+            nonlocal url_reads
+            url_reads += 1
+            if url_reads == 2:
+                await driver.goto("https://other.test/signup")
+                driver.field_values["input[name=\"email\"]"] = "cloneuser"
+                driver.field_values["input[name=\"pw\"]"] = CANARY2
+            return await real_current_url()
+
+        driver.current_url = url_then_moves
+        result = await service.save_login_from_page(session)
+        assert result["saved"] is False
+        assert result["reason"] == "page_changed"
+        assert vault.list_entries() == []
+
+
+# ---------------------------------------------------------------------
 # Gate integration: the vault tools meet the 6.2 confirmation gate
 # ---------------------------------------------------------------------
 

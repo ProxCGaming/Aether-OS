@@ -9,17 +9,20 @@ import logging
 import sqlite3
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 try:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.date import DateTrigger
     from apscheduler.triggers.interval import IntervalTrigger
     HAS_APSCHEDULER = True
 except ImportError:
     AsyncIOScheduler = None
     CronTrigger = None
+    DateTrigger = None
     IntervalTrigger = None
     HAS_APSCHEDULER = False
 
@@ -118,9 +121,15 @@ class CapabilitySchedulerManager:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.scheduler: AsyncIOScheduler | None = None
-        self._init_db()
+        # Defaults are assigned BEFORE _init_db() restores the persisted
+        # config, so a saved schedule/method wins on reopen and the
+        # defaults apply only when nothing was ever saved (E5-F10).
         self.current_schedule = "weekly"  # default: weekly
         self.current_method = "Both"       # default: Option A + Option C
+        # Set when the active schedule string cannot be honoured, so the
+        # refusal is visible in the job state (get_status_summary).
+        self.schedule_error: str | None = None
+        self._init_db()
 
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
@@ -195,6 +204,7 @@ class CapabilitySchedulerManager:
                 self.scheduler.start()
                 self._update_job_schedule(self.current_schedule)
                 self._register_memory_prune_job()
+                self._register_memory_consolidation_job()
                 logger.info("CapabilitySchedulerManager started.")
             except Exception as e:  # noqa: BLE001 — scheduler start is deferred to the loop's first tick if no loop is running yet
                 logger.warning(f"AsyncIOScheduler start deferred (no running event loop yet): {e}")
@@ -205,26 +215,110 @@ class CapabilitySchedulerManager:
             self.scheduler = None
             logger.info("CapabilitySchedulerManager stopped.")
 
+    def _last_run_started_at(self) -> float | None:
+        """Epoch of the most recent recorded run, or None if never run."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT MAX(started_at) FROM capability_check_runs"
+            ).fetchone()
+            return row[0] if row else None
+
+    def _build_trigger(self, interval: str):
+        """Build the APScheduler trigger for a schedule string.
+
+        Named intervals are anchored at the last recorded run so their
+        occurrences stay aligned to the schedule itself across restarts
+        (last_run + k * period) instead of restarting a full period from
+        every startup. Anything else must be a standard 5-field cron
+        expression and registers a real CronTrigger. An unparseable
+        string raises ValueError — callers refuse it loudly rather than
+        silently degrading it to some default interval (E5-F10).
+        """
+        last_ts = self._last_run_started_at()
+        anchor = (
+            datetime.fromtimestamp(last_ts, tz=UTC)
+            if last_ts is not None
+            else None
+        )
+        if interval == "daily":
+            return IntervalTrigger(days=1, start_date=anchor)
+        if interval == "weekly":
+            return IntervalTrigger(weeks=1, start_date=anchor)
+        if interval == "monthly":
+            return IntervalTrigger(weeks=4, start_date=anchor)
+        return CronTrigger.from_crontab(interval)
+
+    def _recover_missed_run(self, trigger):
+        """Startup misfire recovery (ADR 0007, E5-F10).
+
+        Rule: if at least one scheduled occurrence fell due after the
+        last recorded run while the app was closed, execute exactly ONE
+        catch-up run at startup — never a storm of backdated runs, no
+        matter how many periods were missed. A job whose next occurrence
+        is still in the future recovers nothing. The periodic job's own
+        next fire is computed from the schedule's occurrences (see
+        _build_trigger), so recovery never pushes it a period away.
+        """
+        last_ts = self._last_run_started_at()
+        if last_ts is None:
+            return
+        now = datetime.now(UTC)
+        last_dt = datetime.fromtimestamp(last_ts, tz=UTC)
+        try:
+            missed_at = trigger.get_next_fire_time(last_dt, now)
+        except Exception:  # recovery must never block startup
+            logger.exception("Capability check misfire check failed")
+            return
+        if missed_at is None or missed_at > now:
+            return
+
+        job = self.scheduler.get_job("capability_check_periodic")
+        if job is not None and job.next_run_time is not None and job.next_run_time <= now:
+            # The periodic job itself is already due; APScheduler's
+            # misfire handling (grace time None) fires it once — that
+            # firing IS the catch-up, so don't schedule a second one.
+            return
+
+        self.scheduler.add_job(
+            self._execute_check_job,
+            trigger=DateTrigger(run_date=now),
+            id="capability_check_catchup",
+            misfire_grace_time=None,
+            replace_existing=True,
+        )
+        logger.info(
+            "Capability check run was due at %s while the app was closed; "
+            "scheduled one startup catch-up run.",
+            missed_at.isoformat(),
+        )
+
     def _update_job_schedule(self, interval: str):
         if not self.scheduler or not self.scheduler.running:
             return
 
-        # Remove existing job if any
-        if self.scheduler.get_job("capability_check_periodic"):
-            self.scheduler.remove_job("capability_check_periodic")
+        # Remove existing jobs if any (a re-schedule also cancels a
+        # catch-up that has not fired yet; _recover_missed_run below
+        # re-evaluates and re-adds one if a run is still due).
+        for job_id in ("capability_check_periodic", "capability_check_catchup"):
+            if self.scheduler.get_job(job_id):
+                self.scheduler.remove_job(job_id)
 
         if interval == "none":
+            self.schedule_error = None
             return
 
-        trigger = None
-        if interval == "daily":
-            trigger = IntervalTrigger(days=1)
-        elif interval == "weekly":
-            trigger = IntervalTrigger(weeks=1)
-        elif interval == "monthly":
-            trigger = IntervalTrigger(weeks=4)
-        else:  # custom / fallback
-            trigger = IntervalTrigger(hours=12)
+        try:
+            trigger = self._build_trigger(interval)
+        except ValueError as e:
+            # Refuse loudly: no job runs under a false schedule, and the
+            # error is part of the job state for the settings surface.
+            self.schedule_error = f"Unrecognised schedule '{interval}': {e}"
+            logger.error(
+                f"Refusing capability check schedule '{interval}': {e}. "
+                "No periodic job registered."
+            )
+            return
+        self.schedule_error = None
 
         # misfire_grace_time=None ensures missed jobs run immediately on startup
         self.scheduler.add_job(
@@ -235,6 +329,7 @@ class CapabilitySchedulerManager:
             replace_existing=True,
         )
         logger.info(f"Updated capability check schedule to '{interval}' with misfire recovery.")
+        self._recover_missed_run(trigger)
 
     def _register_memory_prune_job(self):
         """Phase 10.3 A1: weekly retention pruning for all memory tiers.
@@ -276,6 +371,47 @@ class CapabilitySchedulerManager:
         """Manual trigger for memory pruning (mirrors run_now for
         capability checks)."""
         return self._run_memory_prune_job()
+
+    def _register_memory_consolidation_job(self):
+        """Epic 4, E4-10 (addendum omp #33): weekly consolidation of
+        the episodic/KG stores into the curated memory document.
+
+        Registered next to the prune job, same pattern and cadence —
+        and deliberately NOT run at startup, for the same reason as
+        pruning: a startup run would fire inside
+        EngineState.initialize(), which tests also call, and would
+        rewrite the live ~/.aether document during test runs. A
+        weekly interval trigger only fires on schedule. Manual
+        trigger: run_memory_consolidation_now().
+        """
+        if not HAS_APSCHEDULER or not self.scheduler or not self.scheduler.running:
+            return
+        self.scheduler.add_job(
+            self._run_memory_consolidation_job,
+            trigger=IntervalTrigger(weeks=1),
+            id="memory_consolidation_weekly",
+            replace_existing=True,
+        )
+        logger.info("Registered weekly memory consolidation job.")
+
+    def _run_memory_consolidation_job(self) -> dict[str, Any]:
+        """Execute one consolidation pass (sync job; APScheduler runs
+        it in the default executor). Returns the pass result."""
+        from aether_engine.config import load_config
+        from aether_engine.memory.consolidation import consolidate_memory_document
+
+        try:
+            result = consolidate_memory_document(config=load_config())
+            logger.info(f"Memory consolidation complete: {result}")
+            return result
+        except Exception as e:
+            logger.exception("Memory consolidation failed")
+            return {"error": str(e)}
+
+    def run_memory_consolidation_now(self) -> dict[str, Any]:
+        """Manual trigger for memory consolidation (mirrors
+        run_memory_prune_now for capability housekeeping)."""
+        return self._run_memory_consolidation_job()
 
     async def _execute_check_job(self, method: str | None = None) -> dict[str, Any]:
         """Execute a capability check run using Option A (benchmarks), C (self-tests), or Both."""
@@ -525,6 +661,7 @@ class CapabilitySchedulerManager:
         return {
             "schedule": self.current_schedule,
             "method": self.current_method,
+            "schedule_error": self.schedule_error,
             "last_run": last_run,
             "next_run_ts": next_run_ts,
         }

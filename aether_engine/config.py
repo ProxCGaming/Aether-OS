@@ -1,8 +1,13 @@
 """Provider registry and persisted user config (~/.aether/config.json) with dynamic discovered models."""
 import json
+import logging
+import os
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Phase 10.3 B1: the only auxiliary task classes with a real engine seam.
 # routing/policy.py reads "vision"; langgraph/compaction.py reads
@@ -419,6 +424,29 @@ class UserConfig:
         )
 
 
+def custom_provider_flavor(provider_name: str, user_config: UserConfig) -> str:
+    """The saved integration flavour of a custom provider (ADR 0013).
+
+    ``custom_provider_types`` is the authoritative record written by
+    PROVIDER_SAVE: a recorded ``"anthropic"`` means the endpoint
+    speaks the Anthropic protocol. Anything else — a recorded
+    ``"openai_compatible"``, an unrecognised value, or no record at
+    all (legacy saves predate the field) — resolves to
+    ``"openai_compatible"``, the same default the provider-list
+    builders use.
+
+    Dispatch (provider construction and model resolution) and model
+    discovery consult this one helper so the stored SDK choice
+    controls the protocol at every seam (E5-F05). Before, the record
+    was written but never read downstream: every ``custom_*`` provider
+    was dispatched and discovered as OpenAI-compatible regardless of
+    the saved flavour.
+    """
+    if user_config.custom_provider_types.get(provider_name) == "anthropic":
+        return "anthropic"
+    return "openai_compatible"
+
+
 def _clean_browser_category_modes(value) -> dict[str, str]:
     """Epic 8, E8-6.2: delegate to the browser policy validator —
     unknown categories drop, unknown modes tighten to always_confirm."""
@@ -448,15 +476,64 @@ def _clean_ttsr_rules(raw) -> list[dict]:
 
 def load_config(path: Path | None = None) -> UserConfig:
     p = path or CONFIG_PATH
-    if p.exists():
+    if not p.exists():
+        return UserConfig()
+    try:
+        raw = p.read_bytes()
+    except OSError as exc:
+        # Unreadable is NOT corrupt: the file may be perfectly valid
+        # (permissions, a transient I/O error). Never quarantine or
+        # overwrite evidence that could not even be read — log loudly
+        # and run this session on defaults; the file stays untouched
+        # and a later successful save replaces it atomically (E6-F07).
+        logger.error(
+            "Could not read config file %s (%s); using default settings "
+            "for this session. The file was left untouched.", p, exc)
+        return UserConfig()
+    try:
+        return UserConfig.from_dict(json.loads(raw.decode("utf-8")))
+    except Exception as exc:  # noqa: BLE001 — a corrupt config file must never stop the engine starting; defaults are the designed fallback.
+        # Corrupt: preserve the evidence under a quarantine name
+        # instead of silently minting defaults over it (E6-F07), log
+        # loudly, and run this session on defaults. The live path is
+        # left clear, so the next save starts clean and is never
+        # blocked by the quarantined copy.
+        quarantine = p.with_name(
+            f"{p.name}.corrupt-"
+            f"{datetime.now(UTC):%Y%m%d-%H%M%S-%f}")
         try:
-            return UserConfig.from_dict(json.loads(p.read_text("utf-8")))
-        except Exception:  # noqa: BLE001, S110 — a corrupt config file must never stop the engine starting; defaults are the designed fallback.
-            pass
-    return UserConfig()
+            os.replace(p, quarantine)
+        except OSError as move_exc:
+            logger.error(
+                "Config file %s is corrupt (%s) and could not be "
+                "quarantined (%s); using default settings for this "
+                "session.", p, exc, move_exc)
+        else:
+            logger.error(
+                "Config file %s is corrupt (%s); moved to %s and using "
+                "default settings for this session.", p, exc, quarantine)
+        return UserConfig()
 
 
 def save_config(cfg: UserConfig, path: Path | None = None) -> None:
     p = path or CONFIG_PATH
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(cfg.to_dict(), indent=2), encoding="utf-8")
+    # E6-F07: atomic write — serialise to a temp file in the same
+    # directory, flush/fsync, then os.replace() it over the live file
+    # (the pattern E3-F04 added for the MCP server config). A failed
+    # save (disk full, crash mid-write) leaves the previous valid file
+    # fully intact instead of a truncated fragment that the next load
+    # would read as "no settings at all".
+    tmp_path = p.with_name(p.name + ".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            f.write(json.dumps(cfg.to_dict(), indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, p)
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise

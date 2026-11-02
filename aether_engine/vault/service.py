@@ -32,7 +32,10 @@ an agent just created during a signup: it reads the form's own field
 values through the driver (the password never transits tool
 arguments or the transcript either), marks the entry
 ``created_by="agent"``, and never overwrites an entry the user
-saved themselves.
+saved themselves. Its site/form identity comes from the live page
+at save time, never from the session caches (finding PF-4): a
+credential is bound to the site whose form its values were actually
+read from, re-verified immediately before it is stored.
 """
 from __future__ import annotations
 
@@ -501,21 +504,48 @@ class VaultFillService:
         through the driver and stores them as an agent-created entry
         for the owner to review in Settings. An entry the user saved
         themselves is never overwritten.
+
+        The site the entry is bound to (and the form its selectors
+        come from) is derived from the LIVE page — read through
+        :meth:`BrowserSession.read_live_page` at save time and
+        re-verified immediately before the entry is stored — never
+        from the session's cached URL/HTML snapshot (PF-4). A page
+        that cannot be re-read, or that moved to another site while
+        the save was being read, refuses the save rather than
+        storing a mis-bound entry.
         """
-        url = session.current_url or ""
-        domain = registrable_domain(url)
         task_id = getattr(session, "task_id", None)
+        domain = ""
 
         def refuse(reason: str, message: str) -> dict[str, Any]:
             self._audit.log_event("VAULT_SAVE_REFUSED", {
                 "reason": reason, "site": domain, "task_id": task_id})
             return {"saved": False, "reason": reason, "message": message}
 
+        # PF-4: bind the entry to the LIVE page, read from the
+        # driver now — the same discipline fill_login follows
+        # (M07). This flow used to take the site from
+        # session.current_url and the form from
+        # session.last_page_content, caches from the last browser
+        # action, while the field VALUES were read live: a page
+        # that had moved since (redirect, script navigation) got
+        # its credential stored under the site the cache
+        # remembered, where the site-bound fill would later offer
+        # it on the wrong page — or never on its own. The caches
+        # are not consulted here at all; read_live_page refreshes
+        # them as a side effect for their other consumers.
+        live = await session.read_live_page()
+        if live is None:
+            return refuse(
+                "page_unverifiable",
+                "The browser page could not be re-checked, so "
+                "nothing was saved.")
+        url, page_html = live
+        domain = registrable_domain(url)
         if urlparse(url).scheme not in ("http", "https") or not domain:
             return refuse("not_a_web_page",
                           "The browser is not on a web page.")
-        username_selector, password_selector = find_login_form(
-            session.last_page_content or "")
+        username_selector, password_selector = find_login_form(page_html)
         if password_selector is None:
             return refuse("no_login_form",
                           "This page has no password field to save.")
@@ -540,6 +570,37 @@ class VaultFillService:
                 "missing_username",
                 "The form has no username value to save with the "
                 "password.")
+
+        # Re-verify immediately before storing, as the fill does
+        # before decrypting: the entry's site binding must describe
+        # the page as it IS when the credential is stored, not as
+        # it was when the field reads began. A page that moved to
+        # another site, or lost its password form, in between
+        # refuses the save instead of mislabelling the entry.
+        live = await session.read_live_page()
+        if live is None:
+            return refuse(
+                "page_unverifiable",
+                "The browser page could not be re-checked before "
+                "saving, so nothing was saved.")
+        live_url, live_html = live
+        live_domain = registrable_domain(live_url)
+        if (urlparse(live_url).scheme not in ("http", "https")
+                or live_domain != domain):
+            return refuse(
+                "page_changed",
+                "The browser page moved to a different site "
+                f"({live_domain or 'a non-web page'}) while this "
+                f"save was being read, so the credential was not "
+                f"stored under {domain}. If the save is still "
+                "wanted, run it again on the page as it stands.")
+        _live_username, live_password_selector = find_login_form(live_html)
+        if live_password_selector is None:
+            return refuse(
+                "no_login_form",
+                "The page changed while this save was being read "
+                "and no longer shows a password form, so nothing "
+                "was saved.")
 
         for existing in self._vault.entries_for_site(url):
             if existing["username"] != username_value:

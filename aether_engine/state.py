@@ -53,12 +53,36 @@ class EngineState:
         write_token(self.auth_token, self.token_path)
         self.user_config = load_config()
 
+        self.resync_active_state()
+
+        # Start background capability scheduler with startup misfire recovery
+        self.scheduler_manager.start()
+
+        self.audit_logger.log_event("ENGINE_STARTED", {
+            "token_path": str(self.token_path),
+            "active_provider": self.active_provider,
+            "active_model": self.active_model,
+        })
+        return self.auth_token
+
+    def resync_active_state(self) -> None:
+        """(Re)derive every live field that mirrors ``user_config``.
+
+        ``active_provider`` / ``active_model`` / ``configured_providers``
+        and the skill manager's workspace roots are independent state,
+        not views onto the config — replacing the config alone leaves
+        them stale. ``initialize()`` derives them once at startup;
+        CONFIG_RESET replaces the config wholesale, so it must run the
+        same derivation again or HELLO keeps reporting the pre-reset
+        provider/model and the skill catalogue keeps serving skills
+        from workspace roots the reset removed (E6-F04).
+        """
         # Register persisted discovered models into the model registry
         for prov_name, prov_models in self.user_config.provider_models.items():
             if prov_models:
                 self.model_registry.update_provider_models(prov_name, prov_models)
-                
-        # Initialize skill manager roots
+
+        # Skill manager roots follow the config's workspace roots
         from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
         GLOBAL_SKILL_MANAGER.update_workspace_roots(self.user_config.workspace_roots or [])
 
@@ -77,16 +101,6 @@ class EngineState:
         if val_res.was_fallback:
             logger.warning(f"Startup fallback applied: {val_res.fallback_reason}")
             self.audit_logger.log_event("STARTUP_FALLBACK", {"reason": val_res.fallback_reason})
-
-        # Start background capability scheduler with startup misfire recovery
-        self.scheduler_manager.start()
-
-        self.audit_logger.log_event("ENGINE_STARTED", {
-            "token_path": str(self.token_path),
-            "active_provider": self.active_provider,
-            "active_model": self.active_model,
-        })
-        return self.auth_token
 
     def initialize_auth(self) -> str:
         """Alias for backward compatibility."""

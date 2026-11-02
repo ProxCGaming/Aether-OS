@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Search,
   Image as ImageIcon,
@@ -29,6 +29,12 @@ export default function MediaLibrary({
   const [selectedMedia, setSelectedMedia] = useState(null); // for detail modal
   const [deleteTarget, setDeleteTarget] = useState(null); // for delete confirmation modal
   const [deleteUnderlyingFile, setDeleteUnderlyingFile] = useState(false);
+  // OP12: honest delete outcome. pendingDeletesRef remembers what
+  // each in-flight delete asked for (entry only, or entry + file) so
+  // the response can be judged against the request; deleteNotice is
+  // the surfaced result when reality fell short of the request.
+  const [deleteNotice, setDeleteNotice] = useState(null); // {tone, text} | null
+  const pendingDeletesRef = useRef(new Map()); // media_id -> {item, name, deleteFile}
   // N07: backend recall results for the current search query
   // ({query, items, degraded} | null). Null means "no backend answer
   // for this query" — the local metadata filter below is the fallback
@@ -61,8 +67,37 @@ export default function MediaLibrary({
         } else if (data.type === 'MEDIA_DELETE_RESPONSE') {
           const deletedId = data.payload?.media_id;
           if (deletedId) {
-            setInternalMedia(prev => prev.filter(m => m.id !== deletedId));
-            if (selectedMedia?.id === deletedId) setSelectedMedia(null);
+            // OP12: judge the outcome against what this delete
+            // actually asked for. The engine reports deleted /
+            // file_deleted separately precisely so a shortfall is
+            // surfaced, never smoothed over.
+            const pending = pendingDeletesRef.current.get(deletedId);
+            pendingDeletesRef.current.delete(deletedId);
+            if (data.payload?.deleted === false) {
+              // The entry was NOT removed — undo the optimistic
+              // removal and say so.
+              if (pending?.item && !controlledMedia) {
+                setInternalMedia(prev => (
+                  prev.some(m => m.id === deletedId) ? prev : [pending.item, ...prev]
+                ));
+              }
+              setDeleteNotice({
+                tone: 'error',
+                text: `Could not remove ${pending?.name || 'that item'} from the library — the entry is still there.`,
+              });
+            } else {
+              setInternalMedia(prev => prev.filter(m => m.id !== deletedId));
+              if (selectedMedia?.id === deletedId) setSelectedMedia(null);
+              if (pending?.deleteFile && data.payload?.file_deleted === false) {
+                // Entry is gone, but the file the user explicitly
+                // asked to delete is not — it may already have been
+                // moved or deleted outside the app.
+                setDeleteNotice({
+                  tone: 'warning',
+                  text: `Removed ${pending.name} from the library, but the file could not be deleted from disk — it may already have been moved or deleted.`,
+                });
+              }
+            }
           }
         } else if (data.type === 'MEDIA_ANALYSIS_PROGRESS') {
           // N07: the production analyzer now fans its events out to
@@ -352,6 +387,14 @@ export default function MediaLibrary({
     const mid = deleteTarget.id;
     const delFile = deleteUnderlyingFile;
 
+    // OP12: remember the request so the response handler can tell
+    // "file deleted as asked" apart from "file silently kept".
+    pendingDeletesRef.current.set(mid, {
+      item: deleteTarget,
+      name: (deleteTarget.file_path || '').split(/[/\\]/).pop() || 'the file',
+      deleteFile: delFile,
+    });
+
     // Optimistic removal
     setInternalMedia(prev => prev.filter(m => m.id !== mid));
 
@@ -535,6 +578,50 @@ export default function MediaLibrary({
           style={{ fontSize: '11px', color: '#fbbf24', marginBottom: '10px' }}
         >
           Semantic search is unavailable right now — showing text matches only.
+        </div>
+      )}
+
+      {/* OP12: honest delete outcome — shown when a delete fell short
+          of what was asked (entry refused, or the file the user chose
+          to delete could not be deleted from disk). */}
+      {deleteNotice && (
+        <div
+          data-testid="media-delete-notice"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            fontSize: '12px',
+            color: deleteNotice.tone === 'error' ? '#f87171' : '#fbbf24',
+            background: deleteNotice.tone === 'error'
+              ? 'rgba(239, 68, 68, 0.1)'
+              : 'rgba(251, 191, 36, 0.08)',
+            border: deleteNotice.tone === 'error'
+              ? '1px solid rgba(239, 68, 68, 0.3)'
+              : '1px solid rgba(251, 191, 36, 0.3)',
+            borderRadius: '8px',
+            padding: '8px 12px',
+            marginBottom: '10px'
+          }}
+        >
+          <AlertTriangle size={14} style={{ flexShrink: 0 }} />
+          <span style={{ flex: 1 }}>{deleteNotice.text}</span>
+          <button
+            type="button"
+            data-testid="media-delete-notice-dismiss"
+            onClick={() => setDeleteNotice(null)}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'inherit',
+              cursor: 'pointer',
+              padding: '2px',
+              display: 'flex',
+              alignItems: 'center'
+            }}
+          >
+            <X size={13} />
+          </button>
         </div>
       )}
 
@@ -1237,7 +1324,12 @@ export default function MediaLibrary({
               <h3 style={{ margin: 0, fontSize: '16px', color: '#fff' }}>Remove Media Entry</h3>
             </div>
             <p style={{ margin: 0, fontSize: '13px', color: '#94a3b8', lineHeight: 1.5 }}>
-              Are you sure you want to remove this media item from your library?
+              Remove{' '}
+              <span style={{ color: '#e2e8f0', fontWeight: 600 }}>
+                {(deleteTarget.file_path || '').split(/[/\\]/).pop() || 'this media item'}
+              </span>{' '}
+              from your library? The library entry is removed either way — the file itself
+              stays in its folder unless you also delete it below.
             </p>
 
             <label
@@ -1259,7 +1351,7 @@ export default function MediaLibrary({
                 checked={deleteUnderlyingFile}
                 onChange={(e) => setDeleteUnderlyingFile(e.target.checked)}
               />
-              <span>Also delete underlying file from disk</span>
+              <span>Also delete the file from disk</span>
             </label>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>

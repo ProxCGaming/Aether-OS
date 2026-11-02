@@ -13,15 +13,23 @@ Design notes:
   from the environment. A variable with no value and no default is left
   untouched so a missing secret is visible, not silently empty.
 - stdio servers log to stderr, never stdout (stdout is protocol only);
-  the SDK's stdio client sends the child's stderr to the engine's
-  stderr by default, so a chatty server cannot corrupt the protocol.
+  on POSIX the child's stderr reaches the engine's stderr through a
+  bounded relay (E3-F05), so a chatty server cannot corrupt the
+  protocol or grow engine logs without limit.
+- stdio servers are spawned through ``stdio_launcher.py`` (E3-F05),
+  which applies worker-equivalent CPU/memory caps before the server's
+  own code runs — a user-added server is untrusted code and must not
+  inherit the engine's unlimited resource limits.
 """
 import asyncio
 import logging
 import os
 import re
+import sys
+import threading
 from contextlib import AsyncExitStack
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -38,6 +46,29 @@ MCP_RESOURCE_MAX_CHARS = 20000
 # Issue 007: cap for one prompt message, same scale — a prompt template
 # is user-supplied text from an untrusted server, never unbounded.
 MCP_PROMPT_MAX_CHARS = 20000
+
+# E3-F05: stdio resource governance. Stdio servers are spawned through
+# stdio_launcher.py, which applies worker-equivalent caps before the
+# server's code runs (POSIX: rlimits via exec; Windows: a supervising
+# Job Object). The defaults are proportioned to a session-long process
+# rather than a single tool call — the memory ceiling matches the
+# worker "standard" profile (4096 MB, workers/sandbox.py) and the CPU
+# budget is 3600s of cumulative CPU over the server's lifetime. A
+# server config may override either with ``time_cap_seconds`` /
+# ``memory_cap_mb`` (the worker-profile vocabulary); an explicit 0
+# disables that cap — the user's choice for their own allow-listed
+# server, never the silent default.
+MCP_STDIO_DEFAULT_TIME_CAP_SECONDS = 3600
+MCP_STDIO_DEFAULT_MEMORY_CAP_MB = 4096
+
+# E3-F05: byte cap for one stdio server's relayed stderr (POSIX). The
+# first bytes are forwarded to the engine's stderr (server logs stay
+# visible, as before); anything beyond is drained and discarded, so a
+# flooding server can neither block on a full pipe nor grow the
+# engine's logs without limit.
+MCP_STDIO_STDERR_CAP_BYTES = 1024 * 1024
+
+_STDIO_LAUNCHER_PATH = Path(__file__).with_name("stdio_launcher.py")
 
 # Issue 011 (S2): minimal environment allow-list for stdio children.
 # A stdio server is untrusted code: it gets the config ``env`` (expanded)
@@ -142,6 +173,118 @@ def expand_env_vars(value: str, environ: dict[str, str] | None = None) -> str:
         return match.group(0)
 
     return _VAR_RE.sub(_repl, value)
+
+
+def _stdio_resource_caps(config: dict) -> tuple[int, int]:
+    """Resolve ``(time_cap_seconds, memory_cap_mb)`` for a stdio server.
+
+    Absent keys get the MCP defaults; an explicit 0 disables that cap;
+    anything that is not a non-negative number is a loud
+    :class:`MCPClientError` at connect time — a mistyped cap must
+    never silently become "no cap", nor explode inside the launcher
+    where the user would not see the reason.
+    """
+    caps = []
+    for key, default, unit in (
+        ("time_cap_seconds", MCP_STDIO_DEFAULT_TIME_CAP_SECONDS, "seconds"),
+        ("memory_cap_mb", MCP_STDIO_DEFAULT_MEMORY_CAP_MB, "MB"),
+    ):
+        raw = config.get(key, default)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw < 0:
+            raise MCPClientError(
+                f"stdio server config {key!r} must be a non-negative number "
+                f"of {unit} (0 disables the cap); got {raw!r}"
+            )
+        caps.append(int(raw))
+    return caps[0], caps[1]
+
+
+class _BoundedStderrRelay:
+    """Bounded drain for one stdio server's stderr (E3-F05, POSIX).
+
+    The SDK points the child's stderr at :attr:`writer` (a pipe). A
+    daemon thread drains the pipe: the first
+    ``MCP_STDIO_STDERR_CAP_BYTES`` bytes are forwarded to the engine's
+    stderr (the pre-existing behaviour — server logs stay visible),
+    everything beyond is read and discarded, with the overflow counted
+    and logged once. The drain is what makes the bound real: capping
+    without draining would just move the failure, since a chatty
+    server would block forever on a full pipe. The thread ends at EOF
+    — when the server has exited and the parent's writer copy has been
+    closed via :meth:`close_writer` (done right after spawn).
+    """
+
+    def __init__(self, target) -> None:
+        self._target = target
+        self.total_bytes = 0
+        self.forwarded_bytes = 0
+        self.truncated = False
+        read_fd, write_fd = os.pipe()
+        self._read = os.fdopen(read_fd, "rb", buffering=0)
+        self.writer = os.fdopen(write_fd, "wb", buffering=0)
+        self._thread = threading.Thread(
+            target=self._drain, name="mcp-stderr-relay", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def close_writer(self) -> None:
+        try:
+            self.writer.close()
+        except OSError:
+            pass
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Join the drain thread; True if it finished (EOF reached)."""
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+    def _drain(self) -> None:
+        try:
+            while True:
+                chunk = self._read.read(65536)
+                if not chunk:
+                    break
+                self.total_bytes += len(chunk)
+                room = MCP_STDIO_STDERR_CAP_BYTES - self.forwarded_bytes
+                if room > 0:
+                    piece = chunk[:room]
+                    self._forward(piece)
+                    self.forwarded_bytes += len(piece)
+                if len(chunk) > max(room, 0) and not self.truncated:
+                    self.truncated = True
+                    logger.warning(
+                        "MCP stdio server stderr exceeded %d bytes; "
+                        "further output is being discarded",
+                        MCP_STDIO_STDERR_CAP_BYTES,
+                    )
+        except (OSError, ValueError):
+            pass  # read end torn down mid-drain — nothing left to do
+
+    def _forward(self, data: bytes) -> None:
+        target = self._target
+        if target is None:
+            return
+        try:
+            stream = getattr(target, "buffer", None) or target
+            try:
+                stream.write(data)
+            except TypeError:
+                stream.write(data.decode("utf-8", errors="replace"))
+            stream.flush()
+        except (OSError, ValueError):
+            pass  # engine stderr went away (teardown) — keep draining
+
+
+def _make_stderr_relay() -> _BoundedStderrRelay | None:
+    """The bounded stderr relay for a stdio spawn, or None where the
+    SDK's direct passthrough stays: Windows (the child inherits the
+    engine's stderr handle through the launcher supervisor; there is
+    no pipe seam to drain) and headless POSIX runs with no stderr."""
+    if sys.platform == "win32" or sys.stderr is None:
+        return None
+    return _BoundedStderrRelay(sys.stderr)
 
 
 class MCPClientManager:
@@ -256,6 +399,17 @@ class MCPClientManager:
         ``cwd`` is passed through when set. The child's stderr goes to
         the engine's stderr (SDK default); stdout is protocol only.
         Closing the stack terminates the subprocess.
+
+        E3-F05: the SDK is handed the resource-capped launcher
+        (``stdio_launcher.py``) as the "server" command, with the real
+        command after ``--``. The launcher applies the resolved
+        CPU/memory caps before the server's code runs (POSIX: rlimits
+        then exec, so the capped process IS the SDK's child; Windows:
+        a Job Object supervisor). The spawn therefore assumes
+        ``sys.executable`` is a real Python interpreter — the same
+        assumption the worker sandbox already makes
+        (``python -m aether_worker``). On POSIX the child's stderr is
+        additionally routed through the bounded relay.
         """
         command = config.get("command")
         if not command:
@@ -271,13 +425,36 @@ class MCPClientManager:
                 for k, v in (config.get("env") or {}).items()
             }
         )
+        cpu_cap, memory_cap = _stdio_resource_caps(config)
         params = StdioServerParameters(
-            command=command,
-            args=list(config.get("args") or []),
+            command=sys.executable,
+            args=[
+                str(_STDIO_LAUNCHER_PATH),
+                f"--cpu-seconds={cpu_cap}",
+                f"--memory-mb={memory_cap}",
+                "--",
+                command,
+                *list(config.get("args") or []),
+            ],
             env=env,
             cwd=config.get("cwd"),
         )
-        return await stack.enter_async_context(stdio_client(params))
+        relay = _make_stderr_relay()
+        if relay is None:
+            return await stack.enter_async_context(stdio_client(params))
+        relay.start()
+        try:
+            streams = await stack.enter_async_context(
+                stdio_client(params, errlog=relay.writer)
+            )
+        except BaseException:
+            relay.close_writer()
+            raise
+        # The spawn has happened: the parent's copy of the pipe's write
+        # end closes now, so the drain thread sees EOF once the server
+        # (the only remaining writer) exits and the stack closes it.
+        relay.close_writer()
+        return streams
 
     async def _open_http_session(self, stack: AsyncExitStack, config: dict, timeout: float):
         """Open the Streamable HTTP streams on *stack*."""

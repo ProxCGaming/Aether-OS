@@ -7,13 +7,15 @@ MAX_VALIDATION_PINGS = 5
 
 from aether_engine.config import (
     CLOUD_PROVIDERS,
+    custom_provider_flavor,
     save_config,
 )
 from aether_engine.providers.discovery import fetch_available_models
 from aether_engine.providers.litellm_provider import LiteLLMProvider, validate_api_key
 from aether_engine.routing.fallback import (
-    get_fallback_candidates,
+    get_configured_fallback_candidates,
 )
+from aether_engine.routing.startup import is_keyless_custom_provider
 from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
 from aether_engine.state import engine_state
 
@@ -73,7 +75,9 @@ async def _build_provider_list_async(store: SecretStore) -> list:
             try:
                 key = store.load_provider(pname) if pname in stored else ""
                 if key or provider_type == "openai_compatible":
-                    disc = await fetch_available_models(pname, key, base_url=base_url)
+                    disc = await fetch_available_models(
+                        pname, key, base_url=base_url,
+                        provider_flavor=custom_provider_flavor(pname, cfg))
                     if disc.models:
                         models = disc.models
                         cfg.provider_models[pname] = disc.models
@@ -234,7 +238,12 @@ async def _validate_provider_key_inner(
     """
     if not base_url:
         base_url = engine_state.user_config.custom_base_urls.get(provider_name)
-    disc = await fetch_available_models(provider_name, api_key, base_url=base_url)
+    # E5-F05: discovery and the validation ping speak the provider's
+    # saved protocol — an anthropic-flavour custom is discovered and
+    # pinged as Anthropic, not as an OpenAI-compatible endpoint.
+    flavor = custom_provider_flavor(provider_name, engine_state.user_config)
+    disc = await fetch_available_models(
+        provider_name, api_key, base_url=base_url, provider_flavor=flavor)
     discovered_models = disc.models
 
     candidates: list[str] = [m for m in discovered_models if m][:MAX_VALIDATION_PINGS]
@@ -242,11 +251,11 @@ async def _validate_provider_key_inner(
         # No discovered models: fall back to the provider's default test model.
         candidates = [""]
 
-    is_custom = provider_name in ("custom_openai", "custom") or provider_name.startswith("custom_")
-
     result: dict[str, Any] = {"status": "network_error", "message": "Validation failed."}
     for model_id in candidates:
-        attempt = await validate_api_key(provider_name, api_key, model=model_id, base_url=base_url)
+        attempt = await validate_api_key(
+            provider_name, api_key, model=model_id, base_url=base_url,
+            provider_flavor=flavor)
         result = attempt
         if attempt["status"] == "connected":
             if model_id:
@@ -256,15 +265,13 @@ async def _validate_provider_key_inner(
         # A single model can reject the request (entitlement/quota/model-specific 401)
         # while the key itself is valid, so keep scanning the remaining candidates.
 
-    # For OpenAI-compatible endpoints the /models call is authenticated, so a
-    # successful model listing means the key is accepted even if no sampled model
-    # responded to the chat ping (e.g. only one model on the plan works).
-    if result.get("status") != "connected" and discovered_models and is_custom:
-        result = {
-            "status": "connected",
-            "message": f"API key is valid ({len(discovered_models)} models available).",
-            "latency_ms": result.get("latency_ms", 0.0),
-        }
+    # E5-F06: the ping verdict governs key validity — full stop. A custom
+    # endpoint's /models listing is often public (served without auth), so
+    # a successful catalog fetch proves nothing about the key and must
+    # never convert a failed ping (explicit invalid_key, or a network
+    # error) into "connected". The catalog's legitimate contribution is
+    # availability info only: the model list attached below, and the
+    # persisted models when the ping genuinely connects.
 
     # Attach discovered models (and the excluded ones, for the provider card
     # "View all" expander) to the result dictionary.
@@ -298,7 +305,27 @@ async def _validate_provider_key_inner(
         engine_state.health_manager.record_failure(provider_name, result["message"], is_retriable=True)
     return result
 
-def _create_provider_instance(provider_name: str, model: str, secret_store: SecretStore, *, local_only: bool = False, require_vision: bool = False):
+def _load_provider_key(provider_name: str, secret_store: SecretStore, config) -> str:
+    """The API key for *provider_name*: its stored secret, or the
+    no-key placeholder for providers that legitimately have none.
+
+    No secret is not an error for Ollama (the local daemon) or for a
+    custom OpenAI-compatible provider whose saved configuration is
+    complete (base URL + catalog, ADR 0013) — E5-F04. The keyless
+    decision is driven by the provider's saved configuration shape
+    (``is_keyless_custom_provider``), not by a name allowlist. Every
+    other provider raises ProviderNotFoundError: a missing key for a
+    key-requiring provider is a real configuration error.
+    """
+    try:
+        return secret_store.load_provider(provider_name)
+    except ProviderNotFoundError:
+        if provider_name == "ollama" or is_keyless_custom_provider(provider_name, config):
+            return "sk-no-key-required"
+        raise
+
+
+def _create_provider_instance(provider_name: str, model: str, secret_store: SecretStore, *, local_only: bool = False, require_vision: bool = False, user_config=None):
     """Factory for LLM provider instances — all providers route through LiteLLM.
 
     Computes per-node fallback candidates from the health manager and model registry
@@ -311,25 +338,34 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
     forbids fallbacks to models that cannot see images — together
     they guarantee a call pinned to an explicit local vision model
     can never be retried with the image on a cloud model.
+
+    Finding E5-F02: ``user_config`` is the configuration authoritative
+    for this construction — the task's effective (layered) config on
+    task paths. The fallback policy (``disable_fallbacks`` /
+    ``fallback_chain``), custom base URLs, reasoning effort and TTSR
+    rules are all read from it, so the per-call enforcement point
+    honours the same policy as the task-level retry factory. Callers
+    without a task config omit it and get the global config, exactly
+    as before.
     """
     from aether_engine.providers.litellm_provider import (
         FallbackModel,
         resolve_litellm_model,
     )
-    from aether_engine.routing.registry import is_local_provider
 
-    if provider_name == "ollama":
-        try:
-            api_key = secret_store.load_provider(provider_name)
-        except ProviderNotFoundError:
-            api_key = "sk-no-key-required"
-    else:
-        api_key = secret_store.load_provider(provider_name)
-    base_url = engine_state.user_config.custom_base_urls.get(provider_name)
+    config = user_config if user_config is not None else engine_state.user_config
+
+    api_key = _load_provider_key(provider_name, secret_store, config)
+    base_url = config.custom_base_urls.get(provider_name)
+    # E5-F05: the saved flavour steers construction and every model
+    # resolution below (primary + fallback candidates), so an
+    # anthropic-flavour custom is dispatched through the Anthropic
+    # protocol instead of being silently treated as OpenAI-compatible.
+    flavor = custom_provider_flavor(provider_name, config)
 
     fallback_models: list[FallbackModel] = []
-    
-    if not getattr(engine_state.user_config, "disable_fallbacks", False):
+
+    if not getattr(config, "disable_fallbacks", False):
         try:
             # 1. Intra-provider fallbacks: alternative healthy chat models from the SAME provider
             same_provider_models = engine_state.model_registry.get_models_for_provider(provider_name)
@@ -338,7 +374,8 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
                     if require_vision and "vision" not in entry.capabilities:
                         continue
                     fallback_models.append(FallbackModel(
-                        model=resolve_litellm_model(entry.id, provider_name),
+                        model=resolve_litellm_model(
+                            entry.id, provider_name, provider_flavor=flavor),
                         api_key=api_key,
                         provider_name=provider_name,
                         base_url=base_url,
@@ -346,50 +383,37 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
                 if len(fallback_models) >= 2:
                     break
 
-            # 2. Cross-provider candidates
-            fb_chain = getattr(engine_state.user_config, "fallback_chain", [])
-            if fb_chain:
-                # If custom fallback chain specified, pick top model from each in order
-                for fb_prov in fb_chain:
-                    if fb_prov == provider_name or not engine_state.health_manager.is_provider_available(fb_prov):
-                        continue
-                    if local_only and not is_local_provider(fb_prov):
-                        continue
-                    fb_models = engine_state.model_registry.get_models_for_provider(fb_prov)
-                    for entry in fb_models:
-                        if entry.capabilities and "chat" in entry.capabilities:
-                            if require_vision and "vision" not in entry.capabilities:
-                                continue
-                            fb_api_key = secret_store.load_provider(fb_prov)
-                            fb_base_url = engine_state.user_config.custom_base_urls.get(fb_prov)
-                            fallback_models.append(FallbackModel(
-                                model=resolve_litellm_model(entry.id, fb_prov),
-                                api_key=fb_api_key,
-                                provider_name=fb_prov,
-                                base_url=fb_base_url,
-                            ))
-                            break # Just pick one per provider
-            else:
-                # Default logic using get_fallback_candidates
-                candidates = get_fallback_candidates(
-                    failed_provider=provider_name,
-                    configured_providers=engine_state.configured_providers,
-                    health_manager=engine_state.health_manager,
-                    registry=engine_state.model_registry,
-                    local_only=local_only,
-                    require_vision=require_vision,
-                )
-                for entry in candidates:
-                    fb_api_key = secret_store.load_provider(entry.provider)
-                    fb_base_url = engine_state.user_config.custom_base_urls.get(entry.provider)
-                    fallback_models.append(FallbackModel(
-                        model=resolve_litellm_model(entry.id, entry.provider),
-                        api_key=fb_api_key,
-                        provider_name=entry.provider,
-                        base_url=fb_base_url,
-                    ))
-        except Exception:  # noqa: BLE001, S110 — fallback computation is best-effort; a failure means no fallbacks, not a crash
-            pass  # Fallback computation is best-effort
+            # 2. Cross-provider candidates — derived by the single
+            # fallback-policy authority (routing.fallback), the same
+            # function the task-level retry factory consults, from
+            # the same config object (E5-F02).
+            candidates = get_configured_fallback_candidates(
+                failed_provider=provider_name,
+                config=config,
+                configured_providers=engine_state.configured_providers,
+                health_manager=engine_state.health_manager,
+                registry=engine_state.model_registry,
+                local_only=local_only,
+                require_vision=require_vision,
+            )
+            for entry in candidates:
+                fb_api_key = _load_provider_key(entry.provider, secret_store, config)
+                fb_base_url = config.custom_base_urls.get(entry.provider)
+                fallback_models.append(FallbackModel(
+                    model=resolve_litellm_model(
+                        entry.id, entry.provider,
+                        provider_flavor=custom_provider_flavor(entry.provider, config)),
+                    api_key=fb_api_key,
+                    provider_name=entry.provider,
+                    base_url=fb_base_url,
+                ))
+        except Exception:  # fallback computation is best-effort; a failure means no fallbacks, not a crash
+            # E5-F02 (debuggability): the failure is logged, not
+            # silently swallowed — a broken fallback computation
+            # must be visible when a configured chain "does nothing".
+            logger.warning(
+                "Fallback computation failed for %s/%s; provider will have no fallbacks",
+                provider_name, model, exc_info=True)
 
     return LiteLLMProvider(
         api_key=api_key,
@@ -397,6 +421,7 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
         provider_name=provider_name,
         base_url=base_url,
         fallback_models=fallback_models,
-        reasoning_effort=getattr(engine_state.user_config, "reasoning_effort", "standard"),
-        ttsr_rules=getattr(engine_state.user_config, "ttsr_rules", None),
+        reasoning_effort=getattr(config, "reasoning_effort", "standard"),
+        ttsr_rules=getattr(config, "ttsr_rules", None),
+        provider_flavor=flavor,
     )

@@ -77,6 +77,28 @@ _SNAPSHOT_IGNORE_DIRS = frozenset({
 
 _FILE_WRITE_TOOL_NAMES = frozenset({"write_file", "edit_file"})
 
+# ── PF-2: generated-media classification ────────────────────────────
+# One classification source for both media-registration seams (the
+# write_file/edit_file path and the N05 filesystem-effect observation
+# below), so a file's media type never depends on which tool happened
+# to write it.
+_GENERATED_IMAGE_EXTENSIONS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp",
+})
+_GENERATED_VIDEO_EXTENSIONS = frozenset({
+    ".mp4", ".webm", ".mkv", ".mov", ".avi",
+})
+
+
+def _generated_media_type(file_path: str) -> str | None:
+    """'image' / 'video' for generated-media extensions, else None."""
+    ext = Path(file_path).suffix.lower()
+    if ext in _GENERATED_VIDEO_EXTENSIONS:
+        return "video"
+    if ext in _GENERATED_IMAGE_EXTENSIONS:
+        return "image"
+    return None
+
 
 def _snapshot_workspace_files(
     workspace_roots: list | None,
@@ -280,6 +302,11 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                 args,
                 workspace_roots=workspace_roots,
                 task_class=task_class,
+                # E2-F05: the user's configured resource profiles must
+                # reach the sandbox with the class name — without them
+                # every worker run silently used the sandbox's separate
+                # built-in defaults instead of the selected profile.
+                task_classes=user_config.task_classes if user_config else None,
                 policies=user_config.tool_policies if user_config else {},
                 path_rules=user_config.path_rules if user_config else None,
                 shell_extras=(
@@ -354,14 +381,11 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
 
                     # Epic 8, E8-4.2: Auto-register agent-generated media into MediaStore
                     if file_p:
-                        ext = file_p.suffix.lower()
-                        is_img = ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp")
-                        is_vid = ext in (".mp4", ".webm", ".mkv", ".mov", ".avi")
-                        if is_img or is_vid:
+                        m_type = _generated_media_type(str(file_p))
+                        if m_type:
                             try:
                                 from aether_engine.media.store import get_media_store
                                 m_store = get_media_store()
-                                m_type = "video" if is_vid else "image"
                                 med_item = m_store.register_media(
                                     file_path=str(file_path),
                                     collection="generated",
@@ -414,22 +438,27 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                         fs_snapshot_before,
                         _snapshot_workspace_files(workspace_roots),
                     )
-                    if changed_paths:
+                except Exception:
+                    logger.exception(
+                        f"Failed to collect artifacts for {tool_name}")
+                    changed_paths = []
+                if changed_paths:
+                    sess_id = (
+                        state.get("session_id")
+                        or configurable.get("session_id")
+                        or "default"
+                    )
+                    t_id = (
+                        state.get("task_id")
+                        or configurable.get("request_id")
+                        or "default"
+                    )
+                    try:
                         from aether_engine.artifacts.store import (
                             get_artifact_store,
                         )
 
                         art_store = get_artifact_store()
-                        sess_id = (
-                            state.get("session_id")
-                            or configurable.get("session_id")
-                            or "default"
-                        )
-                        t_id = (
-                            state.get("task_id")
-                            or configurable.get("request_id")
-                            or "default"
-                        )
                         for changed_path in changed_paths:
                             artifact_record = art_store.record_artifact(
                                 session_id=sess_id,
@@ -457,9 +486,68 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                                         },
                                     ),
                                 )
-                except Exception:
-                    logger.exception(
-                        f"Failed to collect artifacts for {tool_name}")
+                    except Exception:
+                        logger.exception(
+                            f"Failed to collect artifacts for {tool_name}")
+
+                    # PF-2: media-typed effects of the same observation
+                    # also enter the media library as generated media —
+                    # the registration the write path above performs,
+                    # driven by the filesystem diff instead of tool
+                    # arguments, with the same MEDIA_RECORDED shape and
+                    # analysis scheduling. The library indexes files in
+                    # place by path, so a file already entered (by any
+                    # registration path) is never duplicated here.
+                    for changed_path in changed_paths:
+                        m_type = _generated_media_type(changed_path)
+                        if not m_type:
+                            continue
+                        try:
+                            from aether_engine.media.store import (
+                                get_media_store,
+                            )
+
+                            m_store = get_media_store()
+                            if m_store.get_by_path(changed_path) is not None:
+                                continue
+                            med_item = m_store.register_media(
+                                file_path=changed_path,
+                                collection="generated",
+                                media_type=m_type,
+                                session_id=sess_id,
+                                # N08 provenance, as on the write path.
+                                message_id=(
+                                    state.get("message_id")
+                                    or configurable.get("message_id")
+                                ),
+                                probe_metadata={
+                                    "origin": "agent_generated",
+                                    "tool": tool_name,
+                                },
+                            )
+                            if t_id:
+                                event_bus.publish(
+                                    t_id,
+                                    Event(
+                                        type=EventType.MEDIA_RECORDED,
+                                        request_id=t_id,
+                                        payload=med_item,
+                                    ),
+                                )
+                            # E8-4.3: analyse on arrival — detached,
+                            # never blocks the tool call.
+                            try:
+                                from aether_engine.media.analyzer import (
+                                    schedule_media_analysis,
+                                )
+
+                                schedule_media_analysis(med_item["id"])
+                            except Exception:  # noqa: BLE001, S110
+                                pass
+                        except Exception:
+                            logger.exception(
+                                "Failed to auto-register generated media "
+                                "into MediaStore")
 
             # E1-17: publish scratchpad renders for the UI panel
             # (sanitised in scratchpad_event_payload; display-only).

@@ -63,6 +63,15 @@
       "package.json",
       "electron/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "engine-payload",
+        "to": "engine",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
     "win": {
       "target": "nsis",
       "icon": "build/icon.png"

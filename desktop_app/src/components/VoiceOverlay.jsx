@@ -16,6 +16,15 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 // decode finishes after the cut is dropped (it belongs to the
 // reply the user just talked over).
 //
+// N09: playback position is reported back to the engine through
+// onPlaybackProgress — the highest engine chunk_seq this player
+// has FINISHED playing (a source's natural onended under the cut
+// epoch it was scheduled in; a source stopped by a cut never
+// counts). One -1 report when the session goes live arms the
+// engine's playback-based heard accounting; without any report
+// the engine cannot know what was actually heard. Reports are
+// fire-and-forget: nothing on the live path waits for them.
+//
 // F-12b: the peer connection actually negotiates. The overlay is
 // the offerer (it holds the microphone): on capture it creates an
 // offer and reports it through onRtcOffer; local ICE candidates
@@ -59,6 +68,7 @@ export default function VoiceOverlay({
   rtcAnswer = null,
   onRtcIceCandidate = () => {},
   rtcRemoteCandidate = null,
+  onPlaybackProgress = () => {},
 }) {
   const [micLive, setMicLive] = useState(false);
   const [micError, setMicError] = useState(null);
@@ -85,6 +95,21 @@ export default function VoiceOverlay({
   useEffect(() => {
     onRtcIceCandidateRef.current = onRtcIceCandidate;
   }, [onRtcIceCandidate]);
+  const onPlaybackProgressRef = useRef(onPlaybackProgress);
+  useEffect(() => {
+    onPlaybackProgressRef.current = onPlaybackProgress;
+  }, [onPlaybackProgress]);
+  // Highest engine chunk_seq already reported as finished; the
+  // engine takes the max, and this keeps reports monotonic even
+  // if an onended lands late.
+  const reportedSeqRef = useRef(-1);
+
+  // N09: going live arms playback reporting (-1: nothing finished
+  // yet). Re-firing on a later activation is harmless — reports
+  // never rewind the engine's position.
+  useEffect(() => {
+    if (open && active) onPlaybackProgressRef.current(-1);
+  }, [open, active]);
   // Engine candidates that arrive before the answer is applied
   // queue here; the answer effect flushes them in order.
   const pendingRemoteRef = useRef([]);
@@ -271,7 +296,11 @@ export default function VoiceOverlay({
   }, [playbackCut, stopPlayback]);
 
   // Playback: decode each TTS chunk and queue it after the last.
-  const playChunk = useCallback((b64) => {
+  // engineSeq is the chunk's engine-side identity (N09): when the
+  // scheduled source ends NATURALLY — same cut epoch it was
+  // scheduled in, so a cut-stopped source never counts — the
+  // chunk is reported as finished playing.
+  const playChunk = useCallback((b64, engineSeq = null) => {
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       if (!Ctx || !b64) return;
@@ -291,7 +320,21 @@ export default function VoiceOverlay({
           const source = ctx.createBufferSource();
           source.buffer = audioBuffer;
           source.connect(ctx.destination);
-          source.onended = () => { sourcesRef.current.delete(source); };
+          source.onended = () => {
+            sourcesRef.current.delete(source);
+            // N09: a natural end under the scheduling epoch means
+            // the user actually heard this chunk. (stop() also
+            // fires onended, but a cut bumps the epoch first, so
+            // cut-stopped sources are never reported. A chunk
+            // whose natural end races a cut is simply not
+            // reported — the accounting stays conservative.)
+            if (typeof engineSeq === 'number'
+                && epoch === cutEpochRef.current
+                && engineSeq > reportedSeqRef.current) {
+              reportedSeqRef.current = engineSeq;
+              onPlaybackProgressRef.current(engineSeq);
+            }
+          };
           sourcesRef.current.add(source);
           const startAt = Math.max(ctx.currentTime, playHeadRef.current || 0);
           source.start(startAt);
@@ -302,7 +345,9 @@ export default function VoiceOverlay({
   }, []);
 
   useEffect(() => {
-    if (audioChunk && audioChunk.data) playChunk(audioChunk.data);
+    if (audioChunk && audioChunk.data) {
+      playChunk(audioChunk.data, audioChunk.engineSeq ?? null);
+    }
   }, [audioChunk, playChunk]);
 
   useEffect(() => () => {

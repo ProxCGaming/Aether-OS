@@ -58,6 +58,9 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
                     p_name, m_name, secret_store,
                     local_only=bool(_cfg.get("local_only")),
                     require_vision=bool(_cfg.get("require_vision")),
+                    # E5-F02: the run's effective config governs this
+                    # construction's fallback policy too.
+                    user_config=_uc,
                 )
         except Exception as e:  # noqa: BLE001 — an unusable per-agent model override falls back to the graph provider.
             logger.warning(f"Coder agent_models override {agent_model_override!r} unusable, using default provider: {e}")

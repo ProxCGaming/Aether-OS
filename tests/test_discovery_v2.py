@@ -68,7 +68,7 @@ async def test_validate_surfaces_discovery_error_with_code():
     from aether_engine.orchestration.core import _validate_provider_key
     from aether_engine.state import engine_state
 
-    async def fake_validate(provider, key, model="", base_url=None):
+    async def fake_validate(provider, key, model="", base_url=None, provider_flavor=None):
         return {"status": "network_error", "message": "boom"}
 
     with patch(
@@ -101,7 +101,7 @@ async def test_validate_connected_when_ping_works_despite_discovery_error():
     from aether_engine.orchestration.core import _validate_provider_key
     from aether_engine.state import engine_state
 
-    async def fake_validate(provider, key, model="", base_url=None):
+    async def fake_validate(provider, key, model="", base_url=None, provider_flavor=None):
         return {"status": "connected", "message": "ok", "latency_ms": 5.0}
 
     with patch(
@@ -131,7 +131,7 @@ async def test_validate_attaches_excluded_models():
     from aether_engine.orchestration.core import _validate_provider_key
     from aether_engine.state import engine_state
 
-    async def fake_validate(provider, key, model="", base_url=None):
+    async def fake_validate(provider, key, model="", base_url=None, provider_flavor=None):
         return {"status": "connected", "message": "ok", "latency_ms": 5.0}
 
     excluded = [{"id": "text-embedding-3-small", "kind": "embedding"}]
@@ -193,7 +193,7 @@ class TestDiscoveryWebSocket:
         mock_store.list_providers.return_value = []
         try:
             with patch("aether_engine.routes.websocket.SecretStore", return_value=mock_store), \
-                 patch("aether_engine.app.SecretStore", return_value=mock_store):  # noqa: SIM117 — nested under a multi-manager patch; combined form lands with the tip cleanup
+                 patch("aether_engine.app.SecretStore", return_value=mock_store):  # noqa: SIM117 — nested for readability; combined form lands with the tip cleanup
                 with TestClient(app) as client:
                     live_token = engine_state.auth_token
                     with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {live_token}"}) as ws:

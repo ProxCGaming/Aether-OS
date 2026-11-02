@@ -119,3 +119,68 @@ def get_fallback_candidates(
                 candidates.append(models[0])
 
     return candidates
+
+
+def get_configured_fallback_candidates(
+    failed_provider: str,
+    config,
+    configured_providers: list[str],
+    health_manager: ProviderHealthManager,
+    registry: ModelRegistry | None = None,
+    *,
+    local_only: bool = False,
+    require_vision: bool = False,
+) -> list[ModelEntry]:
+    """The single fallback-policy authority (finding E5-F02).
+
+    Every fallback enforcement point — per-call candidate computation
+    in ``orchestration.core._create_provider_instance`` and the
+    task-level retry factory in ``routes.websocket`` — derives its
+    cross-provider candidates HERE, from the SAME config object, so
+    the user's fallback configuration governs both points with one
+    interpretation. ``config`` is whichever ``UserConfig`` is
+    authoritative at the call site: the task's effective (layered)
+    config for task paths, the global config elsewhere.
+
+    Interpretation, identical at both points:
+
+    - ``disable_fallbacks`` — no candidates, ever.
+    - ``fallback_chain`` non-empty — the chain is the ordered
+      authority: for each provider in chain order (skipping the
+      failed provider, unavailable providers, and — under
+      ``local_only`` — non-local providers), that provider's first
+      chat-capable model (vision-capable too, under
+      ``require_vision``).
+    - No chain — the health-derived derivation
+      (:func:`get_fallback_candidates`) over the configured
+      providers, unchanged.
+    """
+    if getattr(config, "disable_fallbacks", False):
+        return []
+    chain = getattr(config, "fallback_chain", None) or []
+    if not chain:
+        return get_fallback_candidates(
+            failed_provider,
+            configured_providers,
+            health_manager,
+            registry=registry,
+            local_only=local_only,
+            require_vision=require_vision,
+        )
+    reg = registry or GLOBAL_MODEL_REGISTRY
+    candidates: list[ModelEntry] = []
+    for provider in chain:
+        if provider == failed_provider:
+            continue
+        if local_only and not is_local_provider(provider):
+            continue
+        if not health_manager.is_provider_available(provider):
+            continue
+        for entry in reg.get_models_for_provider(provider):
+            if "chat" not in entry.capabilities:
+                continue
+            if require_vision and "vision" not in entry.capabilities:
+                continue
+            candidates.append(entry)
+            break
+    return candidates
