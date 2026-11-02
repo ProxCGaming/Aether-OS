@@ -24,7 +24,10 @@ from aether_common.contracts import (
 from aether_engine.config import (
     AUXILIARY_TASK_CLASSES,
     UserConfig,
+    canonical_workspace_root,
     custom_provider_flavor,
+    find_workspace_root,
+    remove_workspace_root,
     save_config,
 )
 from aether_engine.cost.ledger import (
@@ -173,6 +176,97 @@ def _extract_token(ws: WebSocket) -> str | None:
     return auth[7:].strip() if auth.startswith("Bearer ") else None
 
 
+def _resolve_workspace_binding(
+    payload: dict[str, Any], *, required: bool
+) -> tuple[bool, str | None, str]:
+    """Resolve a request's ``workspace`` field to a session binding.
+
+    The ONE binding rule (per-workspace sessions, grill Q3/Q4),
+    shared by SESSION_CREATE, SESSION_MOVE, and — via
+    :func:`_create_bound_session` — every implicit creation site,
+    so the paths cannot drift apart:
+
+    - field ABSENT: for create (``required=False``), the active
+      root — ``workspace_roots[0]``, already canonical in config —
+      or None when no roots are configured ("No workspace" is a
+      legitimate home, Q4). For move (``required=True``) an absent
+      field is a malformed request: a move must name its target.
+    - field explicitly null: unbound (None).
+    - field a string: canonicalised and matched against the
+      configured roots via :func:`find_workspace_root`; the binding
+      is the STORED (canonical) root. A string naming no configured
+      root is refused — a binding names a workspace (Q2), and
+      filing a session under a path the app does not know would
+      strand it outside every workspace view.
+
+    Returns (ok, binding, error).
+    """
+    roots = engine_state.user_config.workspace_roots or []
+    if "workspace" not in payload:
+        if required:
+            return False, None, (
+                "workspace is required (a workspace path, or null to unbind)")
+        return True, (roots[0] if roots else None), ""
+    raw = payload.get("workspace")
+    if raw is None:
+        return True, None, ""
+    if not isinstance(raw, str) or not raw.strip():
+        return False, None, "workspace must be a workspace path or null"
+    match = find_workspace_root(roots, raw)
+    if match is None:
+        return False, None, f"workspace is not a configured workspace root: {raw}"
+    return True, match, ""
+
+
+async def _create_bound_session(title: str) -> tuple[str, str | None]:
+    """Create a session under the creation binding rule.
+
+    Implicit creation sites (the task pump's first message, the MCP
+    prompt/resource saves, voice) carry no workspace field, so they
+    take the resolver's absent-field branch: the active root at
+    creation time, or unbound when no roots are configured.
+    Returns (session_id, binding).
+    """
+    _ok, binding, _error = _resolve_workspace_binding({}, required=False)
+    sess_id = await asyncio.to_thread(session_store.create_session, title, binding)
+    return sess_id, binding
+
+
+async def _unbind_sessions_bound_to(root: str) -> int:
+    """Unbind every session filed under ``root`` (grill Q7).
+
+    Workspace removal unbinds — sessions are never deleted by a
+    workspace operation. Returns how many sessions were unbound.
+    """
+    bound = await asyncio.to_thread(session_store.list_sessions, root)
+    unbound = 0
+    for row in bound:
+        if await asyncio.to_thread(
+                session_store.set_session_workspace, row["id"], None):
+            unbound += 1
+    return unbound
+
+
+async def _workspace_session_counts() -> tuple[dict[str, int], int]:
+    """(per-root session counts, unbound count) for WORKSPACE_LIST.
+
+    Keys are the stored canonical roots, exactly as bindings record
+    them. A binding naming no configured root (possible only via a
+    restored backup) is counted under no row — the session still
+    lists in SESSION_LIST; it is simply filed nowhere the Projects
+    view knows.
+    """
+    counts: dict[str, int] = {}
+    unbound = 0
+    for row in await asyncio.to_thread(session_store.list_sessions):
+        binding = row.get("workspace")
+        if binding is None:
+            unbound += 1
+        else:
+            counts[binding] = counts.get(binding, 0) + 1
+    return counts, unbound
+
+
 async def _run_mcp_prompt_into_chat(
     name: str, prompt_name: str, arguments: Any, session_id: str | None
 ) -> dict[str, Any]:
@@ -203,9 +297,8 @@ async def _run_mcp_prompt_into_chat(
             if sess is None:
                 session_id = None
         if not session_id:
-            session_id = await asyncio.to_thread(
-                session_store.create_session, f"MCP prompt: {prompt_name}"
-            )
+            session_id, _binding = await _create_bound_session(
+                f"MCP prompt: {prompt_name}")
         for msg in messages:
             await asyncio.to_thread(
                 session_store.add_message, session_id, msg["role"], msg["content"]
@@ -1205,14 +1298,17 @@ async def ws_tasks(ws: WebSocket):
                 session_id = msg.payload.get("session_id")
                 
                 if not session_id:
-                    # Create new session if none provided
+                    # Create new session if none provided. Implicit
+                    # creation takes the SESSION_CREATE binding rule
+                    # (slice 3): the active root at creation time, or
+                    # unbound — via the one shared helper.
                     title = prompt[:30] + "..." if len(prompt) > 30 else prompt
-                    session_id = await asyncio.to_thread(session_store.create_session, title)
+                    session_id, session_binding = await _create_bound_session(title)
                     try:
                         await ws.send_text(Event(
                             type=EventType.SESSION_CREATE_RESPONSE,
                             request_id=req_id,
-                            payload={"session_id": session_id, "preserve_messages": True}
+                            payload={"session_id": session_id, "workspace": session_binding, "preserve_messages": True}
                         ).to_json())
                         await ws.send_text(Event(
                             type=EventType.SESSION_LIST_RESPONSE,
@@ -2025,11 +2121,34 @@ async def ws_tasks(ws: WebSocket):
             # Session Events
             # -----------------------------------------------------------
             elif msg.type == EventType.SESSION_LIST_REQUEST:
-                sessions = await asyncio.to_thread(session_store.list_sessions)
+                # Slice 3: an optional workspace filter with the
+                # store's three states — field absent = all sessions
+                # (exactly the pre-slice behaviour), a path = that
+                # workspace (canonicalised before the store sees it,
+                # so any spelling filters the one workspace), explicit
+                # null = unbound only. Every row already carries its
+                # `workspace` binding from the store.
+                if "workspace" not in msg.payload:
+                    sessions = await asyncio.to_thread(session_store.list_sessions)
+                    list_error = ""
+                elif msg.payload.get("workspace") is None:
+                    sessions = await asyncio.to_thread(session_store.list_sessions, None)
+                    list_error = ""
+                elif isinstance(msg.payload.get("workspace"), str):
+                    sessions = await asyncio.to_thread(
+                        session_store.list_sessions,
+                        canonical_workspace_root(msg.payload["workspace"]))
+                    list_error = ""
+                else:
+                    sessions = []
+                    list_error = "workspace filter must be a workspace path or null"
+                list_payload: dict[str, Any] = {"sessions": sessions}
+                if list_error:
+                    list_payload["error"] = list_error
                 await ws.send_text(Event(
                     type=EventType.SESSION_LIST_RESPONSE,
                     request_id=req_id,
-                    payload={"sessions": sessions},
+                    payload=list_payload,
                 ).to_json())
 
             elif msg.type == EventType.SESSION_GET_REQUEST:
@@ -2043,12 +2162,30 @@ async def ws_tasks(ws: WebSocket):
 
             elif msg.type == EventType.SESSION_CREATE_REQUEST:
                 title = msg.payload.get("title", "New Chat")
-                sess_id = await asyncio.to_thread(session_store.create_session, title)
-                await ws.send_text(Event(
-                    type=EventType.SESSION_CREATE_RESPONSE,
-                    request_id=req_id,
-                    payload={"session_id": sess_id},
-                ).to_json())
+                # Slice 3 (grill Q3/Q4): the optional workspace field
+                # follows the one binding rule — absent binds the
+                # active root (or unbound with no roots configured),
+                # a string binds that configured root by canonical
+                # identity, explicit null creates unbound. An
+                # unconfigured target is refused honestly and creates
+                # nothing. The reply names the new session's binding.
+                bind_ok, binding, bind_error = _resolve_workspace_binding(
+                    msg.payload, required=False)
+                if not bind_ok:
+                    await ws.send_text(Event(
+                        type=EventType.SESSION_CREATE_RESPONSE,
+                        request_id=req_id,
+                        payload={"session_id": None, "workspace": None,
+                                 "success": False, "error": bind_error},
+                    ).to_json())
+                else:
+                    sess_id = await asyncio.to_thread(
+                        session_store.create_session, title, binding)
+                    await ws.send_text(Event(
+                        type=EventType.SESSION_CREATE_RESPONSE,
+                        request_id=req_id,
+                        payload={"session_id": sess_id, "workspace": binding},
+                    ).to_json())
 
             elif msg.type == EventType.SESSION_DELETE_REQUEST:
                 sess_id = msg.payload.get("session_id")
@@ -2124,6 +2261,48 @@ async def ws_tasks(ws: WebSocket):
                     type=EventType.SESSION_RENAME_RESPONSE,
                     request_id=req_id,
                     payload={"session_id": sess_id, "title": new_title, "renamed": renamed},
+                ).to_json())
+
+            elif msg.type == EventType.SESSION_MOVE_REQUEST:
+                # Per-workspace sessions, slice 3 (grill Q6): re-file
+                # a session under another workspace, or unbind it
+                # with a null workspace. Binding is organisational
+                # only (Q11) — a move touches no history, context, or
+                # checkpoints, and a running task keeps the roots it
+                # snapshotted at launch. Unknown sessions and
+                # unconfigured targets are refused honestly; the
+                # reply reports the session's binding after the
+                # request, moved or not.
+                sess_id = msg.payload.get("session_id")
+                session = await asyncio.to_thread(
+                    session_store.get_session, sess_id) if sess_id else None
+                if session is None:
+                    move_ok = False
+                    move_binding = None
+                    move_error = ("A session_id is required." if not sess_id
+                                  else f"Session not found: {sess_id}")
+                else:
+                    move_ok, move_binding, move_error = _resolve_workspace_binding(
+                        msg.payload, required=True)
+                    if move_ok:
+                        move_ok = await asyncio.to_thread(
+                            session_store.set_session_workspace,
+                            sess_id, move_binding)
+                        if not move_ok:
+                            move_error = f"Session not found: {sess_id}"
+                    if not move_ok:
+                        move_binding = session.get("workspace")
+                move_payload: dict[str, Any] = {
+                    "session_id": sess_id,
+                    "workspace": move_binding,
+                    "moved": move_ok,
+                }
+                if not move_ok:
+                    move_payload["error"] = move_error
+                await ws.send_text(Event(
+                    type=EventType.SESSION_MOVE_RESPONSE,
+                    request_id=req_id,
+                    payload=move_payload,
                 ).to_json())
 
             elif msg.type == EventType.SESSION_SEARCH_REQUEST:
@@ -3591,9 +3770,8 @@ async def ws_tasks(ws: WebSocket):
                             if sess is None:
                                 session_id = None
                         if not session_id:
-                            session_id = await asyncio.to_thread(
-                                session_store.create_session, f"MCP resource: {uri}"
-                            )
+                            session_id, _binding = await _create_bound_session(
+                                f"MCP resource: {uri}")
                         message = f"[MCP resource from server '{name}': {uri}]\n{content}"
                         await asyncio.to_thread(
                             session_store.add_message, session_id, "system", message
@@ -4236,6 +4414,13 @@ async def ws_tasks(ws: WebSocket):
 
             elif msg.type == EventType.WORKSPACE_LIST_REQUEST:
                 roots = engine_state.user_config.workspace_roots or []
+                # Per-workspace sessions, slice 3 (additive): each
+                # row gains the count of sessions bound to it, and
+                # the reply gains the unbound ("No workspace") count,
+                # so the Projects view can render filing state — and
+                # the Q7 removal confirmation its count — without a
+                # second call.
+                counts, unbound_count = await _workspace_session_counts()
                 workspaces = []
                 for idx, r in enumerate(roots):
                     p = Path(r)
@@ -4248,21 +4433,33 @@ async def ws_tasks(ws: WebSocket):
                         # state in the Projects view.
                         "is_active": idx == 0,
                         "exists": p.is_dir(),
+                        "session_count": counts.get(r, 0),
                     })
                 await ws.send_text(Event(
                     type=EventType.WORKSPACE_LIST_RESPONSE,
                     request_id=req_id,
-                    payload={"workspaces": workspaces},
+                    payload={"workspaces": workspaces,
+                             "unbound_session_count": unbound_count},
                 ).to_json())
 
             elif msg.type == EventType.WORKSPACE_ADD_REQUEST:
+                # Per-workspace sessions, slice 2 (grill Q2/Q8): a
+                # root's identity is its canonical form. The incoming
+                # path is canonicalised BEFORE the duplicate check,
+                # so a second spelling of a configured folder (a
+                # trailing slash, a symlink, a dotted path) is refused
+                # and the reply points at the existing entry instead
+                # of adding a twin.
                 ws_path = msg.payload.get("path", "").strip()
-                if ws_path and ws_path not in engine_state.user_config.workspace_roots:
-                    engine_state.user_config.workspace_roots.append(ws_path)
+                roots = engine_state.user_config.workspace_roots
+                existing = find_workspace_root(roots, ws_path)
+                if ws_path and existing is None:
+                    canonical = canonical_workspace_root(ws_path)
+                    roots.append(canonical)
                     save_config(engine_state.user_config)
                     from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-                    GLOBAL_SKILL_MANAGER.update_workspace_roots(engine_state.user_config.workspace_roots)
-                    p = Path(ws_path)
+                    GLOBAL_SKILL_MANAGER.update_workspace_roots(roots)
+                    p = Path(canonical)
                     await ws.send_text(Event(
                         type=EventType.WORKSPACE_ADD_RESPONSE,
                         request_id=req_id,
@@ -4273,29 +4470,59 @@ async def ws_tasks(ws: WebSocket):
                         # renders the new row correctly from the reply
                         # itself instead of waiting for a LIST refetch.
                         payload={"success": True, "workspace": {
-                            "path": ws_path, "name": p.name, "is_indexed": False,
-                            "is_active": len(engine_state.user_config.workspace_roots) == 1,
+                            "path": canonical, "name": p.name, "is_indexed": False,
+                            "is_active": len(roots) == 1,
                             "exists": p.is_dir(),
                         }},
+                    ).to_json())
+                elif existing is not None:
+                    p = Path(existing)
+                    await ws.send_text(Event(
+                        type=EventType.WORKSPACE_ADD_RESPONSE,
+                        request_id=req_id,
+                        # Q8 refusal: `exists` + the existing entry
+                        # (same badge shape as a LIST row) let the
+                        # Projects view highlight the real workspace
+                        # instead of dead-ending on an error string.
+                        payload={"success": False, "exists": True,
+                                 "error": "Path already exists",
+                                 "workspace": {
+                                     "path": existing, "name": p.name,
+                                     "is_indexed": False,
+                                     "is_active": roots.index(existing) == 0,
+                                     "exists": p.is_dir(),
+                                 }},
                     ).to_json())
                 else:
                     await ws.send_text(Event(
                         type=EventType.WORKSPACE_ADD_RESPONSE,
                         request_id=req_id,
-                        payload={"success": False, "error": "Path empty or already exists"},
+                        payload={"success": False, "error": "Path empty"},
                     ).to_json())
 
             elif msg.type == EventType.WORKSPACE_REMOVE_REQUEST:
+                # Slice 2: removal addresses the canonical identity —
+                # any spelling of the folder removes its one stored
+                # entry, and the reply names the canonical root that
+                # was actually removed (slice 3 unbinds that root's
+                # sessions by this value).
                 ws_path = msg.payload.get("path", "").strip()
-                if ws_path in engine_state.user_config.workspace_roots:
-                    engine_state.user_config.workspace_roots.remove(ws_path)
+                removed = remove_workspace_root(
+                    engine_state.user_config.workspace_roots, ws_path)
+                if removed is not None:
                     save_config(engine_state.user_config)
                     from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
                     GLOBAL_SKILL_MANAGER.update_workspace_roots(engine_state.user_config.workspace_roots)
+                    # Slice 3 (grill Q7): the removed root's sessions
+                    # fall back to unbound — removal never deletes a
+                    # session — and the reply reports how many were
+                    # unbound, keyed by the canonical root removed.
+                    unbound_sessions = await _unbind_sessions_bound_to(removed)
                     await ws.send_text(Event(
                         type=EventType.WORKSPACE_REMOVE_RESPONSE,
                         request_id=req_id,
-                        payload={"success": True, "path": ws_path},
+                        payload={"success": True, "path": removed,
+                                 "unbound_sessions": unbound_sessions},
                     ).to_json())
                 else:
                     await ws.send_text(Event(
@@ -4415,18 +4642,22 @@ async def ws_tasks(ws: WebSocket):
                 # Epic 6, E6-04: the active workspace is the first
                 # root (containment, skills, and task defaults all
                 # key off roots[0]); activating = move to front.
+                # Slice 2: the request addresses the canonical
+                # identity — any spelling of the folder activates its
+                # one stored (canonical) entry.
                 ws_path = msg.payload.get("path", "").strip()
                 roots = engine_state.user_config.workspace_roots
-                if ws_path in roots:
-                    roots.remove(ws_path)
-                    roots.insert(0, ws_path)
+                existing = find_workspace_root(roots, ws_path)
+                if existing is not None:
+                    roots.remove(existing)
+                    roots.insert(0, existing)
                     save_config(engine_state.user_config)
                     from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
                     GLOBAL_SKILL_MANAGER.update_workspace_roots(roots)
                     await ws.send_text(Event(
                         type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
                         request_id=req_id,
-                        payload={"success": True, "path": ws_path},
+                        payload={"success": True, "path": existing},
                     ).to_json())
                 else:
                     await ws.send_text(Event(
@@ -4547,8 +4778,8 @@ async def ws_tasks(ws: WebSocket):
                 await _stop_voice_session()
                 voice_session_id = msg.payload.get("session_id")
                 if not voice_session_id:
-                    voice_session_id = await asyncio.to_thread(
-                        session_store.create_session, "Voice conversation")
+                    voice_session_id, _binding = await _create_bound_session(
+                        "Voice conversation")
                 cfg = engine_state.user_config
                 voice_error: str | None = None
                 voice_pipeline = None

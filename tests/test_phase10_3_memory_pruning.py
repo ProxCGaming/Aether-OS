@@ -163,8 +163,8 @@ def _entities():
         return {r[0] for r in conn.execute("SELECT name FROM entities")}
 
 
-def _insert_session(title, age_days, n_messages=2):
-    session_id = session_store.create_session(title)
+def _insert_session(title, age_days, n_messages=2, workspace=None):
+    session_id = session_store.create_session(title, workspace=workspace)
     for i in range(n_messages):
         session_store.add_message(session_id, "user", f"message {i}")
     # Backdate last activity (create/add use now).
@@ -306,6 +306,123 @@ def test_session_count_cap_keeps_newest(isolated_memory):
     assert session_store.get_session(ids[0]) is None
     assert session_store.get_session(ids[1]) is not None
     assert session_store.get_session(ids[2]) is not None
+
+
+# --- sessions: per-workspace buckets (grill Q12) -----------------------------
+#
+# Q12 (owner-decided): the session caps apply PER BUCKET, not globally.
+# A bucket is one workspace binding (a canonical root path); unbound
+# sessions (workspace IS NULL) form their own bucket — the "No
+# workspace" bucket. The numbers are unchanged (180 days / newest 200);
+# only their scope moved. The pre-existing session tests above all use
+# a single (unbound) bucket, so their expectations are unchanged.
+
+WS_A = "/ws/alpha"
+WS_B = "/ws/beta"
+
+
+def _bulk_insert_sessions(tag, workspace, count, base_ts):
+    """Insert ``count`` sessions by direct SQL (fast path for cap tests).
+
+    updated_at increases with the index, so index 0 is the oldest.
+    """
+    session_store.init_db()
+    ids = []
+    with session_store._get_conn() as conn:
+        for i in range(count):
+            sid = f"bulk-{tag}-{i}"
+            ts = base_ts + i
+            conn.execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at, workspace)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (sid, f"Bulk {tag} {i}", ts, ts, workspace),
+            )
+            ids.append(sid)
+        conn.commit()
+    return ids
+
+
+def test_session_count_cap_applies_per_workspace_bucket(isolated_memory):
+    buckets = {}
+    for ws in (WS_A, WS_B, None):
+        buckets[ws] = [
+            _insert_session(f"Chat {ws} {i}", age_days=age, workspace=ws)
+            for i, age in enumerate([3, 2, 1])
+        ]
+
+    result = session_store.prune_sessions(retention_days=0, max_sessions=2)
+
+    # One excess session per bucket. A global cap of 2 would have
+    # kept only the 2 newest of all 9.
+    assert result["pruned_sessions"] == 3
+    for ws, ids in buckets.items():
+        assert session_store.get_session(ids[0]) is None  # bucket's oldest
+        assert session_store.get_session(ids[1]) is not None
+        assert session_store.get_session(ids[2]) is not None
+        assert len(session_store.list_sessions(ws)) == 2
+
+
+def test_busy_bucket_overflow_does_not_evict_quiet_bucket(isolated_memory):
+    quiet_ids = [
+        _insert_session("Quiet recent", age_days=100, workspace="/ws/quiet"),
+        _insert_session("Quiet older", age_days=110, workspace="/ws/quiet"),
+    ]
+    busy_ids = [
+        _insert_session(f"Busy {i}", age_days=age)
+        for i, age in enumerate([5, 4, 3, 2, 1])
+    ]
+
+    result = session_store.prune_sessions(retention_days=180, max_sessions=3)
+
+    # The busy (unbound) bucket sheds its own 2 oldest. The quiet
+    # bucket is within both of its own bounds (2 <= 3 sessions, last
+    # activity < 180 days ago) and is untouched — under the old
+    # global cap both quiet sessions were the oldest rows overall
+    # and would have been evicted by the busy bucket's overflow.
+    assert result["pruned_sessions"] == 2
+    for sid in quiet_ids:
+        assert session_store.get_session(sid) is not None
+    assert session_store.get_session(busy_ids[0]) is None
+    assert session_store.get_session(busy_ids[1]) is None
+    for sid in busy_ids[2:]:
+        assert session_store.get_session(sid) is not None
+
+
+def test_session_age_pruning_applies_within_each_bucket(isolated_memory):
+    victims, keepers = [], []
+    for ws in (WS_A, WS_B, None):
+        victims.append(
+            _insert_session(f"Old {ws}", age_days=200, n_messages=2, workspace=ws)
+        )
+        keepers.append(
+            _insert_session(f"New {ws}", age_days=1, n_messages=2, workspace=ws)
+        )
+
+    result = session_store.prune_sessions(retention_days=180, max_sessions=0)
+
+    # One age victim per bucket, each pruned as a unit (messages
+    # cascade, counted per bucket and summed).
+    assert result["pruned_sessions"] == 3
+    assert result["pruned_messages"] == 6
+    for sid in victims:
+        assert session_store.get_session(sid) is None
+        assert _session_message_count(sid) == 0
+    for sid in keepers:
+        assert session_store.get_session(sid) is not None
+
+
+def test_bucket_at_exactly_max_sessions_keeps_everything(isolated_memory):
+    base = NOW - 10 * DAY
+    full_ids = _bulk_insert_sessions("alpha", WS_A, 200, base)
+    over_ids = _bulk_insert_sessions("beta", WS_B, 201, base)
+
+    result = session_store.prune_sessions(retention_days=0, max_sessions=200)
+
+    # Bucket A sits exactly at the cap: nothing is pruned from it.
+    # Bucket B is one over: exactly its oldest session goes.
+    assert result["pruned_sessions"] == 1
+    assert {s["id"] for s in session_store.list_sessions(WS_A)} == set(full_ids)
+    assert {s["id"] for s in session_store.list_sessions(WS_B)} == set(over_ids[1:])
 
 
 # --- prune_all + config ------------------------------------------------------

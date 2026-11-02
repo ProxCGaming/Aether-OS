@@ -1,7 +1,9 @@
 """Provider registry and persisted user config (~/.aether/config.json) with dynamic discovered models."""
 import json
 import logging
+import ntpath
 import os
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -391,7 +393,7 @@ class UserConfig:
             approval_binding_mode=d.get("approval_binding_mode") if d.get("approval_binding_mode") in ("rebind", "carry") else "rebind",
             search_provider=d.get("search_provider") if d.get("search_provider") in ("ddgs", "exa", "brave", "tavily", "firecrawl") else "ddgs",
             search_fallback_to_ddgs=bool(d.get("search_fallback_to_ddgs", False)),
-            workspace_roots=d.get("workspace_roots") if isinstance(d.get("workspace_roots"), list) else [],
+            workspace_roots=_clean_workspace_roots(d.get("workspace_roots")),
             repo_map_token_budget=_as_int(d.get("repo_map_token_budget"), 1000),
             embedding_model=str(d.get("embedding_model") or "qwen3-embedding:0.6b"),
             agent_models=_as_dict(d.get("agent_models")),
@@ -482,6 +484,110 @@ def _clean_ttsr_rules(raw) -> list[dict]:
     from aether_engine.providers.ttsr import clean_ttsr_rules
 
     return clean_ttsr_rules(raw)
+
+
+# ---------------------------------------------------------------------------
+# Workspace root identity (per-workspace sessions, grill Q2/Q8)
+#
+# A workspace root IS its canonical path string: sessions bind to it
+# (session_store's nullable ``workspace`` column) and every other
+# root-keyed consumer compares against it, so there is exactly one
+# spelling per folder everywhere the engine writes a root down.
+# ---------------------------------------------------------------------------
+
+def canonical_workspace_root(raw):
+    """The one canonical spelling of a workspace root.
+
+    Steps, in order: ``~`` is expanded, the path is made absolute,
+    and symlinks are resolved (``Path.resolve`` — which also
+    collapses ``.``/``..`` segments and strips trailing separators).
+    Resolution never requires the folder to exist, so a
+    missing-folder root — a state the Projects view renders
+    deliberately — canonicalises like any other. The stored form
+    keeps the filesystem's real casing; only comparison folds case,
+    and only on Windows (see :func:`workspace_root_key`).
+
+    Total by design: non-string input, and strings that are empty or
+    all whitespace, come back unchanged, so config load can run this
+    over anything a file contains without raising.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return raw
+    return str(Path(raw).expanduser().resolve())
+
+
+def workspace_root_key(root, platform: str | None = None) -> str:
+    """The comparison key for a workspace root's identity.
+
+    Two roots are the same workspace iff their keys match. On
+    Windows the key is ``ntpath.normcase`` of the canonical form
+    (lower-cased, backslash separators) because folder identity
+    there is case-insensitive; on POSIX the canonical form itself
+    is the key — case is significant, exactly as the filesystem
+    treats it.
+    """
+    canonical = canonical_workspace_root(root)
+    if not isinstance(canonical, str):
+        return canonical
+    plat = sys.platform if platform is None else platform
+    if plat == "win32":
+        return ntpath.normcase(canonical)
+    return canonical
+
+
+def find_workspace_root(roots, raw) -> str | None:
+    """The stored root canonically equal to ``raw``, else None."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    key = workspace_root_key(raw)
+    for entry in roots or []:
+        if isinstance(entry, str) and workspace_root_key(entry) == key:
+            return entry
+    return None
+
+
+def remove_workspace_root(roots: list, raw) -> str | None:
+    """Remove the stored root canonically equal to ``raw``, in place.
+
+    Returns the canonical path that was removed, or None when no
+    stored root matches. The WORKSPACE_REMOVE handler reports this
+    value, and session unbinding on remove (slice 3) keys off it —
+    a session binding names the canonical root, never the spelling
+    a caller happened to address it by.
+    """
+    existing = find_workspace_root(roots, raw)
+    if existing is None:
+        return None
+    roots.remove(existing)
+    return existing
+
+
+def _clean_workspace_roots(raw) -> list:
+    """Load-time identity hygiene for ``workspace_roots``.
+
+    Every string entry is stored in canonical form, and entries
+    that canonicalise equal collapse to the FIRST occurrence (Q8),
+    so a config file carrying two spellings of one folder loads as
+    a single workspace — and path bindings recorded against the
+    folder match the surviving entry. Non-string debris passes
+    through untouched: load stays total and quiet, as from_dict
+    promises everywhere else.
+    """
+    if not isinstance(raw, list):
+        return []
+    cleaned: list = []
+    seen: set = set()
+    for entry in raw:
+        if not isinstance(entry, str):
+            cleaned.append(entry)
+            continue
+        canonical = canonical_workspace_root(entry)
+        key = workspace_root_key(canonical)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(canonical)
+    return cleaned
 
 def load_config(path: Path | None = None) -> UserConfig:
     p = path or CONFIG_PATH

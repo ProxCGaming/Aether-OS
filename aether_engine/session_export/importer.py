@@ -26,6 +26,18 @@ from aether_engine.memory import session_store
 
 logger = logging.getLogger("aether_engine.session_export.importer")
 
+# Per-workspace sessions (grill Q9, superseded form): there is no
+# workspace export and a session's binding does NOT travel as a filing
+# instruction. An export may name the session's home workspace as a
+# provenance label; an import IGNORES that value for filing and always
+# restores the session unbound ("No workspace"). Successful import
+# results state the outcome under ``workspace`` (always None) and
+# ``workspace_note``.
+IMPORT_WORKSPACE_NOTE = (
+    "Imported into No workspace (the workspace named in the export is "
+    "a provenance label only; the binding does not transfer)"
+)
+
 # M15 residual (EGM S4 M12): format gate + size caps.
 #
 # Every export this app produces carries ``format_version: 1`` (the
@@ -192,6 +204,10 @@ def _restore_session_to_db(
                     f"Session id {session_id} is already in use"
                 )
 
+        # The workspace column is deliberately NOT written here: an
+        # imported session always lands unbound (workspace NULL),
+        # whatever provenance label the export carried (see
+        # IMPORT_WORKSPACE_NOTE).
         conn.execute(
             "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
             (session_id, title, created_at, updated_at),
@@ -258,6 +274,8 @@ def import_session_json(content: str | None = None, file_path: str | Path | None
             "title": title,
             "message_count": count,
             "error": None,
+            "workspace": None,
+            "workspace_note": IMPORT_WORKSPACE_NOTE,
         }
     except json.JSONDecodeError as e:
         return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": f"Invalid JSON format: {e}"}
@@ -502,6 +520,8 @@ def import_session_archive(archive_path: str | Path | None = None, content: str 
                     "title": title,
                     "message_count": count,
                     "error": None,
+                    "workspace": None,
+                    "workspace_note": IMPORT_WORKSPACE_NOTE,
                 }
     except zipfile.BadZipFile as e:
         return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": f"Corrupt ZIP archive: {e}"}

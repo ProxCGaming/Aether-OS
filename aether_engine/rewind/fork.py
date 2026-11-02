@@ -240,7 +240,11 @@ def fork_session_at(
                 return _refusal(source_session_id, plan)
             keep = plan
         if is_empty:
-            new_id = session_store.create_session(title)
+            # The store's fork_session inherits the binding on every
+            # other path; this empty-fork branch creates directly, so
+            # it must pass the source's binding explicitly or the
+            # fork would silently land unbound.
+            new_id = session_store.create_session(title, source.get("workspace"))
             copied = 0
             result = {"new_session_id": new_id, "title": title,
                       "messages_copied": 0}
@@ -281,6 +285,9 @@ def fork_session_at(
         "new_session_id": result["new_session_id"],
         "source_session_id": source_session_id,
         "title": result["title"],
+        # The fork inherits the source's binding (slice 1); the
+        # response names it so the caller files the fork correctly.
+        "workspace": stored.get("workspace") if stored else source.get("workspace"),
         "messages_copied": copied,
         "messages": stored["messages"] if stored else [],
         "error": None,

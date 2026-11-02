@@ -157,6 +157,37 @@ h1, h2, h3 {
   }
 }
 
+/* Per-workspace sessions (Q6): the per-row "Move to…" affordance,
+   revealed on hover like the rename button beside it. */
+.session-move-btn {
+  background: transparent;
+  border: none;
+  color: #a78bfa;
+  opacity: 0;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.session-item:hover .session-move-btn {
+  opacity: 0.6;
+}
+
+.session-move-btn:hover {
+  opacity: 1 !important;
+  background: rgba(124, 58, 237, 0.18);
+}
+
+@media (hover: none) {
+  .session-move-btn {
+    opacity: 0.6;
+  }
+}
+
 .close-btn:hover {
   background: #e81123;
   color: white;

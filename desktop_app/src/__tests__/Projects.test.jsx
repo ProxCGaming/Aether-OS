@@ -66,7 +66,7 @@ describe('Projects', () => {
     delete window.electronAPI;
   });
 
-  it('sends WORKSPACE_REMOVE_REQUEST when removing a workspace', () => {
+  it('sends WORKSPACE_REMOVE_REQUEST when removing a workspace (after the confirmation)', () => {
     const { wsRef, getHandler } = makeWsRef();
     render(<Projects wsRef={wsRef} />);
     act(() => {
@@ -78,7 +78,11 @@ describe('Projects', () => {
       });
     });
     // The remove button is the Trash2 icon button next to the workspace.
+    // Per-workspace sessions (Q7): the click now arms a confirmation
+    // first — nothing is sent until it is confirmed.
     fireEvent.click(screen.getByTitle('Remove workspace'));
+    expect(sentTypes(wsRef)).not.toContain('WORKSPACE_REMOVE_REQUEST');
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
 
     const removeCalls = wsRef.current.send.mock.calls
       .map(([raw]) => JSON.parse(raw))
@@ -166,5 +170,85 @@ describe('Projects workspace badges (E6-F11)', () => {
     });
     expect(screen.getByText('Active')).toBeInTheDocument();
     expect(screen.getByText('Folder missing')).toBeInTheDocument();
+  });
+});
+
+describe('Projects per-workspace session counts (renderer slice, Q7)', () => {
+  const seedList = (getHandler, payload) => {
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({ type: 'WORKSPACE_LIST_RESPONSE', payload }),
+      });
+    });
+  };
+
+  it('shows each workspace session_count and the unbound count on a No workspace line', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<Projects wsRef={wsRef} />);
+    seedList(getHandler, {
+      workspaces: [
+        { path: '/home/user/proj', name: 'proj', is_indexed: false, is_active: true, exists: true, session_count: 2 },
+        { path: '/home/user/solo', name: 'solo', is_indexed: false, is_active: false, exists: true, session_count: 1 },
+      ],
+      unbound_session_count: 3,
+    });
+
+    expect(screen.getByText('2 sessions')).toBeInTheDocument();
+    expect(screen.getByText('1 session')).toBeInTheDocument();
+    expect(screen.getByText('No workspace')).toBeInTheDocument();
+    expect(screen.getByText('3 unbound sessions')).toBeInTheDocument();
+  });
+
+  it('the remove confirmation names the unbinding with the count, before anything is sent', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<Projects wsRef={wsRef} />);
+    seedList(getHandler, {
+      workspaces: [
+        { path: '/home/user/proj', name: 'proj', is_indexed: false, is_active: true, exists: true, session_count: 2 },
+      ],
+      unbound_session_count: 0,
+    });
+
+    wsRef.current.send.mockClear();
+    fireEvent.click(screen.getByTitle('Remove workspace'));
+
+    expect(
+      screen.getByText('2 sessions will move to No workspace — nothing is deleted.')
+    ).toBeInTheDocument();
+    expect(sentTypes(wsRef)).not.toContain('WORKSPACE_REMOVE_REQUEST');
+
+    // Cancel backs out with nothing sent and the row intact.
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(sentTypes(wsRef)).not.toContain('WORKSPACE_REMOVE_REQUEST');
+    expect(screen.getByText('/home/user/proj')).toBeInTheDocument();
+    expect(
+      screen.queryByText('2 sessions will move to No workspace — nothing is deleted.')
+    ).not.toBeInTheDocument();
+  });
+
+  it('a successful remove reply folds the unbound count into the No workspace line', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<Projects wsRef={wsRef} />);
+    seedList(getHandler, {
+      workspaces: [
+        { path: '/home/user/proj', name: 'proj', is_indexed: false, is_active: true, exists: true, session_count: 2 },
+      ],
+      unbound_session_count: 1,
+    });
+    expect(screen.getByText('1 unbound session')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('Remove workspace'));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_REMOVE_RESPONSE',
+          payload: { success: true, path: '/home/user/proj', unbound_sessions: 2 },
+        }),
+      });
+    });
+
+    expect(screen.queryByText('/home/user/proj')).not.toBeInTheDocument();
+    expect(screen.getByText('3 unbound sessions')).toBeInTheDocument();
   });
 });

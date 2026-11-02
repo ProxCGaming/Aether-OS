@@ -151,6 +151,16 @@ class EventType(str, Enum):
     # the fork's retained messages exactly as stored (M12).
     SESSION_FORK_REQUEST = "SESSION_FORK_REQUEST"
     SESSION_FORK_RESPONSE = "SESSION_FORK_RESPONSE"
+    # Per-workspace sessions, slice 3: SESSION_MOVE re-files a
+    # session under another workspace, or unbinds it with a null
+    # workspace (bulk move is the renderer looping this pair).
+    # Binding is organisational only (grill Q11) — a move touches
+    # no history or checkpoints. Request: {session_id,
+    # workspace: path | null}; response: {session_id, workspace,
+    # moved} (+ error on refusal), where workspace is the session's
+    # binding after the request, moved or not.
+    SESSION_MOVE_REQUEST = "SESSION_MOVE_REQUEST"
+    SESSION_MOVE_RESPONSE = "SESSION_MOVE_RESPONSE"
     # Epic 8, E8-2.1: Canvas A - artifact store + per-session panel
     ARTIFACT_LIST_REQUEST = "ARTIFACT_LIST_REQUEST"
     ARTIFACT_LIST_RESPONSE = "ARTIFACT_LIST_RESPONSE"

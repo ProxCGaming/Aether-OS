@@ -54,6 +54,14 @@ No new scope is decided here. The dispositions of record are:
    documents the divergence rather than resolving it. Building
    per-workspace sessions remains a fresh decision plus a
    data-model change.
+   **Update (2 Nov 2026): superseded by ADR 0042.** The fresh
+   decision was taken later the same day (owner grill, 12
+   questions) and per-workspace sessions were built in the
+   programme ADR 0042 records (store binding `7eba58a`, canonical
+   identity `0f1e5ed`, socket binding `13db655`, per-workspace
+   retention `b7ae06a`, desktop `7dedbb1`, export/import
+   provenance in the final slice). The divergence recorded above
+   is closed.
 5. **Handed-off Settings suite (Epics 1–2 → Epic 6).** The Epic 1
    and 2 summaries handed a suite of Settings editors to Epic 6;
    the Epic 6 close-out did not mention them and they were not

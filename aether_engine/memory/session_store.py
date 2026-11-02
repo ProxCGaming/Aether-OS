@@ -18,11 +18,13 @@ DB_PATH = Path.home() / ".aether" / "memory.db"
 
 # E4-F11: application schema version for this store's tables.
 # 1 = the original sessions/session_messages schema; 2 = the
-# thoughts + attachments columns on session_messages. Bump with
+# thoughts + attachments columns on session_messages; 3 = the
+# nullable workspace column on sessions (per-workspace sessions:
+# the canonicalised workspace root path, NULL = unbound). Bump with
 # every migration; init records the marker via
 # _record_schema_version so a future migration can gate on it
 # instead of re-deriving the schema's generation from its shape.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_META_DDL = """
     CREATE TABLE IF NOT EXISTS aether_schema_meta (
@@ -100,15 +102,57 @@ def init_db() -> None:
             conn.execute("ALTER TABLE session_messages ADD COLUMN attachments TEXT")
         except sqlite3.OperationalError:
             pass
+        # Schema v3: the per-workspace binding. Nullable on purpose —
+        # pre-existing rows land as unbound ("No workspace"); there
+        # is deliberately no backfill (grill Q1/Q4).
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN workspace TEXT")
+        except sqlite3.OperationalError:
+            pass
         _record_schema_version(conn, "sessions", SCHEMA_VERSION)
         conn.commit()
     _initialized = DB_PATH
 
-def list_sessions() -> list[dict[str, Any]]:
+class _AllWorkspaces:
+    """Sentinel for list_sessions(): no workspace filter."""
+
+    def __repr__(self) -> str:
+        return "ALL_WORKSPACES"
+
+
+#: Default filter for list_sessions(): every session, bound or not.
+#: ``workspace=None`` cannot mean "no filter" there — it is the
+#: explicit unbound-only state — so the no-filter state needs its
+#: own unambiguous value.
+ALL_WORKSPACES = _AllWorkspaces()
+
+
+def list_sessions(workspace: str | None | _AllWorkspaces = ALL_WORKSPACES) -> list[dict[str, Any]]:
+    """List sessions, most recently updated first.
+
+    The ``workspace`` filter has three unambiguous states:
+
+    - omitted / ``ALL_WORKSPACES``: no filter — every session;
+    - a path string: only sessions bound to that workspace (the
+      value is matched exactly; canonical form is the caller's job);
+    - ``None``: only unbound sessions (``workspace IS NULL``), the
+      "No workspace" bucket.
+
+    Each returned dict carries the session's ``workspace`` binding
+    (a path string or None).
+    """
     init_db()
     with _get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM sessions ORDER BY updated_at DESC")
+        if isinstance(workspace, _AllWorkspaces):
+            cur.execute("SELECT * FROM sessions ORDER BY updated_at DESC")
+        elif workspace is None:
+            cur.execute("SELECT * FROM sessions WHERE workspace IS NULL ORDER BY updated_at DESC")
+        else:
+            cur.execute(
+                "SELECT * FROM sessions WHERE workspace = ? ORDER BY updated_at DESC",
+                (workspace,),
+            )
         return [dict(row) for row in cur.fetchall()]
 
 def get_session(session_id: str) -> dict[str, Any] | None:
@@ -160,17 +204,42 @@ def get_session(session_id: str) -> dict[str, Any] | None:
         session["messages"] = messages
         return session
 
-def create_session(title: str = "New Chat") -> str:
+def create_session(title: str = "New Chat", workspace: str | None = None) -> str:
+    """Create a session, optionally bound to a workspace.
+
+    ``workspace`` is the canonicalised workspace root path, stored
+    verbatim (canonicalisation is the caller's job); None creates an
+    unbound session (the "No workspace" bucket).
+    """
     init_db()
     session_id = str(uuid.uuid4())
     now = int(time.time())
     with _get_conn() as conn:
         conn.execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (session_id, title, now, now)
+            "INSERT INTO sessions (id, title, created_at, updated_at, workspace) VALUES (?, ?, ?, ?, ?)",
+            (session_id, title, now, now, workspace)
         )
         conn.commit()
     return session_id
+
+
+def set_session_workspace(session_id: str, workspace: str | None) -> bool:
+    """Move a session to a workspace, or to unbound with None.
+
+    This is a filing change only (grill Q6/Q11): it deliberately does
+    not touch ``updated_at`` — pruning judges age on last activity,
+    and moving a session is not activity. Returns False when no such
+    session exists.
+    """
+    init_db()
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE sessions SET workspace = ? WHERE id = ?",
+            (workspace, session_id)
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 # Client-supplied message ids (edit-and-resend hardening): the UI
 # generates the id for a user message and sends it with START_TASK, so
@@ -246,7 +315,8 @@ def fork_session(source_session_id: str, cut_message_id: str | None, new_title: 
     ``cut_message_id`` is the last message copied (inclusive); None
     copies the whole session. The cut id is resolved inside the
     source session only — an id that lives in another session never
-    cuts this one. Returns {"new_session_id", "title",
+    cuts this one. The fork inherits the source's workspace binding.
+    Returns {"new_session_id", "title", "workspace",
     "messages_copied"}, or None when the source session or the cut
     message cannot be resolved (nothing is created in that case).
     The source is only ever read.
@@ -272,9 +342,10 @@ def fork_session(source_session_id: str, cut_message_id: str | None, new_title: 
         new_id = str(uuid.uuid4())
         now = int(time.time())
         title = new_title if new_title else source["title"]
+        workspace = source["workspace"]
         conn.execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (new_id, title, now, now)
+            "INSERT INTO sessions (id, title, created_at, updated_at, workspace) VALUES (?, ?, ?, ?, ?)",
+            (new_id, title, now, now, workspace)
         )
         for m in rows:
             conn.execute(
@@ -282,7 +353,7 @@ def fork_session(source_session_id: str, cut_message_id: str | None, new_title: 
                 (str(uuid.uuid4()), new_id, m["role"], m["content"], m["thoughts"], m.get("attachments"), m["timestamp"])
             )
         conn.commit()
-    return {"new_session_id": new_id, "title": title, "messages_copied": len(rows)}
+    return {"new_session_id": new_id, "title": title, "workspace": workspace, "messages_copied": len(rows)}
 
 
 def delete_session(session_id: str) -> bool:
@@ -321,7 +392,7 @@ def search_sessions(query: str, limit: int = 20) -> list[dict[str, Any]]:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT s.id, s.title, s.updated_at,
+            SELECT s.id, s.title, s.updated_at, s.workspace,
                    (SELECT substr(m.content, 1, 140) FROM session_messages m
                      WHERE m.session_id = s.id AND m.content LIKE ?
                      ORDER BY m.timestamp ASC, m.rowid ASC LIMIT 1) AS snippet
@@ -335,7 +406,7 @@ def search_sessions(query: str, limit: int = 20) -> list[dict[str, Any]]:
             (like, like, like, int(limit)),
         )
         return [
-            {"id": r[0], "title": r[1], "updated_at": r[2], "snippet": r[3] or ""}
+            {"id": r[0], "title": r[1], "updated_at": r[2], "workspace": r[3], "snippet": r[4] or ""}
             for r in cur.fetchall()
         ]
 
@@ -449,6 +520,16 @@ def get_chat_history(session_id: str, current_prompt: str | None = None, *, limi
 # messages go with it via the ON DELETE CASCADE foreign key, never left
 # orphaned. Age is judged on updated_at (last activity), not created_at,
 # so a long-lived but active chat is not pruned.
+#
+# Scope (grill Q12, owner-decided): both bounds apply PER BUCKET, not
+# globally. A bucket is one workspace binding value — each canonical
+# root path is a bucket of its own, and unbound sessions (workspace
+# IS NULL) form the "No workspace" bucket. The numbers are the config
+# numbers unchanged; only their scope moved, so one busy workspace's
+# overflow can never evict a quiet workspace's sessions. The age bound
+# is a per-row predicate on updated_at, so applying it inside each
+# bucket selects exactly the rows a single DELETE selects; the count
+# bound is the one that genuinely partitions (see prune_sessions).
 # ---------------------------------------------------------------------------
 
 def prune_sessions(retention_days: int | None = None,
@@ -457,7 +538,13 @@ def prune_sessions(retention_days: int | None = None,
                    now: int | None = None) -> dict[str, int]:
     """Prune sessions by age (on updated_at), then by count (oldest first).
 
-    Returns counts and logs them to the audit log (SESSIONS_PRUNED).
+    Both bounds are enforced within each workspace bucket
+    independently: the count cap keeps the newest ``max_sessions``
+    sessions of EVERY bucket (each bound workspace, and the unbound
+    "No workspace" bucket), not the newest overall. Age pruning is a
+    per-row updated_at predicate, applied as one DELETE — identical
+    to judging it bucket by bucket. Returns counts and logs them to
+    the audit log (SESSIONS_PRUNED).
     """
     cfg = config if config is not None else load_config()
     if retention_days is None:
@@ -483,14 +570,23 @@ def prune_sessions(retention_days: int | None = None,
             pruned_sessions += cur.rowcount
 
         if max_sessions and max_sessions > 0:
-            total = cur.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-            excess = total - int(max_sessions)
-            if excess > 0:
-                rows = cur.execute(
-                    "SELECT id FROM sessions ORDER BY updated_at ASC LIMIT ?",
-                    (excess,),
-                ).fetchall()
-                ids = [r["id"] for r in rows]
+            # Per-bucket count cap (grill Q12): rank sessions inside
+            # their workspace bucket by recency and take every row
+            # ranked beyond the cap. PARTITION BY workspace puts all
+            # NULL bindings in one partition — the unbound bucket —
+            # matching GROUP BY semantics. Ties on updated_at break
+            # by rowid DESC (later-inserted ranks newer), mirroring
+            # the old global query's oldest-first deletion order.
+            rows = cur.execute(
+                "SELECT id FROM ("
+                "SELECT id, ROW_NUMBER() OVER ("
+                "PARTITION BY workspace ORDER BY updated_at DESC, rowid DESC"
+                ") AS rn FROM sessions"
+                ") WHERE rn > ?",
+                (int(max_sessions),),
+            ).fetchall()
+            ids = [r["id"] for r in rows]
+            if ids:
                 placeholders = ",".join("?" for _ in ids)
                 pruned_messages += cur.execute(
                     "SELECT COUNT(*) FROM session_messages WHERE session_id IN "

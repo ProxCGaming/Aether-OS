@@ -4,6 +4,11 @@ import './chat.css';
 
 export default function Projects({ wsRef }) {
   const [workspaces, setWorkspaces] = useState([]);
+  // Per-workspace sessions: the reply-level count of sessions filed
+  // under no workspace, and the row currently armed for removal
+  // (the Q7 confirmation shows before any REMOVE is sent).
+  const [unboundSessionCount, setUnboundSessionCount] = useState(null);
+  const [confirmRemovePath, setConfirmRemovePath] = useState(null);
 
   // Fetch workspace list from engine on mount
   useEffect(() => {
@@ -14,6 +19,9 @@ export default function Projects({ wsRef }) {
         const data = JSON.parse(event.data);
         if (data.type === 'WORKSPACE_LIST_RESPONSE') {
           setWorkspaces(data.payload.workspaces || []);
+          if (typeof data.payload.unbound_session_count === 'number') {
+            setUnboundSessionCount(data.payload.unbound_session_count);
+          }
         } else if (data.type === 'WORKSPACE_ADD_RESPONSE') {
           if (data.payload.success && data.payload.workspace) {
             setWorkspaces(prev => [...prev, data.payload.workspace]);
@@ -29,6 +37,13 @@ export default function Projects({ wsRef }) {
           }
         } else if (data.type === 'WORKSPACE_REMOVE_RESPONSE') {
           if (data.payload.success) {
+            setConfirmRemovePath(null);
+            // Q7: the sessions the removed root owned are unbound
+            // now — the engine reports how many in the reply, so
+            // the No workspace line stays true without a refetch.
+            if (typeof data.payload.unbound_sessions === 'number') {
+              setUnboundSessionCount(prev => (prev ?? 0) + data.payload.unbound_sessions);
+            }
             setWorkspaces(prev => {
               const remaining = prev.filter(w => w.path !== data.payload.path);
               // E6-F11: the first root is the active workspace (the
@@ -131,9 +146,32 @@ export default function Projects({ wsRef }) {
               <div>
                 <h3 style={{ fontSize: '16px', margin: '0 0 4px 0' }}>{ws.name}</h3>
                 <p style={{ color: '#9090a0', margin: 0, fontSize: '13px', fontFamily: 'monospace' }}>{ws.path}</p>
+                {typeof ws.session_count === 'number' && (
+                  <p style={{ color: '#a78bfa', margin: '4px 0 0 0', fontSize: '12px' }}>{ws.session_count} session{ws.session_count === 1 ? '' : 's'}</p>
+                )}
               </div>
             </div>
             <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+              {confirmRemovePath === ws.path ? (
+                <>
+                  <span style={{ color: '#fca5a5', fontSize: '12px', maxWidth: '300px' }}>
+                    {ws.session_count ?? 0} session{(ws.session_count ?? 0) === 1 ? '' : 's'} will move to No workspace — nothing is deleted.
+                  </span>
+                  <button
+                    onClick={() => handleRemoveWorkspace(ws.path)}
+                    style={{ background: 'rgba(239, 68, 68, 0.85)', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}
+                  >
+                    Remove
+                  </button>
+                  <button
+                    onClick={() => setConfirmRemovePath(null)}
+                    style={{ background: 'rgba(255,255,255,0.06)', color: '#e2e8f0', border: '1px solid rgba(255,255,255,0.15)', padding: '6px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px' }}
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+              <>
               {ws.is_active && (
                 <div style={{ color: '#a78bfa', fontSize: '12px', border: '1px solid rgba(167,139,250,0.5)', borderRadius: '8px', padding: '3px 10px' }}>Active</div>
               )}
@@ -155,16 +193,27 @@ export default function Projects({ wsRef }) {
                 </div>
               )}
               <button 
-                onClick={() => handleRemoveWorkspace(ws.path)}
+                onClick={() => setConfirmRemovePath(ws.path)}
                 title="Remove workspace"
                 aria-label={`Remove workspace ${ws.path}`}
                 style={{ background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: 'none', padding: '8px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               >
                 <Trash2 size={16} />
               </button>
+              </>
+              )}
             </div>
           </div>
         ))}
+        {unboundSessionCount !== null && (
+          <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px dashed rgba(255,255,255,0.12)', borderRadius: '16px', padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <h3 style={{ fontSize: '14px', margin: '0 0 4px 0', color: '#e2e8f0' }}>No workspace</h3>
+              <p style={{ color: '#9090a0', margin: 0, fontSize: '13px' }}>Sessions not filed under any workspace.</p>
+            </div>
+            <div style={{ color: '#a78bfa', fontSize: '13px' }}>{unboundSessionCount} unbound session{unboundSessionCount === 1 ? '' : 's'}</div>
+          </div>
+        )}
         {workspaces.length === 0 && (
           <div style={{ textAlign: 'center', color: '#9090a0', padding: '40px', background: 'rgba(255,255,255,0.02)', borderRadius: '16px' }}>
             No workspaces added. Add a local folder to get started.

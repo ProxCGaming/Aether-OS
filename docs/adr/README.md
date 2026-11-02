@@ -44,3 +44,4 @@ New ADRs use the next sequential 4-digit number: `NNNN-short-slug.md`.
 - [0039 — Autonomous supervisor memory orchestration](0039-autonomous-supervisor-memory-orchestration.md) (filed as 0019; renumbered to 0039 on 2 Nov 2026 to resolve the duplicate 0019)
 - [0040 — Learned and Consolidated Memory Documents (E4-10)](0040-learned-and-consolidated-memory-documents.md)
 - [0041 — Dispositions for the Plan-Addendum Reversals](0041-addendum-reversal-dispositions.md)
+- [0042 — Per-Workspace Sessions](0042-per-workspace-sessions.md)

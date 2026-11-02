@@ -5,7 +5,7 @@ import { SocketProvider, useAetherSocket } from './contexts/SocketContext';
 // interactivity don't wait on it. The Suspense fallback paints the
 // same background colour, so the graph simply fades in when ready.
 const ForceGraph3D = React.lazy(() => import('react-force-graph-3d'));
-import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, BarChart2, Minus, Square, LogIn, Menu, Pencil, Upload, Layers } from 'lucide-react';
+import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, FolderInput, BarChart2, Minus, Square, LogIn, Menu, Pencil, Upload, Layers } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
 import SettingsPanel from './SettingsPanel';
 import { resolveSnipHotkey } from './snipHotkey';
@@ -199,6 +199,21 @@ function AppContent() {
   const [activeSession, setActiveSession] = useState(initialSession || null);
   const activeSessionRef = useRef(initialSession || null);
   useEffect(() => { activeSessionRef.current = activeSession; }, [activeSession]);
+  // Per-workspace sessions (grill Q5/Q6/Q10): the engine's workspace
+  // rows (WORKSPACE_LIST), which the session list filters by; the
+  // list view — 'workspace' (the active root), 'all', or 'unbound';
+  // and the move machinery (per-row menu + multi-select bulk loop).
+  // The refs mirror what the once-registered message handler and
+  // the list-request helper read.
+  const [workspaces, setWorkspaces] = useState([]);
+  const [sessionListView, setSessionListView] = useState('workspace');
+  const sessionListViewRef = useRef('workspace');
+  const activeWorkspacePathRef = useRef(null);
+  const [sessionSelectMode, setSessionSelectMode] = useState(false);
+  const [selectedSessionIds, setSelectedSessionIds] = useState([]);
+  const [moveMenuFor, setMoveMenuFor] = useState(null);
+  const [moveStatus, setMoveStatus] = useState(null);
+  const moveBatchRef = useRef(null);
   // Epic 8, E8-1.1a: the active session's rewind manifest — the LAST
   // task's recorded points (label, checkpoint, files written so far),
   // fetched via REWIND_MANIFEST_GET when a session is shown and when
@@ -214,6 +229,41 @@ function AppContent() {
       payload: { session_id: sessionId },
     }));
   }, [wsRef]);
+  // Per-workspace sessions: the one place SESSION_LIST_REQUEST is
+  // built, so every refresh honours the current list view. The
+  // payload encodes the store's three filter states — no payload at
+  // all for "all" (exactly the pre-slice wire shape), a path for
+  // the active workspace, explicit null for unbound only.
+  const sendSessionListRequest = useCallback(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    const msg = { type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() };
+    const view = sessionListViewRef.current;
+    if (view === 'unbound') {
+      msg.payload = { workspace: null };
+    } else if (view === 'workspace' && activeWorkspacePathRef.current) {
+      msg.payload = { workspace: activeWorkspacePathRef.current };
+    }
+    wsRef.current.send(JSON.stringify(msg));
+  }, [wsRef]);
+  const requestWorkspaceList = useCallback(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({
+      type: 'WORKSPACE_LIST_REQUEST',
+      schema_version: 1,
+      request_id: Date.now().toString(),
+      payload: {},
+    }));
+  }, [wsRef]);
+  // Derived workspace lookups, shared by the palette items, the
+  // search-result labels, and the sidebar filter chips. A binding
+  // is a root path; its label is the workspace's display name, or
+  // "No workspace" for an unbound (null) binding.
+  const activeWorkspaceRow = workspaces.find(w => w.is_active) || null;
+  const workspaceLabelFor = (path) => {
+    if (!path) return 'No workspace';
+    const row = workspaces.find(w => w.path === path);
+    return row ? row.name : path;
+  };
   // Epic 8, E8-1.1b: rewind execution state. rewindConfirm holds the
   // point awaiting confirmation ({entry, filesNotReverted}) for the
   // RewindConfirmModal; rewindUndo holds the staged rewind's undo
@@ -938,7 +988,7 @@ function AppContent() {
           if (data.payload?.session_id && !activeSessionRef.current) {
             setActiveSession(data.payload.session_id);
             if (wsRef.current) {
-              wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+              sendSessionListRequest();
         wsRef.current.send(JSON.stringify({ type: 'CONFIG_GET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
             }
           }
@@ -1043,12 +1093,61 @@ function AppContent() {
           } else if (isFloating && initialSession) {
             handleSessionSwitch(initialSession);
           }
+        } else if (data.type === 'WORKSPACE_LIST_RESPONSE') {
+          // Per-workspace sessions: App keeps its own copy of the
+          // workspace rows — the session list filters by the active
+          // row (see the effect below) and move menus/search labels
+          // read names from it. Projects requests the same list on
+          // the shared socket, so these replies also land here.
+          setWorkspaces(Array.isArray(data.payload?.workspaces) ? data.payload.workspaces : []);
+        } else if (data.type === 'WORKSPACE_SET_ACTIVE_RESPONSE') {
+          // The active flag lives on the LIST rows; refetch them so
+          // the workspace-change effect re-files the session list.
+          if (data.payload?.success) requestWorkspaceList();
+        } else if (data.type === 'SESSION_MOVE_RESPONSE') {
+          // Per-workspace sessions (Q6): move outcomes. A successful
+          // move re-files the row in place — its new binding rides
+          // the reply; a refusal leaves the row exactly as it was.
+          // Bulk moves settle one reply at a time into moveBatchRef;
+          // the last reply reconciles the filtered list and reports
+          // the tally honestly (n moved, m failed + first reason).
+          const p = data.payload || {};
+          if (p.moved && p.session_id) {
+            setSessions(prev => prev.map(s => s.id === p.session_id ? { ...s, workspace: p.workspace ?? null } : s));
+          }
+          const batch = moveBatchRef.current;
+          if (batch) {
+            batch.settled += 1;
+            if (p.moved) {
+              batch.moved += 1;
+            } else {
+              batch.failed += 1;
+              if (!batch.firstError) batch.firstError = p.error || 'Move refused';
+            }
+            if (batch.settled >= batch.total) {
+              moveBatchRef.current = null;
+              if (batch.total > 1) {
+                setSessionSelectMode(false);
+                setSelectedSessionIds([]);
+                setMoveStatus(batch.failed > 0
+                  ? { type: 'error', message: `${batch.moved} moved, ${batch.failed} failed: ${batch.firstError}` }
+                  : { type: 'success', message: `${batch.moved} sessions moved.` });
+              } else if (batch.failed > 0) {
+                setMoveStatus({ type: 'error', message: batch.firstError });
+              }
+              sendSessionListRequest();
+            }
+          }
         } else if (data.type === 'SLASH_COMMAND_LIST_RESPONSE') {
           setSlashCommands(data.payload.commands || []);
         } else if (data.type === 'WORKSPACE_ADD_RESPONSE' || data.type === 'WORKSPACE_REMOVE_RESPONSE') {
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: 'SLASH_COMMAND_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
             wsRef.current.send(JSON.stringify({ type: 'SKILL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+            // Per-workspace sessions: keep App's workspace rows (and
+            // therefore the session list filter) current as roots
+            // come and go.
+            requestWorkspaceList();
           }
         } else if (data.type === 'SESSION_GET_RESPONSE') {
           // Only replace chat messages if we explicitly requested a session switch and it matches exactly.
@@ -1319,7 +1418,7 @@ function AppContent() {
           }
           // Refresh list
           if (wsRef.current) {
-            wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+            sendSessionListRequest();
         wsRef.current.send(JSON.stringify({ type: 'CONFIG_GET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
           }
         } else if (data.type === 'SESSION_DELETE_RESPONSE') {
@@ -1362,26 +1461,14 @@ function AppContent() {
           // holding the history up to the chosen step. Refresh the
           // list and land the user in it; the source is untouched.
           if (data.payload?.ok && data.payload?.new_session_id) {
-            if (wsRef.current) {
-              wsRef.current.send(JSON.stringify({
-                type: 'SESSION_LIST_REQUEST',
-                schema_version: 1,
-                request_id: Date.now().toString()
-              }));
-            }
+            sendSessionListRequest();
             handleSessionSwitch(data.payload.new_session_id);
           } else if (data.payload?.error) {
             console.warn('Fork refused:', data.payload.error);
           }
         } else if (data.type === 'SESSION_IMPORT_RESPONSE') {
           if (data.payload?.ok) {
-            if (wsRef.current) {
-              wsRef.current.send(JSON.stringify({
-                type: 'SESSION_LIST_REQUEST',
-                schema_version: 1,
-                request_id: Date.now().toString()
-              }));
-            }
+            sendSessionListRequest();
             if (data.payload.session_id) {
               handleSessionSwitch(data.payload.session_id);
             }
@@ -1836,7 +1923,8 @@ function AppContent() {
     if (isConnected && !wasConnectedRef.current) {
       setStatus('Online');
       if (wsRef.current) {
-        wsRef.current.send(JSON.stringify({ type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+        sendSessionListRequest();
+        requestWorkspaceList();
         wsRef.current.send(JSON.stringify({ type: 'CONFIG_GET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
         wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
         wsRef.current.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
@@ -1864,7 +1952,24 @@ function AppContent() {
       });
     }
     wasConnectedRef.current = isConnected;
-  }, [isConnected, wsRef]);
+  }, [isConnected, wsRef, sendSessionListRequest, requestWorkspaceList]);
+
+  // Per-workspace sessions (Q5): when the ACTIVE workspace changes,
+  // the session list re-files itself under the new workspace — the
+  // view returns to 'workspace' and the list is re-requested with
+  // the new filter. Only a path change acts: count-only refreshes
+  // of the rows leave the user's chosen view (All / No workspace)
+  // alone. The open session is untouched either way — this effect
+  // only ever re-requests the LIST.
+  useEffect(() => {
+    const active = workspaces.find(w => w.is_active) || null;
+    const nextPath = active ? active.path : null;
+    if (nextPath === activeWorkspacePathRef.current) return;
+    activeWorkspacePathRef.current = nextPath;
+    sessionListViewRef.current = 'workspace';
+    setSessionListView('workspace');
+    sendSessionListRequest();
+  }, [workspaces, sendSessionListRequest]);
 
   // Epic 8, E8-2.1: sync artifacts when active session changes
   useEffect(() => {
@@ -2223,6 +2328,9 @@ function AppContent() {
       items.push({
         id: `sess-${sess.id}`, kind: 'session',
         label: sess.title || 'Untitled chat',
+        // Q10: palette session entries carry their workspace label,
+        // like the search results in the sidebar list.
+        hint: workspaceLabelFor(sess.workspace),
         run: () => { handleSessionSwitch(sess.id); setActiveTab('Chat'); },
       });
     });
@@ -2245,7 +2353,7 @@ function AppContent() {
         });
       });
     return items;
-  }, [sessions, providers, wsRef]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessions, providers, wsRef, workspaces]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Epic 6, E6-03: the wired shortcut set (the dialog lists exactly
   // these): Ctrl+K palette, Ctrl+N new chat, Ctrl+, Settings.
@@ -2585,6 +2693,91 @@ function AppContent() {
     }
   };
 
+  // Per-workspace sessions (Q5/Q6): list-view switching, selection,
+  // and moves. The view lives in a ref as well as state because the
+  // list-request helper and the message handler read it outside
+  // React's render cycle. (The workspace lookups themselves —
+  // activeWorkspaceRow / workspaceLabelFor — live above, beside the
+  // request helpers the palette memo also uses.)
+  const handleSessionListViewChange = (view) => {
+    sessionListViewRef.current = view;
+    setSessionListView(view);
+    setMoveMenuFor(null);
+    sendSessionListRequest();
+  };
+
+  const toggleSessionSelected = (sessionId) => {
+    setSelectedSessionIds(prev => (prev.includes(sessionId)
+      ? prev.filter(id => id !== sessionId)
+      : [...prev, sessionId]));
+  };
+
+  // One SESSION_MOVE_REQUEST per session: the engine has no bulk
+  // pair, so bulk move is this renderer loop over the single-move
+  // contract. Outcomes tally into moveBatchRef and settle in the
+  // SESSION_MOVE_RESPONSE branch of the message handler.
+  const startSessionMoves = (sessionIds, targetWorkspace) => {
+    if (!sessionIds.length) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    setMoveMenuFor(null);
+    setMoveStatus(null);
+    moveBatchRef.current = { total: sessionIds.length, settled: 0, moved: 0, failed: 0, firstError: null };
+    sessionIds.forEach((sid) => {
+      wsRef.current.send(JSON.stringify({
+        type: 'SESSION_MOVE_REQUEST',
+        schema_version: 1,
+        request_id: `move_${Date.now()}_${sid}`,
+        payload: { session_id: sid, workspace: targetWorkspace },
+      }));
+    });
+  };
+
+  // The move-target list shared by the per-row menu and the bulk
+  // bar: every configured workspace plus "No workspace". A session's
+  // current filing is disabled — moving there would be a no-op the
+  // UI should not offer. For the bulk menu (currentWorkspace ===
+  // undefined) nothing is disabled: a mixed selection may hold any
+  // binding.
+  const renderMoveTargets = (currentWorkspace, onPick) => (
+    <>
+      {workspaces.map(w => (
+        <button
+          key={w.path}
+          disabled={currentWorkspace === w.path}
+          onClick={() => onPick(w.path)}
+          style={{
+            background: 'rgba(255,255,255,0.05)',
+            border: '1px solid rgba(255,255,255,0.1)',
+            color: currentWorkspace === w.path ? '#9090a0' : '#fff',
+            borderRadius: '6px',
+            padding: '5px 10px',
+            cursor: currentWorkspace === w.path ? 'default' : 'pointer',
+            fontSize: '12px',
+            textAlign: 'left',
+          }}
+        >
+          {w.name}
+        </button>
+      ))}
+      <button
+        disabled={currentWorkspace === null}
+        onClick={() => onPick(null)}
+        style={{
+          background: 'rgba(255,255,255,0.05)',
+          border: '1px solid rgba(255,255,255,0.1)',
+          color: currentWorkspace === null ? '#9090a0' : '#fff',
+          borderRadius: '6px',
+          padding: '5px 10px',
+          cursor: currentWorkspace === null ? 'default' : 'pointer',
+          fontSize: '12px',
+          textAlign: 'left',
+        }}
+      >
+        No workspace
+      </button>
+    </>
+  );
+
   // Epic 1 UI batch (E1-08): debounced session search. An empty query
   // restores the normal list; results are only applied when they answer
   // the current query (see SESSION_SEARCH_RESPONSE above).
@@ -2774,6 +2967,99 @@ function AppContent() {
                 />
               </div>
 
+              {/* Per-workspace sessions (Q5): the list files itself
+                  under the active workspace; "All sessions" and
+                  "No workspace" are one click away. The chips (and
+                  the Select toggle for bulk moves, Q6) only exist
+                  when at least one workspace is configured — with
+                  none, the list is the plain unfiltered list it
+                  always was. Filtering governs the LIST only; the
+                  open session is never switched or closed by it. */}
+              {workspaces.length > 0 && (
+                <div style={{ display: 'flex', gap: '6px', padding: '0 24px', marginBottom: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  {[
+                    { view: 'workspace', label: activeWorkspaceRow ? activeWorkspaceRow.name : 'Workspace' },
+                    { view: 'all', label: 'All sessions' },
+                    { view: 'unbound', label: 'No workspace' },
+                  ].map(chip => (
+                    <button
+                      key={chip.view}
+                      aria-pressed={sessionListView === chip.view}
+                      onClick={() => handleSessionListViewChange(chip.view)}
+                      style={{
+                        background: sessionListView === chip.view ? 'rgba(167, 139, 250, 0.22)' : 'rgba(255,255,255,0.05)',
+                        border: `1px solid ${sessionListView === chip.view ? 'rgba(167, 139, 250, 0.55)' : 'rgba(255,255,255,0.1)'}`,
+                        color: '#fff',
+                        borderRadius: '999px',
+                        padding: '4px 10px',
+                        cursor: 'pointer',
+                        fontSize: '11px',
+                      }}
+                    >
+                      {chip.label}
+                    </button>
+                  ))}
+                  <button
+                    aria-label="Select sessions"
+                    aria-pressed={sessionSelectMode}
+                    onClick={() => {
+                      setSessionSelectMode(prev => !prev);
+                      setSelectedSessionIds([]);
+                      setMoveMenuFor(null);
+                    }}
+                    style={{
+                      marginLeft: 'auto',
+                      background: sessionSelectMode ? 'rgba(167, 139, 250, 0.22)' : 'rgba(255,255,255,0.05)',
+                      border: `1px solid ${sessionSelectMode ? 'rgba(167, 139, 250, 0.55)' : 'rgba(255,255,255,0.1)'}`,
+                      color: '#fff',
+                      borderRadius: '999px',
+                      padding: '4px 10px',
+                      cursor: 'pointer',
+                      fontSize: '11px',
+                    }}
+                  >
+                    Select
+                  </button>
+                </div>
+              )}
+
+              {/* Bulk move bar (Q6): appears in select mode once the
+                  selection is non-empty. One "Move to…" applies the
+                  single-move contract per selected session. */}
+              {sessionSelectMode && selectedSessionIds.length > 0 && (
+                <div data-testid="session-bulk-bar" style={{ margin: '0 24px 12px', padding: '8px 10px', background: 'rgba(167, 139, 250, 0.1)', border: '1px solid rgba(167, 139, 250, 0.35)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{ fontSize: '12px', color: '#fff' }}>{selectedSessionIds.length} selected</span>
+                    <button
+                      onClick={() => setMoveMenuFor(moveMenuFor === '__bulk__' ? null : '__bulk__')}
+                      style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#fff', borderRadius: '6px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px' }}
+                    >
+                      Move to…
+                    </button>
+                    <button
+                      onClick={() => setSelectedSessionIds([])}
+                      style={{ background: 'none', border: 'none', color: '#9090a0', cursor: 'pointer', fontSize: '12px', padding: '4px' }}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  {moveMenuFor === '__bulk__' && (
+                    <div data-testid="session-bulk-move-menu" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      {renderMoveTargets(undefined, (target) => startSessionMoves(selectedSessionIds, target))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Move outcome (Q6): refusals and bulk tallies surface
+                  here instead of failing silently. */}
+              {moveStatus && (
+                <div data-testid="session-move-status" style={{ margin: '0 24px 12px', padding: '8px 10px', background: moveStatus.type === 'error' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.12)', border: `1px solid ${moveStatus.type === 'error' ? 'rgba(239, 68, 68, 0.3)' : 'rgba(16, 185, 129, 0.3)'}`, borderRadius: '6px', color: moveStatus.type === 'error' ? '#fca5a5' : '#a7f3d0', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>{moveStatus.message}</span>
+                  <button onClick={() => setMoveStatus(null)} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0 }}><X size={12} /></button>
+                </div>
+              )}
+
               <div className="chat-scroll" style={{ padding: '0 12px', flex: 1, overflowY: 'auto' }}>
                 {sessionSearchResults !== null ? (
                   sessionSearchResults.length === 0 ? (
@@ -2795,15 +3081,23 @@ function AppContent() {
                         {r.snippet && (
                           <div style={{ fontSize: '12px', color: '#9090a0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.snippet}</div>
                         )}
+                        {/* Q10: search is global, so every result
+                            names the workspace it is filed under. */}
+                        <div style={{ fontSize: '11px', color: '#a78bfa', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{workspaceLabelFor(r.workspace)}</div>
                       </div>
                     </div>
                   ))
                 ) : sessions.map(s => (
+                  <React.Fragment key={s.id}>
                   <div
-                    key={s.id}
                     className={`session-item ${activeSession === s.id ? 'active' : ''}`}
-                    onClick={() => handleSessionSwitch(s.id)}
-                    onDoubleClick={() => handleStartRenameSession(s)}
+                    onClick={() => {
+                      // In select mode a row click picks the row
+                      // for a bulk move instead of switching to it.
+                      if (sessionSelectMode) toggleSessionSelected(s.id);
+                      else handleSessionSwitch(s.id);
+                    }}
+                    onDoubleClick={() => { if (!sessionSelectMode) handleStartRenameSession(s); }}
                     style={{
                       display: 'flex',
                       alignItems: 'center',
@@ -2811,6 +3105,16 @@ function AppContent() {
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden', flex: 1 }}>
+                      {sessionSelectMode && (
+                        <input
+                          type="checkbox"
+                          aria-label={`Select session ${s.title || s.name || s.id}`}
+                          checked={selectedSessionIds.includes(s.id)}
+                          onChange={() => toggleSessionSelected(s.id)}
+                          onClick={(e) => e.stopPropagation()}
+                          style={{ flexShrink: 0, accentColor: '#a78bfa' }}
+                        />
+                      )}
                       <MessageSquare size={16} style={{ opacity: activeSession === s.id ? 1 : 0.5, flexShrink: 0 }} />
                       {editingSessionId === s.id ? (
                         <input
@@ -2847,7 +3151,16 @@ function AppContent() {
                         <span style={{ fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.title || s.name || `Session ${s.id}`}</span>
                       )}
                     </div>
+                    {!sessionSelectMode && (
                     <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+                      <button
+                        className="session-move-btn"
+                        onClick={(e) => { e.stopPropagation(); setMoveMenuFor(moveMenuFor === s.id ? null : s.id); }}
+                        title="Move Session"
+                        aria-label="Move session"
+                      >
+                        <FolderInput size={13} />
+                      </button>
                       <button
                         className="session-rename-btn"
                         onClick={(e) => handleStartRenameSession(s, e)}
@@ -2864,7 +3177,18 @@ function AppContent() {
                         <Trash2 size={14} />
                       </button>
                     </div>
+                    )}
                   </div>
+                  {moveMenuFor === s.id && (
+                    <div
+                      data-testid={`session-move-menu-${s.id}`}
+                      style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '8px', margin: '0 2px 6px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.09)', borderRadius: '8px' }}
+                    >
+                      <div style={{ fontSize: '11px', color: '#9090a0' }}>Move to…</div>
+                      {renderMoveTargets(s.workspace ?? null, (target) => startSessionMoves([s.id], target))}
+                    </div>
+                  )}
+                  </React.Fragment>
                 ))}
               </div>
             </div>

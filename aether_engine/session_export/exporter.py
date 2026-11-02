@@ -84,6 +84,15 @@ def export_session_markdown(session_id: str) -> str:
     updated_at = sess.get("updated_at")
     messages = sess.get("messages", [])
 
+    # Provenance label only (grill Q9, superseded form): the export
+    # records where the session lived so a reader can see it, but the
+    # binding is not a filing instruction — import always lands the
+    # session unbound (see the importer).
+    workspace = sess.get("workspace")
+    workspace_line = (
+        f"- **Workspace:** `{workspace}`" if workspace else "- **Workspace:** No workspace"
+    )
+
     lines: list[str] = [
         f"# Session: {title}",
         "",
@@ -91,6 +100,7 @@ def export_session_markdown(session_id: str) -> str:
         f"- **Created:** {_format_timestamp(created_at)}",
         f"- **Updated:** {_format_timestamp(updated_at)}",
         f"- **Messages:** {len(messages)}",
+        workspace_line,
         "",
         "---",
         "",
