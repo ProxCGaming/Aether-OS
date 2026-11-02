@@ -280,9 +280,19 @@ class CredentialVault:
     def delete_entry(self, entry_id: str) -> bool:
         """Delete an entry; True when a row was actually removed."""
         with self._connect() as conn:
+            row = conn.execute(
+                "SELECT encrypted_password, encrypted_totp FROM vault_entries"
+                " WHERE id = ?", (entry_id,)).fetchone()
             cursor = conn.execute(
                 "DELETE FROM vault_entries WHERE id = ?", (entry_id,))
-            return cursor.rowcount > 0
+            deleted = cursor.rowcount > 0
+        # S2-N3: clean the external store entries (OS keyring on
+        # non-Windows) for both secret columns the row carried.
+        if deleted and row is not None:
+            for blob in row:
+                if blob is not None:
+                    self.protector.delete(bytes(blob))
+        return deleted
 
     def mark_used(self, entry_id: str) -> None:
         with self._connect() as conn:
@@ -474,10 +484,17 @@ class CredentialVault:
     def delete_totp_entry(self, entry_id: str) -> bool:
         """Delete an authenticator entry; True when a row went."""
         with self._connect() as conn:
+            row = conn.execute(
+                "SELECT encrypted_secret FROM vault_totp_entries"
+                " WHERE id = ?", (entry_id,)).fetchone()
             cursor = conn.execute(
                 "DELETE FROM vault_totp_entries WHERE id = ?",
                 (entry_id,))
-            return cursor.rowcount > 0
+            deleted = cursor.rowcount > 0
+        # S2-N3: keyring cleanup, as in delete_entry.
+        if deleted and row is not None and row[0] is not None:
+            self.protector.delete(bytes(row[0]))
+        return deleted
 
     def get_totp_entry_secret(self, entry_id: str) -> str:
         """Decrypt one authenticator entry's secret — OWNER PATH ONLY.

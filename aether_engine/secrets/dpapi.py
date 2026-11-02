@@ -17,7 +17,10 @@ blob is never silently decoded to a secret (S2-M10).
 from __future__ import annotations
 
 import abc
+import logging
 import sys
+
+logger = logging.getLogger(__name__)
 
 
 class SecretDecryptionError(Exception):
@@ -32,7 +35,42 @@ class BaseProtector(abc.ABC):
     def unprotect(self, data: bytes) -> bytes:
         """Decrypt bytes."""
 
+    def delete(self, data: bytes) -> None:
+        """Remove any external store entry backing ``data``.
+
+        Called when the row holding a protected blob is deleted, so
+        the secret does not linger in the OS keyring after its last
+        reference is gone (S2-N3). Best-effort: implementations must
+        not raise — a cleanup failure never fails the delete itself.
+        The default has nothing external to clean (self-contained
+        blobs, e.g. DPAPI) and does nothing.
+        """
+
 class WindowsDPAPIProtector(BaseProtector):
+    def delete(self, data: bytes) -> None:
+        # S2-N3: on Windows the DPAPI blob is self-contained — nothing
+        # external to clean. Elsewhere protect() stored the secret in
+        # the OS keyring under a `keyring:<id>` reference; remove that
+        # entry so a deleted provider/vault row leaves no orphaned
+        # secret behind. Best-effort throughout (see BaseProtector).
+        if sys.platform == "win32":
+            return
+        try:
+            secret_ref = data.decode("utf-8")
+        except (UnicodeDecodeError, AttributeError):
+            return
+        if not secret_ref.startswith("keyring:"):
+            return
+        secret_id = secret_ref.split("keyring:", 1)[1]
+        if not secret_id:
+            return
+        try:
+            import keyring
+
+            keyring.delete_password("aether-os", secret_id)
+        except Exception as exc:  # noqa: BLE001 — cleanup must never fail the delete (S2-N3)
+            logger.debug("keyring cleanup failed for a deleted secret: %s", exc)
+
     def protect(self, data: bytes) -> bytes:
         if sys.platform == "win32":
             return _dpapi_encrypt(data)

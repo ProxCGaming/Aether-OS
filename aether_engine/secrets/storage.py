@@ -136,9 +136,19 @@ class SecretStore:
     def delete_provider(self, provider: str) -> bool:
         if not self.db_path.exists():
             return False
+        blob: bytes | None = None
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            row = conn.execute(
+                "SELECT api_key FROM providers WHERE name = ?", (provider,)
+            ).fetchone()
+            if row is not None:
+                blob = bytes(row[0])
             cursor = conn.execute("DELETE FROM providers WHERE name = ?", (provider,))
             deleted = cursor.rowcount > 0
+        # S2-N3: clean the external store entry (OS keyring on
+        # non-Windows) so the deleted key leaves no orphan behind.
+        if deleted and blob is not None:
+            self.protector.delete(blob)
         # Phase 10.2, C2: deleting a stored key is a destructive action —
         # audit it, but only when a row was actually removed (critical/07
         # M4). Provider name only, never a key value.
