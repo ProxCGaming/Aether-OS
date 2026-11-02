@@ -104,7 +104,11 @@ class TestRunWorker:
 
 class TestWorkerAuditHelpers:
     def test_audit_event_writes_audit_logger_log_event_shape(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+        # S1-N1: the worker's audit path is home-based now, not
+        # cwd-relative — pin the module constant at the tmp log.
+        monkeypatch.setattr(
+            "aether_worker.__main__.DEFAULT_AUDIT_LOG_PATH",
+            tmp_path / "logs" / "audit.log")
         _audit_event("WORKER_TEST", {"tool": "write_file"})
         log = tmp_path / "logs" / "audit.log"
         (record,) = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
@@ -120,7 +124,9 @@ class TestWorkerAuditHelpers:
         what AuditLogger.log_event writes, or log consumers diverge."""
         from aether_engine.audit import AuditLogger
 
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "aether_worker.__main__.DEFAULT_AUDIT_LOG_PATH",
+            tmp_path / "logs" / "audit.log")
         _audit_event("SHAPE_CHECK", {"tool": "x"})
         AuditLogger(log_path=tmp_path / "audit2.log").log_event("SHAPE_CHECK", {"tool": "x"})
         worker_record = json.loads((tmp_path / "logs" / "audit.log").read_text(encoding="utf-8"))
@@ -128,7 +134,9 @@ class TestWorkerAuditHelpers:
         assert set(worker_record) == set(logger_record)
 
     def test_refuse_returns_1_writes_audit_event_and_reports_json(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "aether_worker.__main__.DEFAULT_AUDIT_LOG_PATH",
+            tmp_path / "logs" / "audit.log")
         code = _refuse("WORKER_AUTH_REFUSED", "write_file", "missing_token")
         assert code == 1
         (record,) = [json.loads(line) for line in
@@ -149,6 +157,10 @@ def _run_worker_subprocess(tmp_path, payload, token_env=None, token_file=None):
         token_dir.mkdir(parents=True, exist_ok=True)
         (token_dir / "engine.token").write_text(token_file, encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k != "AETHER_WORKER_TOKEN"}
+    # S1-N1: the worker's audit log lives under ~/.aether — pin the
+    # child's home to tmp_path so the trail stays isolated per test.
+    env["HOME"] = str(tmp_path)
+    env["USERPROFILE"] = str(tmp_path)
     env["PYTHONPATH"] = str(REPO_ROOT)
     if token_env is not None:
         env["AETHER_WORKER_TOKEN"] = token_env
@@ -161,7 +173,7 @@ def _run_worker_subprocess(tmp_path, payload, token_env=None, token_file=None):
 
 
 def _audit_events(tmp_path):
-    log = tmp_path / "logs" / "audit.log"
+    log = tmp_path / ".aether" / "logs" / "audit.log"
     if not log.is_file():
         return []
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -194,7 +206,7 @@ class TestMainSubprocess:
         assert any("token_file_unavailable" in str(e.get("details", {}))
                    for e in events if e.get("action") == "WORKER_AUTH_REFUSED")
         # The refusal must never leak the token value.
-        assert TOKEN not in (tmp_path / "logs" / "audit.log").read_text(encoding="utf-8")
+        assert TOKEN not in (tmp_path / ".aether" / "logs" / "audit.log").read_text(encoding="utf-8")
 
     def test_valid_token_execute_shell_via_subprocess(self, tmp_path):
         target = tmp_path / "shelled.txt"
@@ -239,4 +251,4 @@ class TestPhase102RefusalStillHolds:
         assert not target.exists()
         events = _audit_events(tmp_path)
         assert any(e.get("action") == "WORKER_AUTH_REFUSED" for e in events)
-        assert "backdoor" not in (tmp_path / "logs" / "audit.log").read_text(encoding="utf-8")
+        assert "backdoor" not in (tmp_path / ".aether" / "logs" / "audit.log").read_text(encoding="utf-8")

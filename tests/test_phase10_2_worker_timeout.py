@@ -15,9 +15,10 @@ past its profile cap is killed within the wall-clock bound (distinct
 ``WORKER_EXECUTION_TIMEOUT`` audit event), and a forced ``assign_process``
 failure refuses execution (``WORKER_EXECUTION_REFUSED``, nothing runs).
 
-Each engine-path test runs the real worker subprocess with cwd in a tmp
-dir, so its ``.run/engine.token`` and ``logs/audit.log`` are fully
-isolated from the repo. On Linux the Windows Job Object cannot attach,
+Each engine-path test runs the real worker subprocess with cwd and
+HOME in a tmp dir, so its ``.run/engine.token`` (cwd-relative) and its
+audit log (``~/.aether/logs/audit.log``, S1-N1) are fully isolated
+from the repo. On Linux the Windows Job Object cannot attach,
 so it is faked (same pattern as tests/test_phase10_2_worker_auth.py).
 """
 import asyncio
@@ -37,7 +38,7 @@ TOKEN = "phase10-2-test-token"
 
 
 def _audit_events(tmp_path):
-    log = tmp_path / "logs" / "audit.log"
+    log = tmp_path / ".aether" / "logs" / "audit.log"
     if not log.is_file():
         return []
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -45,21 +46,28 @@ def _audit_events(tmp_path):
 
 @contextmanager
 def _engine_call_env(tmp_path, job_cls):
-    """chdir to tmp_path (token file + audit log resolve relative to cwd),
-    point PYTHONPATH at the repo for the worker child, and fake the
-    Windows Job Object. Restores everything on exit."""
+    """chdir to tmp_path (the token file resolves relative to cwd),
+    pin HOME to tmp_path (the worker child's audit log resolves under
+    ~/.aether, S1-N1), point PYTHONPATH at the repo for the worker
+    child, and fake the Windows Job Object. Restores everything on
+    exit. The harness AuditLogger writes to the same canonical file
+    the worker child appends to, so both sides share one trail."""
     from aether_engine.audit import AuditLogger
 
     token_dir = tmp_path / ".run"
     token_dir.mkdir(parents=True, exist_ok=True)
     (token_dir / "engine.token").write_text(TOKEN, encoding="utf-8")
-    audit = AuditLogger(log_path=tmp_path / "logs" / "audit.log")
+    audit = AuditLogger(log_path=tmp_path / ".aether" / "logs" / "audit.log")
 
     old_cwd = os.getcwd()
     old_pythonpath = os.environ.get("PYTHONPATH")
+    old_home = os.environ.get("HOME")
+    old_userprofile = os.environ.get("USERPROFILE")
     try:
         os.chdir(tmp_path)
         os.environ["PYTHONPATH"] = str(REPO_ROOT)
+        os.environ["HOME"] = str(tmp_path)
+        os.environ["USERPROFILE"] = str(tmp_path)
         with patch("aether_engine.workers.sandbox.WorkerJobObject", job_cls):
             yield audit
     finally:
@@ -68,6 +76,14 @@ def _engine_call_env(tmp_path, job_cls):
             os.environ.pop("PYTHONPATH", None)
         else:
             os.environ["PYTHONPATH"] = old_pythonpath
+        if old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old_home
+        if old_userprofile is None:
+            os.environ.pop("USERPROFILE", None)
+        else:
+            os.environ["USERPROFILE"] = old_userprofile
 
 
 class FakeJobObject:

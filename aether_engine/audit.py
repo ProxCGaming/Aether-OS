@@ -1,12 +1,29 @@
 import json
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from aether_common.contracts import TaskState
 
-DEFAULT_AUDIT_LOG_PATH = Path("logs/audit.log")
+# S1-N1: the audit trail lives at one canonical location under
+# ~/.aether (the README rule: everything lives in ~/.aether). The old
+# default was the CWD-relative Path("logs/audit.log"), so where the
+# trail landed depended on each process's launch directory — the
+# repo-root dev launch and the desktop-spawned engine wrote different
+# logs, and constructing a logger mkdir'd a logs/ dir in whatever cwd
+# imported it. The worker subprocess uses this same path
+# (aether_worker/__main__.py).
+DEFAULT_AUDIT_LOG_PATH = Path.home() / ".aether" / "logs" / "audit.log"
+
+# Many AuditLogger instances exist in one engine process (module-level
+# loggers in memory/* and the supervisor, per-call constructions in
+# providers/MCP). Serialise rotate+append across all of them so
+# concurrent writers in this process cannot interleave lines or race
+# a rotation. Cross-process appends (the worker) are single-line
+# O_APPEND writes and stay best-effort, as before.
+_APPEND_LOCK = threading.Lock()
 
 # Phase 10.2, C2: the audit log is plaintext and world-readable by default
 # (critical/07 M2/M5), so no secret value and no full tool payload may ever
@@ -112,8 +129,13 @@ class AuditLogger:
             shutil.copyfileobj(f_in, f_out)
         self.log_path.write_text("", encoding="utf-8")
 
-    def _append(self, record: dict[str, Any]) -> None:
-        line = json.dumps(_redact(record)) + "\n"
+    def _append_locked(self, line: str) -> bool:
+        """Rotate (when due) and append one prepared line.
+
+        Caller must hold _APPEND_LOCK. Returns True when a rotation
+        happened, so the caller can record it after releasing the lock
+        (the AUDIT_LOG_ROTATED event itself goes through _append).
+        """
         rotated = False
         try:
             if (
@@ -127,6 +149,12 @@ class AuditLogger:
             rotated = False
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(line)
+        return rotated
+
+    def _append(self, record: dict[str, Any]) -> None:
+        line = json.dumps(_redact(record)) + "\n"
+        with _APPEND_LOCK:
+            rotated = self._append_locked(line)
         if rotated:
             self.log_event("AUDIT_LOG_ROTATED", {
                 "max_bytes": self.max_bytes,

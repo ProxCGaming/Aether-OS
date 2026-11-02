@@ -9,8 +9,9 @@ nothing executes, and a distinct audit event is recorded; the engine's
 own call path (sandbox -> worker, token passed via env) still works.
 
 Each direct-invocation test runs the worker as a real subprocess with
-cwd in a tmp dir, so its ``.run/engine.token`` and ``logs/audit.log``
-are fully isolated from the repo.
+cwd and HOME in a tmp dir, so its ``.run/engine.token`` (cwd-relative)
+and its audit log (``~/.aether/logs/audit.log``, S1-N1) are fully
+isolated from the repo.
 """
 import asyncio
 import json
@@ -48,6 +49,10 @@ def _run_worker(tmp_path, payload, token_env=None, token_file=None):
         token_dir.mkdir(parents=True, exist_ok=True)
         (token_dir / "engine.token").write_text(token_file, encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k != "AETHER_WORKER_TOKEN"}
+    # S1-N1: the worker's audit log lives under ~/.aether — pin the
+    # child's home to tmp_path so the trail stays isolated per test.
+    env["HOME"] = str(tmp_path)
+    env["USERPROFILE"] = str(tmp_path)
     env["PYTHONPATH"] = str(REPO_ROOT)
     if token_env is not None:
         env["AETHER_WORKER_TOKEN"] = token_env
@@ -60,7 +65,7 @@ def _run_worker(tmp_path, payload, token_env=None, token_file=None):
 
 
 def _audit_events(tmp_path):
-    log = tmp_path / "logs" / "audit.log"
+    log = tmp_path / ".aether" / "logs" / "audit.log"
     if not log.is_file():
         return []
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -74,8 +79,8 @@ def _assert_refused(result, target, tmp_path, action="WORKER_AUTH_REFUSED"):
         f"expected audit event {action}, got {events}"
     )
     # The refusal must never leak the token or the tool arguments.
-    assert TOKEN not in (tmp_path / "logs" / "audit.log").read_text(encoding="utf-8")
-    assert "backdoor" not in (tmp_path / "logs" / "audit.log").read_text(encoding="utf-8")
+    assert TOKEN not in (tmp_path / ".aether" / "logs" / "audit.log").read_text(encoding="utf-8")
+    assert "backdoor" not in (tmp_path / ".aether" / "logs" / "audit.log").read_text(encoding="utf-8")
 
 
 class TestDirectWorkerInvocationRefused:
@@ -129,7 +134,10 @@ class TestEngineWorkerCallPath:
         token_dir.mkdir(parents=True, exist_ok=True)
         (token_dir / "engine.token").write_text(TOKEN, encoding="utf-8")
         target = tmp_path / "engine-wrote.txt"
-        audit = AuditLogger(log_path=tmp_path / "logs" / "audit.log")
+        # Engine-side logger writes to the same canonical trail the
+        # worker child appends to (S1-N1: ~/.aether/logs/audit.log,
+        # with HOME pinned to tmp_path below).
+        audit = AuditLogger(log_path=tmp_path / ".aether" / "logs" / "audit.log")
 
         class FakeJobObject:
             def __init__(self, *args, **kwargs):
@@ -140,13 +148,19 @@ class TestEngineWorkerCallPath:
 
         old_cwd = os.getcwd()
         old_pythonpath = os.environ.get("PYTHONPATH")
+        old_home = os.environ.get("HOME")
+        old_userprofile = os.environ.get("USERPROFILE")
         try:
             # Both sandbox.read_token() and the worker child resolve
             # .run/engine.token relative to the process cwd. The chdir
             # also takes the repo off the child's module path, so point
-            # PYTHONPATH at it for this call (restored below).
+            # PYTHONPATH at it for this call (restored below). HOME is
+            # pinned to tmp_path so the child's audit log (S1-N1:
+            # ~/.aether/logs/audit.log) lands in the same isolated dir.
             os.chdir(tmp_path)
             os.environ["PYTHONPATH"] = str(REPO_ROOT)
+            os.environ["HOME"] = str(tmp_path)
+            os.environ["USERPROFILE"] = str(tmp_path)
             with patch("aether_engine.workers.sandbox.WorkerJobObject", FakeJobObject):
                 result = asyncio.run(execute_tool_in_worker(
                     tool_name="write_file",
@@ -160,6 +174,14 @@ class TestEngineWorkerCallPath:
                 os.environ.pop("PYTHONPATH", None)
             else:
                 os.environ["PYTHONPATH"] = old_pythonpath
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
+            if old_userprofile is None:
+                os.environ.pop("USERPROFILE", None)
+            else:
+                os.environ["USERPROFILE"] = old_userprofile
 
         assert result == {"path": str(target), "written": True}, result
         assert target.read_text(encoding="utf-8") == "via-engine"

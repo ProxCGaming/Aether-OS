@@ -3,6 +3,16 @@ import secrets
 import tempfile
 from pathlib import Path
 
+# Token location contract (S3-N2): this path is relative to the ENGINE
+# process's working directory by design of the spawn contract, and every
+# reader resolves it against that same directory — the engine writes the
+# token here at startup; the worker inherits the engine's CWD when the
+# sandbox spawns it and reads the same file; the desktop shell's spawned
+# flow resolves it explicitly via engineLifecycle.tokenFilePath()
+# (<userData>/engine-run/.run/engine.token, the engine run directory it
+# launched the engine with), and the shell's fallback read in main.cjs
+# assumes the dev layout (engine started from the repo root). Moving
+# this location means moving all four together.
 DEFAULT_TOKEN_PATH = Path(".run/engine.token")
 
 

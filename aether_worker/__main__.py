@@ -57,8 +57,10 @@ from aether_common.auth import read_token, verify_token
 
 WORKER_TOKEN_ENV = "AETHER_WORKER_TOKEN"
 
-# Same default path and record shape as aether_engine.audit.AuditLogger.
-DEFAULT_AUDIT_LOG_PATH = Path("logs/audit.log")
+# Same canonical path and record shape as aether_engine.audit.AuditLogger:
+# under ~/.aether, independent of this process's CWD (S1-N1 — the old
+# CWD-relative "logs/audit.log" scattered the trail by launch directory).
+DEFAULT_AUDIT_LOG_PATH = Path.home() / ".aether" / "logs" / "audit.log"
 
 # Tools the worker is allowed to execute. Anything else is refused —
 # an unknown tool must never report a false success (the old code
