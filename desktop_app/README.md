@@ -1,16 +1,43 @@
-# React + Vite
+# Aether-OS desktop app
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+The Electron + React shell for Aether-OS. It is the only frontend:
+the retired PySide6 UI (`aether_ui/`) was deleted on 2026-11-02.
 
-Currently, two official plugins are available:
+The shell renders the chat, dashboard, projects, and settings UI and
+talks to the local Python engine (`aether_engine`, one level up) over
+a WebSocket on port 8000. The engine's auth token is read and held
+only by the Electron main process and sent as an `Authorization`
+header — the renderer never holds it (S1-M3).
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Layout
 
-## React Compiler
+- `main.cjs` — Electron main process: window/tray lifecycle, engine
+  connection and token handling, IPC handlers.
+- `electron/` — main-process helpers: `engineLifecycle.cjs` spawns
+  the bundled engine (or reuses one already answering on port 8000),
+  plus the preload bridges and voice/RTC support.
+- `src/` — the React UI (Vite). `src/contexts/SocketContext` is the
+  single WebSocket facade the components subscribe through.
+- `src/__tests__/` — the Jest suites.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Develop
 
-## Expanding the Oxlint configuration
+```sh
+npm install
+npm run electron:dev   # Vite on :5173 + Electron against it
+npm run dev            # Vite only (browser preview of the UI)
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+## Test
+
+```sh
+npm test               # Jest (jsdom, React Testing Library)
+npm run lint           # oxlint
+```
+
+## Build
+
+```sh
+npm run build          # Vite production build into dist/
+npm run dist           # build + electron-builder packaging
+```

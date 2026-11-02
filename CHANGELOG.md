@@ -2,6 +2,11 @@
 
 All notable changes to the **Aether-OS** project will be documented in this file. 
 
+## [Unreleased]
+
+### Removed
+- **[2026-11-02] Retired PySide6 UI deleted**: `aether_ui/` removed outright (owner directive) with its six dedicated test files (`test_provider_health_badge`, `test_providers_panel_fixes`, `test_settings_provider_state`, `test_ui_window_geometry`, `test_approval_drawer_override`, `test_ui_state`) and the `legacy-ui` optional extra — PySide6, qasync and markdown had zero imports left outside the deleted tree. The Electron app in `desktop_app/` is the only frontend. The two baseline entries naming the deleted panel tests were removed from `scripts/pytest-known-failures.txt`; `tests/test_legacy_ui_retirement.py` keeps its guards (legacy deps never return as hard dependencies; default-path code never imports the legacy stack).
+
 ## [0.3.5] — 2026-10-31 — The full build (Epics 0–10)
 
 Built back-to-back on the `build/full-build` staging branch; `main`
@@ -52,51 +57,6 @@ Per-epic detail lives in `docs/audits/`; decisions in `docs/adr/`
   once their packages/services are installed (adapters are
   stub-tested).
 
-## [Unreleased] (Current Session)
-
-### Added
-- **[2026-09-30] Dynamic Skills System**: Added `SkillManager` and `SlashRegistry` to dynamically load, index, and trigger local `.agents/skills` directly via Slash Commands in the chat UI.
-- **[2026-09-30] UI Polish & Collapsible Sidebar**: Implemented a glassmorphic collapsible left sidebar with `emil-design-eng` aligned ease-out animation curves (`cubic-bezier(0.23, 1, 0.32, 1)`) and a responsive hamburger menu. Added a dynamic autocomplete slash command popup with custom scrolling.
-- **[2026-09-24] Live Tool Activity UI & Event Bus**: Added global event bus `aether_engine/event_bus.py` and `TOOL_ACTIVITY` events to stream tool invocations, parameters, and outputs in real time. Updated `DraggableChatWindow.jsx` with glassmorphic, expandable tool cards with syntax-highlighted payloads.
-- **[2026-09-24] Persistent Episodic Thinking History**: Added SQLite episodic thinking log table in `~/.aether/memory.db` and updated `session_store.py`, `executor.py`, and `DraggableChatWindow.jsx` to persist and restore execution pipelines and thinking steps across application restarts.
-- **[2026-09-24] Intra-Provider Fallback Resilience**: Extended `_create_provider_instance` in `app.py` to automatically include healthy alternative models from the same provider (e.g. `gemini-2.0-flash` when using `gemini-2.5-flash`) before cross-provider candidates, ensuring single-provider setups have automatic retry resilience.
-- **[2026-09-24] Project Guardrails & Git Hooks**: Initialized a root-level `package.json` and configured Husky pre-commit hooks. Commits are now strictly validated against the Conventional Commits format (`type(scope): description`) to prevent vague commit messages and enforce repository standards.
-- **[2026-09-24] Mandatory AI Agent Rules**: Created `.agents/rules/01-project-standards.md`. All future AI agents operating in this repository are now strictly bound by rules that prohibit hallucinating changes, mandate frontend testing, and enforce the Conventional Commits format.
-- **[2026-09-24] Frontend Test Infrastructure**: Installed `jest` and React Testing Library into the `desktop_app` Electron frontend. Authored the first smoke test (`Dashboard.test.jsx`), completely resolving the previous lack of UI test coverage and creating a safety net for future development.
-- **[2026-09-24] ADR Directory Consolidation**: Cleaned up fragmented architecture documentation by moving all 19 floating ADRs from the root `ADR/` folder into `docs/adr/`. The redundant `ADR/` directory was deleted, establishing a single source of truth for design decisions.
-- **[2026-10-25] Phase 10.3 A1 — Memory Pruning**: Retention policy in `UserConfig` (single source: episodic 90d / max 1000, knowledge graph 365d / max 5000, sessions 180d / max 200, configurable via `~/.aether/config.json`); `prune_episodes()` / `prune_facts()` / `prune_sessions()` + `memory/pruning.py:prune_all()` with per-tier audit events, wired as a weekly `memory_prune_weekly` scheduler job. Residual: APScheduler is declared in `requirements.txt` but not installed in the Linux venv, so the weekly job cannot fire in this environment.
-- **[2026-10-25] Phase 10.3 A2 — Episodic Recall**: Semantic search now thresholded at cosine 0.3 (`EPISODIC_SIMILARITY_THRESHOLD`, configurable, `0.0` restores old behaviour); `store_episode` dedupes by `task_id`; one-time idempotent `dedupe_episodic_rows()` migration; bounded embedding backfill (5 per query).
-- **[2026-10-25] Phase 10.3 A3 — Knowledge-Graph Dedupe/Confidence**: Dedupe key `(entity, fact)` casefolded, checked before entity upsert; `dedupe_facts()` migration keeps the highest-confidence copy and removes fact-less entities; fact ranking is now confidence, then recency.
-- **[2026-10-25] Phase 10.3 B1 — Auxiliary-Model Contract Placebo Closed**: Only `vision` is an accepted auxiliary task (`AUXILIARY_TASK_CLASSES = {"vision"}`, single source in `config.py`); other tasks are rejected, stale persisted entries are pruned with an audit event, and `UserConfig.from_dict` filters stale placebo keys on load.
-- **[2026-10-25] Phase 10.3 B2 — Reachable Models + Dead Router Deleted**: `filter_reachable_models` now returns `[]` with an error when nothing is reachable (it previously returned the full input list on total failure); dead `CapabilityRouter` deleted (239 lines) — the live path is `RoutingPolicy.select_route`. Residual: `scheduler/capability_jobs.py` does not yet read the new `.error` on the result.
-- **[2026-10-25] Phase 10.3 C1 — One WebSocket Facade + Providers Array**: `SocketContext` is now the single facade (duplicate `App.jsx` subscription and 150ms dedup hack moved into it, fixing StrictMode double-delivery); `providers` is an array everywhere in the UI. Residual: `MODEL_DEFAULT_CHANGED` arriving before the first list response is still dropped (self-heals via `is_default` flags in the in-flight list response).
-- **[2026-10-25] Phase 10.3 C2 — Dead/Placebo UI Removed or Wired**: `FloatingChat.jsx` deleted (86 lines, zero imports); theme buttons removed (a real theme is not honestly implementable — colours are hardcoded dark inline styles); LocalModelsTab "Active" wired via `MODEL_SET_DEFAULT`; tool-policy "default" option removed (no engine reset event exists — sending literal `"default"` would store junk; a true reset needs a new `TOOL_POLICY_RESET_REQUEST` event); `isMinimized` wired; dead `App.jsx` state removed.
-- **[2026-10-25] Phase 10.3 D1 — Lockfile/CI**: `requirements.txt` gains previously undeclared `aiosqlite`, `pydantic`, `starlette`; `pywin32` now Windows-guarded (`sys_platform == "win32"`); new `.github/workflows/ci.yml` (Python 3.12 pytest + Node 24 Jest); `electron-builder` config added to `desktop_app/package.json`; stale `pytest_output.txt` deleted. Residuals: `npm run dist` untested (first real packaging run needs a human/Windows check); CI green not claimed (GitHub Actions cannot run here); `google-genai` + `langchain-mcp` declared but never imported (removal is a scope decision, not silently done).
-- **[2026-10-25] Phase 10.3 D2 — Test Gaps**: 62 new pytest + 45 new Jest tests (audit logger, event bus, diagnostics, worker entrypoint, approval cards, slash commands, streaming merge, Dropdown, SocketContext). No production source touched.
-- **[2026-10-25] Phase 10.3 D3 — Hygiene**: Changelog backfilled for Phase 9 through 10.3 (this file); `run_ui.py` now launches the Electron app instead of the retired PySide6 UI; commit-hook type list aligned with project standards; orphan one-shot scripts `refactor_app.py` / `update_settings.py` deleted (see Fixed below).
-- **[2026-09-23 04:22] Environment Diagnostics Engine**: Replaced the static UI mockup in the Settings page with a live, dynamic capability-check runner. Pressing "Run Diagnostics Now" triggers a true backend test for the Python environment, terminal access, SQLite read/write permissions, local Ollama daemon connectivity, and `TAVILY_API_KEY` verification, with live results rendering directly into the UI!
-- **[2026-09-23 03:53] Auto-Title Generation**: Newly created conversations (previously generic "New Conversation") are now automatically renamed to a brief summary of the first user prompt sent in the session.
-
-### Removed
-- **[2026-11-02] Retired PySide6 UI deleted**: `aether_ui/` removed outright (owner directive) with its six dedicated test files (`test_provider_health_badge`, `test_providers_panel_fixes`, `test_settings_provider_state`, `test_ui_window_geometry`, `test_approval_drawer_override`, `test_ui_state`) and the `legacy-ui` optional extra — PySide6, qasync and markdown had zero imports left outside the deleted tree. The Electron app in `desktop_app/` is the only frontend. The two baseline entries naming the deleted panel tests were removed from `scripts/pytest-known-failures.txt`; `tests/test_legacy_ui_retirement.py` keeps its guards (legacy deps never return as hard dependencies; default-path code never imports the legacy stack).
-
-### Fixed
-- **[2026-09-30] Session Load Latency**: Eliminated extreme UI locking when switching chats by adding `CREATE INDEX IF NOT EXISTS idx_session_messages_session_id`, caching DB initialization state globally, and wrapping SQLite synchronous `session_store.py` calls in `asyncio.to_thread`.
-- **[2026-09-30] WebSocket Initialization**: Fixed a bug where `SLASH_COMMAND_LIST_REQUEST` and `PLUGIN_LIST_REQUEST` were skipped on hot-reload/mount if the WebSocket was already connected.
-- **[2026-09-30] Settings Scroll Cutoff**: Added `paddingBottom` to the Settings panel scroll container to ensure the deepest items are fully accessible.
-- **[2026-09-24] Gemini Model Discovery & Quota Exhaustion (`gemini-3-pro-image`)**: Filtered out media generation endpoints (`image`, `transcribe`, `lyria`, `audio`) in `discovery.py` that have `limit: 0` on Google AI Studio free tier. Restored `gemini-2.5-flash` as primary default model.
-- **[2026-09-24] Capability Misclassification & Route Hijacking**: Fixed `_infer_capabilities` and `select_route` in `aether_engine/routing/` to reject non-chat models, grant `code` to frontier LLMs, and prioritize the user's active/default model instead of diverting to media endpoints.
-- **[2026-09-24] Thinking Panel Deduplication & Scrolling Physics**: Deduplicated supervisor progress text and redundant tool cards in the thinking panel, and synchronized scrolling physics with the dropdown list.
-- **[2026-09-24] LiteLLM MidStream Fallback Error Handling**: Handled `litellm.MidStreamFallbackError` and retriable quota exhaustion errors during stream execution in `litellm_provider.py` to trigger fallbacks instead of failing the task.
-- **[2026-09-23 04:35] Diagnostics Loading State**: Added a dynamic loading state to the "Run Diagnostics Now" button in the Settings UI so that users receive immediate visual feedback (loading spinner, disabled state) while the backend tests are running.
-- **Settings API Provider Caching**: API keys are now securely cached in the browser `localStorage` upon connection. If a key is disconnected from the backend, the UI text box remains pre-filled, saving users from needing to re-enter it manually.
-- **Model Disconnect Bug**: Fixed a UI bug in `App.jsx` where disconnecting a provider or saving a new configuration failed to instantly refresh the available model dropdown.
-- **Capability Auto-Router Priorities**: Fixed the backend `capability_router.py` logic which was ignoring the user's "Global Default Model" choice. The tiebreaker score was increased from `+1.0` to `+100.0`, ensuring standard chats always respect the user's choice instead of silently falling back to OpenRouter.
-- **LiteLLM Missing Dependency**: Installed the `google-generativeai` package to resolve unexpected crashes when trying to connect and route to Gemini APIs via LiteLLM.
-- **[2026-10-25] Phase 10.3 D3 — `run_ui.py` Launched the Retired UI**: `run_ui.py` imported `aether_ui.main.run_ui` (PySide6, deprecated 2026-09-20, Windows-only imports). It now launches the Electron app the way the repo documents it (`npm run electron:dev`; `--prod` builds once, then launches Electron on `dist/`; `--dry-run` prints the command). Verified on the Linux VM under Xvfb: vite ready on `localhost:5173` (HTTP 200) and the Electron main process running with the engine-down reconnect behaviour; the rendered window itself was not visually observed (headless VM), so a Windows visual check is still open.
-- **[2026-10-25] Phase 10.3 D3 — Commit-Hook / Standards Type Mismatch**: `.husky/commit-msg.js` rejected `style:` (allowed by `.agents/rules/01-project-standards.md` §1, and used in real history) and accepted `ci:` (not in the standards). The hook now matches the standards exactly (`feat, fix, test, refactor, docs, chore, perf, style`); `ci` work uses `chore` ("changes to the build process or auxiliary tools", per the standards doc). Verified by running the hook against test messages of each type.
-- **[2026-10-25] Phase 10.3 D3 — Destructive Orphan Scripts Deleted**: `refactor_app.py` (rewrote `aether_engine/app.py`, `state.py`, `orchestration/core.py`, `routes/websocket.py` from hardcoded `e:/AI projects/AETHER/...` paths and line-number slices — a re-run would corrupt the current files) and `update_settings.py` (rewrote `SettingsPanel.jsx` by line matching against a long-obsolete layout) were deleted after a repo-wide grep confirmed nothing imports or references them.
-
 ---
 
 ## [2026-10-25]
@@ -124,6 +84,24 @@ Per-epic detail lives in `docs/audits/`; decisions in `docs/adr/`
 - **[2026-10-25] ADR 0024**: `docs/adr/0024-phase-10-2-trust-boundary.md` records the phase as a corrective record.
 - **[2026-10-25] Tests**: 45 new pytest + 5 new Jest tests. Verified: pytest 284 passed / same 15 pre-existing failures; Jest 37 passed. Residuals: engine still *accepts* query tokens (follow-up); retired `aether_ui/ws_client.py` still sends `?token=`; no zip size / zip-bomb limit; audit-log hashing/rotation/fsync not built; kill-engine resume manual-pending on Windows.
 
+### Added
+- **[2026-10-25] Phase 10.3 A1 — Memory Pruning**: Retention policy in `UserConfig` (single source: episodic 90d / max 1000, knowledge graph 365d / max 5000, sessions 180d / max 200, configurable via `~/.aether/config.json`); `prune_episodes()` / `prune_facts()` / `prune_sessions()` + `memory/pruning.py:prune_all()` with per-tier audit events, wired as a weekly `memory_prune_weekly` scheduler job. Residual: APScheduler is declared in `requirements.txt` but not installed in the Linux venv, so the weekly job cannot fire in this environment.
+- **[2026-10-25] Phase 10.3 A2 — Episodic Recall**: Semantic search now thresholded at cosine 0.3 (`EPISODIC_SIMILARITY_THRESHOLD`, configurable, `0.0` restores old behaviour); `store_episode` dedupes by `task_id`; one-time idempotent `dedupe_episodic_rows()` migration; bounded embedding backfill (5 per query).
+- **[2026-10-25] Phase 10.3 A3 — Knowledge-Graph Dedupe/Confidence**: Dedupe key `(entity, fact)` casefolded, checked before entity upsert; `dedupe_facts()` migration keeps the highest-confidence copy and removes fact-less entities; fact ranking is now confidence, then recency.
+- **[2026-10-25] Phase 10.3 B1 — Auxiliary-Model Contract Placebo Closed**: Only `vision` is an accepted auxiliary task (`AUXILIARY_TASK_CLASSES = {"vision"}`, single source in `config.py`); other tasks are rejected, stale persisted entries are pruned with an audit event, and `UserConfig.from_dict` filters stale placebo keys on load.
+- **[2026-10-25] Phase 10.3 B2 — Reachable Models + Dead Router Deleted**: `filter_reachable_models` now returns `[]` with an error when nothing is reachable (it previously returned the full input list on total failure); dead `CapabilityRouter` deleted (239 lines) — the live path is `RoutingPolicy.select_route`. Residual: `scheduler/capability_jobs.py` does not yet read the new `.error` on the result.
+- **[2026-10-25] Phase 10.3 C1 — One WebSocket Facade + Providers Array**: `SocketContext` is now the single facade (duplicate `App.jsx` subscription and 150ms dedup hack moved into it, fixing StrictMode double-delivery); `providers` is an array everywhere in the UI. Residual: `MODEL_DEFAULT_CHANGED` arriving before the first list response is still dropped (self-heals via `is_default` flags in the in-flight list response).
+- **[2026-10-25] Phase 10.3 C2 — Dead/Placebo UI Removed or Wired**: `FloatingChat.jsx` deleted (86 lines, zero imports); theme buttons removed (a real theme is not honestly implementable — colours are hardcoded dark inline styles); LocalModelsTab "Active" wired via `MODEL_SET_DEFAULT`; tool-policy "default" option removed (no engine reset event exists — sending literal `"default"` would store junk; a true reset needs a new `TOOL_POLICY_RESET_REQUEST` event); `isMinimized` wired; dead `App.jsx` state removed.
+- **[2026-10-25] Phase 10.3 D1 — Lockfile/CI**: `requirements.txt` gains previously undeclared `aiosqlite`, `pydantic`, `starlette`; `pywin32` now Windows-guarded (`sys_platform == "win32"`); new `.github/workflows/ci.yml` (Python 3.12 pytest + Node 24 Jest); `electron-builder` config added to `desktop_app/package.json`; stale `pytest_output.txt` deleted. Residuals: `npm run dist` untested (first real packaging run needs a human/Windows check); CI green not claimed (GitHub Actions cannot run here); `google-genai` + `langchain-mcp` declared but never imported (removal is a scope decision, not silently done).
+- **[2026-10-25] Phase 10.3 D2 — Test Gaps**: 62 new pytest + 45 new Jest tests (audit logger, event bus, diagnostics, worker entrypoint, approval cards, slash commands, streaming merge, Dropdown, SocketContext). No production source touched.
+- **[2026-10-25] Phase 10.3 D3 — Hygiene**: Changelog backfilled for Phase 9 through 10.3 (this file); `run_ui.py` now launches the Electron app instead of the retired PySide6 UI; commit-hook type list aligned with project standards; orphan one-shot scripts `refactor_app.py` / `update_settings.py` deleted (see Fixed below).
+
+### Fixed
+- **[2026-10-25] Phase 10.3 D3 — `run_ui.py` Launched the Retired UI**: `run_ui.py` imported `aether_ui.main.run_ui` (PySide6, deprecated 2026-09-20, Windows-only imports). It now launches the Electron app the way the repo documents it (`npm run electron:dev`; `--prod` builds once, then launches Electron on `dist/`; `--dry-run` prints the command). Verified on the Linux VM under Xvfb: vite ready on `localhost:5173` (HTTP 200) and the Electron main process running with the engine-down reconnect behaviour; the rendered window itself was not visually observed (headless VM), so a Windows visual check is still open.
+- **[2026-10-25] Phase 10.3 D3 — Commit-Hook / Standards Type Mismatch**: `.husky/commit-msg.js` rejected `style:` (allowed by `.agents/rules/01-project-standards.md` §1, and used in real history) and accepted `ci:` (not in the standards). The hook now matches the standards exactly (`feat, fix, test, refactor, docs, chore, perf, style`); `ci` work uses `chore` ("changes to the build process or auxiliary tools", per the standards doc). Verified by running the hook against test messages of each type.
+- **[2026-10-25] Phase 10.3 D3 — Destructive Orphan Scripts Deleted**: `refactor_app.py` (rewrote `aether_engine/app.py`, `state.py`, `orchestration/core.py`, `routes/websocket.py` from hardcoded `e:/AI projects/AETHER/...` paths and line-number slices — a re-run would corrupt the current files) and `update_settings.py` (rewrote `SettingsPanel.jsx` by line matching against a long-obsolete layout) were deleted after a repo-wide grep confirmed nothing imports or references them.
+
+
 ## [2026-10-10]
 ### Discovery v2 — Provider Model Discovery (5 commits, tip `596509c`, branch `phase-9-trust-boundary`)
 #### Changed
@@ -148,9 +126,48 @@ Per-epic detail lives in `docs/audits/`; decisions in `docs/adr/`
 - **[2026-10-08] Latent `ImportError` Fixed**: Five modules imported `_create_provider_instance` from `aether_engine.app`; it lives in `orchestration/core.py`.
 - **[2026-10-08] Verification**: 198 pytest passed (64 Phase 9 / directly-affected tests green); Jest 27 green. Residual: kill-engine-mid-approval restart/resume is manual-pending on Windows.
 
+## [2026-09-30]
+### Added
+- **[2026-09-30] Dynamic Skills System**: Added `SkillManager` and `SlashRegistry` to dynamically load, index, and trigger local `.agents/skills` directly via Slash Commands in the chat UI.
+- **[2026-09-30] UI Polish & Collapsible Sidebar**: Implemented a glassmorphic collapsible left sidebar with `emil-design-eng` aligned ease-out animation curves (`cubic-bezier(0.23, 1, 0.32, 1)`) and a responsive hamburger menu. Added a dynamic autocomplete slash command popup with custom scrolling.
+
+### Fixed
+- **[2026-09-30] Session Load Latency**: Eliminated extreme UI locking when switching chats by adding `CREATE INDEX IF NOT EXISTS idx_session_messages_session_id`, caching DB initialization state globally, and wrapping SQLite synchronous `session_store.py` calls in `asyncio.to_thread`.
+- **[2026-09-30] WebSocket Initialization**: Fixed a bug where `SLASH_COMMAND_LIST_REQUEST` and `PLUGIN_LIST_REQUEST` were skipped on hot-reload/mount if the WebSocket was already connected.
+- **[2026-09-30] Settings Scroll Cutoff**: Added `paddingBottom` to the Settings panel scroll container to ensure the deepest items are fully accessible.
+
+---
+
+## [2026-09-24]
+### Added
+- **[2026-09-24] Live Tool Activity UI & Event Bus**: Added global event bus `aether_engine/event_bus.py` and `TOOL_ACTIVITY` events to stream tool invocations, parameters, and outputs in real time. Updated `DraggableChatWindow.jsx` with glassmorphic, expandable tool cards with syntax-highlighted payloads.
+- **[2026-09-24] Persistent Episodic Thinking History**: Added SQLite episodic thinking log table in `~/.aether/memory.db` and updated `session_store.py`, `executor.py`, and `DraggableChatWindow.jsx` to persist and restore execution pipelines and thinking steps across application restarts.
+- **[2026-09-24] Intra-Provider Fallback Resilience**: Extended `_create_provider_instance` in `app.py` to automatically include healthy alternative models from the same provider (e.g. `gemini-2.0-flash` when using `gemini-2.5-flash`) before cross-provider candidates, ensuring single-provider setups have automatic retry resilience.
+- **[2026-09-24] Project Guardrails & Git Hooks**: Initialized a root-level `package.json` and configured Husky pre-commit hooks. Commits are now strictly validated against the Conventional Commits format (`type(scope): description`) to prevent vague commit messages and enforce repository standards.
+- **[2026-09-24] Mandatory AI Agent Rules**: Created `.agents/rules/01-project-standards.md`. All future AI agents operating in this repository are now strictly bound by rules that prohibit hallucinating changes, mandate frontend testing, and enforce the Conventional Commits format.
+- **[2026-09-24] Frontend Test Infrastructure**: Installed `jest` and React Testing Library into the `desktop_app` Electron frontend. Authored the first smoke test (`Dashboard.test.jsx`), completely resolving the previous lack of UI test coverage and creating a safety net for future development.
+- **[2026-09-24] ADR Directory Consolidation**: Cleaned up fragmented architecture documentation by moving all 19 floating ADRs from the root `ADR/` folder into `docs/adr/`. The redundant `ADR/` directory was deleted, establishing a single source of truth for design decisions.
+
+### Fixed
+- **[2026-09-24] Gemini Model Discovery & Quota Exhaustion (`gemini-3-pro-image`)**: Filtered out media generation endpoints (`image`, `transcribe`, `lyria`, `audio`) in `discovery.py` that have `limit: 0` on Google AI Studio free tier. Restored `gemini-2.5-flash` as primary default model.
+- **[2026-09-24] Capability Misclassification & Route Hijacking**: Fixed `_infer_capabilities` and `select_route` in `aether_engine/routing/` to reject non-chat models, grant `code` to frontier LLMs, and prioritize the user's active/default model instead of diverting to media endpoints.
+- **[2026-09-24] Thinking Panel Deduplication & Scrolling Physics**: Deduplicated supervisor progress text and redundant tool cards in the thinking panel, and synchronized scrolling physics with the dropdown list.
+- **[2026-09-24] LiteLLM MidStream Fallback Error Handling**: Handled `litellm.MidStreamFallbackError` and retriable quota exhaustion errors during stream execution in `litellm_provider.py` to trigger fallbacks instead of failing the task.
+- **Settings API Provider Caching**: API keys are now securely cached in the browser `localStorage` upon connection. If a key is disconnected from the backend, the UI text box remains pre-filled, saving users from needing to re-enter it manually.
+- **Model Disconnect Bug**: Fixed a UI bug in `App.jsx` where disconnecting a provider or saving a new configuration failed to instantly refresh the available model dropdown.
+- **Capability Auto-Router Priorities**: Fixed the backend `capability_router.py` logic which was ignoring the user's "Global Default Model" choice. The tiebreaker score was increased from `+1.0` to `+100.0`, ensuring standard chats always respect the user's choice instead of silently falling back to OpenRouter.
+- **LiteLLM Missing Dependency**: Installed the `google-generativeai` package to resolve unexpected crashes when trying to connect and route to Gemini APIs via LiteLLM.
+
+---
+
 ## [2026-09-23]
 ### Added
 - **Auto-Router**: Added a capability-based task auto-router and the main desktop application UI components.
+- **[2026-09-23 04:22] Environment Diagnostics Engine**: Replaced the static UI mockup in the Settings page with a live, dynamic capability-check runner. Pressing "Run Diagnostics Now" triggers a true backend test for the Python environment, terminal access, SQLite read/write permissions, local Ollama daemon connectivity, and `TAVILY_API_KEY` verification, with live results rendering directly into the UI!
+- **[2026-09-23 03:53] Auto-Title Generation**: Newly created conversations (previously generic "New Conversation") are now automatically renamed to a brief summary of the first user prompt sent in the session.
+
+### Fixed
+- **[2026-09-23 04:35] Diagnostics Loading State**: Added a dynamic loading state to the "Run Diagnostics Now" button in the Settings UI so that users receive immediate visual feedback (loading spinner, disabled state) while the backend tests are running.
 
 ## [2026-09-22]
 ### Added

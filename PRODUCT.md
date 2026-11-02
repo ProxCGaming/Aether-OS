@@ -4,7 +4,7 @@
 
 ## Platform
 
-web
+desktop
 
 ## Stack
 Electron + React + Vanilla CSS
