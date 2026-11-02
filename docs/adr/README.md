@@ -45,3 +45,4 @@ New ADRs use the next sequential 4-digit number: `NNNN-short-slug.md`.
 - [0040 — Learned and Consolidated Memory Documents (E4-10)](0040-learned-and-consolidated-memory-documents.md)
 - [0041 — Dispositions for the Plan-Addendum Reversals](0041-addendum-reversal-dispositions.md)
 - [0042 — Per-Workspace Sessions](0042-per-workspace-sessions.md)
+- [0043 — Model Hub and Speech Selection](0043-model-hub-and-speech-selection.md)

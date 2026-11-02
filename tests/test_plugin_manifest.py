@@ -1,8 +1,11 @@
-import pytest
 import json
 from pathlib import Path
+
+import pytest
 from pydantic import ValidationError
+
 from aether_engine.plugins.manifest import PluginManifest, parse_manifest
+
 
 def test_valid_manifest(tmp_path: Path):
     manifest_data = {
@@ -26,7 +29,7 @@ def test_valid_manifest(tmp_path: Path):
 
 def test_missing_required_fields():
     with pytest.raises(ValidationError):
-        PluginManifest(**{"name": "NoVersionPlugin"})
+        PluginManifest(name="NoVersionPlugin")
 
 def test_invalid_manifest_path():
     with pytest.raises(FileNotFoundError):

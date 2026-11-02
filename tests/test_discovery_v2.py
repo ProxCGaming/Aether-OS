@@ -192,15 +192,17 @@ class TestDiscoveryWebSocket:
         mock_store = MagicMock()
         mock_store.list_providers.return_value = []
         try:
-            with patch("aether_engine.routes.websocket.SecretStore", return_value=mock_store), \
-                 patch("aether_engine.app.SecretStore", return_value=mock_store):  # noqa: SIM117 — nested under a multi-manager patch; combined form lands with the tip cleanup
-                with TestClient(app) as client:
-                    live_token = engine_state.auth_token
-                    with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {live_token}"}) as ws:
-                        from aether_common.contracts import Event, EventType
-                        hello = Event.from_json(ws.receive_text())
-                        assert hello.type == EventType.HELLO
-                        yield ws, engine_state
+            with (
+                patch("aether_engine.routes.websocket.SecretStore", return_value=mock_store),
+                patch("aether_engine.app.SecretStore", return_value=mock_store),
+                TestClient(app) as client,
+            ):
+                live_token = engine_state.auth_token
+                with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {live_token}"}) as ws:
+                    from aether_common.contracts import Event, EventType
+                    hello = Event.from_json(ws.receive_text())
+                    assert hello.type == EventType.HELLO
+                    yield ws, engine_state
         finally:
             engine_state.user_config.provider_models = orig_models
             engine_state.user_config.provider_excluded_models = orig_excluded

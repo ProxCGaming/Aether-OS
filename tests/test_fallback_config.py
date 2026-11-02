@@ -1,7 +1,9 @@
+
 import pytest
-import asyncio
+
+from aether_common.contracts import EventType
 from aether_engine.config import UserConfig
-from aether_common.contracts import Event, EventType
+
 
 def test_user_config_fallback_fields():
     cfg = UserConfig()

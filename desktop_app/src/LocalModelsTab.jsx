@@ -1,86 +1,210 @@
-import React, { useState, useEffect } from 'react';
-import { Search, Download, Trash2, Folder, HardDrive, Cpu, CheckCircle2, Pause, X, Play, RefreshCw, SlidersHorizontal } from 'lucide-react';
-import Dropdown from './Dropdown';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Search, Download, Trash2, CheckCircle2, X, RefreshCw, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react';
 import './chat.css';
 
-export default function LocalModelsTab({ wsRef, localModels = [], defaultProvider = '', defaultModel = '' }) {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filterType, setFilterType] = useState('all');
-  const [sortType, setSortType] = useState('name');
-  const [downloadProgress, setDownloadProgress] = useState({}); // { modelName: { percent, status } }
+// Model Hub (H4): this tab is the renderer's window onto the hub
+// contracts built in H1–H3. Search runs against two live sources —
+// Hugging Face (the engine queries its public API) and the shipped
+// Ollama library — and every row is labelled by how Aether can run
+// it (in-app / via Ollama / not locally runnable / unknown). The
+// runnability label is the routing authority for downloads, exactly
+// as in the engine: GGUF variants pull through Ollama, in-app speech
+// repos land in the Hugging Face cache, and not-runnable rows get no
+// download control at all.
+//
+// Search/detail/inventory are request/response pairs correlated by
+// request_id. Download progress and lifecycle ride the shared task
+// event stream (LOCAL_MODEL_DOWNLOAD_PROGRESS / TASK_COMPLETED /
+// TASK_FAILED / TASK_CANCELLED) keyed by the engine's download key —
+// the model name for Ollama pulls, the hf.co/<repo>:<quant> ref for
+// GGUF pulls, the repo id for speech downloads — which the download
+// RESPONSE hands back as `model`.
 
-  // Phase 10.3 C2: which model is the engine's current default, as
-  // { provider, model }. Seeded from props (derived from the providers
-  // array by SettingsPanel) and kept live from MODEL_DEFAULT_CHANGED
-  // broadcasts — the providers list has no ollama entry, so this tab
-  // cannot read the active local model back from it.
+const SOURCES = [
+  { value: 'hf', label: 'Hugging Face' },
+  { value: 'ollama', label: 'Ollama' },
+];
+
+const FAMILY_CHIPS = [
+  { value: 'all', label: 'All' },
+  { value: 'brain', label: 'Brains' },
+  { value: 'speech-to-text', label: 'Speech-to-text' },
+  { value: 'text-to-speech', label: 'Text-to-speech' },
+  { value: 'embedding', label: 'Embeddings' },
+  { value: 'other', label: 'Other' },
+];
+
+const FAMILY_LABELS = {
+  brain: 'Brain',
+  'speech-to-text': 'Speech-to-text',
+  'text-to-speech': 'Text-to-speech',
+  embedding: 'Embedding',
+  other: 'Other',
+};
+
+const SOURCE_LABELS = { hf: 'Hugging Face', ollama: 'Ollama' };
+
+const RUNNABILITY_BADGES = {
+  'in-app': { label: 'In-app', color: '#34d399', bg: 'rgba(16, 185, 129, 0.15)', border: 'rgba(16, 185, 129, 0.3)' },
+  ollama: { label: 'Via Ollama', color: '#f5b544', bg: 'rgba(245, 181, 52, 0.12)', border: 'rgba(245, 181, 52, 0.35)' },
+  'not-runnable': { label: 'Not locally runnable', color: '#f87171', bg: 'rgba(239, 68, 68, 0.12)', border: 'rgba(239, 68, 68, 0.3)' },
+  unknown: { label: 'Run support unknown', color: '#9090a0', bg: 'rgba(144, 144, 160, 0.12)', border: 'rgba(144, 144, 160, 0.3)' },
+};
+
+function rowKey(row) {
+  return `${row.source}:${row.id}`;
+}
+
+function formatBytes(bytes) {
+  if (bytes === null || bytes === undefined || Number.isNaN(bytes)) return null;
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
+
+function formatDownloads(count) {
+  if (count === null || count === undefined) return null;
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
+  return `${count}`;
+}
+
+const chipStyle = {
+  background: 'rgba(100, 100, 100, 0.15)', color: 'var(--text-primary, #e2e8f0)',
+  padding: '4px 8px', borderRadius: '6px', fontSize: '11px', fontWeight: 500,
+};
+
+const downloadButtonStyle = {
+  padding: '10px 16px', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)',
+  color: 'var(--text-primary, #fff)', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)',
+  borderRadius: '12px', cursor: 'pointer', fontWeight: 500, display: 'flex',
+  justifyContent: 'center', alignItems: 'center', gap: '8px', transition: 'all 0.2s',
+};
+
+export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultModel = '' }) {
+  const [source, setSource] = useState('hf');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [family, setFamily] = useState('all');
+  const [results, setResults] = useState([]);
+  const [resultsError, setResultsError] = useState(null);
+  const [searching, setSearching] = useState(false);
+  const [searched, setSearched] = useState(false);
+
+  const [expandedKey, setExpandedKey] = useState(null);
+  const [details, setDetails] = useState({}); // rowKey -> { detail, error }
+
+  const [downloaded, setDownloaded] = useState([]);
+  const [downloadProgress, setDownloadProgress] = useState({}); // engine key -> { percent, status }
+  const [hubError, setHubError] = useState(null);
+
+  // Phase 10.3 C2 (preserved): which model is the engine's current
+  // default, as { provider, model }. Seeded from props (derived from
+  // the providers array by SettingsPanel) and kept live from
+  // MODEL_DEFAULT_CHANGED broadcasts.
   const [activeDefault, setActiveDefault] = useState({ provider: defaultProvider, model: defaultModel });
+
+  // request_id -> one-shot response handler for the hub pairs.
+  const pendingRef = useRef(new Map());
+  // rowKey -> engine download keys, learned from
+  // MODEL_HUB_DOWNLOAD_RESPONSE (the GGUF key is an hf.co ref, not
+  // the repo id, so progress events can't be matched by id alone).
+  const [keysByRow, setKeysByRow] = useState({});
+  const searchSeqRef = useRef(0);
 
   useEffect(() => {
     setActiveDefault({ provider: defaultProvider, model: defaultModel });
   }, [defaultProvider, defaultModel]);
-  
-  // A curated catalogue representing models available to download.
-  const [catalog, setCatalog] = useState([]);
 
-  useEffect(() => {
-    fetch('/ollama-catalog.json')
-      .then(res => res.json())
-      .then(data => setCatalog(data))
-      .catch(e => console.error('Failed to load catalog:', e));
-  }, []);
+  const sendRequest = useCallback((type, payload, onResponse) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return null;
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    if (onResponse) pendingRef.current.set(requestId, onResponse);
+    ws.send(JSON.stringify({ type, schema_version: 1, request_id: requestId, payload }));
+    return requestId;
+  }, [wsRef]);
 
-  // Combine downloaded models with catalog
-  const mergedModels = catalog.map(cat => {
-    const downloaded = localModels.find(lm => lm.name === cat.name);
-    return {
-      ...cat,
-      isDownloaded: !!downloaded,
-      localSize: downloaded ? (downloaded.size / (1024*1024*1024)) : cat.size,
-      downloadPath: downloaded ? downloaded.path : null
-    };
-  });
-
-  // Also include models that are downloaded but not in our catalog
-  localModels.forEach(lm => {
-    if (!catalog.find(c => c.name === lm.name)) {
-      mergedModels.push({
-        name: lm.name,
-        size: lm.size / (1024*1024*1024),
-        localSize: lm.size / (1024*1024*1024),
-        params: 'Unknown',
-        quant: 'Unknown',
-        description: 'Locally imported model.',
-        isDownloaded: true,
-        downloadPath: lm.path
-      });
+  const sendFireAndForget = useCallback((type, payload) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type, schema_version: 1, request_id: Date.now().toString(), payload,
+      }));
     }
-  });
+  }, [wsRef]);
 
+  const refreshDownloaded = useCallback(() => {
+    sendRequest('MODEL_HUB_DOWNLOADED_REQUEST', {}, (payload) => {
+      if (payload && Array.isArray(payload.models)) setDownloaded(payload.models);
+      if (payload && payload.error) setHubError(payload.error);
+    });
+  }, [sendRequest]);
+
+  const runSearch = useCallback(() => {
+    const seq = ++searchSeqRef.current;
+    setSearching(true);
+    sendRequest(
+      'MODEL_HUB_SEARCH_REQUEST',
+      { source, query: searchQuery, family: family === 'all' ? null : family },
+      (payload) => {
+        if (seq !== searchSeqRef.current) return; // a newer search owns the list
+        setSearching(false);
+        setSearched(true);
+        setResults(payload && Array.isArray(payload.models) ? payload.models : []);
+        setResultsError(payload && payload.error ? payload.error : null);
+      }
+    );
+  }, [sendRequest, source, searchQuery, family]);
+
+  useEffect(() => { runSearch(); }, [runSearch]);
+  useEffect(() => { refreshDownloaded(); }, [refreshDownloaded]);
+
+  // One socket listener: hub responses (correlated by request_id),
+  // download progress + task lifecycle, and the default-changed
+  // broadcast.
   useEffect(() => {
     if (!wsRef.current) return;
+    const clearProgress = (model) => {
+      setDownloadProgress(prev => {
+        if (!model || !(model in prev)) return prev;
+        const next = { ...prev };
+        delete next[model];
+        return next;
+      });
+    };
     const handleMessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'LOCAL_MODEL_DOWNLOAD_PROGRESS') {
+        const payload = data.payload || {};
+        if (data.request_id && pendingRef.current.has(data.request_id)) {
+          const handler = pendingRef.current.get(data.request_id);
+          pendingRef.current.delete(data.request_id);
+          handler(payload);
+          return;
+        }
+        if (data.type === 'LOCAL_MODEL_DOWNLOAD_PROGRESS' && payload.model) {
           setDownloadProgress(prev => ({
             ...prev,
-            [data.payload.model]: {
-              percent: data.payload.download_percent,
-              status: data.payload.status
-            }
+            [payload.model]: { percent: payload.download_percent, status: payload.status },
           }));
-        } else if (data.type === 'MODEL_DEFAULT_CHANGED' && data.payload) {
-          // The engine confirms a new default (e.g. after Set Active).
-          setActiveDefault({ provider: data.payload.provider || '', model: data.payload.model || '' });
-        } else if (data.type === 'TASK_COMPLETED' && data.payload.model) {
-          // Refresh list automatically
-          setDownloadProgress(prev => {
-            const next = { ...prev };
-            delete next[data.payload.model];
-            return next;
-          });
-          wsRef.current.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
+        } else if (data.type === 'MODEL_DEFAULT_CHANGED') {
+          setActiveDefault({ provider: payload.provider || '', model: payload.model || '' });
+        } else if (data.type === 'TASK_COMPLETED' && payload.model) {
+          clearProgress(payload.model);
+          refreshDownloaded();
+        } else if (data.type === 'TASK_FAILED' && payload.model) {
+          clearProgress(payload.model);
+          if (payload.error) setHubError(payload.error);
+          refreshDownloaded();
+        } else if (data.type === 'TASK_CANCELLED' && payload.model) {
+          clearProgress(payload.model);
+          refreshDownloaded();
         }
       } catch (e) {}
     };
@@ -88,234 +212,424 @@ export default function LocalModelsTab({ wsRef, localModels = [], defaultProvide
     return () => {
       if (wsRef.current) wsRef.current.removeEventListener('message', handleMessage);
     };
-  }, [wsRef]);
+  }, [wsRef, refreshDownloaded]);
 
-  const handleDownload = (modelName) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'LOCAL_MODEL_DOWNLOAD_START',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { model: modelName, destination_dir: localStorage.getItem('local_model_download_dir') || null }
-      }));
-      setDownloadProgress(prev => ({ ...prev, [modelName]: { percent: 0, status: 'starting' } }));
+  // ---- downloads -------------------------------------------------
+
+  const isDownloaded = useCallback((row) => {
+    return downloaded.some(d => {
+      if (d.source === row.source && d.id === row.id) return true;
+      // A downloaded HF GGUF lives in the Ollama store under its
+      // hf.co/<repo>:<quant> name.
+      return row.source === 'hf' && d.source === 'ollama'
+        && typeof d.id === 'string' && d.id.startsWith(`hf.co/${row.id}`);
+    });
+  }, [downloaded]);
+
+  const progressForRow = useCallback((row) => {
+    const keys = [row.id, ...(keysByRow[rowKey(row)] || [])];
+    for (const key of keys) {
+      if (key && downloadProgress[key]) return { key, ...downloadProgress[key] };
     }
+    return null;
+  }, [downloadProgress, keysByRow]);
+
+  const handleDownload = (row, variant) => {
+    const payload = { source: row.source, id: row.id };
+    // The engine matches the variant as a STRING (quant label or
+    // filename) — never the variant object.
+    if (variant) payload.variant = variant.quant || variant.file;
+    setHubError(null);
+    sendRequest('MODEL_HUB_DOWNLOAD_REQUEST', payload, (resp) => {
+      if (resp && resp.success) {
+        const engineKey = resp.model || row.id;
+        const rk = rowKey(row);
+        setKeysByRow(prev => {
+          const existing = prev[rk] || [];
+          return existing.includes(engineKey) ? prev : { ...prev, [rk]: [...existing, engineKey] };
+        });
+        setDownloadProgress(prev => ({ ...prev, [engineKey]: { percent: 0, status: 'starting' } }));
+      } else {
+        setHubError((resp && resp.error) || 'The engine refused the download.');
+      }
+    });
   };
 
-  // Phase 10.3 C2: "Active" used to be a button with no handler. It now
-  // sets the model as the engine's default via MODEL_SET_DEFAULT —
-  // provider 'ollama' is the local-models provider (LiteLLM resolves it
-  // to ollama/<model>), and the engine broadcasts MODEL_DEFAULT_CHANGED,
-  // which flips this card to the Active state (see the message handler).
+  const handleCancel = (engineKey) => {
+    sendFireAndForget('LOCAL_MODEL_DOWNLOAD_CANCEL', { model: engineKey });
+    setDownloadProgress(prev => {
+      const next = { ...prev };
+      delete next[engineKey];
+      return next;
+    });
+  };
+
+  const handleDeleteDownloaded = (row) => {
+    setHubError(null);
+    sendRequest('MODEL_HUB_DELETE_REQUEST', { source: row.source, id: row.id }, (resp) => {
+      if (resp && resp.success) {
+        refreshDownloaded();
+      } else {
+        setHubError((resp && resp.error) || 'The engine could not delete that model.');
+      }
+    });
+  };
+
+  // Phase 10.3 C2 (preserved): set a downloaded Ollama model as the
+  // engine's default via MODEL_SET_DEFAULT (provider 'ollama').
   const handleSetActive = (modelName) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'MODEL_SET_DEFAULT',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { provider: 'ollama', model: modelName }
-      }));
-    }
+    sendFireAndForget('MODEL_SET_DEFAULT', { provider: 'ollama', model: modelName });
   };
 
-  const handleCancel = (modelName) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'LOCAL_MODEL_DOWNLOAD_CANCEL',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { model: modelName }
-      }));
-      setDownloadProgress(prev => {
-        const next = { ...prev };
-        delete next[modelName];
-        return next;
+  // ---- detail ----------------------------------------------------
+
+  const toggleDetails = (row) => {
+    const key = rowKey(row);
+    if (expandedKey === key) {
+      setExpandedKey(null);
+      return;
+    }
+    setExpandedKey(key);
+    if (!details[key]) {
+      sendRequest('MODEL_HUB_DETAIL_REQUEST', { source: row.source, id: row.id }, (payload) => {
+        setDetails(prev => ({
+          ...prev,
+          [key]: {
+            detail: payload && payload.detail ? payload.detail : null,
+            error: payload && payload.error ? payload.error : null,
+          },
+        }));
       });
     }
   };
 
-  const handleDelete = (modelName) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'LOCAL_MODEL_DELETE_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { name: modelName }
-      }));
-      setTimeout(() => {
-         wsRef.current.send(JSON.stringify({ type: 'LOCAL_MODEL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
-      }, 500);
-    }
+  // ---- rendering -------------------------------------------------
+
+  const renderProgress = (progress) => (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'rgb(var(--accent-rgb, 167, 139, 250))', fontSize: '13px', fontWeight: 600 }}>
+        <RefreshCw size={14} className="spin-animation" /> {Math.round(progress.percent || 0)}%
+        {progress.status ? <span style={{ color: 'var(--text-secondary, #9090a0)', fontWeight: 500 }}>{progress.status}</span> : null}
+      </div>
+      <button onClick={() => handleCancel(progress.key)} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: '#ef4444', cursor: 'pointer', border: '1px solid rgba(239,68,68,0.3)' }} title="Cancel Download">
+        <X size={14} />
+      </button>
+    </>
+  );
+
+  const renderVariant = (row, variant) => {
+    const label = variant.quant || (variant.kind === 'gguf' ? 'GGUF' : variant.kind);
+    const downloadable = row.runnability === 'ollama' && variant.kind === 'gguf'
+      && !isDownloaded(row) && !progressForRow(row);
+    return (
+      <div
+        key={variant.file || variant.kind}
+        data-testid={variant.quant ? `variant-${variant.quant}` : undefined}
+        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', padding: '8px 10px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '10px' }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary, #fff)' }}>
+            {label}
+            {variant.kind ? <span style={{ color: 'var(--text-secondary, #9090a0)', fontWeight: 500 }}> · {variant.kind}</span> : null}
+          </div>
+          {variant.file && (
+            <div style={{ fontSize: '11px', color: 'var(--text-secondary, #9090a0)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{variant.file}</div>
+          )}
+          {Array.isArray(variant.files) && (
+            <div style={{ fontSize: '11px', color: 'var(--text-secondary, #9090a0)', fontFamily: 'monospace' }}>{variant.files.length} files</div>
+          )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+          <span style={{ fontSize: '12px', color: 'var(--text-secondary, #9090a0)' }}>
+            {variant.size_bytes ? formatBytes(variant.size_bytes) : 'Size not reported'}
+          </span>
+          {downloadable && (
+            <button onClick={() => handleDownload(row, variant)} className="ios-glass" style={{ ...downloadButtonStyle, padding: '6px 12px', fontSize: '12px' }}>
+              <Download size={14} /> Download
+            </button>
+          )}
+        </div>
+      </div>
+    );
   };
 
-  const handleBrowseDir = async () => {
-    try {
-      const path = await window.electronAPI.selectDirectory();
-      if (path) {
-        // You could save this to localStorage and pass it as destination_dir to LOCAL_MODEL_DOWNLOAD_START
-        localStorage.setItem('local_model_download_dir', path);
-        alert(`Download directory set to: ${path}`);
-      }
-    } catch (e) {
-      console.error(e);
+  const renderDetail = (row) => {
+    const entry = details[rowKey(row)];
+    if (!entry) {
+      return <div style={{ fontSize: '13px', color: 'var(--text-secondary, #9090a0)' }}>Loading details…</div>;
     }
+    if (entry.error) {
+      return <div style={{ fontSize: '13px', color: '#f87171' }}>{entry.error}</div>;
+    }
+    const detail = entry.detail;
+    if (!detail) return null;
+    const variants = Array.isArray(detail.variants) ? detail.variants : [];
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        {detail.size_bytes ? (
+          <div style={{ fontSize: '12px', color: 'var(--text-secondary, #9090a0)' }}>
+            Total size: {formatBytes(detail.size_bytes)}
+          </div>
+        ) : null}
+        {variants.length === 0 && (
+          <div style={{ fontSize: '13px', color: 'var(--text-secondary, #9090a0)' }}>No downloadable variants listed.</div>
+        )}
+        {variants.map(v => renderVariant(row, v))}
+      </div>
+    );
   };
 
-  const customDir = localStorage.getItem('local_model_download_dir');
+  const renderResultCard = (row) => {
+    const badge = RUNNABILITY_BADGES[row.runnability] || RUNNABILITY_BADGES.unknown;
+    const progress = progressForRow(row);
+    const alreadyDownloaded = isDownloaded(row);
+    const expanded = expandedKey === rowKey(row);
+    const sizeText = formatBytes(row.size_bytes);
+    const downloadsText = formatDownloads(row.downloads);
+    // Whole-repo downloads: Ollama library rows and in-app speech
+    // repos. HF GGUF repos download per variant from the detail.
+    const wholeRepoDownloadable = !alreadyDownloaded && !progress && (
+      row.source === 'ollama' || row.runnability === 'in-app'
+    );
 
-  // Filtering and Sorting
-  const filteredModels = mergedModels
-    .filter(m => m.name.toLowerCase().includes(searchQuery.toLowerCase()))
-    .filter(m => {
-      if (filterType === 'downloaded') return m.isDownloaded;
-      if (filterType === 'not_downloaded') return !m.isDownloaded;
-      return true;
-    })
-    .sort((a, b) => {
-      if (sortType === 'name') return a.name.localeCompare(b.name);
-      if (sortType === 'size_asc') return a.size - b.size;
-      if (sortType === 'size_desc') return b.size - a.size;
-      return 0;
-    });
+    return (
+      <div
+        key={rowKey(row)}
+        data-testid={`result-row-${rowKey(row)}`}
+        className="ios-glass"
+        style={{ padding: '20px', borderRadius: '16px', display: 'flex', flexDirection: 'column', transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)', position: 'relative', overflow: 'hidden' }}
+      >
+        {progress && (
+          <div style={{ position: 'absolute', bottom: 0, left: 0, height: '4px', background: 'linear-gradient(90deg, rgba(var(--accent-rgb, 124, 58, 237), 1), rgba(var(--accent-rgb, 167, 139, 250), 1))', width: `${progress.percent || 0}%`, transition: 'width 0.3s linear' }} />
+        )}
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px', gap: '12px' }}>
+          <h4 style={{ fontSize: '16px', fontWeight: 600, margin: 0, color: 'var(--text-primary, #fff)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.name}</h4>
+          {alreadyDownloaded ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', padding: '4px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, letterSpacing: '0.05em', flexShrink: 0 }}>
+              <CheckCircle2 size={12} /> DOWNLOADED
+            </div>
+          ) : sizeText ? (
+            <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '12px', fontWeight: 500, flexShrink: 0 }}>{sizeText}</div>
+          ) : null}
+        </div>
+
+        {row.id !== row.name && (
+          <div style={{ fontSize: '11px', color: 'var(--text-secondary, #9090a0)', fontFamily: 'monospace', marginBottom: '8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.id}</div>
+        )}
+
+        {row.description && (
+          <p style={{ color: 'var(--text-secondary, #a0a0b0)', fontSize: '13px', lineHeight: '1.5', margin: '0 0 12px 0' }}>{row.description}</p>
+        )}
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '12px' }}>
+          <span style={chipStyle}>{FAMILY_LABELS[row.family] || 'Other'}</span>
+          {downloadsText && <span style={chipStyle}>{downloadsText} downloads</span>}
+          {Array.isArray(row.formats) && row.formats.map(f => (
+            <span key={f} style={chipStyle}>{f}</span>
+          ))}
+          {row.params && <span style={chipStyle}>{row.params} Params</span>}
+          {row.quant && <span style={chipStyle}>{row.quant}</span>}
+        </div>
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+          <span title={row.runnability_reason || ''} style={{ background: badge.bg, color: badge.color, border: `1px solid ${badge.border}`, padding: '4px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, letterSpacing: '0.03em' }}>
+            {badge.label}
+          </span>
+          <span style={{ fontSize: '12px', color: 'var(--text-secondary, #9090a0)' }}>
+            {row.licence ? `Licence: ${row.licence}` : 'Licence unknown'}
+          </span>
+        </div>
+
+        {row.runnability === 'not-runnable' && row.runnability_reason && (
+          <p style={{ color: '#f87171', fontSize: '12px', lineHeight: '1.5', margin: '0 0 16px 0' }}>{row.runnability_reason}</p>
+        )}
+        {row.runnability === 'unknown' && row.runnability_reason && (
+          <p style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '12px', lineHeight: '1.5', margin: '0 0 16px 0' }}>{row.runnability_reason}</p>
+        )}
+
+        <div style={{ display: 'flex', gap: '12px', alignItems: 'center', justifyContent: 'space-between', marginTop: 'auto' }}>
+          {progress ? renderProgress(progress) : wholeRepoDownloadable ? (
+            <button onClick={() => handleDownload(row)} className="ios-glass" style={{ ...downloadButtonStyle, flex: 1 }}>
+              <Download size={16} /> Download
+            </button>
+          ) : row.runnability === 'ollama' && row.source === 'hf' && !alreadyDownloaded ? (
+            <span style={{ fontSize: '12px', color: 'var(--text-secondary, #9090a0)' }}>Pick a variant below to download via Ollama.</span>
+          ) : <span />}
+          <button
+            onClick={() => toggleDetails(row)}
+            className="ios-glass"
+            aria-expanded={expanded}
+            style={{ padding: '8px 12px', borderRadius: '10px', color: 'var(--text-primary, #e2e8f0)', cursor: 'pointer', border: '1px solid rgba(255,255,255,0.12)', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 500, flexShrink: 0 }}
+          >
+            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />} Details
+          </button>
+        </div>
+
+        {expanded && (
+          <div style={{ marginTop: '16px', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '16px' }}>
+            {renderDetail(row)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderDownloadedRow = (row) => {
+    const sizeText = formatBytes(row.size_bytes);
+    const isActive = row.source === 'ollama'
+      && activeDefault.provider === 'ollama' && activeDefault.model === row.id;
+    return (
+      <div
+        key={rowKey(row)}
+        data-testid={`downloaded-row-${rowKey(row)}`}
+        style={{ display: 'flex', alignItems: 'center', gap: '16px', padding: '14px 16px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '12px' }}
+      >
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary, #fff)' }}>{row.name}</span>
+            <span style={chipStyle}>{SOURCE_LABELS[row.source] || row.source}</span>
+            <span style={chipStyle}>{FAMILY_LABELS[row.family] || 'Other'}</span>
+            {sizeText && <span style={{ fontSize: '12px', color: 'var(--text-secondary, #9090a0)' }}>{sizeText}</span>}
+          </div>
+          {row.path && (
+            <div style={{ fontSize: '11px', color: 'var(--text-secondary, #9090a0)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '4px' }} title={row.path}>{row.path}</div>
+          )}
+        </div>
+        {row.source === 'ollama' && (
+          isActive ? (
+            <button disabled title="Currently the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+              Active
+            </button>
+          ) : (
+            <button onClick={() => handleSetActive(row.id)} title="Set as the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)', color: 'var(--text-primary, #fff)', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+              Set Active
+            </button>
+          )
+        )}
+        <button onClick={() => handleDeleteDownloaded(row)} className="ios-glass" style={{ padding: '8px 10px', background: 'rgba(239,68,68,0.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '10px', cursor: 'pointer' }} title="Delete Model">
+          <Trash2 size={16} />
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', paddingBottom: '32px' }}>
-      
-      {/* Header & Directory Picker */}
+
+      {/* Header */}
       <div style={{ background: 'var(--bg-secondary, rgba(255,255,255,0.02))', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '16px', padding: '20px' }}>
-         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-            <div>
-               <h3 style={{ fontSize: '18px', fontWeight: 600, margin: '0 0 8px 0', color: 'var(--text-primary, #fff)' }}>Local Inference Engine</h3>
-               <p style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px', margin: 0, maxWidth: '500px', lineHeight: '1.5' }}>
-                 Aether-OS automatically accelerates local inference using your GPU via Ollama. Download models below to run completely offline.
-               </p>
-            </div>
-            <button 
-              onClick={handleBrowseDir}
-              className="ios-glass"
-              style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', color: 'var(--text-primary, #e2e8f0)', borderRadius: '12px', border: '1px solid rgba(var(--accent-rgb, 124,58,237),0.3)', cursor: 'pointer', fontWeight: 500 }}
+        <h3 style={{ fontSize: '18px', fontWeight: 600, margin: '0 0 8px 0', color: 'var(--text-primary, #fff)' }}>Model Hub</h3>
+        <p style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px', margin: 0, maxWidth: '560px', lineHeight: '1.5' }}>
+          Search Hugging Face and the Ollama library, and download models in one click.
+          Every model is labelled by how it runs: in the app itself (speech),
+          via Ollama (GGUF brains), or not locally runnable — those are shown
+          honestly, with the reason, and can't be downloaded from here.
+        </p>
+      </div>
+
+      {/* Source switch + search */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        <div style={{ display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <div role="group" aria-label="Model source" style={{ display: 'flex', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '12px', padding: '4px', gap: '4px' }}>
+            {SOURCES.map(s => (
+              <button
+                key={s.value}
+                onClick={() => setSource(s.value)}
+                aria-pressed={source === s.value}
+                style={{
+                  padding: '8px 16px', borderRadius: '9px', border: 'none', cursor: 'pointer',
+                  fontSize: '13px', fontWeight: 600,
+                  background: source === s.value ? 'rgba(245, 181, 52, 0.18)' : 'transparent',
+                  color: source === s.value ? '#f5b544' : 'var(--text-secondary, #9090a0)',
+                  transition: 'all 0.2s',
+                }}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ position: 'relative', flex: 1, minWidth: '220px' }}>
+            <Search size={16} color="var(--text-secondary, #9090a0)" style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)' }} />
+            <input
+              type="text"
+              placeholder="Search models…"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              className="ios-glass-input"
+              style={{ width: '100%', padding: '12px 16px 12px 42px', color: 'var(--text-primary, #fff)', fontSize: '14px', background: 'var(--bg-secondary, rgba(0, 0, 0, 0.15))' }}
+            />
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          {FAMILY_CHIPS.map(chip => (
+            <button
+              key={chip.value}
+              onClick={() => setFamily(chip.value)}
+              aria-pressed={family === chip.value}
+              style={{
+                padding: '6px 12px', borderRadius: '20px', cursor: 'pointer', fontSize: '12px', fontWeight: 600,
+                background: family === chip.value ? 'rgba(245, 181, 52, 0.18)' : 'rgba(255,255,255,0.04)',
+                color: family === chip.value ? '#f5b544' : 'var(--text-secondary, #9090a0)',
+                border: `1px solid ${family === chip.value ? 'rgba(245, 181, 52, 0.4)' : 'rgba(255,255,255,0.08)'}`,
+                transition: 'all 0.2s',
+              }}
             >
-              <Folder size={16} color="rgb(var(--accent-rgb, 167, 139, 250))" />
-              {customDir ? 'Change Directory' : 'Set Download Folder'}
+              {chip.label}
             </button>
-         </div>
-         {customDir && (
-           <div style={{ marginTop: '16px', fontSize: '12px', color: 'var(--text-secondary, #9090a0)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-             <HardDrive size={14} /> Saving to: <span style={{ color: 'rgb(var(--accent-rgb, 167, 139, 250))', fontFamily: 'monospace' }}>{customDir}</span>
-           </div>
-         )}
-      </div>
-
-      {/* Toolbar */}
-      <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-        <div style={{ position: 'relative', flex: 1 }}>
-          <Search size={16} color="var(--text-secondary, #9090a0)" style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)' }} />
-          <input 
-            type="text" 
-            placeholder="Search local catalog..." 
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            className="ios-glass-input"
-            style={{ width: '100%', padding: '12px 16px 12px 42px', color: 'var(--text-primary, #fff)', fontSize: '14px', background: 'var(--bg-secondary, rgba(0, 0, 0, 0.15))' }}
-          />
-        </div>
-        
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-           <Dropdown 
-             value={filterType}
-             onChange={setFilterType}
-             options={[
-               { value: 'all', label: 'All Models' },
-               { value: 'downloaded', label: 'Downloaded' },
-               { value: 'not_downloaded', label: 'Available' }
-             ]}
-           />
-           <Dropdown 
-             value={sortType}
-             onChange={setSortType}
-             options={[
-               { value: 'name', label: 'Sort: Name' },
-               { value: 'size_asc', label: 'Sort: Size (Smallest)' },
-               { value: 'size_desc', label: 'Sort: Size (Largest)' }
-             ]}
-           />
+          ))}
         </div>
       </div>
 
-      {/* Model Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
-        {filteredModels.map(model => {
-          const progress = downloadProgress[model.name];
-          const isDownloading = !!progress;
+      {/* Inline hub error (download refusals, failures, delete errors) */}
+      {hubError && (
+        <div role="alert" style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#fca5a5', borderRadius: '12px', padding: '12px 16px', fontSize: '13px', lineHeight: '1.5' }}>
+          <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: '1px' }} />
+          <span style={{ flex: 1 }}>{hubError}</span>
+          <button onClick={() => setHubError(null)} aria-label="Dismiss" style={{ background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', padding: 0 }}>
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
-          return (
-            <div key={model.name} className="ios-glass" style={{ padding: '20px', borderRadius: '16px', display: 'flex', flexDirection: 'column', transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)', position: 'relative', overflow: 'hidden' }}>
-              
-              {/* Animated Progress Background Overlay */}
-              {isDownloading && (
-                <div style={{ position: 'absolute', bottom: 0, left: 0, height: '4px', background: 'linear-gradient(90deg, rgba(var(--accent-rgb, 124, 3a, ed), 1), rgba(var(--accent-rgb, 167, 139, 250), 1))', width: `${progress.percent}%`, transition: 'width 0.3s linear' }} />
-              )}
+      {/* Results */}
+      <div>
+        {resultsError ? (
+          <div role="alert" style={{ background: 'rgba(239, 68, 68, 0.08)', border: '1px solid rgba(239, 68, 68, 0.25)', color: '#fca5a5', borderRadius: '12px', padding: '16px', fontSize: '14px', lineHeight: '1.5' }}>
+            {resultsError}
+          </div>
+        ) : searching && results.length === 0 ? (
+          <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <RefreshCw size={14} className="spin-animation" /> Searching {SOURCE_LABELS[source]}…
+          </div>
+        ) : searched && results.length === 0 ? (
+          <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px' }}>
+            No models found on {SOURCE_LABELS[source]} for this search.
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
+            {results.map(renderResultCard)}
+          </div>
+        )}
+      </div>
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
-                <h4 style={{ fontSize: '18px', fontWeight: 600, margin: 0, color: 'var(--text-primary, #fff)' }}>{model.name}</h4>
-                {model.isDownloaded && !isDownloading ? (
-                   <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', padding: '4px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, letterSpacing: '0.05em' }}>
-                     <CheckCircle2 size={12} /> READY
-                   </div>
-                ) : (
-                   <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '12px', fontWeight: 500 }}>{model.size.toFixed(1)} GB</div>
-                )}
-              </div>
-
-              <p style={{ color: 'var(--text-secondary, #a0a0b0)', fontSize: '13px', lineHeight: '1.5', margin: '0 0 16px 0', flex: 1 }}>
-                {model.description}
-              </p>
-
-              <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
-                <span style={{ background: 'rgba(100, 100, 100, 0.15)', color: 'var(--text-primary, #e2e8f0)', padding: '4px 8px', borderRadius: '6px', fontSize: '11px', fontWeight: 500 }}>{model.params} Params</span>
-                <span style={{ background: 'rgba(100, 100, 100, 0.15)', color: 'var(--text-primary, #e2e8f0)', padding: '4px 8px', borderRadius: '6px', fontSize: '11px', fontWeight: 500 }}>{model.quant}</span>
-              </div>
-
-              <div style={{ display: 'flex', gap: '12px', alignItems: 'center', justifyContent: 'space-between' }}>
-                {isDownloading ? (
-                   <>
-                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'rgb(var(--accent-rgb, 167, 139, 250))', fontSize: '13px', fontWeight: 600 }}>
-                        <RefreshCw size={14} className="spin-animation" /> {progress.percent}%
-                     </div>
-                     <div style={{ display: 'flex', gap: '8px' }}>
-                        <button onClick={() => handleCancel(model.name)} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: '#ef4444', cursor: 'pointer', border: '1px solid rgba(239,68,68,0.3)' }} title="Cancel Download">
-                           <X size={14} />
-                        </button>
-                     </div>
-                   </>
-                ) : model.isDownloaded ? (
-                   <>
-                     {activeDefault.provider === 'ollama' && activeDefault.model === model.name ? (
-                       <button disabled title="Currently the active model" className="ios-glass" style={{ flex: 1, padding: '10px 0', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '12px', cursor: 'default', fontWeight: 500, transition: 'all 0.2s' }}>
-                         Active
-                       </button>
-                     ) : (
-                       <button onClick={() => handleSetActive(model.name)} title="Set as the active model" className="ios-glass" style={{ flex: 1, padding: '10px 0', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)', color: 'var(--text-primary, #fff)', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, transition: 'all 0.2s' }}>
-                         Set Active
-                       </button>
-                     )}
-                     <button onClick={() => handleDelete(model.name)} className="ios-glass" style={{ padding: '10px 12px', background: 'rgba(239,68,68,0.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '12px', cursor: 'pointer', transition: 'all 0.2s' }} title="Delete Model">
-                       <Trash2 size={16} />
-                     </button>
-                   </>
-                ) : (
-                   <button 
-                     onClick={() => handleDownload(model.name)}
-                     className="ios-glass" 
-                     style={{ width: '100%', padding: '10px 0', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)', color: 'var(--text-primary, #fff)', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', transition: 'all 0.2s' }}>
-                     <Download size={16} /> Download
-                   </button>
-                )}
-              </div>
-
-            </div>
-          );
-        })}
+      {/* Downloaded inventory */}
+      <div data-testid="downloaded-section">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+          <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0, color: 'var(--text-primary, #fff)' }}>Downloaded</h3>
+          <button onClick={refreshDownloaded} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: 'var(--text-secondary, #9090a0)', cursor: 'pointer', border: '1px solid rgba(255,255,255,0.1)' }} title="Refresh downloaded models">
+            <RefreshCw size={14} />
+          </button>
+        </div>
+        {downloaded.length === 0 ? (
+          <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px' }}>
+            No models downloaded yet — download one from the catalogue above and it will appear here.
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {downloaded.map(renderDownloadedRow)}
+          </div>
+        )}
       </div>
 
     </div>

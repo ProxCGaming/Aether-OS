@@ -5,20 +5,17 @@ excluded list (with kind tags), and an optional DiscoveryError carrying the
 HTTP status code. There are no hardcoded fallback model lists — failures
 surface the real error.
 """
-import os
-import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import httpx
+import pytest
 
 from aether_engine.providers.discovery import (
-    DiscoveryError,
     DiscoveryResult,
-    fetch_available_models,
+    _discover_anthropic_models,
     _discover_gemini_models,
     _discover_openai_models,
-    _discover_anthropic_models,
-    _discover_deepseek_models,
-    _discover_openrouter_models,
+    fetch_available_models,
 )
 from aether_engine.routing.registry import ModelRegistry
 

@@ -1,5 +1,6 @@
 from aether_engine.routing.task_class_router import infer_task_class
 
+
 def test_infer_task_class():
     assert infer_task_class("delete_file", {}) == "instant"
     assert infer_task_class("write_file", {}) == "quick"

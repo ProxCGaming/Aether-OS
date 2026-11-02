@@ -12,7 +12,9 @@ from aether_engine.config import (
     UserConfig,
     load_config,
 )
+from aether_engine.models.hub_downloads import ModelHubDownloads
 from aether_engine.models.local_models import OllamaManager
+from aether_engine.models.model_hub import ModelHub
 from aether_engine.routing.health import (
     GLOBAL_HEALTH_MANAGER,
 )
@@ -41,6 +43,9 @@ class EngineState:
         self.routing_policy = GLOBAL_ROUTING_POLICY
         self.scheduler_manager = CapabilitySchedulerManager()
         self.ollama_manager = OllamaManager()
+        self.model_hub = ModelHub()
+        self.hub_downloads = ModelHubDownloads(
+            hub=self.model_hub, ollama=self.ollama_manager)
         from aether_engine.plugins.installer import PluginInstaller
         self.plugin_installer = PluginInstaller(Path.home() / ".aether" / "plugins", audit_logger=self.audit_logger)
         self.active_provider: str = "google_gemini"

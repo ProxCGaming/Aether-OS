@@ -29,12 +29,26 @@ vocabulary and normalised the way the config loader normalises it
 (strip / lower), so a stored value is exactly the name the facade
 will resolve — per request, so a valid switch takes effect without
 a restart.
+
+Model hub H3 adds the three speech fields under the same contract:
+``speech_stt_model`` (dictation + voice mode), ``transcription_stt_model``
+(the media analyser's own setting, grill P6(c)) and
+``speech_tts_voice``. The STT fields are validated against the
+voice layer's vocabulary — a faster-whisper size name, or an HF
+repo id the hub labeller (H1) marks in-app for speech-to-text —
+because faster-whisper accepts ANY string as a repo id and an
+unvalidated typo would become a surprise multi-GB download at
+first voice use. The voice is validated against the Kokoro
+voice-id pattern. Both checks are offline and exact: no coercion,
+no network probe.
 """
 from __future__ import annotations
 
 from typing import Any
 
 from aether_engine.memory.facade import VALID_BACKENDS
+from aether_engine.voice.stt import is_supported_stt_model
+from aether_engine.voice.tts import is_valid_kokoro_voice
 
 HANDED_OFF_FIELDS = (
     "supervisor_spawn_allowlist",
@@ -46,6 +60,9 @@ HANDED_OFF_FIELDS = (
     "compaction_keep_recent",
     "path_rules",
     "memory_backend",
+    "speech_stt_model",
+    "transcription_stt_model",
+    "speech_tts_voice",
 )
 
 # The verdict vocabulary of tools/policy.py's _VERDICT_MAP and the
@@ -151,6 +168,37 @@ def _validate_path_rule(index: int, rule: Any) -> dict:
     return cleaned
 
 
+def _validate_stt_model(field: str, value: Any) -> str:
+    """A speech STT model write (H3): a faster-whisper size name or
+    an in-app faster-whisper HF repo id — see the module docstring
+    for why anything else must be refused, never coerced."""
+    if not isinstance(value, str) or not value.strip():
+        raise _fail(field, "must be a faster-whisper model name or "
+                           "a Hugging Face repo id")
+    name = value.strip()
+    if not is_supported_stt_model(name):
+        raise _fail(field, f"unsupported speech model {value!r} "
+                           f"(use a faster-whisper size such as 'small', "
+                           f"'medium' or 'large-v3', or a Hugging Face "
+                           f"faster-whisper-* repo id)")
+    return name
+
+
+def _validate_tts_voice(value: Any) -> str:
+    """A Kokoro voice write (H3): the voice-id pattern from
+    voice/tts.py, e.g. 'af_heart' — anything else names no voice
+    Kokoro can load."""
+    if not isinstance(value, str) or not value.strip():
+        raise _fail("speech_tts_voice", "must be a Kokoro voice id")
+    voice = value.strip()
+    if not is_valid_kokoro_voice(voice):
+        raise _fail("speech_tts_voice",
+                    f"unknown Kokoro voice {value!r} (voice ids look "
+                    f"like 'af_heart': a language/gender prefix and "
+                    f"a lowercase name)")
+    return voice
+
+
 def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
     """Validate the handed-off fields present in a CONFIG_UPDATE.
 
@@ -223,5 +271,18 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
                         f"unknown backend {value!r} "
                         f"(valid: {', '.join(VALID_BACKENDS)})")
         cleaned["memory_backend"] = name
+
+    if "speech_stt_model" in config_data:
+        cleaned["speech_stt_model"] = _validate_stt_model(
+            "speech_stt_model", config_data["speech_stt_model"])
+
+    if "transcription_stt_model" in config_data:
+        cleaned["transcription_stt_model"] = _validate_stt_model(
+            "transcription_stt_model",
+            config_data["transcription_stt_model"])
+
+    if "speech_tts_voice" in config_data:
+        cleaned["speech_tts_voice"] = _validate_tts_voice(
+            config_data["speech_tts_voice"])
 
     return cleaned

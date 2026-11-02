@@ -16,9 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from aether_engine.skills.manifest import SkillManifest
 from aether_engine.skills.manager import SkillManager
-
+from aether_engine.skills.manifest import SkillManifest
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers

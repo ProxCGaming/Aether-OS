@@ -53,16 +53,15 @@ class TestSandboxFailClosed:
         with patch(
             "aether_engine.workers.sandbox.WorkerJobObject",
             side_effect=RuntimeError("pywin32 is not installed or available."),
-        ):
-            with pytest.raises(RuntimeError, match="Refusing to execute"):
-                asyncio.run(
-                    execute_tool_in_worker(
-                        tool_name="execute_shell",
-                        args={"command": "echo hi"},
-                        task_class="standard",
-                        audit_logger=audit,
-                    )
+        ), pytest.raises(RuntimeError, match="Refusing to execute"):
+            asyncio.run(
+                execute_tool_in_worker(
+                    tool_name="execute_shell",
+                    args={"command": "echo hi"},
+                    task_class="standard",
+                    audit_logger=audit,
                 )
+            )
         audit.log_event.assert_called_once()
         event_name = audit.log_event.call_args[0][0]
         assert event_name == "WORKER_EXECUTION_REFUSED", event_name

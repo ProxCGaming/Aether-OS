@@ -87,7 +87,7 @@ class TestPhase101PluginInstall(unittest.TestCase):
         def _do():
             try:
                 q.put(("ok", ws.receive_text()))
-            except Exception as e:  # noqa: BLE001 — relayed to the test thread for assertion
+            except Exception as e:  # noqa: BLE001 — relay boundary: any exception from the socket thread is forwarded to the test thread for assertion
                 q.put(("err", e))
 
         threading.Thread(target=_do, daemon=True).start()
@@ -152,35 +152,34 @@ class TestPhase101PluginInstall(unittest.TestCase):
     def test_approval_reject_cancels_cleanly_and_session_survives(self):
         # Pre-fix: the reject branch raised NameError outside any try, hit
         # the outer WS except, and dropped the session.
-        with TestClient(app) as client:  # noqa: SIM117 — nested for readability; combined form lands with the tip cleanup
-            with self._connect(client) as ws:
-                self._hello(ws)
-                ws.send_text(Event(
-                    type=EventType.PLUGIN_INSTALL_REQUEST,
-                    request_id="req-reject-1",
-                    payload={"source": str(self.source_dir)},
-                ).to_json())
-                approval = self._recv_event(ws)
-                self.assertEqual(approval.type, EventType.PLUGIN_APPROVAL_REQUEST)
+        with TestClient(app) as client, self._connect(client) as ws:
+            self._hello(ws)
+            ws.send_text(Event(
+                type=EventType.PLUGIN_INSTALL_REQUEST,
+                request_id="req-reject-1",
+                payload={"source": str(self.source_dir)},
+            ).to_json())
+            approval = self._recv_event(ws)
+            self.assertEqual(approval.type, EventType.PLUGIN_APPROVAL_REQUEST)
 
-                ws.send_text(Event(
-                    type=EventType.PLUGIN_APPROVAL_REJECTED,
-                    request_id="req-reject-1",
-                ).to_json())
-                resp = self._recv_event(ws)
-                self.assertEqual(resp.type, EventType.PLUGIN_INSTALL_RESPONSE)
-                self.assertFalse(resp.payload["success"])
-                self.assertIn("rejected", resp.payload["error"])
+            ws.send_text(Event(
+                type=EventType.PLUGIN_APPROVAL_REJECTED,
+                request_id="req-reject-1",
+            ).to_json())
+            resp = self._recv_event(ws)
+            self.assertEqual(resp.type, EventType.PLUGIN_INSTALL_RESPONSE)
+            self.assertFalse(resp.payload["success"])
+            self.assertIn("rejected", resp.payload["error"])
 
-                self.assertNotIn("Phase101TestPlugin", engine_state.plugin_installer.get_all())
-                from aether_engine.routes import websocket as ws_routes
+            self.assertNotIn("Phase101TestPlugin", engine_state.plugin_installer.get_all())
+            from aether_engine.routes import websocket as ws_routes
 
-                self.assertNotIn("req-reject-1", ws_routes.pending_plugin_installs)
+            self.assertNotIn("req-reject-1", ws_routes.pending_plugin_installs)
 
-                # Session must still be alive after a clean rejection.
-                ws.send_text(Event(type=EventType.PLUGIN_LIST_REQUEST).to_json())
-                listed = self._recv_event(ws)
-                self.assertEqual(listed.type, EventType.PLUGIN_LIST_RESPONSE)
+            # Session must still be alive after a clean rejection.
+            ws.send_text(Event(type=EventType.PLUGIN_LIST_REQUEST).to_json())
+            listed = self._recv_event(ws)
+            self.assertEqual(listed.type, EventType.PLUGIN_LIST_RESPONSE)
 
     def test_grant_with_unknown_request_id_does_not_drop_session(self):
         # Pre-fix: even a grant for an unknown request id raised NameError

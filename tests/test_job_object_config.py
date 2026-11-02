@@ -1,8 +1,10 @@
 import pytest
 
+
 def test_job_object_creation_and_limits():
     try:
         import win32job
+
         from aether_engine.workers.job_object import WorkerJobObject
     except ImportError:
         pytest.skip("pywin32 not installed or not on Windows")

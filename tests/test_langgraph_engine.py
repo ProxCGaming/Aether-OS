@@ -1,11 +1,12 @@
 import pytest
+
 pytest.importorskip("langgraph")
-from typing import Dict, Any
 from pathlib import Path
 
-from aether_engine.langgraph.state import AetherState
 from aether_engine.langgraph.checkpointer import DEFAULT_CHECKPOINT_DB
 from aether_engine.langgraph.graph import create_graph
+from aether_engine.langgraph.state import AetherState
+
 
 def test_aether_state_schema():
     """Test that the AetherState TypedDict has the expected keys."""

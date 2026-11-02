@@ -144,8 +144,10 @@ class TestAssignProcessFailureRefuses:
         from aether_engine.workers.sandbox import execute_tool_in_worker
 
         target = tmp_path / "must-not-exist.txt"
-        with _engine_call_env(tmp_path, FailingAssignJobObject) as audit, \
-                pytest.raises(RuntimeError, match="Refusing to execute"):
+        with (
+            _engine_call_env(tmp_path, FailingAssignJobObject) as audit,
+            pytest.raises(RuntimeError, match="Refusing to execute"),
+        ):
             asyncio.run(execute_tool_in_worker(
                 tool_name="write_file",
                 args={"path": str(target), "content": "unlimited"},

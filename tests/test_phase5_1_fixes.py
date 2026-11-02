@@ -2,15 +2,11 @@
 
 Each test validates one of the confirmed bugs is actually fixed.
 """
-import asyncio
-import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 
 class TestFix1CheckpointDurability(unittest.TestCase):

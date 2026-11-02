@@ -1,9 +1,11 @@
-import pytest
-import shutil
 import json
-import zipfile
+import shutil
 from pathlib import Path
+
+import pytest
+
 from aether_engine.plugins.installer import PluginInstaller
+
 
 @pytest.fixture
 def temp_installer(tmp_path: Path):

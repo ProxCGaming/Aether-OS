@@ -1,13 +1,14 @@
-import unittest
 import tempfile
-import os
+import unittest
 from pathlib import Path
+
 from aether_common.auth import (
     generate_token,
-    write_token,
     read_token,
     verify_token,
+    write_token,
 )
+
 
 class TestCommonAuth(unittest.TestCase):
     def setUp(self):

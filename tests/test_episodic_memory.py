@@ -1,19 +1,23 @@
-import pytest
-import os
 from unittest.mock import patch
-from aether_engine.memory.episodic import store_episode, query_episodes
+
+import pytest
+
+from aether_engine.memory.episodic import query_episodes, store_episode
+
 
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path):
     test_db = tmp_path / "test_episodic.db"
-    with patch("aether_engine.memory.episodic.DB_PATH", test_db):
-        # Disable AuditLogger for testing by mocking it
-        with patch("aether_engine.memory.episodic._audit_logger.log_event") as mock_log:
-            yield test_db, mock_log
+    # Disable AuditLogger for testing by mocking it
+    with (
+        patch("aether_engine.memory.episodic.DB_PATH", test_db),
+        patch("aether_engine.memory.episodic._audit_logger.log_event") as mock_log,
+    ):
+        yield test_db, mock_log
 
 @pytest.mark.asyncio
 async def test_episodic_memory_store_and_query(setup_test_db):
-    test_db, mock_log = setup_test_db
+    _test_db, mock_log = setup_test_db
     
     task_id = "task-123"
     prompt = "Create a python script"

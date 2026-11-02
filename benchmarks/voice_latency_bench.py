@@ -675,9 +675,11 @@ def run_voice_latency_bench(
         # placebo. The run stays labelled fake, with the reason
         # saying exactly why.
         reasons = [
-            ("runtime dependencies are installed, but this harness "
-             "measures simulated stages with calibrated delays and "
-             "never loads a real model")
+            (
+                "runtime dependencies are installed, but this harness "
+                "measures simulated stages with calibrated delays and "
+                "never loads a real model"
+            )
         ]
     samples: list[StageTimings] = []
 

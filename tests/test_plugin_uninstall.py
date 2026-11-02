@@ -1,7 +1,10 @@
-import pytest
 import json
 from pathlib import Path
+
+import pytest
+
 from aether_engine.plugins.installer import PluginInstaller
+
 
 @pytest.fixture
 def temp_installer(tmp_path: Path):

@@ -265,6 +265,19 @@ class UserConfig:
     vad_threshold: float = 0.5
     silence_duration_ms: int = 700
     smart_turn_sensitivity: float = 0.5
+    # Model hub, H3: which local speech models serve which job.
+    # speech_stt_model is shared by push-to-talk dictation and
+    # voice mode; transcription_stt_model is the media analyser's
+    # alone (picker grill P6(c) — background transcription does
+    # not follow the speech picker); speech_tts_voice is the
+    # Kokoro voice the pipeline speaks with. All three are
+    # validated strictly on the Settings write path
+    # (config_updates.py) and cleaned on load below: faster-whisper
+    # treats any string as a repo id, so an unvalidated value would
+    # become a surprise multi-GB download at first voice use.
+    speech_stt_model: str = "small"
+    transcription_stt_model: str = "small"
+    speech_tts_voice: str = "af_heart"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -324,6 +337,9 @@ class UserConfig:
             "vad_threshold": self.vad_threshold,
             "silence_duration_ms": self.silence_duration_ms,
             "smart_turn_sensitivity": self.smart_turn_sensitivity,
+            "speech_stt_model": self.speech_stt_model,
+            "transcription_stt_model": self.transcription_stt_model,
+            "speech_tts_voice": self.speech_tts_voice,
         }
 
     @classmethod
@@ -432,6 +448,10 @@ class UserConfig:
             silence_duration_ms=_as_int(d.get("silence_duration_ms"), 700),
             smart_turn_sensitivity=min(1.0, max(0.0, _as_float(
                 d.get("smart_turn_sensitivity"), 0.5))),
+            speech_stt_model=_clean_speech_stt_model(d.get("speech_stt_model")),
+            transcription_stt_model=_clean_speech_stt_model(
+                d.get("transcription_stt_model")),
+            speech_tts_voice=_clean_speech_tts_voice(d.get("speech_tts_voice")),
         )
 
 
@@ -456,6 +476,24 @@ def custom_provider_flavor(provider_name: str, user_config: UserConfig) -> str:
     if user_config.custom_provider_types.get(provider_name) == "anthropic":
         return "anthropic"
     return "openai_compatible"
+
+
+def _clean_speech_stt_model(value) -> str:
+    """Model hub, H3: delegate to the voice STT vocabulary — a
+    value faster-whisper would treat as an unknown repo id falls
+    back to the default instead of reaching the constructor."""
+    from aether_engine.voice.stt import is_supported_stt_model
+
+    return value.strip() if is_supported_stt_model(value) else "small"
+
+
+def _clean_speech_tts_voice(value) -> str:
+    """Model hub, H3: delegate to the Kokoro voice-id pattern —
+    an unknown voice falls back to the default, like the STT
+    fields above."""
+    from aether_engine.voice.tts import is_valid_kokoro_voice
+
+    return value.strip() if is_valid_kokoro_voice(value) else "af_heart"
 
 
 def _clean_browser_category_modes(value) -> dict[str, str]:

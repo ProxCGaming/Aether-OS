@@ -1,10 +1,8 @@
 """Tests for APScheduler capability check scheduling and startup misfire recovery."""
-import asyncio
-from pathlib import Path
 import pytest
 
-from aether_engine.scheduler.capability_jobs import CapabilitySchedulerManager
 from aether_engine.providers.discovery import DiscoveryResult
+from aether_engine.scheduler.capability_jobs import CapabilitySchedulerManager
 
 
 @pytest.fixture
@@ -58,7 +56,7 @@ class TestSchedulerMisfire:
 
     @pytest.mark.asyncio
     async def test_run_option_c_with_discovered_models(self, temp_scheduler_mgr):
-        from unittest.mock import patch, AsyncMock, MagicMock
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         mock_store = MagicMock()
         mock_store.list_providers.return_value = ["google_gemini"]

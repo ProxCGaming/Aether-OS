@@ -1,7 +1,9 @@
-import unittest
 import asyncio
+import unittest
+
 from aether_common.contracts import EventType, TaskState
 from aether_engine.simulated_task import SimulatedTask
+
 
 class TestSimulatedTask(unittest.IsolatedAsyncioTestCase):
     async def test_normal_task_execution(self):

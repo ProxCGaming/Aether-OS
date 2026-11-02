@@ -93,6 +93,40 @@ class OllamaManager:
         models_result.sort(key=lambda x: (not x["downloaded"], x["name"]))
         return models_result
 
+    async def list_downloaded_models(self) -> list[dict[str, Any]]:
+        """Downloaded models only, with exact byte sizes from /api/tags.
+
+        The model hub's inventory needs real sizes; ``list_models()``
+        formats them away into "~4.7GB" display strings and mixes in
+        the not-downloaded catalogue, so this is the byte-accurate
+        sibling over the same daemon endpoint. A dead daemon yields
+        an empty list (the hub states sizes only when it knows them).
+        """
+        if not await self.is_ollama_running():
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                res = await client.get(f"{self.base_url}/api/tags")
+                if res.status_code != 200:
+                    return []
+                data = res.json()
+        except Exception as e:  # noqa: BLE001 — inventory is best-effort: an unreadable daemon response means "unknown", reported as empty
+            logger.warning(f"Error fetching Ollama tags for inventory: {e}")
+            return []
+        models: list[dict[str, Any]] = []
+        for m in data.get("models", []):
+            name = m.get("name", "")
+            if not name:
+                continue
+            models.append({
+                "name": name,
+                "size_bytes": m.get("size", 0) or 0,
+                "path": self._downloaded_paths.get(
+                    name, f"~/.ollama/models/manifests/{name}"),
+            })
+        models.sort(key=lambda x: x["name"])
+        return models
+
     def _find_manifest(self, model_name: str) -> Path | None:
         """Locate a pulled model's manifest inside the daemon store.
 

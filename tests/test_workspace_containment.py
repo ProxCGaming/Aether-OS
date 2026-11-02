@@ -1,6 +1,5 @@
-import os
-from pathlib import Path
 from aether_engine.validation.pre_flight import validate_tool_request
+
 
 def test_workspace_containment(tmp_path):
     root1 = tmp_path / "workspace1"

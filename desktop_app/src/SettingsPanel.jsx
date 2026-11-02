@@ -17,6 +17,7 @@ import BrowserPolicyPanel from './components/Settings/BrowserPolicyPanel';
 import UsageSettingsPanel from './components/Settings/UsageSettingsPanel';
 import VaultPanel from './components/Settings/VaultPanel';
 import OrchestrationPanel from './components/Settings/OrchestrationPanel';
+import SpeechSettingsPanel from './components/Settings/SpeechSettingsPanel';
 import PathRulesPanel from './components/Settings/PathRulesPanel';
 import ProjectConfigPanel from './components/Settings/ProjectConfigPanel';
 
@@ -1019,6 +1020,17 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                      </div>
                    ))}
                  </div>
+
+                 {/* Model Hub H5: the Speech card — speech model,
+                     voice and transcription model, controlled from
+                     the applied config like every handed-off surface
+                     (E6-F05) and written through sendConfigUpdate. */}
+                 <SpeechSettingsPanel
+                   config={engineConfig}
+                   configError={configUpdateError}
+                   onConfigUpdate={sendConfigUpdate}
+                   wsRef={wsRef}
+                 />
                </>
             )}
 

@@ -6,7 +6,7 @@ from aether_engine.routing.policy import (
     RoutingPolicy,
     infer_task_requirements,
 )
-from aether_engine.routing.registry import ModelRegistry, ModelEntry
+from aether_engine.routing.registry import ModelEntry, ModelRegistry
 
 
 @pytest.fixture

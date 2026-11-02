@@ -38,7 +38,7 @@ def main():
         else:
             print("\n[ERROR] Key verification mismatch after write.")
             sys.exit(1)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — CLI error boundary: any store failure is reported as a clean error + exit 1
         print(f"\n[ERROR] Failed to store API key: {e}")
         sys.exit(1)
 

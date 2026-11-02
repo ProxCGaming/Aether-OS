@@ -989,16 +989,28 @@ def create_voice_pipeline(
     escalation_ack: str = DEFAULT_ESCALATION_ACK,
     endpointer: Endpointer | None = None,
     endpointer_config: EndpointerConfig | None = None,
+    stt_model: str | None = None,
+    tts_voice: str = DEFAULT_VOICE,
 ) -> tuple[VoicePipeline | None, str | None]:
     """Build a pipeline from the production stages (or injected
     ones). Returns ``(pipeline, None)`` when every stage can run,
     or ``(None, "voice unavailable: ...")`` — nothing is opened
     either way; opening happens in ``pipeline.start()``.
+
+    ``stt_model`` / ``tts_voice`` are the speech config (model hub,
+    H3), read by the caller at session start: the STT engine is
+    built with the model here and holds it for the pipeline's
+    whole life — there is no swap seam, so a config change applies
+    to the NEXT session (grill P3(a)). An injected ``stt`` wins
+    over ``stt_model``. The voice, by contrast, reaches the TTS
+    stage as a per-sentence parameter from ``tts_voice``.
     """
     pipeline = VoicePipeline(
         session_id=session_id,
         vad=vad if vad is not None else SileroVad(),
-        stt=stt if stt is not None else FasterWhisperStt(),
+        stt=stt if stt is not None else (
+            FasterWhisperStt(model=stt_model) if stt_model
+            else FasterWhisperStt()),
         tts=tts if tts is not None else KokoroTts(),
         transport=transport if transport is not None else WebRtcVoiceTransport(),
         talker=talker,
@@ -1008,6 +1020,7 @@ def create_voice_pipeline(
         on_turn_error=on_turn_error,
         endpointer=endpointer,
         endpointer_config=endpointer_config,
+        tts_voice=tts_voice,
         escalation_classifier=escalation_classifier,
         on_escalation=on_escalation,
         escalation_ack=escalation_ack,

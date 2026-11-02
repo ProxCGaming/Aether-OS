@@ -15,6 +15,7 @@ import asyncio
 import importlib.util
 import io
 import logging
+import re
 import struct
 import wave
 from collections.abc import AsyncIterator
@@ -26,6 +27,25 @@ logger = logging.getLogger("aether_engine.voice.tts")
 
 DEFAULT_VOICE = "af_heart"
 KOKORO_SAMPLE_RATE = 24000
+
+# Kokoro voice ids are ``<family>_<name>``: a two-letter
+# language/gender prefix (a=American, b=British, e=Spanish,
+# f=French, h=Hindi, i=Italian, j=Japanese, p=Portuguese,
+# z=Mandarin; f=female, m=male) and a lowercase name. The pattern
+# is the vocabulary the speech config field validates against
+# (model hub, H3): a value outside it names no voice Kokoro can
+# load, so it is refused at write time instead of failing at
+# synthesis time.
+KOKORO_VOICE_ID_RE = re.compile(
+    r"^(?:af|am|bf|bm|ef|em|ff|fm|hf|hm|if|im|jf|jm|pf|pm|zf|zm)"
+    r"_[a-z]+$")
+
+
+def is_valid_kokoro_voice(value: object) -> bool:
+    """Whether *value* has the shape of a Kokoro voice id."""
+    return (
+        isinstance(value, str)
+        and KOKORO_VOICE_ID_RE.match(value.strip()) is not None)
 
 
 class TtsEngine(Protocol):

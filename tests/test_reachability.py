@@ -1,6 +1,9 @@
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+
 from aether_engine.models.reachability import ModelReachabilityChecker
+
 
 @pytest.mark.asyncio
 async def test_reachability_checker_caching(tmp_path):

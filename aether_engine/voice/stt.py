@@ -19,12 +19,64 @@ import asyncio
 import importlib.util
 import io
 import logging
+import re
 import wave
 from typing import Protocol
 
 from aether_engine.voice import VoiceUnavailableError
 
 logger = logging.getLogger("aether_engine.voice.stt")
+
+# The bare model names faster-whisper itself accepts: each maps to
+# the ``Systran/faster-whisper-<name>`` Hugging Face repo in
+# ``faster_whisper.download_model``. This is the closed vocabulary
+# the speech config fields validate against (model hub, H3) —
+# faster-whisper treats ANY other string as a repo id or path, so
+# without this check a settings typo becomes a surprise multi-GB
+# download at first voice use.
+WHISPER_MODEL_SIZES = frozenset({
+    "tiny", "tiny.en",
+    "base", "base.en",
+    "small", "small.en",
+    "medium", "medium.en",
+    "large-v1", "large-v2", "large-v3", "large",
+    "large-v3-turbo", "turbo",
+    "distil-small.en", "distil-medium.en",
+    "distil-large-v2", "distil-large-v3", "distil-large-v3.5",
+})
+
+# An HF repo id is exactly ``owner/name`` — no whitespace, no
+# extra path segments.
+_HF_REPO_ID_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
+
+
+def is_supported_stt_model(value: object) -> bool:
+    """Whether *value* may be stored as a speech STT model (H3).
+
+    Two legal shapes, checked offline:
+
+    - a bare faster-whisper size name (``WHISPER_MODEL_SIZES``);
+    - an HF repo id whose leaf marks it as a faster-whisper build
+      — decided by the model hub's runnability labeller (H1) from
+      the id alone, so this predicate and the hub can never
+      disagree about what runs in-app.
+
+    Anything else (unknown bare names, non-faster-whisper repos,
+    non-strings) is unsupported.
+    """
+    if not isinstance(value, str):
+        return False
+    name = value.strip()
+    if not name:
+        return False
+    if "/" not in name:
+        return name in WHISPER_MODEL_SIZES
+    if not _HF_REPO_ID_RE.match(name):
+        return False
+    from aether_engine.models.model_hub import label_runnability
+
+    label, _reason = label_runnability("speech-to-text", [], name)
+    return label == "in-app"
 
 
 class SttEngine(Protocol):

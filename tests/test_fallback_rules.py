@@ -9,17 +9,16 @@ Previously this file imported run_task from the dead orchestration.simple module
 That import and the test depending on it have been replaced with tests that exercise
 the live code paths.
 """
+from typing import ClassVar
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from aether_engine.providers.base import (
     AuthenticationError,
-    BaseProvider,
     NetworkError,
     RateLimitError,
-    StreamChunk,
     TimeoutError,
-    ToolCall,
 )
 from aether_engine.routing.fallback import (
     classify_provider_error,
@@ -28,7 +27,6 @@ from aether_engine.routing.fallback import (
 )
 from aether_engine.routing.health import ProviderHealthManager
 from aether_engine.routing.registry import ModelEntry, ModelRegistry
-from aether_engine.tools.registry import Tool, ToolRegistry
 
 
 class TestFallbackRules:
@@ -110,7 +108,10 @@ class TestPerNodeFallback:
         per-call fallback loop unpacks fm.model/fm.api_key/fm.base_url/
         fm.provider_name, so plain strings would crash on the live path.
         """
-        from aether_engine.providers.litellm_provider import LiteLLMProvider, FallbackModel
+        from aether_engine.providers.litellm_provider import (
+            FallbackModel,
+            LiteLLMProvider,
+        )
         provider = LiteLLMProvider(
             api_key="test-key",
             model="gemini-2.5-flash",
@@ -131,11 +132,14 @@ class TestPerNodeFallback:
         Phase 9, C3: previously no test exercised the live per-call fallback
         path at all — only the shape of the stored config.
         """
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
 
         import litellm
 
-        from aether_engine.providers.litellm_provider import LiteLLMProvider, FallbackModel
+        from aether_engine.providers.litellm_provider import (
+            FallbackModel,
+            LiteLLMProvider,
+        )
 
         provider = LiteLLMProvider(
             api_key="test-key",
@@ -155,7 +159,7 @@ class TestPerNodeFallback:
             finish_reason = "stop"
 
         class FakeChunk:
-            choices = [FakeChoice()]
+            choices: ClassVar = [FakeChoice()]
 
         async def fake_stream():
             yield FakeChunk()
@@ -214,8 +218,11 @@ class TestPerNodeFallback:
 
     def test_create_provider_instance_intra_provider_fallback(self):
         """Verify that _create_provider_instance includes same-provider alternative models."""
-        from aether_engine.orchestration.core import _create_provider_instance, engine_state
-        from aether_engine.routing.registry import ModelRegistry, ModelEntry
+        from aether_engine.orchestration.core import (
+            _create_provider_instance,
+            engine_state,
+        )
+        from aether_engine.routing.registry import ModelEntry, ModelRegistry
 
         mock_models = [
             ModelEntry(provider="google_gemini", id="gemini-3.5-flash-lite", label="Flash Lite", capabilities=["chat", "fast"], priority=1),

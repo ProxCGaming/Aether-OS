@@ -148,9 +148,15 @@ def _audit_approval_arguments_edited(
 
 
 def create_stt_engine():
-    """Factory for local STT engine (E8-5.3 push-to-talk dictation)."""
+    """Factory for local STT engine (E8-5.3 push-to-talk dictation).
+
+    Model hub, H3: the engine is built with the configured speech
+    STT model (``speech_stt_model``), read fresh at construction —
+    the per-connection cache below keys on the same value, so a
+    Settings change rebuilds on next use.
+    """
     from aether_engine.voice.stt import FasterWhisperStt
-    return FasterWhisperStt()
+    return FasterWhisperStt(model=engine_state.user_config.speech_stt_model)
 
 
 def create_tts_engine():
@@ -562,8 +568,13 @@ async def ws_tasks(ws: WebSocket):
         # FasterWhisperStt/KokoroTts loads a model, so dictation and
         # read-aloud reuse one engine for the connection's lifetime
         # instead of constructing a fresh one per chunk/request.
+        # H3: the dictation slot is keyed by the configured speech
+        # STT model (dictation_stt_model) — a settings change swaps
+        # the engine on next use instead of silently dictating with
+        # the old model until reconnect.
         "dictation_stt": None,
         "dictation_stt_opened": False,
+        "dictation_stt_model": None,
         "read_aloud_tts": None,
         "read_aloud_tts_opened": False,
     }
@@ -753,13 +764,28 @@ async def ws_tasks(ws: WebSocket):
     # One STT and one TTS engine per connection, closed only at
     # connection teardown — NOT on DICTATION_STOP / read-aloud end,
     # or push-to-talk would reload the model on every utterance.
+    # H3 exception: the dictation STT slot is keyed by the configured
+    # speech model — a model change (not a stop) swaps the engine.
 
     def _dictation_stt() -> Any:
-        """The connection's cached dictation STT engine, built once."""
+        """The connection's cached dictation STT engine.
+
+        Model-aware (H3): the cache is keyed by the configured
+        speech STT model. Same model → the same engine, no reload.
+        A changed model builds the new model's engine on this next
+        use and drops the old one (for FasterWhisperStt, dropping
+        the reference IS the release — its close() only drops the
+        loaded model). The pre-H3 cache never re-read config, so a
+        Settings change silently left dictation on the old model
+        until the socket reconnected: a placebo control.
+        """
+        model = engine_state.user_config.speech_stt_model
         engine = voice_state.get("dictation_stt")
-        if engine is None:
+        if engine is None or voice_state.get("dictation_stt_model") != model:
             engine = create_stt_engine()
             voice_state["dictation_stt"] = engine
+            voice_state["dictation_stt_model"] = model
+            voice_state["dictation_stt_opened"] = False
         return engine
 
     async def _open_dictation_stt() -> Any:
@@ -806,6 +832,7 @@ async def ws_tasks(ws: WebSocket):
         """Close both cached speech engines (connection teardown).
         Guarded and best-effort: a failing close never wedges the
         disconnect path, and the slots are cleared regardless."""
+        voice_state["dictation_stt_model"] = None
         for engine_key, opened_key in (
             ("dictation_stt", "dictation_stt_opened"),
             ("read_aloud_tts", "read_aloud_tts_opened"),
@@ -3033,6 +3060,100 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
 
             # -----------------------------------------------------------
+            # Model Hub catalogue layer (H1, read-only)
+            # -----------------------------------------------------------
+            elif msg.type == EventType.MODEL_HUB_SEARCH_REQUEST:
+                result = await engine_state.model_hub.search(
+                    source=msg.payload.get("source", "hf"),
+                    query=msg.payload.get("query", "") or "",
+                    family=msg.payload.get("family"),
+                )
+                await ws.send_text(Event(
+                    type=EventType.MODEL_HUB_SEARCH_RESPONSE,
+                    request_id=req_id,
+                    payload=result,
+                ).to_json())
+
+            elif msg.type == EventType.MODEL_HUB_DETAIL_REQUEST:
+                result = await engine_state.model_hub.detail(
+                    source=msg.payload.get("source", "hf"),
+                    repo_id=msg.payload.get("id", "") or "",
+                )
+                await ws.send_text(Event(
+                    type=EventType.MODEL_HUB_DETAIL_RESPONSE,
+                    request_id=req_id,
+                    payload=result,
+                ).to_json())
+
+            # -----------------------------------------------------------
+            # Model Hub downloads (H2): begin/run split — the RESPONSE
+            # is the synchronous verdict (accepted, or the honest
+            # refusal: busy store, not runnable, voice components
+            # missing); progress then flows as the same task event
+            # stream the local-model pulls use. The download registers
+            # in active_downloads under its store key, so the existing
+            # LOCAL_MODEL_DOWNLOAD_CANCEL cancels hub downloads too.
+            # task_runner is deliberately NOT touched: a hub download
+            # must never cancel a running agent task.
+            # -----------------------------------------------------------
+            elif msg.type == EventType.MODEL_HUB_DOWNLOAD_REQUEST:
+                plan = await engine_state.hub_downloads.begin(
+                    source=msg.payload.get("source", "hf"),
+                    model_id=msg.payload.get("id", "") or "",
+                    variant=msg.payload.get("variant"),
+                )
+                if not plan.get("success"):
+                    await ws.send_text(Event(
+                        type=EventType.MODEL_HUB_DOWNLOAD_RESPONSE,
+                        request_id=req_id,
+                        payload={
+                            "success": False,
+                            "error": plan.get("error"),
+                        },
+                    ).to_json())
+                else:
+                    await ws.send_text(Event(
+                        type=EventType.MODEL_HUB_DOWNLOAD_RESPONSE,
+                        request_id=req_id,
+                        payload={
+                            "success": True,
+                            "model": plan["key"],
+                            "task_id": plan["task_id"],
+                        },
+                    ).to_json())
+
+                    async def execute_hub_download(plan=plan, request_id=req_id):
+                        try:
+                            async for dl_ev in engine_state.hub_downloads.run(
+                                plan, request_id=request_id
+                            ):
+                                await ws.send_text(dl_ev.to_json())
+                        finally:
+                            engine_state.hub_downloads.release(plan)
+
+                    hub_dl_task = asyncio.create_task(execute_hub_download())
+                    active_downloads[plan["key"]] = hub_dl_task
+
+            elif msg.type == EventType.MODEL_HUB_DOWNLOADED_REQUEST:
+                result = await engine_state.hub_downloads.downloaded()
+                await ws.send_text(Event(
+                    type=EventType.MODEL_HUB_DOWNLOADED_RESPONSE,
+                    request_id=req_id,
+                    payload=result,
+                ).to_json())
+
+            elif msg.type == EventType.MODEL_HUB_DELETE_REQUEST:
+                result = await engine_state.hub_downloads.delete(
+                    source=msg.payload.get("source", "hf"),
+                    model_id=msg.payload.get("id", "") or "",
+                )
+                await ws.send_text(Event(
+                    type=EventType.MODEL_HUB_DELETE_RESPONSE,
+                    request_id=req_id,
+                    payload=result,
+                ).to_json())
+
+            # -----------------------------------------------------------
             # Capabilities Check Scheduler Events
             # -----------------------------------------------------------
             elif msg.type == EventType.CAPABILITY_CHECK_SET_SCHEDULE:
@@ -3284,7 +3405,7 @@ async def ws_tasks(ws: WebSocket):
                                     entry.provider
                                     for entry in engine_state.model_registry.list_all_models()
                                 )
-                            except Exception:  # noqa: BLE001, S110 — best-effort enrichment: a registry listing failure must not block validation
+                            except Exception:  # noqa: BLE001, S110 — best-effort enrichment: a registry listing failure must not block validation; config-known providers are still checked
                                 pass
                             if _provider not in _known_providers:
                                 _error = f"unknown provider: {_provider}"
@@ -4854,6 +4975,11 @@ async def ws_tasks(ws: WebSocket):
                         on_turn_error=_voice_turn_error,
                         escalation_classifier=_voice_should_escalate,
                         on_escalation=_voice_escalation_launch,
+                        # H3: the speech config is read HERE, at
+                        # session start — a mid-session change is
+                        # picked up by the NEXT session only (P3(a)).
+                        stt_model=cfg.speech_stt_model,
+                        tts_voice=cfg.speech_tts_voice,
                         endpointer_config=EndpointerConfig(
                             speech_threshold=cfg.vad_threshold,
                             silence_duration_ms=cfg.silence_duration_ms,

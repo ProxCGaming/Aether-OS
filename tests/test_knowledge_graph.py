@@ -1,8 +1,13 @@
+from unittest.mock import patch
+
 import pytest
-import os
-import json
-from unittest.mock import patch, MagicMock
-from aether_engine.memory.knowledge_graph import extract_and_store_facts, get_entity_facts, get_all_facts
+
+from aether_engine.memory.knowledge_graph import (
+    extract_and_store_facts,
+    get_all_facts,
+    get_entity_facts,
+)
+
 
 class MockStreamChunk:
     def __init__(self, text):
@@ -18,13 +23,15 @@ class MockProvider:
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path):
     test_db = tmp_path / "test_knowledge_graph.db"
-    with patch("aether_engine.memory.knowledge_graph.DB_PATH", test_db):
-        with patch("aether_engine.memory.knowledge_graph._audit_logger.log_event") as mock_log:
-            yield test_db, mock_log
+    with (
+        patch("aether_engine.memory.knowledge_graph.DB_PATH", test_db),
+        patch("aether_engine.memory.knowledge_graph._audit_logger.log_event") as mock_log,
+    ):
+        yield test_db, mock_log
 
 @pytest.mark.asyncio
 async def test_knowledge_graph_extraction(setup_test_db):
-    test_db, mock_log = setup_test_db
+    _test_db, mock_log = setup_test_db
     provider = MockProvider()
     
     await extract_and_store_facts(

@@ -1,8 +1,13 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-from aether_engine.capability.benchmark_cache import BENCHMARK_CACHE, get_benchmark_for_model
+
+from aether_engine.capability.benchmark_cache import (
+    BENCHMARK_CACHE,
+)
 from aether_engine.capability.classifier import classify_model_capabilities
 from aether_engine.capability.self_test import run_model_self_test
+
 
 def test_benchmark_cache_lookup():
     assert "gemini-1.5-pro" in BENCHMARK_CACHE

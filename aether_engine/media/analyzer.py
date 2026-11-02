@@ -560,7 +560,13 @@ class MediaAnalyzer:
         if self._stt_engine is None:
             from aether_engine.voice.stt import FasterWhisperStt
 
-            self._stt_engine = FasterWhisperStt()
+            # Model hub, H3 / grill P6(c): transcription reads its
+            # OWN config field — never the speech picker — resolved
+            # the way the vision provider resolves its config
+            # (injected config, else the on-disk config).
+            config = self._config if self._config is not None else load_config()
+            self._stt_engine = FasterWhisperStt(
+                model=config.transcription_stt_model)
         return self._stt_engine
 
     async def close_stt(self) -> None:

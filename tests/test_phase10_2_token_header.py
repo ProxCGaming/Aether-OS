@@ -88,11 +88,13 @@ class TestHeaderTokenAuth(unittest.TestCase):
 
     def test_websocket_no_header_token_rejected_1008(self):
         """No header token (and no query token) -> close 1008."""
-        with TestClient(app) as client:
-            with self.assertRaises(WebSocketDisconnect) as cm:  # noqa: SIM117 — nested for readability; combined form lands with the tip cleanup
-                with client.websocket_connect("/ws/tasks"):
-                    pass
-            self.assertEqual(cm.exception.code, 1008)
+        with (
+            TestClient(app) as client,
+            self.assertRaises(WebSocketDisconnect) as cm,
+            client.websocket_connect("/ws/tasks"),
+        ):
+            pass
+        self.assertEqual(cm.exception.code, 1008)
 
         audit_content = self.audit_file.read_text(encoding="utf-8")
         self.assertIn("Unauthorized", audit_content)
@@ -100,14 +102,16 @@ class TestHeaderTokenAuth(unittest.TestCase):
 
     def test_websocket_wrong_header_token_rejected_1008(self):
         """A wrong Bearer token -> close 1008."""
-        with TestClient(app) as client:
-            with self.assertRaises(WebSocketDisconnect) as cm:  # noqa: SIM117 — nested for readability; combined form lands with the tip cleanup
-                with client.websocket_connect(
-                    "/ws/tasks",
-                    headers={"Authorization": "Bearer wrong-token-12345"},
-                ):
-                    pass
-            self.assertEqual(cm.exception.code, 1008)
+        with (
+            TestClient(app) as client,
+            self.assertRaises(WebSocketDisconnect) as cm,
+            client.websocket_connect(
+                "/ws/tasks",
+                headers={"Authorization": "Bearer wrong-token-12345"},
+            ),
+        ):
+            pass
+        self.assertEqual(cm.exception.code, 1008)
 
     def test_websocket_query_token_valid_rejected_1008(self):
         """S1-M3: a VALID token in the URL query string must NOT

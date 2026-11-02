@@ -14,9 +14,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from aether_engine.secrets.storage import SecretStore
 from aether_engine.audit import AuditLogger
-
+from aether_engine.secrets.storage import SecretStore
 
 EXPORT_PATH = Path.home() / ".aether" / "exported_keys.json"
 
@@ -26,7 +25,7 @@ def main():
     print("  AETHER Secrets Exporter")
     print("=" * 56)
     print()
-    print(f"Source DB   : ~/.aether/secrets.db")
+    print("Source DB   : ~/.aether/secrets.db")
     print(f"Export File : {EXPORT_PATH}")
     print()
 
@@ -47,7 +46,7 @@ def main():
             # Show only first 6 and last 4 chars for safety in terminal
             masked = key[:6] + "…" + key[-4:] if len(key) > 12 else "****"
             print(f"  ✔ {name:25s} → {masked}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — CLI reporting boundary: any per-provider load failure is reported and the loop continues
             print(f"  ✖ {name:25s} → ERROR: {e}")
 
     if not exported:
@@ -64,7 +63,7 @@ def main():
             "count": len(exported),
             "export_path": str(EXPORT_PATH),
         })
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — fail-closed audit gate: any audit failure, whatever its type, must abort the export
         print(f"\n[ERROR] Audit log write failed ({e}). Aborting export — no file written.")
         sys.exit(1)
 

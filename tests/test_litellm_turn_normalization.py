@@ -1,6 +1,5 @@
-import pytest
 from aether_engine.providers.litellm_provider import LiteLLMProvider
-from aether_engine.providers.base import ToolCall
+
 
 def test_convert_messages_prepends_user_turn_if_starts_with_assistant():
     provider = LiteLLMProvider(api_key="test-key", model="gemini/gemini-2.0-flash")
