@@ -6,6 +6,9 @@ task to a specialist agent — and an Electron + React app is the window
 onto it. Every tool call passes one policy and approval pipeline before
 it runs, and API keys live only in an encrypted secret store.
 
+[![CI](https://github.com/ProxCGaming/Aether-OS/actions/workflows/ci.yml/badge.svg)](https://github.com/ProxCGaming/Aether-OS/actions/workflows/ci.yml)
+![Version](https://img.shields.io/badge/version-0.3.5-orange)
+
 **Version 0.3.5** · [Changelog](CHANGELOG.md) ·
 [Architecture decisions](docs/adr/) · [Per-epic summaries](docs/audits/)
 

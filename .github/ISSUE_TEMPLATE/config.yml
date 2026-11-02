@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and discussion
+    url: https://github.com/ProxCGaming/Aether-OS/discussions
+    about: Ask questions and discuss ideas in Discussions, not Issues.
+  - name: Security report
+    url: https://github.com/ProxCGaming/Aether-OS/security/advisories/new
+    about: Report a vulnerability privately — see SECURITY.md.

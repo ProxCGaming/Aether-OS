@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest something Aether-OS should do.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the situation, not just the feature you imagine.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Chat / agents
+        - Memory
+        - Voice
+        - Canvas / artifacts
+        - Browser / vault
+        - Models / providers
+        - Desktop app shell
+        - Other
+    validations:
+      required: true
