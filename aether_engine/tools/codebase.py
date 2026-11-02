@@ -73,9 +73,14 @@ def _project_tree_fn(path: str | None = None, workspace_roots: list | None = Non
     return "\n".join(lines)
 
 
-def run_checks_locally(root: Path) -> str:
-    """The in-process run_checks implementation (worker mirrors it)."""
-    checks = detect_checks(root)
+def run_checks_locally(root: Path, commands: dict | None = None) -> str:
+    """The in-process run_checks implementation (worker mirrors it).
+
+    ``commands`` is the E2-F14 override forwarded to
+    :func:`detect_checks` (argv per check kind); None keeps the
+    detected defaults.
+    """
+    checks = detect_checks(root, commands)
     results = []
     for check in checks:
         try:
@@ -94,11 +99,11 @@ def run_checks_locally(root: Path) -> str:
     return format_summary(str(root), results)
 
 
-def _run_checks_fn(path: str, workspace_roots: list | None = None) -> str:
+def _run_checks_fn(path: str, workspace_roots: list | None = None, commands: dict | None = None) -> str:
     root = resolve_contained(path, workspace_roots)
     if not root.is_dir():
         return f"Error: not a directory: {path}"
-    return run_checks_locally(root)
+    return run_checks_locally(root, commands)
 
 
 def codebase_tools() -> list[Tool]:
@@ -130,6 +135,16 @@ def codebase_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Repository root directory inside the workspace."},
+                    "commands": {
+                        "type": "object",
+                        "description": (
+                            "Optional command overrides keyed by check kind "
+                            "('ruff' / 'pytest' / 'jest' / 'oxlint'), each an argv array — "
+                            "for custom flags, test subsets or an alternative runner. "
+                            "Omit to run the detected default commands."
+                        ),
+                        "additionalProperties": {"type": "array", "items": {"type": "string"}},
+                    },
                 },
                 "required": ["path"],
             },

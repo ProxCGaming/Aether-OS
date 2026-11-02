@@ -91,6 +91,30 @@ async function writeFloatingTransferState(state) {
   }
 }
 
+// E6-F08: the Settings section inventory the command palette
+// can jump straight to. Ids and labels mirror SettingsPanel's own menu
+// items (SettingsPanel.jsx `menuItems`); the palette entries run
+// through App's tab state + the panel's initial-section prop.
+// 'About' is last, matching its place at the end of the panel nav.
+const SETTINGS_SECTIONS = [
+  { id: 'Providers', label: 'API Providers' },
+  { id: 'Models', label: 'Models & Tasks' },
+  { id: 'Agents', label: 'Agents' },
+  { id: 'Tools', label: 'Tools' },
+  { id: 'MCP', label: 'MCP Servers' },
+  { id: 'Plugins', label: 'Plugins' },
+  { id: 'Skills', label: 'Skills' },
+  { id: 'WorkspaceIndexing', label: 'Workspace Indexing' },
+  { id: 'BrowserPolicy', label: 'Browser Agent' },
+  { id: 'Usage', label: 'Usage' },
+  { id: 'PasswordVault', label: 'Password Vault' },
+  { id: 'Memory', label: 'Memory & Storage' },
+  { id: 'Capabilities', label: 'Capabilities' },
+  { id: 'Voice', label: 'Voice Tuning' },
+  { id: 'Advanced', label: 'Advanced' },
+  { id: 'About', label: 'About' },
+];
+
 function AppContent() {
   // Phase 10.3 C1: the engine-message facade lives in SocketContext, not
   // here. AppContent consumes its wsRef/isConnected; it builds no mock of
@@ -130,6 +154,16 @@ function AppContent() {
   const [providersLoaded, setProvidersLoaded] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  // E6-F08: a Settings section chosen outside the panel (command
+  // palette) — handed to SettingsPanel as its initial section, then
+  // cleared so a later plain "Go to Settings" keeps the panel's own
+  // current section.
+  const [settingsSection, setSettingsSection] = useState(null);
+  // E6-F13: approvals awaiting a decision, mirrored into a ref so the
+  // shell's global shortcut handler can act on the latest one without
+  // re-registering on every message change. Entries are appended in
+  // arrival order and removed as App answers them.
+  const pendingApprovalsRef = useRef([]);
   const [localModels, setLocalModels] = useState([]);
 
   // Dashboard State (real data, not hardcoded)
@@ -621,6 +655,19 @@ function AppContent() {
       const data = JSON.parse(event.data);
         if (data.type === 'hello') {
           setStatus(`Online / ${data.payload.active_model || 'Agent'}`);
+        } else if (data.type === 'TASK_CREATED') {
+          // E6-F10: TASK_CREATED is the start event the engine
+          // actually emits (graph + fast-chat runners); TASK_STARTED
+          // is never sent, so counting only the branch below left
+          // the Dashboard's Active Tasks at 0 for real tasks. A
+          // created task counts until its terminal event (handled by
+          // the TASK_COMPLETED / TASK_FAILED / TASK_CANCELLED branch,
+          // which deletes the same id). Counting only — the
+          // streaming-bubble lifecycle below keys off the client's
+          // own START_TASK echo, unchanged.
+          if (data.payload?.task_id || data.request_id) {
+            setActiveTaskIds(prev => new Set(prev).add(data.payload?.task_id || data.request_id));
+          }
         } else if (data.type === 'START_TASK' || data.type === 'TASK_STARTED') {
           // Track active task for Dashboard
           if (data.payload?.task_id || data.request_id) {
@@ -1205,7 +1252,16 @@ function AppContent() {
           }
         } else if (data.type === 'TOOL_APPROVAL_REQUEST') {
           setIsThinking(false);
-          const approvalMsg = { 
+          // E6-F13: track for the approve/reject shortcuts.
+          pendingApprovalsRef.current = [
+            ...pendingApprovalsRef.current,
+            {
+              kind: 'tool',
+              id: data.request_id || Date.now().toString(),
+              approval_key: data.payload.approval_key || data.request_id,
+            },
+          ];
+          const approvalMsg = {
             id: data.request_id || Date.now().toString(),
             role: 'tool_approval', 
             tool_name: data.payload.tool_name,
@@ -1228,7 +1284,12 @@ function AppContent() {
           }
         } else if (data.type === 'PLUGIN_APPROVAL_REQUEST') {
           setIsThinking(false);
-          setChatMessages(prev => [...prev, { 
+          // E6-F13: track for the approve/reject shortcuts.
+          pendingApprovalsRef.current = [
+            ...pendingApprovalsRef.current,
+            { kind: 'plugin', id: data.request_id || Date.now().toString() },
+          ];
+          setChatMessages(prev => [...prev, {
             id: data.request_id || Date.now().toString(),
             role: 'plugin_approval', 
             plugin_name: data.payload.plugin_name,
@@ -2148,6 +2209,16 @@ function AppContent() {
       { id: 'act-tab-settings', kind: 'action', label: 'Go to Settings', run: () => setActiveTab('Settings') },
       { id: 'act-shortcuts', kind: 'action', label: 'Keyboard shortcuts', run: () => setShortcutsOpen(true) },
     ];
+    // E6-F08: individual Settings sections are palette actions too —
+    // the section list mirrors SettingsPanel's own menu inventory
+    // (ids + labels), and running one jumps straight there:
+    // Settings tab + that section as the panel's initial menu.
+    SETTINGS_SECTIONS.forEach(({ id, label }) => {
+      items.push({
+        id: `settings-${id}`, kind: 'settings', label: `Settings: ${label}`, hint: 'Settings section',
+        run: () => { setSettingsSection(id); setActiveTab('Settings'); },
+      });
+    });
     (sessions || []).forEach(sess => {
       items.push({
         id: `sess-${sess.id}`, kind: 'session',
@@ -2178,11 +2249,21 @@ function AppContent() {
 
   // Epic 6, E6-03: the wired shortcut set (the dialog lists exactly
   // these): Ctrl+K palette, Ctrl+N new chat, Ctrl+, Settings.
+  // E6-F09: Escape closes the shortcuts dialog, as the dialog itself
+  // advertises (the palette already handles its own Escape).
+  // E6-F13: Ctrl+. cancels the running task (the Stop action);
+  // Ctrl+Enter approves and Ctrl+Shift+Enter rejects the most recent
+  // pending approval. The approval shortcuts never fire while a text
+  // field has focus — approving must be deliberate, never a
+  // keystroke meant for the composer or a rename box.
   useEffect(() => {
     if (isFloating) return undefined;
     const onKey = (e) => {
       const mod = e.ctrlKey || e.metaKey;
-      if (mod && (e.key === 'k' || e.key === 'K')) {
+      if (e.key === 'Escape' && shortcutsOpen) {
+        e.preventDefault();
+        setShortcutsOpen(false);
+      } else if (mod && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
         setPaletteOpen(prev => !prev);
       } else if (mod && (e.key === 'n' || e.key === 'N')) {
@@ -2192,11 +2273,29 @@ function AppContent() {
       } else if (mod && e.key === ',') {
         e.preventDefault();
         setActiveTab('Settings');
+      } else if (mod && e.key === '.') {
+        e.preventDefault();
+        handleStopTask();
+      } else if (mod && e.key === 'Enter') {
+        const target = e.target;
+        const typing = target && (
+          target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
+          || target.tagName === 'SELECT' || target.isContentEditable);
+        const pending = pendingApprovalsRef.current[pendingApprovalsRef.current.length - 1];
+        if (!typing && pending) {
+          e.preventDefault();
+          const approved = !e.shiftKey;
+          if (pending.kind === 'tool') {
+            handleToolApproval(pending.id, approved, pending.approval_key);
+          } else {
+            handlePluginApproval(pending.id, approved);
+          }
+        }
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isFloating]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isFloating, shortcutsOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleDeleteSession = (id, e) => {
     e.stopPropagation(); // prevent triggering handleSessionSwitch
@@ -2272,6 +2371,9 @@ function AppContent() {
   };
 
   const handleToolApproval = (requestId, approved, approvalKey, scope, editedArgs, browserEnvelope) => {
+    // E6-F13: decided now — no longer shortcut-actionable.
+    pendingApprovalsRef.current = pendingApprovalsRef.current.filter(
+      (entry) => !(entry.kind === 'tool' && entry.id === requestId));
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const key = approvalKey || requestId;
       wsRef.current.send(JSON.stringify({
@@ -2312,6 +2414,9 @@ function AppContent() {
   };
 
   const handlePluginApproval = (requestId, approved) => {
+    // E6-F13: decided now — no longer shortcut-actionable.
+    pendingApprovalsRef.current = pendingApprovalsRef.current.filter(
+      (entry) => !(entry.kind === 'plugin' && entry.id === requestId));
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: approved ? 'PLUGIN_APPROVAL_GRANTED' : 'PLUGIN_APPROVAL_REJECTED',
@@ -2651,6 +2756,7 @@ function AppContent() {
               <div style={{ padding: '0 24px', marginBottom: '12px' }}>
                 <input
                   type="text"
+                  className="aether-search-input"
                   placeholder="Search chats..."
                   aria-label="Search chats"
                   value={sessionSearchQuery}
@@ -2663,8 +2769,7 @@ function AppContent() {
                     borderRadius: '8px',
                     padding: '7px 10px',
                     color: '#fff',
-                    fontSize: '12px',
-                    outline: 'none'
+                    fontSize: '12px'
                   }}
                 />
               </div>
@@ -2887,14 +2992,16 @@ function AppContent() {
                      <X size={20} />
                    </button>
                  </div>
-                 <SettingsPanel 
-                   wsRef={wsRef} 
+                 <SettingsPanel
+                   wsRef={wsRef}
                    providers={providers}
                    providerHealth={providerHealth}
                    localModels={localModels}
                    activeSession={activeSession}
                    dailyBudget={dailyBudget}
                    budgetAlert={budgetAlert}
+                   initialMenu={settingsSection}
+                   onInitialMenuConsumed={() => setSettingsSection(null)}
                  />
                </div>
             )}
@@ -2938,6 +3045,9 @@ function AppContent() {
               ['Ctrl+K', 'Command palette'],
               ['Ctrl+N', 'New chat'],
               ['Ctrl+,', 'Open Settings'],
+              ['Ctrl+.', 'Cancel current task'],
+              ['Ctrl+Enter', 'Approve pending request'],
+              ['Ctrl+Shift+Enter', 'Reject pending request'],
               ['Alt+Space', 'Show / hide Aether-OS (global)'],
               [resolveSnipHotkey(engineConfig?.snip_hotkey).accelerator, 'Snip & ask (global)'],
               ['Esc', 'Close palette / dialogs'],

@@ -16,10 +16,20 @@ logger = logging.getLogger("aether_engine.app")
 
 async def lifespan(_app: FastAPI):
     # Epic 10, E10-04: unhandled exceptions land in ~/.aether/logs/crash.log.
-    from aether_engine.diagnostics import install_crash_logging
+    from aether_engine.diagnostics import install_crash_logging, record_crash
 
     install_crash_logging()
-    engine_state.initialize()
+    try:
+        engine_state.initialize()
+    except Exception:
+        # E10-F08: Uvicorn catches lifespan failures itself, so the
+        # unhandled-exception hooks never see a startup failure.
+        # Write the promised crash-log banner explicitly, then let
+        # the failure propagate exactly as before.
+        import sys
+
+        record_crash("LIFESPAN STARTUP FAILURE", *sys.exc_info())
+        raise
 
     # Epic 9: warm the deferred litellm import in a background thread.
     # The import costs ~4s; paying it here (overlapped with the rest

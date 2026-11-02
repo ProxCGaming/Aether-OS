@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import shutil
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,13 @@ from aether_common.contracts import Event, EventType, TaskState
 logger = logging.getLogger("aether_engine.models.local_models")
 
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+
+# E5-F17: the pull client must never be unbounded — timeout=None let
+# a silent daemon hang a download forever. A pull is long-lived, so
+# the bound is per-phase: the read timeout is an INACTIVITY bound (a
+# daemon that keeps sending progress never trips it; one that goes
+# silent does, and the failure path reports a failed pull).
+OLLAMA_PULL_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=5.0)
 
 # Curated library catalog of common local models with sizes
 DEFAULT_LOCAL_CATALOG: list[dict[str, Any]] = [
@@ -26,8 +34,15 @@ DEFAULT_LOCAL_CATALOG: list[dict[str, Any]] = [
 class OllamaManager:
     """Manages local model queries, deletion, and Engine task-driven downloads."""
 
-    def __init__(self, base_url: str = OLLAMA_BASE_URL):
+    def __init__(self, base_url: str = OLLAMA_BASE_URL, models_dir: str | Path | None = None):
         self.base_url = base_url
+        # The daemon's own model store — where /api/pull physically
+        # lands a model (the daemon offers no per-pull destination).
+        # A download whose chosen destination differs from the store
+        # is relocated out of here once the daemon confirms it
+        # (E5-F16).
+        self.models_dir = (
+            Path(models_dir) if models_dir else Path.home() / ".ollama" / "models")
         self._downloaded_paths: dict[str, str] = {}
 
     async def is_ollama_running(self) -> bool:
@@ -77,6 +92,64 @@ class OllamaManager:
         # Ensure downloaded models sort to top
         models_result.sort(key=lambda x: (not x["downloaded"], x["name"]))
         return models_result
+
+    def _find_manifest(self, model_name: str) -> Path | None:
+        """Locate a pulled model's manifest inside the daemon store.
+
+        Store layout: ``manifests/<registry>/<namespace>/<name>/<tag>``
+        (the namespace segment is absent for some sources, hence the
+        glob over the trailing name/tag pair). A missing tag defaults
+        to ``latest``, matching the daemon's own convention.
+        """
+        manifests_root = self.models_dir / "manifests"
+        if not manifests_root.is_dir():
+            return None
+        leaf = model_name.rsplit("/", 1)[-1]
+        if ":" in leaf:
+            name, tag = model_name.rsplit(":", 1)
+        else:
+            name, tag = model_name, "latest"
+        matches = sorted(manifests_root.glob(f"**/{name}/{tag}"))
+        return matches[0] if matches else None
+
+    def _place_model_in_destination(self, model_name: str, dest: Path) -> str | None:
+        """Copy ``model_name``'s manifest + referenced blobs from the
+        daemon store into ``dest``, mirroring the store layout.
+
+        The daemon's own copy stays in place (it remains the serving
+        copy); the destination receives a real copy of the model's
+        files. Returns an error string, or None when every file is
+        in place.
+        """
+        manifest_path = self._find_manifest(model_name)
+        if manifest_path is None:
+            return (
+                f"the daemon's model store ({self.models_dir}) does not "
+                f"contain {model_name}")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            digests: list[str] = []
+            config_digest = (manifest.get("config") or {}).get("digest")
+            if config_digest:
+                digests.append(config_digest)
+            for layer in manifest.get("layers") or []:
+                if layer.get("digest"):
+                    digests.append(layer["digest"])
+            blobs_dst = dest / "blobs"
+            for digest in digests:
+                src = self.models_dir / "blobs" / digest.replace(":", "-")
+                if not src.is_file():
+                    return (
+                        f"blob {digest} for {model_name} is missing from "
+                        f"the daemon store")
+                blobs_dst.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, blobs_dst / src.name)
+            manifest_dst = dest / manifest_path.relative_to(self.models_dir)
+            manifest_dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(manifest_path, manifest_dst)
+        except (OSError, ValueError) as e:
+            return f"copying {model_name} failed: {e}"
+        return None
 
     async def download_model_task(
         self,
@@ -133,7 +206,7 @@ class OllamaManager:
         saw_success = False
         try:
             async with (
-                httpx.AsyncClient(timeout=None) as client,
+                httpx.AsyncClient(timeout=OLLAMA_PULL_TIMEOUT) as client,
                 client.stream(
                     "POST",
                     f"{self.base_url}/api/pull",
@@ -213,6 +286,25 @@ class OllamaManager:
                 retriable=True,
             )
             return
+
+        # E5-F16: honour the chosen destination in the pull itself,
+        # not just in the reported path. The daemon stores the model
+        # in its own store; when the destination differs, the model's
+        # manifest + referenced blobs are copied there (store layout
+        # mirrored) so the files genuinely live at the destination.
+        # If they cannot be placed, the download fails honestly —
+        # no recorded path may point at a place the model is not.
+        dest_path = Path(dest)
+        if dest_path.resolve() != self.models_dir.resolve():
+            placement_error = self._place_model_in_destination(model_name, dest_path)
+            if placement_error is not None:
+                yield _failed(
+                    f"Ollama pulled {model_name}, but the chosen "
+                    f"destination {dest} could not be honoured: "
+                    f"{placement_error}",
+                    retriable=False,
+                )
+                return
 
         self._downloaded_paths[model_name] = str(Path(dest) / model_name)
         yield Event(

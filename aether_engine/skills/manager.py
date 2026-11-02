@@ -182,7 +182,12 @@ class SkillManager:
             p = Path(r) / ".agents" / "skills"
             if p.exists() and p.is_dir():
                 new_dirs.append(p)
-        if set(new_dirs) != set(self.workspace_dirs):
+        # E6-F12: compare as ordered lists, not sets — discovery
+        # resolves same-name conflicts by scan order (E7-F08), so a
+        # pure reorder (e.g. SET_ACTIVE moving a root to the front)
+        # changes what the index must serve and has to rebuild too.
+        # An identical re-set stays a no-op.
+        if new_dirs != self.workspace_dirs:
             self.workspace_dirs = new_dirs
             self._rebuild_index()
             
@@ -254,6 +259,27 @@ class SkillManager:
                             break
                         except Exception as e:  # noqa: BLE001 — one bad skill file must not break discovery; it is logged and skipped
                             logger.warning(f"Failed to parse SKILL.md at {md_path}: {e}")
+
+                if manifest and not manifest.trigger.keywords:
+                    # E7-F10: the SKILL.md shadows the adjacent
+                    # manifest.json for discovery, but the keywords
+                    # declared in that JSON are the same skill's own
+                    # metadata — inheriting them keeps task-start
+                    # auto-match available to Markdown skills. Only
+                    # keywords are inherited, and only from a
+                    # same-named manifest; everything else about the
+                    # Markdown manifest stands.
+                    manifest_path = skill_dir / "manifest.json"
+                    if manifest_path.exists():
+                        try:
+                            json_manifest = SkillManifest.from_file(manifest_path)
+                        except Exception:  # noqa: BLE001 — a broken sibling manifest must not break discovery
+                            json_manifest = None
+                        if (json_manifest is not None
+                                and json_manifest.name == manifest.name
+                                and json_manifest.trigger.keywords):
+                            manifest.trigger.keywords = list(
+                                json_manifest.trigger.keywords)
 
                 if not manifest:
                     manifest_path = skill_dir / "manifest.json"

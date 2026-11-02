@@ -16,6 +16,41 @@ _audit_logger = AuditLogger()
 # Database path is ~/.aether/memory.db
 DB_PATH = Path.home() / ".aether" / "memory.db"
 
+# E4-F11: application schema version for this store's tables.
+# 1 = the original sessions/session_messages schema; 2 = the
+# thoughts + attachments columns on session_messages. Bump with
+# every migration; init records the marker via
+# _record_schema_version so a future migration can gate on it
+# instead of re-deriving the schema's generation from its shape.
+SCHEMA_VERSION = 2
+
+_SCHEMA_META_DDL = """
+    CREATE TABLE IF NOT EXISTS aether_schema_meta (
+        store TEXT PRIMARY KEY,
+        version INTEGER NOT NULL
+    )
+"""
+
+
+def _record_schema_version(conn: sqlite3.Connection, store: str, version: int) -> None:
+    """Record ``store``'s schema version after its migrations ran.
+
+    The per-store row in ``aether_schema_meta`` is the marker a
+    future migration gates on (memory.db is shared by several
+    stores, so one file-level number cannot speak for each of them);
+    ``PRAGMA user_version`` mirrors the highest store version in the
+    file as the file-level marker.
+    """
+    conn.execute(_SCHEMA_META_DDL)
+    conn.execute(
+        "INSERT INTO aether_schema_meta (store, version) VALUES (?, ?) "
+        "ON CONFLICT(store) DO UPDATE SET version = excluded.version",
+        (store, version),
+    )
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version > current:
+        conn.execute(f"PRAGMA user_version = {int(version)}")
+
 # Init guard holding the DB_PATH the tables were created in (False
 # before the first init). Keying it to the path means a changed
 # DB_PATH re-initialises instead of serving "no such table" errors
@@ -65,6 +100,7 @@ def init_db() -> None:
             conn.execute("ALTER TABLE session_messages ADD COLUMN attachments TEXT")
         except sqlite3.OperationalError:
             pass
+        _record_schema_version(conn, "sessions", SCHEMA_VERSION)
         conn.commit()
     _initialized = DB_PATH
 

@@ -450,7 +450,7 @@ class ToolRegistry:
         whole trust architecture for any future caller.
         """
         from aether_engine.audit import AuditLogger
-        from aether_engine.tools.policy import resolve_policy_by_name
+        from aether_engine.tools.policy import resolve_policy_by_name, shell_denial_rule
         from aether_engine.validation.pre_flight import validate_tool_request
 
         tool = self.get_tool(name)  # raises ToolNotFoundError — preserved
@@ -500,7 +500,15 @@ class ToolRegistry:
                     except Exception:  # best-effort audit, as with TOOL_EXECUTED below
                         logger.debug("Failed to write APPROVAL_CACHE_HIT audit event", exc_info=True)
             if policy == "deny":
-                log.log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": name, "reason": "User Deny", "via": "registry.execute"})
+                payload = {"tool_name": name, "reason": "User Deny", "via": "registry.execute"}
+                # E2-F13: when a shell safety rule produced the denial,
+                # name the matched rule in the audit trail (the PRD
+                # requires logging the matched pattern). A plain config
+                # Deny matches no rule and keeps the bare payload.
+                rule = shell_denial_rule(tool, check_args, shell_extras)
+                if rule is not None:
+                    payload["rule"] = rule
+                log.log_event("TOOL_BLOCKED_BY_POLICY", payload)
                 raise ToolExecutionError(f"Tool '{name}' is blocked by policy (deny).")
             if policy == "ask" and not approved:
                 log.log_event("TOOL_BLOCKED_BY_POLICY", {"tool_name": name, "reason": "Bypassed Approval", "via": "registry.execute"})
@@ -608,12 +616,13 @@ class ToolRegistry:
                         result[: tool.max_output_chars]
                         + f"\n...[output truncated to {tool.max_output_chars} chars]"
                     )
-                if tool.source.startswith("mcp:"):
-                    from aether_engine.tools.hooks import apply_tool_result_hooks
-
-                    return apply_tool_result_hooks(name, call_args, result, audit_logger=log)
-                # Browser executions fall through to the shared tail:
-                # TOOL_EXECUTED audit + tool_result hooks below.
+                # MCP and browser executions fall through to the shared
+                # tail: TOOL_EXECUTED audit + tool_result hooks below.
+                # E0-02: MCP used to return through the result hooks
+                # here, skipping the audit entirely — a successful MCP
+                # execution left no TOOL_EXECUTED record. The tail
+                # applies the hooks exactly once, so falling through
+                # adds only the missing audit, nothing else.
             elif tool.risk != ToolRisk.READ_ONLY:
                 from aether_engine.workers.sandbox import execute_tool_in_worker
                 result = await execute_tool_in_worker(

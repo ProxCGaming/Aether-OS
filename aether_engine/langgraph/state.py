@@ -1,6 +1,7 @@
 import base64
 import binascii
 import json
+from collections import OrderedDict
 from pathlib import Path
 from typing import Annotated, Any, NotRequired, TypedDict
 
@@ -55,6 +56,16 @@ def to_aether_message(message: Any) -> Any:
         converted["tool_call_id"] = getattr(message, "tool_call_id", None)
         if getattr(message, "name", None):
             converted["name"] = message.name
+    # E3-F10: the supervisor's drop metadata lives in additional_kwargs
+    # (aether_dropped_tool_calls). Normalizing it away here was one of
+    # the two seams that lost dropped names from the latest state —
+    # a batch crossing this boundary kept the call record but not the
+    # record of what was dropped alongside it.
+    dropped = (getattr(message, "additional_kwargs", None) or {}).get(
+        "aether_dropped_tool_calls"
+    )
+    if dropped:
+        converted["aether_dropped_tool_calls"] = list(dropped)
     return converted
 
 
@@ -220,13 +231,39 @@ def collapse_subgraph_echo(left: list, right: list) -> list:
 #   decisions      — list[str], append-merged (delegation/commitments)
 #   open_questions — list[str], overwritten (a question leaves the list
 #                    by being answered, so append semantics cannot work)
+#   artifacts      — list[str], append-merged (files the team produced)
+# EVERY section is bounded (E1-F14): list sections keep at most
+# BLACKBOARD_LIST_CAP entries of at most BLACKBOARD_ENTRY_MAX_CHARS
+# each, and the plan is capped at BLACKBOARD_PLAN_MAX_CHARS — an agent
+# writing a 100k plan or 60 questions cannot bloat the checkpoint.
+# The board also carries a bounded change journal ("_journal") so the
+# briefing can show each agent what changed since its own last turn.
 BLACKBOARD_LIST_CAP = 50
+BLACKBOARD_PLAN_MAX_CHARS = 4000
+BLACKBOARD_ENTRY_MAX_CHARS = 1000
+BLACKBOARD_JOURNAL_CAP = 50
 BLACKBOARD_BRIEFING_MAX_CHARS = 1200
+
+_BLACKBOARD_APPEND_SECTIONS = ("findings", "decisions", "artifacts")
+_BLACKBOARD_SECTION_LABELS = {
+    "plan": "Plan",
+    "findings": "Findings",
+    "decisions": "Decisions",
+    "open_questions": "Open questions",
+    "artifacts": "Artifacts",
+}
 
 
 def merge_mapping(left: dict | None, right: dict | None) -> dict:
     """Key-wise merge for dict channels written per-agent (E1-10)."""
     return {**(left or {}), **(right or {})}
+
+
+def _cap_board_entry(value: Any) -> Any:
+    """Bound one blackboard list entry's size (E1-F14)."""
+    if isinstance(value, str) and len(value) > BLACKBOARD_ENTRY_MAX_CHARS:
+        return value[:BLACKBOARD_ENTRY_MAX_CHARS]
+    return value
 
 
 def merge_blackboard(left: dict | None, right: dict | None) -> dict:
@@ -238,33 +275,112 @@ def merge_blackboard(left: dict | None, right: dict | None) -> dict:
     append — otherwise every delegation would duplicate every entry.
     """
     merged: dict[str, Any] = dict(left or {})
+    # The change journal merges by sequence number (union), so an echo
+    # of the full board never duplicates or rewinds it.
+    journal_by_seq: dict[int, dict] = {}
+    for source in (left, right):
+        for entry in (source or {}).get("_journal") or []:
+            if isinstance(entry, dict) and isinstance(entry.get("seq"), int):
+                journal_by_seq[entry["seq"]] = entry
+    journal: list[dict] = [journal_by_seq[s] for s in sorted(journal_by_seq)]
+    next_seq = (journal[-1]["seq"] if journal else 0) + 1
+
+    def _note(section: str, text: str) -> None:
+        nonlocal next_seq
+        journal.append({"seq": next_seq, "section": section, "text": text})
+        next_seq += 1
+
     for key, value in (right or {}).items():
-        if key in ("findings", "decisions") and isinstance(value, list):
+        if key == "_journal":
+            continue
+        if key in _BLACKBOARD_APPEND_SECTIONS and isinstance(value, list):
             current = list(merged.get(key) or [])
             incoming = list(value)
             if current and len(incoming) >= len(current) and incoming[: len(current)] == current:
-                merged[key] = incoming[-BLACKBOARD_LIST_CAP:]
+                new_entries = incoming[len(current):]
+                merged[key] = [_cap_board_entry(e) for e in incoming[-BLACKBOARD_LIST_CAP:]]
             else:
-                merged[key] = (current + incoming)[-BLACKBOARD_LIST_CAP:]
+                new_entries = incoming
+                merged[key] = [_cap_board_entry(e) for e in (current + incoming)[-BLACKBOARD_LIST_CAP:]]
+            for entry in new_entries:
+                _note(key, str(entry)[:BLACKBOARD_ENTRY_MAX_CHARS])
+        elif key == "plan":
+            capped = value[:BLACKBOARD_PLAN_MAX_CHARS] if isinstance(value, str) else value
+            if capped != merged.get("plan"):
+                _note("plan", "plan updated")
+            merged[key] = capped
+        elif key == "open_questions" and isinstance(value, list):
+            capped = [_cap_board_entry(e) for e in list(value)[-BLACKBOARD_LIST_CAP:]]
+            if capped != list(merged.get("open_questions") or []):
+                _note("open_questions", f"open questions updated ({len(capped)} open)")
+            merged[key] = capped
         else:
             merged[key] = value
+    if journal:
+        merged["_journal"] = journal[-BLACKBOARD_JOURNAL_CAP:]
+    elif "_journal" in merged:
+        del merged["_journal"]
     return merged
 
 
-def blackboard_briefing(state: dict, *, max_chars: int = BLACKBOARD_BRIEFING_MAX_CHARS) -> str:
+# Per-(task, agent) briefing cursors for the blackboard delta (E1-F14):
+# the journal sequence each agent had already seen at its last
+# briefing. Process-local on purpose — the delta is a prompt
+# optimisation, not state of record: the journal itself is
+# checkpointed with the board, so after an engine restart a cursor
+# simply re-baselines (the full summary always renders regardless).
+_BRIEFING_CURSORS: "OrderedDict[tuple[str, str], int]" = OrderedDict()
+_BRIEFING_CURSOR_CAP = 256
+
+
+def _blackboard_delta(state: dict, board: dict, agent: str | None) -> str:
+    """What changed on the board since the reading agent's last turn.
+
+    Keyed by (task_id, agent): the first briefing in a task sets the
+    agent's baseline and shows no delta; later briefings list the
+    journal entries past the agent's cursor, then advance it.
+    """
+    reader = agent or (state or {}).get("active_specialist")
+    task_id = (state or {}).get("task_id")
+    journal = board.get("_journal") or []
+    if not reader or not task_id or not journal:
+        return ""
+    key = (str(task_id), str(reader))
+    latest = max(e["seq"] for e in journal)
+    cursor = _BRIEFING_CURSORS.get(key)
+    _BRIEFING_CURSORS[key] = latest
+    _BRIEFING_CURSORS.move_to_end(key)
+    while len(_BRIEFING_CURSORS) > _BRIEFING_CURSOR_CAP:
+        _BRIEFING_CURSORS.popitem(last=False)
+    if cursor is None:
+        return ""
+    fresh = [e for e in journal if e["seq"] > cursor]
+    if not fresh:
+        return ""
+    rendered = "; ".join(
+        f"{_BLACKBOARD_SECTION_LABELS.get(e['section'], e['section'])}: {e['text']}"
+        for e in fresh
+    )
+    return f"New since your last turn: {rendered}"
+
+
+def blackboard_briefing(state: dict, *, agent: str | None = None,
+                        max_chars: int = BLACKBOARD_BRIEFING_MAX_CHARS) -> str:
     """Render the blackboard as a bounded prompt section.
 
     The optimisation the owner asked for: agents never receive the raw
     blackboard, only this summary — plan excerpt, the most recent
-    findings/decisions, and open questions — hard-capped at max_chars
-    regardless of how much the board holds.
+    findings/decisions/artifacts, open questions, and (for an
+    identified reader) what changed since that agent's last turn —
+    hard-capped at max_chars regardless of how much the board holds.
     """
     board = (state or {}).get("blackboard") or {}
     parts: list[str] = []
     plan = (board.get("plan") or "").strip()
     if plan:
         parts.append(f"Plan: {plan[:300]}")
-    for key, label in (("findings", "Findings"), ("decisions", "Decisions")):
+    for key, label in (("findings", "Findings"), ("decisions", "Decisions"),
+                       ("artifacts", "Artifacts")):
         entries = [str(e).strip() for e in (board.get(key) or []) if str(e).strip()]
         if entries:
             recent = entries[-5:]
@@ -272,6 +388,9 @@ def blackboard_briefing(state: dict, *, max_chars: int = BLACKBOARD_BRIEFING_MAX
     questions = [str(q).strip() for q in (board.get("open_questions") or []) if str(q).strip()]
     if questions:
         parts.append("Open questions: " + " | ".join(questions[-5:]))
+    delta = _blackboard_delta(state, board, agent)
+    if delta:
+        parts.append(delta)
     text = "\n".join(parts)
     return text[:max_chars]
 

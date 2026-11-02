@@ -263,12 +263,14 @@ def make_provider_summariser(provider: Any) -> Summariser:
 
 
 def resolve_summariser_provider(user_config: Any | None, secret_store: Any, fallback: Any, *, local_only: bool = False) -> Any:
-    """Resolve the summariser provider: compression override or fallback.
+    """Resolve the summariser provider: compression override, else an
+    available tiny local model (E5-F19), else the run's provider.
 
     Mirrors how the specialist nodes resolve per-agent overrides and
     how routing resolves the vision auxiliary override: a
     ``"provider:::model"`` string wins when it is usable; anything else
-    (absent, ``"auto"``, unusable) falls back to the run's provider.
+    (absent, ``"auto"``, unusable) prefers a tiny local model when one
+    is available and otherwise falls back to the run's provider.
 
     ``local_only`` (finding M17 residual) carries the run's routing
     constraint into this construction too: folded history can contain
@@ -290,6 +292,17 @@ def resolve_summariser_provider(user_config: Any | None, secret_store: Any, fall
                     f"Compression auxiliary override {override!r} unusable, "
                     f"using the run provider for summarisation: {e}"
                 )
+    # E5-F19: auto mode prefers a tiny local model for this
+    # housekeeping over the run's (usually cloud) provider. The
+    # local_only constraint passes through: a local pick is local
+    # by construction, and the factory still forbids cloud fallbacks
+    # for a local-only run.
+    from aether_engine.orchestration.core import create_tiny_local_aux_provider
+
+    local = create_tiny_local_aux_provider(
+        user_config, secret_store, local_only=local_only)
+    if local is not None:
+        return local
     return fallback
 
 

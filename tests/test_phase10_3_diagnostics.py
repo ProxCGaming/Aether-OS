@@ -77,8 +77,25 @@ class TestWebSearchApi:
         assert entry["details"] == "Missing TAVILY_API_KEY"
 
     def test_ok_when_tavily_key_present(self, monkeypatch):
+        # E5-F18 realignment: this test previously set a fake key and
+        # asserted OK / "Key verified" with no probe at all — it
+        # pinned the audited defect (presence labelled as verified).
+        # The runner now verifies the key with a real probe; the
+        # OK / "Key verified" outcome is asserted against a probe
+        # that answers 200. The rejected/unreachable outcomes are
+        # pinned in tests/test_epic5_minors_batch.py.
         monkeypatch.setenv("TAVILY_API_KEY", "tvly-test-key")
-        entry = by_target(run_environment_diagnostics())["Web Search API"]
+        response = MagicMock()
+        response.status = 200
+        response.__enter__.return_value = response
+
+        def fake_urlopen(req, timeout=None):
+            if "tavily" in getattr(req, "full_url", ""):
+                return response
+            raise urllib.error.URLError("refused")
+
+        with patch.object(diagnostics.urllib.request, "urlopen", fake_urlopen):
+            entry = by_target(run_environment_diagnostics())["Web Search API"]
         assert entry["status"] == "OK"
         assert entry["details"] == "Key verified"
 

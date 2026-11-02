@@ -41,3 +41,12 @@ describe('CommandPalette component', () => {
     expect(screen.queryByTestId('command-palette')).not.toBeInTheDocument();
   });
 });
+
+describe('CommandPalette search input focus ring (E6-F16)', () => {
+  it('the palette search input carries the shared focus-ring class', () => {
+    render(<CommandPalette open items={items} onClose={jest.fn()} />);
+    const input = screen.getByLabelText('Search commands');
+    expect(input.classList.contains('aether-search-input')).toBe(true);
+    expect(input.style.outline).toBe('');
+  });
+});

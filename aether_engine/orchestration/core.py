@@ -15,6 +15,7 @@ from aether_engine.providers.litellm_provider import LiteLLMProvider, validate_a
 from aether_engine.routing.fallback import (
     get_configured_fallback_candidates,
 )
+from aether_engine.routing.registry import is_local_provider
 from aether_engine.routing.startup import is_keyless_custom_provider
 from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
 from aether_engine.state import engine_state
@@ -425,3 +426,45 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
         ttsr_rules=getattr(config, "ttsr_rules", None),
         provider_flavor=flavor,
     )
+
+
+def create_tiny_local_aux_provider(user_config, secret_store, *, local_only: bool = False):
+    """E5-F19: build a provider over an available tiny local model
+    for auxiliary housekeeping (session titles, compaction summaries),
+    or None when no such model is available/buildable.
+
+    "Tiny local" is read from the live registry: a model on a local
+    provider (``is_local_provider``) carrying both the ``chat`` and
+    ``fast`` capabilities — ``fast`` is the registry's own small-model
+    class (``_infer_capabilities`` grants it to mini/small/haiku-class
+    models). Candidates order by (priority, provider, id), the
+    registry's preference order. Construction goes through the same
+    factory as an explicit ``provider:::model`` override; any failure
+    returns None so the caller falls back to its task/run provider —
+    housekeeping must never fail over a missing local model.
+    """
+    if not secret_store:
+        return None
+    try:
+        candidates = [
+            entry for entry in engine_state.model_registry.list_all_models()
+            if is_local_provider(entry.provider)
+            and "chat" in entry.capabilities
+            and "fast" in entry.capabilities
+        ]
+    except Exception:  # an unreadable registry means no local preference, never a crash
+        logger.warning("Tiny-local aux lookup failed; no local preference", exc_info=True)
+        return None
+    if not candidates:
+        return None
+    candidates.sort(key=lambda e: (e.priority, e.provider, e.id))
+    entry = candidates[0]
+    try:
+        return _create_provider_instance(
+            entry.provider, entry.id, secret_store,
+            local_only=local_only, user_config=user_config)
+    except Exception as e:  # noqa: BLE001 — an unbuildable local model falls back, never fails the caller
+        logger.warning(
+            f"Tiny local model {entry.provider}/{entry.id} unusable for "
+            f"auxiliary work, falling back: {e}")
+        return None

@@ -224,6 +224,15 @@ class AetherSupervisorModel(BaseChatModel):
         agent_tools = configurable.get("agent_tools", {})
         allowed = agent_tools.get("supervisor") if isinstance(agent_tools, dict) else None
 
+        # E1-F12: the spawn allow-list filters the native handoff
+        # offers themselves, not only the routing prompt's text — a
+        # denied specialist's transfer tool is never offered, so the
+        # model cannot call what the policy would strip afterwards.
+        # Mirrors the filter supervisor_routing_prompt applies.
+        spawn_allowlist = getattr(user_config, "supervisor_spawn_allowlist", None)
+        if spawn_allowlist is not None:
+            available = [a for a in available if a in spawn_allowlist]
+
         used_tools = set()
         for msg in dict_messages:
             for tc in msg.get("tool_calls") or []:
@@ -489,33 +498,45 @@ def _spawn_policy_denial(state: dict, target: str, config: dict | None = None) -
     delegation never happens, the denial is logged, and the reason
     becomes the run's final message instead of a silent drop.
     """
-    if config is None:
-        try:
-            config = get_config()
-        except Exception:  # noqa: BLE001 — policy must never break routing when config is unavailable.
-            return None
-    user_config = (config.get("configurable", {}) or {}).get("user_config")
-    if user_config is None:
-        return None
-    allowlist = getattr(user_config, "supervisor_spawn_allowlist", None)
-    cap = getattr(user_config, "supervisor_delegation_cap", 8)
+    # E1-F11: plan mode disables supervisor spawns beyond planning —
+    # the flag lives in state, so this check needs no config and
+    # covers every handoff shape (native, forced, JSON-decoded) that
+    # reaches this backstop. Only delegation to the planner survives:
+    # a plan-mode run still needs its planning step, while execution
+    # specialists must never start.
     reason = None
-    if allowlist is not None and target not in allowlist:
-        reason = f"'{target}' is not in the supervisor spawn allow-list ({', '.join(allowlist) or 'empty'})"
-    elif isinstance(cap, int) and cap >= 0:
-        dict_messages = message_dicts(state.get("messages", []))
-        last_user = max(
-            (i for i, m in enumerate(dict_messages) if m.get("role") == "user"),
-            default=-1,
+    if state.get("plan_mode") and target != "planner":
+        reason = (
+            "plan mode is active: supervisor spawns are disabled in "
+            "plan mode — only delegation to the planner is allowed"
         )
-        delegations = 0
-        for msg in dict_messages[last_user + 1:]:
-            for tc in msg.get("tool_calls") or []:
-                if (tc.get("function", {}).get("name") or "").startswith(HANDOFF_PREFIX):
-                    delegations += 1
-        # The count includes the pending handoff (the last message).
-        if delegations > cap:
-            reason = f"the delegation cap for one turn ({cap}) is reached"
+    if reason is None:
+        if config is None:
+            try:
+                config = get_config()
+            except Exception:  # noqa: BLE001 — policy must never break routing when config is unavailable.
+                return None
+        user_config = (config.get("configurable", {}) or {}).get("user_config")
+        if user_config is None:
+            return None
+        allowlist = getattr(user_config, "supervisor_spawn_allowlist", None)
+        cap = getattr(user_config, "supervisor_delegation_cap", 8)
+        if allowlist is not None and target not in allowlist:
+            reason = f"'{target}' is not in the supervisor spawn allow-list ({', '.join(allowlist) or 'empty'})"
+        elif isinstance(cap, int) and cap >= 0:
+            dict_messages = message_dicts(state.get("messages", []))
+            last_user = max(
+                (i for i, m in enumerate(dict_messages) if m.get("role") == "user"),
+                default=-1,
+            )
+            delegations = 0
+            for msg in dict_messages[last_user + 1:]:
+                for tc in msg.get("tool_calls") or []:
+                    if (tc.get("function", {}).get("name") or "").startswith(HANDOFF_PREFIX):
+                        delegations += 1
+            # The count includes the pending handoff (the last message).
+            if delegations > cap:
+                reason = f"the delegation cap for one turn ({cap}) is reached"
     if reason is None:
         return None
     messages = state.get("messages", [])
@@ -534,11 +555,23 @@ def _spawn_policy_denial(state: dict, target: str, config: dict | None = None) -
         "handled another way."
     )
     stripped = AIMessage(content=explanation, id=getattr(last, "id", None))
+    decision: dict[str, Any] = {
+        "next": target, "denied": True, "reason": reason, "briefing": "",
+    }
+    # E3-F10: the denial replaces the pending message wholesale, and
+    # the fresh decision above would take the routing step's drop
+    # metadata with it — the non-supervisor calls emitted alongside
+    # the handoff (stamped on the decision as dropped_tool_calls)
+    # vanished from the latest state and the delegation log. Carry
+    # them into the denial decision, where the log keeps them.
+    stamped = (getattr(last, "additional_kwargs", None) or {}).get("aether_decision")
+    if isinstance(stamped, dict) and stamped.get("dropped_tool_calls"):
+        decision["dropped_tool_calls"] = list(stamped["dropped_tool_calls"])
     return {
         "messages": [stripped],
         "delegation_log": [
             {"agent": "supervisor", "timestamp": time.time(),
-             "decision": {"next": target, "denied": True, "reason": reason, "briefing": ""}}
+             "decision": decision}
         ],
         "active_specialist": None,
     }
@@ -566,10 +599,18 @@ def supervisor_post_model_hook(state: dict) -> dict:
         denial = _spawn_policy_denial(state, target)
         if denial is not None:
             return denial
-        if decision is None:
-            # Native-tool routing: the briefing is what memory tools
-            # returned since the last user message; the reason is the
-            # model's own reply text alongside the transfer call.
+        if decision is None or (
+            isinstance(decision, dict) and not decision.get("briefing")
+        ):
+            # Briefing reconstruction: the briefing is what memory
+            # tools returned since the last user message. This used to
+            # run only for unstamped (decision-less) handoffs — but
+            # native transfers stamp a decision with an EMPTY briefing
+            # (E1-F09), which silently bypassed the reconstruction and
+            # handed the specialist no retrieved context. A stamped
+            # decision with no briefing of its own now receives the
+            # same reconstruction; its next/reason are untouched, and
+            # a decision carrying a real briefing keeps it.
             briefing_parts = []
             dict_messages = message_dicts(messages)
             last_user = max(
@@ -579,11 +620,17 @@ def supervisor_post_model_hook(state: dict) -> dict:
             for msg in dict_messages[last_user + 1:]:
                 if msg.get("role") == "tool" and msg.get("content"):
                     briefing_parts.append(msg["content"])
-            decision = {
-                "next": target,
-                "reason": last.content if isinstance(last.content, str) else "",
-                "briefing": "\n".join(briefing_parts),
-            }
+            reconstructed = "\n".join(briefing_parts)
+            if decision is None:
+                # Native-tool routing: the reason is the model's own
+                # reply text alongside the transfer call.
+                decision = {
+                    "next": target,
+                    "reason": last.content if isinstance(last.content, str) else "",
+                    "briefing": reconstructed,
+                }
+            elif reconstructed:
+                decision = {**decision, "briefing": reconstructed}
         reason = decision.get("reason", "")
         return {
             "delegation_log": [
@@ -595,6 +642,27 @@ def supervisor_post_model_hook(state: dict) -> dict:
         }
 
     if tool_calls:
+        # Memory step: the model decides again once the results land,
+        # so routing bookkeeping does not change — with one exception
+        # (E3-F10). When the routing step dropped non-supervisor calls
+        # alongside the memory calls, those names exist only on this
+        # message; returning nothing here lost them from the
+        # delegation log and (once the message was normalized) from
+        # the latest state. Record them the way other decisions are
+        # recorded.
+        dropped = additional.get("aether_dropped_tool_calls")
+        if dropped:
+            return {
+                "delegation_log": [
+                    {"agent": "supervisor", "timestamp": time.time(),
+                     "decision": {
+                         "next": "supervisor",
+                         "reason": "Memory step: supervisor called memory tools directly.",
+                         "briefing": "",
+                         "dropped_tool_calls": list(dropped),
+                     }}
+                ]
+            }
         return {}
 
     if decision is None:

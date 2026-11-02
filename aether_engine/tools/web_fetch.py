@@ -298,8 +298,15 @@ def _request_once(
     closed with ``FetchProxyError`` because a proxy would re-resolve
     the hostname and defeat the pin. With no pinned addresses (the
     opt-in local mode) the historical plain client is used unchanged.
+
+    ``timeout_s`` is the fetch's remaining TOTAL budget, not a fresh
+    per-read allowance: httpx applies its timeout to each individual
+    read, so the body loop below also checks a hard end-instant —
+    a slow-drip response of individually timely chunks still fails
+    at the deadline (E2-F09).
     """
     pins = pinned_addresses if pinned_addresses is not None else _PINNED_ADDRESSES.get()
+    deadline_end = time.monotonic() + timeout_s
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "text/html, application/xhtml+xml, text/plain;q=0.9, */*;q=0.5",
@@ -344,6 +351,10 @@ def _request_once(
             capped = False
             for chunk in resp.iter_bytes():
                 buf.extend(chunk)
+                if time.monotonic() > deadline_end:
+                    raise FetchTimeoutError(
+                        f"response body still streaming after {timeout_s:.0f}s"
+                    )
                 if len(buf) > MAX_BODY_BYTES:
                     del buf[MAX_BODY_BYTES:]
                     capped = True
@@ -457,6 +468,11 @@ def _fetch_url_impl(url: str, max_chars: int | None = None) -> str:
             return str(e)
         except Exception as e:  # noqa: BLE001 — transport raises arbitrary network errors; surface honestly as the tool result
             return f"Error: fetching '{current}' failed: {e}"
+        if time.monotonic() > deadline:
+            # E2-F09: the deadline governs the WHOLE fetch — a response
+            # that only completes after it (a slow-dripped final body)
+            # is a timeout, never a success.
+            return f"Error: fetching '{url}' timed out after {FETCH_TIMEOUT_S:.0f}s."
         if resp.status in _REDIRECT_STATUSES and resp.location:
             if hop >= MAX_REDIRECTS:
                 return f"Error: too many redirects (more than {MAX_REDIRECTS}) starting at '{url}'."

@@ -20,6 +20,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -72,12 +73,24 @@ def atomic_write_bytes(path: str, data: bytes) -> None:
 
     An interrupted edit leaves either the old file or the new one —
     never a half-written file.
+
+    E2-F10: an existing file's permission bits are carried onto the
+    replacement. ``mkstemp`` creates the temp at 0600, so without this
+    a successful anchored edit silently stripped an executable
+    script's +x (and any group/other access) on replace. A brand-new
+    file keeps mkstemp's restrictive default.
     """
     target = Path(path)
+    try:
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+    except OSError:
+        mode = None  # new file (or unstatable): keep the default
     fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
+        if mode is not None:
+            os.chmod(tmp_name, mode)
         os.replace(tmp_name, target)
     except BaseException:
         try:

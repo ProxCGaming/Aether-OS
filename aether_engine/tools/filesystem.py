@@ -35,6 +35,11 @@ READ_MAX_CHARS = 16000
 FIND_MAX_RESULTS = 200
 SEARCH_MAX_MATCHES = 100
 SEARCH_MAX_FILES_SCANNED = 2000
+#: Total character budget for search_text output — the PRD's "large-tree
+#: run stays within output budget". Mirrors the Tool.max_output_chars
+#: default (20000): the registry does not truncate in-process results,
+#: so the tool budgets itself, clamping loudly like read_file does.
+SEARCH_MAX_OUTPUT_CHARS = 20000
 
 
 def _read_file_fn(
@@ -239,7 +244,10 @@ def _search_text_fn(
     resolved_roots = [r.resolve() for r in effective_roots(workspace_roots)]
     # (file, display path) pairs — display is relative to the searched
     # base where feasible, the path as given for a single-file target.
-    candidates: list[tuple[Path, str]] = []
+    # E2-F08: candidates are a lazy iterator, never a materialised
+    # list — the scan loop below stops pulling the moment the scan cap
+    # trips, so a huge tree costs bounded enumeration work instead of
+    # a full walk up front.
     # E2-F03: policy judged the call's starting path, and ONLY that
     # path. An explicit single-file target is that judged path itself
     # (a Deny rule blocks the call outright; the sensitive floor
@@ -253,27 +261,31 @@ def _search_text_fn(
         if not target.exists():
             return f"Error: path does not exist: {path}"
         if target.is_file():
-            candidates = [(target, path)]
+            candidates = iter([(target, path)])
             judged_target = target
         else:
-            candidates = [
+            candidates = (
                 (f, f.relative_to(target).as_posix())
                 for f in _walk_files(target, include_hidden)
-            ]
+            )
     else:
         single = len(resolved_roots) == 1
-        for base in resolved_roots:
-            if not base.is_dir():
-                continue
-            candidates.extend(
-                (f, _display_path(f, base, single))
-                for f in _walk_files(base, include_hidden)
-            )
+
+        def _all_root_candidates():
+            for base in resolved_roots:
+                if not base.is_dir():
+                    continue
+                for f in _walk_files(base, include_hidden):
+                    yield (f, _display_path(f, base, single))
+
+        candidates = _all_root_candidates()
 
     matches: list[str] = []
+    out_chars = 0
     scanned = 0
     scan_capped = False
     match_capped = False
+    output_capped = False
     for candidate, display in candidates:
         if file_pattern and not _file_pattern_matches(
             file_pattern, candidate.name, display
@@ -312,12 +324,24 @@ def _search_text_fn(
         except UnicodeDecodeError:
             continue
         for n, line in enumerate(text.splitlines(), start=1):
-            if regex.search(line):
-                matches.append(f"{display}:{n}: {line}")
-                if len(matches) >= SEARCH_MAX_MATCHES:
-                    match_capped = True
-                    break
-        if match_capped:
+            if not regex.search(line):
+                continue
+            entry = f"{display}:{n}: {line}"
+            if len(entry) > SEARCH_MAX_OUTPUT_CHARS:
+                # E2-F08: one matching line (minified/generated files)
+                # can exceed the whole output budget on its own —
+                # clamp the line itself, loudly, as read_file clamps
+                # its window.
+                entry = entry[:SEARCH_MAX_OUTPUT_CHARS] + " [line truncated]"
+            if matches and out_chars + len(entry) + 1 > SEARCH_MAX_OUTPUT_CHARS:
+                output_capped = True
+                break
+            matches.append(entry)
+            out_chars += len(entry) + 1
+            if len(matches) >= SEARCH_MAX_MATCHES:
+                match_capped = True
+                break
+        if match_capped or output_capped:
             break
 
     if not matches:
@@ -326,6 +350,8 @@ def _search_text_fn(
         out = "\n".join(matches)
     if match_capped:
         out += f"\n[capped at {SEARCH_MAX_MATCHES} matching lines — narrow the query or path]"
+    if output_capped:
+        out += f"\n[output capped at {SEARCH_MAX_OUTPUT_CHARS} characters — narrow the query or path]"
     if scan_capped:
         out += f"\n[stopped after scanning {SEARCH_MAX_FILES_SCANNED} files — narrow the path]"
     return out
@@ -340,7 +366,8 @@ def create_search_text_tool() -> Tool:
             "with path, restrict to file types with file_pattern (e.g. '*.py'). "
             "Binary files are skipped; hidden files and .git are skipped unless "
             "include_hidden is set. Sensitive system locations and paths the "
-            f"user has denied are never searched. Capped at {SEARCH_MAX_MATCHES} matching lines."
+            f"user has denied are never searched. Capped at {SEARCH_MAX_MATCHES} matching lines "
+            f"and {SEARCH_MAX_OUTPUT_CHARS} output characters."
         ),
         input_schema={
             "type": "object",

@@ -114,3 +114,57 @@ describe('Projects (Epic 6, E6-04)', () => {
     expect(setActive.payload.path).toBe('/srv/side');
   });
 });
+
+describe('Projects workspace badges (E6-F11)', () => {
+  it('removing the active workspace marks its successor active without a refetch', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<Projects wsRef={wsRef} />);
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_LIST_RESPONSE',
+          payload: {
+            workspaces: [
+              { path: '/home/user/a', name: 'a', is_indexed: false, is_active: true, exists: true },
+              { path: '/home/user/b', name: 'b', is_indexed: false, is_active: false, exists: true },
+            ],
+          },
+        }),
+      });
+    });
+    expect(screen.getByText('Active')).toBeInTheDocument();
+
+    wsRef.current.send.mockClear();
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_REMOVE_RESPONSE',
+          payload: { success: true, path: '/home/user/a' },
+        }),
+      });
+    });
+    // The successor (now the first root) shows the Active badge…
+    expect(screen.getByText('Active')).toBeInTheDocument();
+    expect(screen.queryByText('/home/user/a')).not.toBeInTheDocument();
+    // …derived from the reply, not from a LIST refetch race.
+    expect(sentTypes(wsRef)).not.toContain('WORKSPACE_LIST_REQUEST');
+  });
+
+  it('an ADD reply carrying is_active/exists renders the badges immediately', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<Projects wsRef={wsRef} />);
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_ADD_RESPONSE',
+          payload: {
+            success: true,
+            workspace: { path: '/home/user/new', name: 'new', is_indexed: false, is_active: true, exists: false },
+          },
+        }),
+      });
+    });
+    expect(screen.getByText('Active')).toBeInTheDocument();
+    expect(screen.getByText('Folder missing')).toBeInTheDocument();
+  });
+});

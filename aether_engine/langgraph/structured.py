@@ -105,11 +105,16 @@ async def apply_output_schema(*, agent: str, config: dict, provider: Any,
         return content, value
 
     logger.warning("Structured output for %s failed validation: %s", agent, errors)
+    # E1-F13: the correction must disclose the schema itself — a model
+    # cannot match a format it has never been shown, and a bare parse
+    # error ("not valid JSON") reveals none of the required fields.
     correction = (
         "Your previous reply was not valid structured output: "
         + "; ".join(errors)
         + ". Reply with ONLY a JSON value that matches the required "
-          "output schema — no prose, no code fences."
+          "output schema — no prose, no code fences. "
+        + "The required output schema is: "
+        + json.dumps(schema)
     )
     retry_messages = [
         *messages,

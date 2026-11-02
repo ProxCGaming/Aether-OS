@@ -243,6 +243,24 @@ class TestPullHealthyPath:
         ]
         _script_pull(lines=lines)
         mgr = OllamaManager()
+        # E5-F16 alignment (disclosed): a custom destination is now
+        # honoured by relocating the model out of the daemon store,
+        # so the scripted world must include the store a real daemon
+        # would have written — a manifest + its blobs for MODEL.
+        # Assertions below are unchanged.
+        store = tmp_path / "daemon-store"
+        manifest = {
+            "config": {"digest": "sha256:" + "c" * 64},
+            "layers": [{"digest": "sha256:" + "d" * 64}],
+        }
+        manifest_path = store / "manifests/registry.ollama.ai/library/synthetic-model/latest"
+        manifest_path.parent.mkdir(parents=True)
+        manifest_path.write_text(json.dumps(manifest))
+        blobs = store / "blobs"
+        blobs.mkdir(parents=True)
+        (blobs / ("sha256-" + "c" * 64)).write_bytes(b"cfg")
+        (blobs / ("sha256-" + "d" * 64)).write_bytes(b"layer")
+        mgr.models_dir = store
         dest = str(tmp_path / "models")
         events = await _collect(mgr, dest)
 

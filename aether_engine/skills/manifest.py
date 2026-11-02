@@ -92,7 +92,26 @@ class SkillManifest(BaseModel):
         # Set up trigger
         manifest.trigger.slash_commands = [f"/{name}"]
         manifest.trigger.auto_match = str(meta_block.get("auto_match", "true")).lower() == "true"
-        
+
+        # E7-F10: keywords declared in the frontmatter are the
+        # skill's matchable keywords. Without them the manager's
+        # matcher scores every Markdown skill 0 and task-start
+        # auto-match can never fire for it. Accept the shapes an
+        # author would plausibly declare — a top-level ``keywords``
+        # list, ``metadata.keywords``, or a ``trigger`` block
+        # mirroring manifest.json — first non-empty wins.
+        trigger_block = metadata.get("trigger", {})
+        if not isinstance(trigger_block, dict):
+            trigger_block = {}
+        for declared in (metadata.get("keywords"),
+                         meta_block.get("keywords"),
+                         trigger_block.get("keywords")):
+            if isinstance(declared, list):
+                keywords = [k for k in declared if isinstance(k, str)]
+                if keywords:
+                    manifest.trigger.keywords = keywords
+                    break
+
         # Tools
         allowed_tools_str = metadata.get("allowed-tools", "")
         if allowed_tools_str and isinstance(allowed_tools_str, str):

@@ -8,7 +8,14 @@ from typing import Any
 @dataclass
 class ProviderHealthState:
     provider: str
-    status: str = "healthy"  # "healthy", "degraded", "offline"
+    # E5-F15: a state is born "standby" — created but never probed.
+    # Minting "healthy" here made every unprobed/unconfigured provider
+    # card advertise a health it had never earned. Only a recorded
+    # outcome moves the state: success -> "healthy", failure ->
+    # "degraded"/"offline". Standby is a DISPLAY state only:
+    # is_available() below treats it like the old default (routable),
+    # so eligibility semantics (E5-F08) are unchanged.
+    status: str = "standby"  # "standby", "healthy", "degraded", "offline"
     last_successful_request: float | None = None
     latency_ms: float = 0.0
     consecutive_failures: int = 0
@@ -95,7 +102,10 @@ class ProviderHealthManager:
 
     def reset_provider(self, provider: str) -> ProviderHealthState:
         state = self.get_state(provider)
-        state.status = "healthy"
+        # E5-F15: a reset (e.g. a freshly saved key) clears the failure
+        # record but proves nothing about health — back to standby
+        # until the next recorded outcome.
+        state.status = "standby"
         state.consecutive_failures = 0
         state.cooldown_until = 0.0
         state.last_error = None

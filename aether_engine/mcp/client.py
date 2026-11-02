@@ -37,6 +37,8 @@ import httpx
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import McpError
+from mcp.types import METHOD_NOT_FOUND, PaginatedRequestParams
 
 logger = logging.getLogger("aether_engine.mcp.client")
 
@@ -287,6 +289,75 @@ def _make_stderr_relay() -> _BoundedStderrRelay | None:
     return _BoundedStderrRelay(sys.stderr)
 
 
+async def _list_all_pages(session: Any, method_name: str, items_attr: str) -> list:
+    """Follow a paginated MCP list to exhaustion (E3-F06).
+
+    Pages chain through ``nextCursor`` — a page whose cursor is
+    empty is the last. Before this, every discovery call returned
+    page one and silently dropped the rest: later tools were
+    unavailable to agents and later resources/prompts absent from
+    the UI. The first page is requested exactly as discovery always
+    was (no arguments); only continuation pages pass a cursor, so a
+    single-page server sees the call shape it always did.
+    """
+    method = getattr(session, method_name)
+    items: list = []
+    cursor: str | None = None
+    while True:
+        if cursor is None:
+            result = await method()
+        else:
+            result = await method(params=PaginatedRequestParams(cursor=cursor))
+        items.extend(getattr(result, items_attr))
+        cursor = getattr(result, "nextCursor", None)
+        if not cursor:
+            return items
+
+
+def _capability_absent(session: Any, field: str) -> bool:
+    """True when *session*'s server negotiated capabilities and did
+    NOT advertise *field* (``"tools"`` / ``"resources"`` /
+    ``"prompts"``) — E3-F07.
+
+    A server that declares a capability set is speaking the
+    negotiation protocol: an unadvertised optional capability must
+    not be exercised. Subset servers (tools-only, resources-only)
+    are healthy; asking anyway rejects them at connect time or
+    falsely marks them failed. Two shapes keep the legacy
+    call-through behaviour: no initialize result at all (unknown),
+    and a server that declares NOTHING (raw protocol stubs
+    advertise ``{}`` yet answer every method — the stall/limits
+    fixtures): the absence of every declaration is not a subset
+    declaration.
+    """
+    getter = getattr(session, "get_server_capabilities", None)
+    if getter is None:
+        return False
+    caps = getter()
+    if caps is None:
+        return False
+    if not any(
+        getattr(caps, field_name, None) is not None
+        for field_name in ("tools", "resources", "prompts")
+    ):
+        return False
+    return getattr(caps, field, None) is None
+
+
+def _is_method_not_found(exc: BaseException) -> bool:
+    """True when *exc* is (or wraps) a JSON-RPC method-not-found.
+
+    The SDK surfaces a server's error response either directly as an
+    ``McpError`` or wrapped in an exception group / context chain.
+    """
+    if isinstance(exc, McpError):
+        return exc.error.code == METHOD_NOT_FOUND
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_is_method_not_found(e) for e in exc.exceptions)
+    ctx = getattr(exc, "__context__", None)
+    return ctx is not None and _is_method_not_found(ctx)
+
+
 class MCPClientManager:
     """Holds one ``ClientSession`` per connected MCP server."""
 
@@ -500,8 +571,15 @@ class MCPClientManager:
             # clean up the session opened in this task (closing it here
             # is safe — this is the task that opened it, manual or
             # owner) and report the failure instead of returning ok.
-            tools = await session.list_tools()
-            tool_count = len(tools.tools)
+            # E3-F06: the count spans every discovery page. E3-F07: a
+            # server that did not advertise tools is never asked for
+            # them — a resources-only server is a healthy connection
+            # with zero tools, not a failed connect.
+            if _capability_absent(session, "tools"):
+                tool_count = 0
+            else:
+                tools = await _list_all_pages(session, "list_tools", "tools")
+                tool_count = len(tools)
         except Exception as e:  # noqa: BLE001 — a server that stalls/fails listing tools is a failed connect, whatever the SDK raises
             message = _failure_message(e)
             logger.warning("MCP connect failed for %s while listing tools: %s", name, message)
@@ -720,8 +798,13 @@ class MCPClientManager:
             logger.warning("MCP test connection failed for %s: %s", name, message)
             return {"ok": False, "error": message, "tools": []}
         try:
-            tools = await session.list_tools()
-            return {"ok": True, "error": None, "tools": [t.name for t in tools.tools]}
+            # E3-F06/F07: discovery follows the same rules as a real
+            # connect — every page, and only when the server actually
+            # advertised a tools capability.
+            if _capability_absent(session, "tools"):
+                return {"ok": True, "error": None, "tools": []}
+            tools = await _list_all_pages(session, "list_tools", "tools")
+            return {"ok": True, "error": None, "tools": [t.name for t in tools]}
         except Exception as e:  # noqa: BLE001 — test boundary: any failure is reported in the result dict
             message = str(e) or e.__class__.__name__
             logger.warning(
@@ -744,11 +827,17 @@ class MCPClientManager:
         session = self._sessions.get(name)
         if session is None:
             raise MCPClientError(f"MCP server '{name}' is not connected")
+        # E3-F07: a server that negotiated a capability set without
+        # tools has no tools to list — an empty inventory, not an
+        # error (and the request is never sent).
+        if _capability_absent(session, "tools"):
+            return []
         try:
             # Issue 011 (S1): bounded by the session read timeout (server
             # config timeout); a stalled server fails here, marks the
             # server failed, and never hangs the caller forever.
-            result = await session.list_tools()
+            # E3-F06: every page, not just the first.
+            return await _list_all_pages(session, "list_tools", "tools")
         except BaseException as e:
             if _is_genuine_cancellation(e):
                 raise
@@ -760,7 +849,6 @@ class MCPClientManager:
             raise MCPClientError(
                 f"MCP server '{name}' list_tools failed: {message}"
             ) from e
-        return result.tools
 
     async def call_tool(
         self, server: str, tool: str, args: dict[str, Any] | None = None,
@@ -841,11 +929,24 @@ class MCPClientManager:
         session = self._sessions.get(name)
         if session is None:
             raise MCPClientError(f"MCP server '{name}' is not connected")
+        # E3-F07: resources are an optional capability — a server
+        # that did not advertise them has an empty list, and the
+        # request is never sent (sending it falsely failed healthy
+        # tools-only servers).
+        if _capability_absent(session, "resources"):
+            return []
         try:
-            result = await session.list_resources()
+            # E3-F06: every page, not just the first.
+            resources = await _list_all_pages(session, "list_resources", "resources")
         except BaseException as e:
             if _is_genuine_cancellation(e):
                 raise
+            # E3-F07: a declared-but-unimplemented list (a subset
+            # server answering method-not-found) is likewise an
+            # empty list — the capability is absent in practice and
+            # the server is healthy. Anything else is a real failure.
+            if _is_method_not_found(e):
+                return []
             if isinstance(e, BaseExceptionGroup):
                 message = _first_leaf_message(e)
             else:
@@ -861,7 +962,7 @@ class MCPClientManager:
                 "description": r.description,
                 "mimeType": r.mimeType,
             }
-            for r in result.resources
+            for r in resources
         ]
 
     async def read_resource(self, name: str, uri: str) -> str:
@@ -901,11 +1002,20 @@ class MCPClientManager:
         session = self._sessions.get(name)
         if session is None:
             raise MCPClientError(f"MCP server '{name}' is not connected")
+        # E3-F07: prompts are an optional capability — unadvertised
+        # means an empty list, never a request, never a failure.
+        if _capability_absent(session, "prompts"):
+            return []
         try:
-            result = await session.list_prompts()
+            # E3-F06: every page, not just the first.
+            prompts = await _list_all_pages(session, "list_prompts", "prompts")
         except BaseException as e:
             if _is_genuine_cancellation(e):
                 raise
+            # E3-F07: method-not-found from a subset server is an
+            # empty list, not a failure (see list_resources).
+            if _is_method_not_found(e):
+                return []
             if isinstance(e, BaseExceptionGroup):
                 message = _first_leaf_message(e)
             else:
@@ -927,7 +1037,7 @@ class MCPClientManager:
                     for a in (p.arguments or [])
                 ],
             }
-            for p in result.prompts
+            for p in prompts
         ]
 
     async def get_prompt(

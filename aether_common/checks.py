@@ -21,12 +21,21 @@ CHECK_TIMEOUT_S = 180
 MAX_FAILURE_LINES = 10
 
 
-def detect_checks(root: Path) -> list[dict]:
+def detect_checks(root: Path, commands: dict | None = None) -> list[dict]:
     """Checks to run for the repo at ``root``: [{name, argv, kind}].
 
     Conservative: a check is offered only when its marker exists —
     ruff needs Python project markers, pytest needs tests, jest needs
     a package.json test script, oxlint needs its config or dependency.
+
+    ``commands`` (E2-F14) optionally overrides the argv a detected
+    check runs with, keyed by check kind (``"ruff"`` / ``"pytest"`` /
+    ``"jest"`` / ``"oxlint"``) — e.g. ``{"pytest": ["python", "-m",
+    "pytest", "-q", "tests/unit"]}`` for flags, test subsets or an
+    alternative runner. Detection is unchanged: an override changes
+    HOW a detected check runs, never WHETHER it is offered, and a
+    malformed entry (not a non-empty list) is ignored, keeping the
+    default command.
     """
     checks: list[dict] = []
     is_python = (root / "pyproject.toml").exists() or (root / "setup.cfg").exists() or any(root.glob("*.py"))
@@ -56,12 +65,25 @@ def detect_checks(root: Path) -> list[dict]:
         dev_deps = pkg.get("devDependencies", {}) if isinstance(pkg, dict) else {}
         if (root / ".oxlintrc.json").exists() or (isinstance(dev_deps, dict) and "oxlint" in dev_deps):
             checks.append({"name": "oxlint", "kind": "oxlint", "argv": ["npx", "oxlint"]})
+    if commands:
+        for check in checks:
+            override = commands.get(check["kind"])
+            if isinstance(override, (list, tuple)) and override:
+                check["argv"] = [str(part) for part in override]
     return checks
 
 
 def _count(pattern: str, text: str) -> int:
     match = re.search(pattern, text)
     return int(match.group(1)) if match else 0
+
+
+def _summary_line(label: str, text: str) -> str | None:
+    """The first line starting with ``label`` (Jest's summary lines)."""
+    for line in text.splitlines():
+        if line.strip().startswith(label):
+            return line
+    return None
 
 
 def parse_result(kind: str, output: str, returncode: int) -> dict:
@@ -79,13 +101,25 @@ def parse_result(kind: str, output: str, returncode: int) -> dict:
             "failures": failures,
         }
     if kind == "jest":
-        return {
-            "passed": _count(r"(\d+) passed", output),
-            "failed": _count(r"(\d+) failed", output),
+        # E2-F11: Jest prints its "Test Suites:" summary BEFORE its
+        # "Tests:" summary, so a first-match scan of the whole output
+        # reported suite counts as test counts. Parse each summary on
+        # its own line: passed/failed are the TEST totals, and the
+        # suite totals ride along under their own keys.
+        tests_line = _summary_line("Tests:", output)
+        counts_from = tests_line if tests_line is not None else output
+        result = {
+            "passed": _count(r"(\d+) passed", counts_from),
+            "failed": _count(r"(\d+) failed", counts_from),
             "errors": 0,
             "ok": returncode == 0,
             "failures": failures,
         }
+        suites_line = _summary_line("Test Suites:", output)
+        if suites_line is not None:
+            result["suites_passed"] = _count(r"(\d+) passed", suites_line)
+            result["suites_failed"] = _count(r"(\d+) failed", suites_line)
+        return result
     if kind in ("ruff", "oxlint"):
         issues = len(re.findall(r"^\S+:\d+:\d+:", output, flags=re.MULTILINE))
         return {

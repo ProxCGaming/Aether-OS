@@ -30,9 +30,19 @@ def is_default_title(title: str | None, first_user_content: str | None) -> bool:
         return True
     if first_user_content:
         candidate = title.strip()
-        # Auto titles are the beginning of the first prompt, cut off.
-        if first_user_content.startswith(candidate) and len(candidate) < len(first_user_content):
+        # Auto titles are the beginning of the first prompt: the whole
+        # prompt verbatim when it is short, or a cut-off prefix. A
+        # strictly-shorter test misses the verbatim shape entirely —
+        # the creation path stores short prompts whole (E1-F15).
+        if first_user_content.startswith(candidate):
             return True
+        # The long-prompt shape appends "..." to the cut prefix
+        # (routes/websocket.py), which breaks the plain prefix test.
+        if candidate.endswith("..."):
+            stem = candidate[:-3].rstrip()
+            if stem and len(first_user_content) > len(stem) \
+                    and first_user_content.startswith(stem):
+                return True
     return False
 
 
@@ -71,7 +81,8 @@ async def generate_session_title(provider: Any, user_prompt: str, assistant_resp
 
 
 def resolve_title_provider(user_config: Any, secret_store: Any, fallback: Any) -> Any:
-    """The title auxiliary override when usable, else the task provider."""
+    """The title auxiliary override when usable, else an available
+    tiny local model (E5-F19), else the task provider."""
     override = ((getattr(user_config, "auxiliary_models", None) or {}).get("title") or "").strip()
     if override and override != "auto" and secret_store:
         p_name, sep, m_name = override.partition(":::")
@@ -83,4 +94,11 @@ def resolve_title_provider(user_config: Any, secret_store: Any, fallback: Any) -
                     p_name, m_name, secret_store, user_config=user_config)
             except Exception as e:  # noqa: BLE001 — unusable title override falls back to the task provider.
                 logger.warning(f"Title auxiliary override {override!r} unusable, using the task provider: {e}")
+    # E5-F19: auto mode prefers a tiny local model for this
+    # housekeeping over the task's (usually cloud) provider.
+    from aether_engine.orchestration.core import create_tiny_local_aux_provider
+
+    local = create_tiny_local_aux_provider(user_config, secret_store)
+    if local is not None:
+        return local
     return fallback

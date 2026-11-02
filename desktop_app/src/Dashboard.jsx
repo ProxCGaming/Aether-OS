@@ -7,16 +7,26 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
   // Epic 6, E6-05: memory stats come from the engine on mount
   // (MEMORY_EPISODES_RESPONSE carries backend + embedding stats).
   const [memoryStats, setMemoryStats] = useState(null);
+  // E4-F14 family: engine memory replies can carry an error instead of
+  // backend/stats (unavailable backend). Like MemoryManagement, that is
+  // an error state — never a healthy-looking native/zero default.
+  const [memoryError, setMemoryError] = useState(null);
   useEffect(() => {
     if (!wsRef?.current) return;
     const handleMessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'MEMORY_EPISODES_RESPONSE') {
-          setMemoryStats({
-            backend: data.payload.backend || 'native',
-            ...(data.payload.embedding_stats || {}),
-          });
+          if (data.payload.error) {
+            setMemoryError(data.payload.error);
+            setMemoryStats(null);
+          } else {
+            setMemoryError(null);
+            setMemoryStats({
+              backend: data.payload.backend || 'native',
+              ...(data.payload.embedding_stats || {}),
+            });
+          }
         }
       } catch (e) {
         // ignore malformed frames
@@ -91,7 +101,12 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a78bfa', marginBottom: '12px' }}>
             <Database size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Memory</span>
           </div>
-          {memoryStats === null ? (
+          {memoryError ? (
+            <div style={{ fontSize: '15px', lineHeight: 1.7 }}>
+              <div style={{ color: '#9090a0' }}>Episodes could not be loaded.</div>
+              <div style={{ color: '#f87171', fontSize: '13px' }}>{memoryError}</div>
+            </div>
+          ) : memoryStats === null ? (
             <div style={{ fontSize: '15px', color: '#9090a0' }}>Loading…</div>
           ) : (
             <div style={{ fontSize: '15px', lineHeight: 1.7 }}>

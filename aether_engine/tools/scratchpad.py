@@ -1,9 +1,10 @@
 """Epic 1, E1-17: the agent scratchpad tool.
 
 ``scratchpad_render`` lets an agent show the user a diagram or sketch
-in the chat's scratchpad panel — a Mermaid diagram, an SVG sketch, or
-plain text — using far fewer tokens than describing it in prose. The
-panel is display-only: rendering never feeds back into execution.
+in the chat's scratchpad panel — a Mermaid diagram, an SVG sketch,
+Markdown, or plain text — using far fewer tokens than describing it
+in prose. The panel is display-only: rendering never feeds back into
+execution.
 
 Safety: content is sanitised HERE, before it is published to the UI —
 scripts, event-handler attributes, javascript: URLs and foreignObject
@@ -19,7 +20,7 @@ from typing import Any
 from aether_engine.tools.registry import Tool, ToolRisk
 
 SCRATCHPAD_TOOL_NAME = "scratchpad_render"
-SCRATCHPAD_KINDS = ("mermaid", "svg", "text")
+SCRATCHPAD_KINDS = ("mermaid", "svg", "markdown", "text")
 MAX_CONTENT_CHARS = 20_000
 
 _SCRIPT_BLOCK = re.compile(r"<script\b[^>]*>.*?</script\s*>", re.IGNORECASE | re.DOTALL)
@@ -56,15 +57,16 @@ def create_scratchpad_tool() -> Tool:
         name=SCRATCHPAD_TOOL_NAME,
         description=(
             "Show the user a visual in the scratchpad panel: a Mermaid diagram "
-            "(kind='mermaid'), an SVG sketch (kind='svg'), or formatted plain "
-            "text (kind='text'). Use it to explain structure, flows, or plans "
-            "visually instead of describing them at length. Display-only."
+            "(kind='mermaid'), an SVG sketch (kind='svg'), a Markdown document "
+            "(kind='markdown'), or formatted plain text (kind='text'). Use it "
+            "to explain structure, flows, or plans visually instead of "
+            "describing them at length. Display-only."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "kind": {"type": "string", "enum": list(SCRATCHPAD_KINDS),
-                         "description": "Rendering kind: mermaid, svg, or text"},
+                         "description": "Rendering kind: mermaid, svg, markdown, or text"},
                 "content": {"type": "string", "description": "The diagram/sketch/text content"},
             },
             "required": ["kind", "content"],

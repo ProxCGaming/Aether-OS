@@ -417,6 +417,17 @@ async def run_langgraph_task(
             }
         }
 
+        # E1-F10: enforce the caller's turn budget. max_turns rides
+        # the run's recursion limit — LangGraph counts subgraph steps
+        # against it, so the budget bounds specialist model/tool
+        # turns, not just supervisor hops — while the fixed graph
+        # ceiling stays the backstop for budgets at or above it (a
+        # smaller requested budget was previously accepted and then
+        # ignored entirely). The resume path has no max_turns input
+        # and keeps the fixed ceiling.
+        if isinstance(max_turns, int) and 0 < max_turns < GRAPH_RECURSION_LIMIT:
+            config["recursion_limit"] = max_turns
+
         # Epic 7, E7-04: skill auto-match — previously match_skills
         # had no caller, so skills activated only via slash commands
         # or per-agent attachment. Keyword matches against the prompt
@@ -1112,10 +1123,19 @@ async def resume_langgraph_task(
         messages_seen = 0
         delegation_seen = 0
         task_id = "unknown"
-        
+        bus_queue: asyncio.Queue | None = None
+
         try:
             state_obj = await graph.aget_state(config)
             task_id = state_obj.values.get("task_id", thread_id)
+            # E1-F16: subscribe to the task's event bus for the whole
+            # resume, as the run path does. Specialists publish
+            # THINKING on the bus and execute_tool publishes
+            # SCRATCHPAD; this path never subscribed, so anything a
+            # resumed specialist thought or rendered simply vanished.
+            # _consume_segment merges the bus queue into each segment.
+            bus_queue = asyncio.Queue()
+            event_bus.subscribe(task_id, bus_queue)
             # E1-F04: fill any run configuration the caller did not
             # supply from the snapshot the run checkpointed with its
             # state — the resume continues the PAUSED task's execution
@@ -1199,7 +1219,60 @@ async def resume_langgraph_task(
 
             async def _consume_segment(segment_input):
                 nonlocal interrupted, messages_seen, delegation_seen
-                async for event in graph.astream(segment_input, config=config, stream_mode="updates"):
+
+                async def _merged_items():
+                    # E1-F16: this segment's graph updates merged with
+                    # the task's bus queue: bus items arrive as
+                    # ("bus", Event) and are forwarded untouched —
+                    # THINKING, SCRATCHPAD and artifact/media notices
+                    # reach the resume consumer in arrival order, as
+                    # they do on the run path — while graph updates
+                    # keep the translation below, unchanged. A graph
+                    # failure re-raises at the point the merge reaches
+                    # it, exactly where a direct astream raise landed.
+                    merged: asyncio.Queue = asyncio.Queue()
+
+                    async def _pump_graph():
+                        stream = graph.astream(
+                            segment_input, config=config,
+                            stream_mode="updates")
+                        try:
+                            async for graph_event in stream:
+                                await merged.put(("graph", graph_event))
+                        except Exception as exc:  # noqa: BLE001 — re-raised by the merge at the matching point below.
+                            await merged.put(("graph_error", exc))
+                        finally:
+                            stream_aclose = getattr(stream, "aclose", None)
+                            if stream_aclose is not None:
+                                await stream_aclose()
+                            await merged.put(("graph_done", None))
+
+                    async def _pump_bus():
+                        while True:
+                            bus_event = await bus_queue.get()
+                            await merged.put(("bus", bus_event))
+
+                    pumps = [
+                        asyncio.create_task(_pump_graph()),
+                        asyncio.create_task(_pump_bus()),
+                    ]
+                    try:
+                        while True:
+                            kind, data = await merged.get()
+                            if kind == "graph_done":
+                                return
+                            if kind == "graph_error":
+                                raise data
+                            yield kind, data
+                    finally:
+                        for pump in pumps:
+                            pump.cancel()
+
+                async for kind, data in _merged_items():
+                    if kind == "bus":
+                        yield data
+                        continue
+                    event = data
                     for node_name, state_update in event.items():
                         if node_name == "__interrupt__":
                             intr_val = state_update[0].value
@@ -1496,6 +1569,12 @@ async def resume_langgraph_task(
                     "latency_ms": elapsed_ms,
                 },
             )
+        finally:
+            # E1-F16: the bus subscription ends with the resume,
+            # however it ended (bus_queue is only set once the
+            # subscription above actually happened).
+            if bus_queue is not None:
+                event_bus.unsubscribe(task_id, bus_queue)
 
 async def get_pending_approvals() -> list[dict[str, Any]]:
     """Query the checkpointer for threads blocked on an approval request."""

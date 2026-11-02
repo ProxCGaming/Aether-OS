@@ -53,10 +53,23 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
         } else if (data.type === 'MCP_RESOURCE_LIST_RESPONSE') {
           if (data.payload.success) {
             setMcpResources(prev => ({ ...prev, [data.payload.name]: data.payload.resources || [] }));
+          } else {
+            // E3-F11: a failed list must be visible (the MCP
+            // action-result idiom) and must not leave the previous
+            // list on screen looking current — clear it, and refresh
+            // the cached server status the failure may have changed.
+            setMcpResources(prev => ({ ...prev, [data.payload.name]: [] }));
+            setMcpTestResult(`Load resources ${data.payload.name} failed: ${data.payload.error || 'unknown error'}`);
+            sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
           }
         } else if (data.type === 'MCP_PROMPT_LIST_RESPONSE') {
           if (data.payload.success) {
             setMcpPrompts(prev => ({ ...prev, [data.payload.name]: data.payload.prompts || [] }));
+          } else {
+            // E3-F11: same rule as the resource list above.
+            setMcpPrompts(prev => ({ ...prev, [data.payload.name]: [] }));
+            setMcpTestResult(`Load prompts ${data.payload.name} failed: ${data.payload.error || 'unknown error'}`);
+            sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
           }
         } else if (data.type === 'MCP_PROMPT_RUN_RESPONSE') {
           setMcpTestResult(data.payload.success
@@ -69,10 +82,13 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
         } else if (data.type === 'MCP_SERVER_ADD_RESPONSE' || data.type === 'MCP_SERVER_REMOVE_RESPONSE') {
           if (data.payload.success) {
             sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
-          } else if (data.type === 'MCP_SERVER_ADD_RESPONSE' && data.payload.error) {
+          } else if (data.payload.error) {
             // A rejected config (e.g. both command and url) must be visible,
-            // not silently ignored.
-            setMcpTestResult(`Add ${data.payload.name} failed: ${data.payload.error}`);
+            // not silently ignored. E3-F11: a failed REMOVE gets the
+            // same visibility — it previously displayed errors only
+            // for ADD, so a refused removal looked like it worked.
+            const verb = data.type === 'MCP_SERVER_ADD_RESPONSE' ? 'Add' : 'Remove';
+            setMcpTestResult(`${verb} ${data.payload.name} failed: ${data.payload.error}`);
           }
         } else if (data.type === 'MCP_SERVER_TEST_RESPONSE') {
           setMcpTestResult(data.payload.success

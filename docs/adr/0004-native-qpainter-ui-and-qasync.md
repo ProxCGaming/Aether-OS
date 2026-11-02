@@ -1,7 +1,7 @@
 # ADR 0004: Native QPainter UI Widgets and qasync Integration
 
 ## Status
-Accepted
+Superseded by ADR-0019 (full frontend migration to Electron/React; see also ADR 0018)
 
 ## Context
 Previous prototypes explored embedding a Chromium web view (`QWebEngineView`) for UI rendering. However:

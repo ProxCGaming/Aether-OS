@@ -71,12 +71,7 @@ from aether_engine.routing.startup import (
 from aether_engine.secrets.dpapi import SecretDecryptionError
 from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
 from aether_engine.state import engine_state
-from aether_engine.tools.registry import (
-    build_tool_registry,
-    create_current_time_tool,
-    create_file_tools,
-    create_web_tools,
-)
+from aether_engine.tools.registry import build_tool_registry
 from aether_engine.validation.diagnostics import run_environment_diagnostics
 from aether_engine.version import APP_VERSION
 
@@ -1093,6 +1088,19 @@ async def ws_tasks(ws: WebSocket):
                             f"Fallback: {p_name}/{p_model} failed before any tool ran; "
                             f"retried on {fallback_provider}/{fallback_model}")
                         p_name, p_model = fallback_provider, fallback_model
+                        # E5-F12: the retry's TASK_CREATED restamp must
+                        # advertise the FALLBACK model's capabilities,
+                        # not the failed primary's. Re-derive them from
+                        # the registry entry for the (provider, model)
+                        # now serving — the same source the original
+                        # RoutingDecision stamp came from. No entry
+                        # means no advertised capabilities, never the
+                        # primary's leftovers.
+                        _fb_entry = engine_state.model_registry.get_model(
+                            fallback_model, provider=fallback_provider)
+                        routing_capabilities = (
+                            list(_fb_entry.capabilities)
+                            if _fb_entry is not None else [])
                         continue
                     elif fallback_blocked_message:
                         # The route was constrained (finding M17) and
@@ -2950,9 +2958,16 @@ async def ws_tasks(ws: WebSocket):
                                 or pname in cfg.custom_base_urls
                                 or pname in cfg.custom_provider_types
                             )
-                            # Only persist if it's a background auto-refresh (no target_provider).
-                            # If target_provider is set, it's a manual UI click and should not save.
-                            if disc.models and is_registered and not target_provider:
+                            # E5-F14: a targeted refresh of a REGISTERED
+                            # (saved) provider applies and persists
+                            # exactly like the full refresh — the old
+                            # "manual click should not save" gate left
+                            # config/registry/disk holding the stale
+                            # catalog while the response showed the new
+                            # one, so the refresh evaporated on the next
+                            # listing/restart. Unsaved templates stay
+                            # unpersisted via is_registered above.
+                            if disc.models and is_registered:
                                 cfg.provider_models[pname] = disc.models
                                 cfg.provider_excluded_models[pname] = disc.excluded
                                 engine_state.model_registry.update_provider_models(pname, disc.models)
@@ -2994,9 +3009,23 @@ async def ws_tasks(ws: WebSocket):
                 )
                 from aether_engine.tools.registry import ToolRisk
                 
-                def enrich_tool(d, name, risk):
+                tool_registry = build_tool_registry(
+                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
+                )
+
+                def enrich_tool(d, name, risk, _registry=tool_registry):
                     user_val = engine_state.user_config.tool_policies.get(name)
-                    effective = resolve_policy_by_name(name, engine_state.user_config.tool_policies)
+                    # E2-F07: resolve through the SAME inputs enforcement
+                    # uses — the real registry (so a tool's registered
+                    # risk, not the EXECUTE fallback, drives the verdict)
+                    # and the live approval mode. Without them the list
+                    # reported "ask" for tools that actually run "allow".
+                    effective = resolve_policy_by_name(
+                        name,
+                        engine_state.user_config.tool_policies,
+                        _registry,
+                        approval_mode=engine_state.user_config.approval_mode,
+                    )
                     d["risk"] = risk.value if isinstance(risk, ToolRisk) else risk
                     d["effective_policy"] = effective
                     d["policy_is_default"] = user_val is None
@@ -3004,9 +3033,7 @@ async def ws_tasks(ws: WebSocket):
                     d["policy"] = user_val or "Require Approval" # UI currently expects the raw setting in 'policy' too
                     return d
 
-                all_tools = build_tool_registry(
-                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
-                ).get_tools()
+                all_tools = tool_registry.get_tools()
                 defs = []
                 for t in all_tools:
                     d = t.to_definition()
@@ -3109,17 +3136,23 @@ async def ws_tasks(ws: WebSocket):
                 
                 if tool_name and policy:
                     from aether_engine.audit import AuditLogger
-                    from aether_engine.tools.policy import KNOWN_NON_REGISTRY_TOOLS
+                    from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+                    from aether_engine.tools.policy import tool_risk_by_name
                     from aether_engine.tools.registry import ToolRisk
-                    
+
                     risk = ToolRisk.EXECUTE
                     try:
-                        all_tools = [create_current_time_tool()] + create_file_tools() + create_web_tools()
-                        t = next((t for t in all_tools if t.name == tool_name), None)
-                        if t:
-                            risk = t.risk
-                        elif tool_name in KNOWN_NON_REGISTRY_TOOLS:
-                            risk = KNOWN_NON_REGISTRY_TOOLS[tool_name]
+                        # E2-F07: gate on the tool's risk in the FULL
+                        # registry — the legacy-factory reconstruction
+                        # this replaces knew nothing of the filesystem,
+                        # codebase, browser or MCP tools, so safe
+                        # registered tools (read_file, project_tree,
+                        # READ_ONLY MCP tools) hit the EXECUTE default
+                        # and "Always Allow" was wrongly downgraded.
+                        setter_registry = build_tool_registry(
+                            mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
+                        )
+                        risk = tool_risk_by_name(tool_name, setter_registry)
                     except Exception:  # best-effort risk lookup: on failure the fail-closed EXECUTE default above stands
                         logger.debug(f"Tool risk lookup failed for {tool_name}", exc_info=True)
 
@@ -4047,11 +4080,36 @@ async def ws_tasks(ws: WebSocket):
                     import httpx
 
                     def _parse(v: str) -> tuple:
-                        parts = []
-                        for piece in v.lstrip("v").split("."):
-                            digits = "".join(c for c in piece if c.isdigit())
-                            parts.append(int(digits) if digits else 0)
-                        return tuple(parts)
+                        # E10-F09: SemVer precedence, not digit
+                        # stripping. Build metadata (+...) never
+                        # affects precedence; a prerelease precedes
+                        # its release; prerelease identifiers compare
+                        # numerically when numeric (numeric < alpha-
+                        # numeric), lexically otherwise, and a
+                        # shorter identifier list precedes a longer
+                        # one it prefixes. An unparseable tag raises
+                        # — the handler turns that into a failed
+                        # check, not a successful "no update".
+                        text = v.strip()
+                        if text[:1] in ("v", "V"):
+                            text = text[1:]
+                        core, _, _build = text.partition("+")
+                        core, dash, prerelease = core.partition("-")
+                        pieces = core.split(".")
+                        if len(pieces) > 3 or not all(p.isdigit() for p in pieces):
+                            raise ValueError(f"not a semantic version: {v!r}")
+                        nums = [int(p) for p in pieces] + [0] * (3 - len(pieces))
+                        if not dash:
+                            return (*nums, 1, ())
+                        pre_key = []
+                        for ident in prerelease.split("."):
+                            if ident.isdigit():
+                                pre_key.append((0, int(ident), ""))
+                            elif ident:
+                                pre_key.append((1, 0, ident))
+                            else:
+                                raise ValueError(f"not a semantic version: {v!r}")
+                        return (*nums, 0, tuple(pre_key))
 
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         resp = await client.get(
@@ -4139,6 +4197,13 @@ async def ws_tasks(ws: WebSocket):
                 # Combine dynamic skill commands
                 skill_commands = []
                 for s in GLOBAL_SKILL_MANAGER.list_all():
+                    # E7-F11: list_all() is the management listing
+                    # (Settings needs disabled skills visible for
+                    # re-enable) — the advertised command list is an
+                    # invocation path, so disabled skills are not
+                    # offered here.
+                    if not s.enabled:
+                        continue
                     for cmd_str in s.slash_commands:
                         skill_commands.append({
                             "command": cmd_str,
@@ -4190,7 +4255,17 @@ async def ws_tasks(ws: WebSocket):
                     await ws.send_text(Event(
                         type=EventType.WORKSPACE_ADD_RESPONSE,
                         request_id=req_id,
-                        payload={"success": True, "workspace": {"path": ws_path, "name": p.name, "is_indexed": False}},
+                        # E6-F11: the reply carries the same badge
+                        # fields WORKSPACE_LIST_RESPONSE computes
+                        # (first root is active; `exists` drives the
+                        # missing-folder state), so the Projects view
+                        # renders the new row correctly from the reply
+                        # itself instead of waiting for a LIST refetch.
+                        payload={"success": True, "workspace": {
+                            "path": ws_path, "name": p.name, "is_indexed": False,
+                            "is_active": len(engine_state.user_config.workspace_roots) == 1,
+                            "exists": p.is_dir(),
+                        }},
                     ).to_json())
                 else:
                     await ws.send_text(Event(

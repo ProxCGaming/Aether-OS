@@ -19,10 +19,22 @@ the compaction reader (``compaction.compaction_config_from``) treats
 0 as "unset" and substitutes the default, so these writers floor at
 1 — a Settings write of 0 would otherwise display 0 while the engine
 quietly ran 40/24000/12.
+
+E4-F12 adds ``memory_backend`` under the same contract: the
+CONFIG_UPDATE handler's fixed field set omitted it, so a write of
+the backend was acknowledged ``success: True`` while the live
+config, the saved file and the facade's backend all stayed on the
+old value. It is validated against the facade's ``VALID_BACKENDS``
+vocabulary and normalised the way the config loader normalises it
+(strip / lower), so a stored value is exactly the name the facade
+will resolve — per request, so a valid switch takes effect without
+a restart.
 """
 from __future__ import annotations
 
 from typing import Any
+
+from aether_engine.memory.facade import VALID_BACKENDS
 
 HANDED_OFF_FIELDS = (
     "supervisor_spawn_allowlist",
@@ -33,6 +45,7 @@ HANDED_OFF_FIELDS = (
     "compaction_trigger_chars",
     "compaction_keep_recent",
     "path_rules",
+    "memory_backend",
 )
 
 # The verdict vocabulary of tools/policy.py's _VERDICT_MAP and the
@@ -199,5 +212,16 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
             raise _fail("path_rules", "must be a list of rule objects")
         cleaned["path_rules"] = [
             _validate_path_rule(i, rule) for i, rule in enumerate(value)]
+
+    if "memory_backend" in config_data:
+        value = config_data["memory_backend"]
+        if not isinstance(value, str) or not value.strip():
+            raise _fail("memory_backend", "must be a backend name")
+        name = value.strip().lower()
+        if name not in VALID_BACKENDS:
+            raise _fail("memory_backend",
+                        f"unknown backend {value!r} "
+                        f"(valid: {', '.join(VALID_BACKENDS)})")
+        cleaned["memory_backend"] = name
 
     return cleaned

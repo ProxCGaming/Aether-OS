@@ -383,6 +383,11 @@ class MCPRegistry:
             await self._client.shutdown_owned()
         except Exception as e:  # noqa: BLE001 — shutdown is best-effort; a failing close must not escape stop_auto_connect
             logger.warning("MCP auto-connect stop failed: %s", e)
+        # E3-F09: shutdown closed every session (manual connections
+        # included — all sessions are owner-managed), so every cached
+        # tool is now inventory for a disconnected server. Clear the
+        # cache, or get_mcp_tools() keeps offering dead tools.
+        self._tools_cache.clear()
 
     async def remove_server(self, name: str):
         """
@@ -487,9 +492,19 @@ class MCPRegistry:
                 logger.warning(
                     "MCP connect failed for %s while listing tools: %s", name, message
                 )
-                await self._client.disconnect(name)
+                # E3-F09: disconnect through the REGISTRY, not the
+                # client directly — disconnect_server also clears the
+                # cached tools. The client-only close left the
+                # previous connection's tools in the cache, still
+                # offered by get_mcp_tools() for a dead server.
+                await self.disconnect_server(name)
                 self._client.set_failed(name, message)
                 return {"ok": False, "error": message}
+        else:
+            # E3-F09: a failed (re)connect leaves no session behind,
+            # so a previous connection's cached tools must not keep
+            # being offered either.
+            self._tools_cache.pop(name, None)
         return result
 
     async def connect_server(self, name: str) -> dict[str, Any]:
@@ -502,6 +517,14 @@ class MCPRegistry:
                     f"{self._invalid_servers[name]['error']}",
                 }
             return {"ok": False, "error": f"Unknown MCP server '{name}'"}
+        if not config.get("enabled", True):
+            # E3-F08: disabled is a real state, not just a display
+            # mask — a disabled server must not connect (and so never
+            # execute) until it is re-enabled.
+            return {
+                "ok": False,
+                "error": f"MCP server '{name}' is disabled; enable it before connecting.",
+            }
         return await self._finish_connect(name, await self._client.connect(name, config))
 
     async def connect_server_owned(self, name: str) -> dict[str, Any]:
@@ -526,6 +549,13 @@ class MCPRegistry:
                     f"{self._invalid_servers[name]['error']}",
                 }
             return {"ok": False, "error": f"Unknown MCP server '{name}'"}
+        if not config.get("enabled", True):
+            # E3-F08: the owned path honours disabled too — this is
+            # the path the audit's repro connected through.
+            return {
+                "ok": False,
+                "error": f"MCP server '{name}' is disabled; enable it before connecting.",
+            }
         return await self._finish_connect(
             name, await self._client.connect_owned(name, config)
         )

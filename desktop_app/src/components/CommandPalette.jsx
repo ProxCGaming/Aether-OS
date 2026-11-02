@@ -102,6 +102,7 @@ export default function CommandPalette({ open, items = [], onClose }) {
       >
         <input
           ref={inputRef}
+          className="aether-search-input"
           aria-label="Search commands"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -110,7 +111,7 @@ export default function CommandPalette({ open, items = [], onClose }) {
           style={{
             width: '100%', boxSizing: 'border-box', padding: '16px',
             background: 'transparent', border: 'none', borderBottom: '1px solid rgba(255,255,255,0.08)',
-            color: '#fff', fontSize: '15px', outline: 'none',
+            color: '#fff', fontSize: '15px',
           }}
         />
         <div style={{ maxHeight: '46vh', overflowY: 'auto' }}>

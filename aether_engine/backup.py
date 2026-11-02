@@ -8,12 +8,14 @@ while the engine runs is still transaction-consistent; WAL/SHM
 sidecars are never copied.
 
 Scope: config.json, mcp_servers.json, langmem_store.json,
-learned.md, *.db, skills/, plugins/, logs/. The named JSON/Markdown
+learned.md, skills.lock.json, *.db, skills/, plugins/, logs/. The named JSON/Markdown
 files are the profile's non-SQLite durable stores: the LangMem
 memory backend keeps both its facts and episodes namespaces in
 langmem_store.json (E10-F03 — the native backend's stores are
-*.db files and ride the glob), and learned.md is the memory
-learned layer's primary store. The secrets store (secrets.db) is
+*.db files and ride the glob), learned.md is the memory
+learned layer's primary store, and skills.lock.json is the
+E7-F09 skill lockfile — the pins that make the collected
+skills/ contents reproducible. The secrets store (secrets.db) is
 EXCLUDED unless `include_secrets=True` — its contents are
 encrypted at rest by the platform protector, so including it
 copies ciphertext, never plaintext keys.
@@ -75,7 +77,7 @@ from aether_engine.version import APP_VERSION
 
 FORMAT_VERSION = 1
 SECRETS_DB = "secrets.db"
-_INCLUDE_FILES = {"config.json", "mcp_servers.json", "langmem_store.json", "learned.md"}
+_INCLUDE_FILES = {"config.json", "mcp_servers.json", "langmem_store.json", "learned.md", "skills.lock.json"}
 _INCLUDE_DIRS = ("skills", "plugins", "logs")
 
 

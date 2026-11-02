@@ -34,6 +34,11 @@ from aether_common.contracts import Event, EventType
 from aether_engine.browser.policy import BROWSER_TOOL_NAMES
 from aether_engine.event_bus import event_bus
 from aether_engine.langgraph.state import TOOL_LOOP_GUARD_THRESHOLD, AetherState
+from aether_engine.langgraph.steering import (
+    drain_steers,
+    has_pending_steers,
+    steer_state_update,
+)
 from aether_engine.tools.approval_cache import get_default_cache
 from aether_engine.tools.registry import ToolExecutionError, ToolNotFoundError
 from aether_engine.tools.scratchpad import (
@@ -149,6 +154,60 @@ def _changed_workspace_files(
     )
 
 
+def _apply_pending_steers(
+    state: AetherState, config: RunnableConfig, update: dict
+) -> dict:
+    """E1-F08: drain queued steers at the tool-step boundary.
+
+    The executor drains the steering queue when the specialist
+    subgraph yields — after ALL of the specialist's tool steps. The
+    PRD's promise is the NEXT step: a steer queued while a tool step
+    ran must be in the specialist's very next model call. This node
+    IS that boundary (every tool step concludes here, however it
+    concludes), so the same drain the executor performs
+    (``steer_state_update`` — same rendering, same provenance move)
+    also runs on this node's update: the steers land in the
+    subgraph's own message channel, behind the tool result, and the
+    specialist's next invocation reads them. The executor's later
+    drain then finds an empty queue — one application, never two —
+    and each applied steer is announced on the event bus with the
+    same STEERING_APPLIED shape the executor itself emits, so the
+    client still learns it landed. With nothing queued the update
+    passes through untouched.
+    """
+    configurable = config.get("configurable", {}) if config else {}
+    steering_key = (
+        state.get("session_id")
+        or configurable.get("session_id")
+        or configurable.get("request_id")
+    )
+    if not steering_key or not has_pending_steers(steering_key):
+        return update
+    steers = drain_steers(steering_key)
+    if not steers:
+        return update
+    steer_update = steer_state_update(steers)
+    merged = dict(update)
+    merged["messages"] = [
+        *update.get("messages", []), *steer_update["messages"]]
+    if "message_id" in steer_update:
+        merged["message_id"] = steer_update["message_id"]
+    task_id = state.get("task_id")
+    if task_id:
+        for steer in steers:
+            event_bus.publish(task_id, Event(
+                type=EventType.STEERING_APPLIED,
+                request_id="",
+                payload={
+                    "task_id": task_id,
+                    "session_id": state.get("session_id"),
+                    "message_id": steer.message_id,
+                    "content": steer.text,
+                },
+            ))
+    return merged
+
+
 async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     """Executes a tool call pending in the state using the provided ToolRegistry.
 
@@ -179,7 +238,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     if isinstance(allowed_tools, list) and tool_name not in allowed_tools:
         error_msg = f"Error: Tool '{tool_name}' is currently disabled for your agent role. You are not allowed to execute it."
         logger.warning(f"Agent '{active_agent}' attempted to use disabled tool '{tool_name}'.")
-        return {
+        return _apply_pending_steers(state, config, {
             "messages": [{
                 "role": "tool",
                 "name": tool_name,
@@ -187,7 +246,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                 "tool_call_id": call_id,
             }],
             "pending_tool_call": None
-        }
+        })
 
     # ── Plan-mode backstop (Epic 1, E1-09) ────────────────────────────
     # Specialists in plan mode are never offered non-READ_ONLY tools,
@@ -201,7 +260,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
         if tool_def is not None and tool_def.risk.value != "read_only":
             error_msg = f"Error: Tool '{tool_name}' is not available in plan mode (read-only). Switch plan mode off to execute it."
             logger.warning(f"Plan mode blocked {tool_name} (risk={tool_def.risk.value}).")
-            return {
+            return _apply_pending_steers(state, config, {
                 "messages": [{
                     "role": "tool",
                     "name": tool_name,
@@ -209,7 +268,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                     "tool_call_id": call_id,
                 }],
                 "pending_tool_call": None
-            }
+            })
 
     # ── Loop guard (Epic 1, E1-03) ────────────────────────────────────
     # Count consecutive identical calls (same tool, same arguments).
@@ -230,7 +289,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
             "tool, or explain to the user what is blocking you."
         )
         logger.warning(f"Loop guard triggered for {tool_name} after {repeats} identical calls.")
-        return {
+        return _apply_pending_steers(state, config, {
             "messages": [{
                 "role": "tool",
                 "name": tool_name,
@@ -240,7 +299,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
             "pending_tool_call": None,
             "tool_call_signature": None,
             "tool_call_repeats": 0,
-        }
+        })
 
     executed_write = False
     if not registry:
@@ -609,4 +668,4 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     }
     if executed_write:
         update["write_tool_used"] = True
-    return update
+    return _apply_pending_steers(state, config, update)

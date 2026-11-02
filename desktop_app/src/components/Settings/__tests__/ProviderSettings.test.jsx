@@ -376,3 +376,32 @@ describe('ProviderSettings Test-button hardening', () => {
     await waitFor(() => expect(screen.getByText('Test Successful')).toBeInTheDocument());
   });
 });
+
+describe('ProviderSettings standby health (E5-F15 renderer polish)', () => {
+  let mockSendMessage;
+  let mockWsRef;
+
+  beforeEach(() => {
+    mockSendMessage = jest.fn();
+    mockWsRef = {
+      current: {
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
+        readyState: 1,
+      },
+    };
+    useAetherSocket.mockReturnValue({ wsRef: mockWsRef, sendMessage: mockSendMessage });
+  });
+
+  test('an unprobed provider renders a neutral standby state, not a failure colour', () => {
+    render(<ProviderSettings
+      providers={[{ name: 'groq', display_name: 'Groq', has_key: true }]}
+      health={{ groq: { status: 'standby', latency_ms: 0 } }}
+    />);
+    const el = screen.getByTestId('provider-health-groq');
+    expect(el.textContent).toContain('standby');
+    // Neutral grey — standby must not fall into the red
+    // "everything else" branch used for offline/failure.
+    expect(el.style.color).toBe('rgb(144, 144, 160)');
+  });
+});

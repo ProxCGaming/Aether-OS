@@ -179,7 +179,10 @@ export default function ProviderSettings({ providers = [], health = {} }) {
           const isCustom = providerName.startsWith('custom_') || providerName === 'custom_openai';
           const isExpanded = expandedProvider === providerName;
           const healthInfo = health && typeof health === 'object' ? health[providerName] : null;
-          const healthColor = !healthInfo ? null : healthInfo.status === 'healthy' ? '#10b981' : healthInfo.status === 'degraded' ? '#f59e0b' : '#ef4444';
+          // E5-F15: the engine reports 'standby' for unprobed /
+          // unconfigured providers — an honest "not checked yet",
+          // rendered neutral grey, never the red failure colour.
+          const healthColor = !healthInfo ? null : healthInfo.status === 'healthy' ? '#10b981' : healthInfo.status === 'degraded' ? '#f59e0b' : healthInfo.status === 'standby' ? '#9090a0' : '#ef4444';
           
           return (
             <div key={providerName} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', overflow: 'hidden', transition: 'all 0.3s' }}>

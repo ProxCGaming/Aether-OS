@@ -160,8 +160,11 @@ async def run_worker(task_payload: dict):
         root = Path(path)
         if not root.is_dir():
             raise ValueError(f"run_checks failed: not a directory: {path}")
+        # E2-F14: the caller may override the detected commands
+        # (argv per check kind); detect_checks validates the entries.
+        commands = args.get("commands")
         results = []
-        for check in detect_checks(root):
+        for check in detect_checks(root, commands if isinstance(commands, dict) else None):
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *check["argv"], cwd=str(root),

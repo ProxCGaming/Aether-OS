@@ -1,6 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock, Scissors, Globe, CircleDollarSign, Mic } from 'lucide-react';
+import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock, Scissors, Globe, CircleDollarSign, Mic, Info } from 'lucide-react';
 import Dropdown from './Dropdown';
+// E6-F14: the About section's version is read from the desktop
+// package manifest — one of the three mirrors of the engine's
+// APP_VERSION (aether_engine/version.py), pinned equal to it by the
+// epic-10 hardening tests. Never a hardcoded copy in this file.
+import appPackage from '../package.json';
 import { resolveSnipHotkey, defaultSnipHotkey } from './snipHotkey';
 import LocalModelsTab from './LocalModelsTab';
 import './chat.css';
@@ -15,7 +20,7 @@ import OrchestrationPanel from './components/Settings/OrchestrationPanel';
 import PathRulesPanel from './components/Settings/PathRulesPanel';
 import ProjectConfigPanel from './components/Settings/ProjectConfigPanel';
 
-export default function SettingsPanel({ wsRef, providers = [], providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null }) {
+export default function SettingsPanel({ wsRef, providers = [], providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null, initialMenu = null, onInitialMenuConsumed = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
   const [modelTab, setModelTab] = useState('cloud'); // 'cloud' or 'local'
   const [keys, setKeys] = useState({});
@@ -33,6 +38,17 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
   const [settingsQuery, setSettingsQuery] = useState('');
   const [resetArmed, setResetArmed] = useState(false);
   const [resetDone, setResetDone] = useState(false);
+  // P-1 (E6-F07 flag): the engine's refusal of a reset (e.g. the
+  // save failed) — surfaced instead of a false "done".
+  const [resetError, setResetError] = useState('');
+  // P-2 (E7-F05 follow-up): plugin action failures land here so they
+  // are visible in this panel, as they already are in
+  // DiagnosticsPanel (which renders the plugin UI).
+  const [pluginActionResult, setPluginActionResult] = useState(null);
+  // E6-F14: workspace roots for the About section's local-guide
+  // entry point (from WORKSPACE_LIST_RESPONSE).
+  const [aboutWorkspaces, setAboutWorkspaces] = useState([]);
+  const [guideStatus, setGuideStatus] = useState('');
   // Epic 10: backup / restore + update check (Advanced tab).
   const [backupStatus, setBackupStatus] = useState('');
   const [includeSecrets, setIncludeSecrets] = useState(false);
@@ -189,8 +205,16 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
 
   // E6-F05: the handed-off panels report edits as partial config
   // objects; they go out through the one CONFIG_UPDATE flow.
+  //
+  // E6-F15: settings edits are sent through the socket facade
+  // UNCONDITIONALLY. The facade's send() queues while the engine is
+  // unreachable and flushes in order on reconnect (the discipline
+  // E6-F02 established for onboarding) — the readyState guards these
+  // handlers used to carry threw the edit away whenever the socket
+  // was mid-reconnect, so a change made offline silently vanished
+  // when the next authoritative config reply landed.
   const sendConfigUpdate = (partial) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (wsRef.current) {
       wsRef.current.send(JSON.stringify({
         type: 'CONFIG_UPDATE_REQUEST',
         schema_version: 1,
@@ -201,7 +225,7 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
   };
 
   const handleProjectLayerSave = (content) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (wsRef.current) {
       wsRef.current.send(JSON.stringify({
         type: 'PROJECT_CONFIG_UPDATE_REQUEST',
         schema_version: 1,
@@ -214,9 +238,10 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
   const handleApprovalModeChange = (mode) => {
     // Optimistic: the selector reflects the choice immediately; the
     // APPROVAL_MODE_SET_RESPONSE confirms (or the next TOOL_LIST_RESPONSE
-    // corrects) it.
+    // corrects) it. E6-F15: sent unconditionally (facade queues it
+    // while offline) like every other settings edit.
     setApprovalMode(mode);
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (wsRef.current) {
       wsRef.current.send(JSON.stringify({
         type: 'APPROVAL_MODE_SET_REQUEST',
         schema_version: 1,
@@ -345,15 +370,28 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
         } else if (data.type === 'PLUGIN_LIST_RESPONSE') {
           const p = data.payload.plugins;
           setPlugins(Array.isArray(p) ? p : Object.values(p || {}));
+        } else if (data.type === 'WORKSPACE_LIST_RESPONSE') {
+          // E6-F14: feeds the About section's local-guide entry point.
+          setAboutWorkspaces(data.payload.workspaces || []);
         } else if (data.type === 'SKILL_TOGGLE_RESPONSE') {
           if (data.payload.skills) setSkills(data.payload.skills);
         } else if (data.type === 'SKILL_LIST_RESPONSE') {
           setSkills(data.payload.skills || []);
         } else if (data.type === 'PLUGIN_INSTALL_RESPONSE' || data.type === 'PLUGIN_UNINSTALL_RESPONSE' || data.type === 'PLUGIN_TOGGLE_RESPONSE') {
           if (data.payload.success) {
+            // P-2: success clears any earlier failure notice and
+            // refetches, exactly as before.
+            setPluginActionResult(null);
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
               wsRef.current.send(JSON.stringify({ type: 'PLUGIN_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
             }
+          } else if (data.payload.error) {
+            // P-2 (E7-F05 follow-up): a failed install/toggle/
+            // uninstall must be visible in this panel too, not
+            // silently swallowed — the DiagnosticsPanel idiom.
+            const verb = data.type === 'PLUGIN_UNINSTALL_RESPONSE' ? 'Uninstall'
+              : data.type === 'PLUGIN_TOGGLE_RESPONSE' ? 'Toggle' : 'Install';
+            setPluginActionResult(`${verb}${data.payload.name ? ` ${data.payload.name}` : ''} failed: ${data.payload.error}`);
           }
         } else if (data.type === 'MEMORY_EPISODES_RESPONSE' || data.type === 'MEMORY_EPISODE_DELETE_RESPONSE') {
           setEpisodes(data.payload.episodes || []);
@@ -370,13 +408,23 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
           setIsDiagnosticsRunning(false);
         } else if (data.type === 'CONFIG_RESET_RESPONSE') {
           setResetArmed(false);
-          setResetDone(true);
-          // E6-F04: the reply carries the full default config —
-          // apply it like any other config reply, or every control
-          // keeps displaying the pre-reset values until the panel
-          // is remounted.
-          if (data.payload && data.payload.config) {
-            applyConfigValues(data.payload.config);
+          if (data.payload && data.payload.success === false) {
+            // P-1 (E6-F07 flag): the reset's save failed — the
+            // engine kept the previous config. Mirror the
+            // CONFIG_UPDATE failure branch: surface the error and
+            // do NOT show the "done" confirmation or apply anything.
+            setResetDone(false);
+            setResetError(data.payload.error || 'The reset could not be saved.');
+          } else {
+            setResetDone(true);
+            setResetError('');
+            // E6-F04: the reply carries the full default config —
+            // apply it like any other config reply, or every control
+            // keeps displaying the pre-reset values until the panel
+            // is remounted.
+            if (data.payload && data.payload.config) {
+              applyConfigValues(data.payload.config);
+            }
           }
         } else if (data.type === 'BACKUP_CREATE_RESPONSE') {
           setBackupStatus(data.payload.success
@@ -469,6 +517,32 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
       if (wsRef.current) wsRef.current.removeEventListener('message', handleMessage);
     };
   }, [wsRef]);
+
+  // E6-F08: a section requested from outside the panel (the command
+  // palette's jump-to-section entries) becomes the active section
+  // exactly once; the parent clears its request when this reports
+  // consumption. (Deliberate prop-to-state sync, as with the
+  // activeMenu fetch effect below.)
+  useEffect(() => {
+    if (initialMenu) {
+      setActiveMenu(initialMenu);
+      if (onInitialMenuConsumed) onInitialMenuConsumed();
+    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+  }, [initialMenu]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // E6-F14: the About section's guide entry point needs the
+  // workspace roots (the guide ships inside the project checkout).
+  useEffect(() => {
+    if (activeMenu === 'About' && wsRef.current) {
+      wsRef.current.send(JSON.stringify({
+        type: 'WORKSPACE_LIST_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+    }
+  }, [activeMenu, wsRef]);
 
   useEffect(() => {
     if (activeMenu === 'Tools' && wsRef.current?.readyState === WebSocket.OPEN) {
@@ -670,7 +744,8 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
     { keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
     { keywords: 'capabilities diagnostics environment scheduler', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
     { keywords: 'voice tuning audio vad endpointing silence threshold mic speech', id: 'Voice', icon: <Mic size={18} />, label: 'Voice Tuning' },
-    { keywords: 'advanced routing fallbacks reset defaults developer project config layer overlay', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' }
+    { keywords: 'advanced routing fallbacks reset defaults developer project config layer overlay', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' },
+    { keywords: 'about version guide documentation help', id: 'About', icon: <Info size={18} />, label: 'About' }
   ];
 
   // The sections surviving the search filter, in nav order. The list
@@ -696,6 +771,7 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
       }}>
         <input
           type="text"
+          className="aether-search-input"
           aria-label="Search settings"
           placeholder="Search settings…"
           value={settingsQuery}
@@ -706,7 +782,7 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
               setActiveMenu(visibleMenuItems[0].id);
             }
           }}
-          style={{ padding: '10px 14px', borderRadius: '10px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', outline: 'none', fontSize: '13px', marginBottom: '4px' }}
+          style={{ padding: '10px 14px', borderRadius: '10px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', fontSize: '13px', marginBottom: '4px' }}
         />
         {visibleMenuItems.map(item => (
           <div
@@ -828,9 +904,11 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                          value={reasoningEffort}
                          onChange={(val) => {
                            // Phase 9, B2: persist engine-side so it actually affects model calls.
+                           // E6-F15: sent unconditionally — the facade
+                           // queues it while offline (see sendConfigUpdate).
                            setReasoningEffort(val);
                            localStorage.setItem('reasoning_effort', val);
-                           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                           if (wsRef.current) {
                              wsRef.current.send(JSON.stringify({
                                type: 'REASONING_EFFORT_SET_REQUEST',
                                schema_version: 1,
@@ -856,8 +934,9 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                      style={{ background: 'transparent', color: '#a78bfa', border: 'none', fontSize: '13px', cursor: 'pointer' }}
                      onClick={() => {
                        // Phase 9, B1: clear every override back to the main model.
+                       // E6-F15: sent unconditionally (facade queues offline).
                        setAuxModels({});
-                       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                       if (wsRef.current) {
                          wsRef.current.send(JSON.stringify({
                            type: 'AUXILIARY_MODEL_SET_REQUEST',
                            schema_version: 1,
@@ -898,7 +977,8 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                                 else next[task.id] = val;
                                 return next;
                               });
-                              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                              // E6-F15: sent unconditionally (facade queues offline).
+                              if (wsRef.current) {
                                 wsRef.current.send(JSON.stringify({
                                   type: 'AUXILIARY_MODEL_SET_REQUEST',
                                   schema_version: 1,
@@ -1156,7 +1236,14 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
         )}
 
         {activeMenu === 'Plugins' && (
-          <DiagnosticsPanel activeMenu='Plugins' />
+          <div>
+            {/* P-2: plugin action failures surface here as well as in
+                DiagnosticsPanel, which renders the plugin UI. */}
+            {pluginActionResult && (
+              <div style={{ color: '#fbbf24', fontSize: '13px', marginBottom: '16px' }}>{pluginActionResult}</div>
+            )}
+            <DiagnosticsPanel activeMenu='Plugins' />
+          </div>
         )}
 
         {activeMenu === 'Skills' && (
@@ -1256,13 +1343,19 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                 Restores every engine setting to its default and saves immediately. Your API keys (held in the
                 encrypted secret store), your files, and your memory are NOT touched.
               </p>
+              {resetError && (
+                <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '12px' }}>Reset failed: {resetError}</div>
+              )}
               {resetDone ? (
                 <div style={{ color: '#10b981', fontSize: '13px' }}>Settings were reset to defaults.</div>
               ) : (
                 <button
                   onClick={() => {
                     if (!resetArmed) { setResetArmed(true); return; }
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                    // E6-F15: sent unconditionally — a reset confirmed
+                    // while offline is queued by the facade and lands
+                    // on reconnect, not dropped.
+                    if (wsRef.current) {
                       wsRef.current.send(JSON.stringify({ type: 'CONFIG_RESET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
                     }
                   }}
@@ -1369,14 +1462,9 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                     onChange={(e) => {
                       const val = e.target.checked;
                       setDisableFallbacks(val);
-                      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                        wsRef.current.send(JSON.stringify({
-                          type: 'CONFIG_UPDATE_REQUEST',
-                          schema_version: 1,
-                          request_id: Date.now().toString(),
-                          payload: { config: { disable_fallbacks: val } }
-                        }));
-                      }
+                      // E6-F15: through the one CONFIG_UPDATE flow,
+                      // unconditionally (facade queues offline).
+                      sendConfigUpdate({ disable_fallbacks: val });
                     }}
                     style={{ accentColor: '#7c3aed', width: '18px', height: '18px' }}
                   />
@@ -1394,15 +1482,10 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                     value={fallbackChain}
                     onChange={(e) => setFallbackChain(e.target.value)}
                     onBlur={() => {
-                      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                        const parsedChain = fallbackChain.split(',').map(s => s.trim()).filter(Boolean);
-                        wsRef.current.send(JSON.stringify({
-                          type: 'CONFIG_UPDATE_REQUEST',
-                          schema_version: 1,
-                          request_id: Date.now().toString(),
-                          payload: { config: { fallback_chain: parsedChain } }
-                        }));
-                      }
+                      // E6-F15: through the one CONFIG_UPDATE flow,
+                      // unconditionally (facade queues offline).
+                      const parsedChain = fallbackChain.split(',').map(s => s.trim()).filter(Boolean);
+                      sendConfigUpdate({ fallback_chain: parsedChain });
                     }}
                     placeholder="E.g. openrouter, groq, anthropic"
                     style={{
@@ -1485,6 +1568,61 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
               >
                 Reset to default ({defaultSnipHotkey()})
               </button>
+            </div>
+          </div>
+        )}
+
+        {activeMenu === 'About' && (
+          <div style={{ color: '#f0f0f5' }}>
+            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>About Aether-OS</h2>
+            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>
+              A local-first desktop agent: a Python engine with a persistent memory, driven from this shell.
+            </p>
+
+            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px', marginBottom: '20px' }}>
+              {/* E6-F14: the version comes from the package manifest
+                  (the APP_VERSION mirror), never a literal here. */}
+              <div style={{ fontSize: '15px', fontWeight: 500, marginBottom: '4px' }}>Aether-OS</div>
+              <div style={{ fontSize: '13px', color: '#9090a0' }}>Version {appPackage.version}</div>
+            </div>
+
+            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Local documentation</h3>
+              <p style={{ color: '#9090a0', fontSize: '13px', margin: '0 0 16px 0' }}>
+                The system guide ships with the project (docs/AETHER_SYSTEM_GUIDE.md) and opens with your
+                default Markdown reader — nothing is fetched from the network.
+              </p>
+              {aboutWorkspaces.length === 0 ? (
+                <div style={{ fontSize: '13px', color: '#9090a0' }}>
+                  Add a workspace that contains the Aether-OS project and the guide can be opened from here.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {aboutWorkspaces.map((root) => (
+                    <div key={root.path} style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                      <button
+                        onClick={async () => {
+                          // The shell's open-path seam (as the canvas's
+                          // "Open externally" uses): a failure comes
+                          // back as the shell's error string and is
+                          // shown, never swallowed.
+                          if (!window.electronAPI?.openPath) {
+                            setGuideStatus('Opening local files is not available in this shell.');
+                            return;
+                          }
+                          const err = await window.electronAPI.openPath(`${root.path}/docs/AETHER_SYSTEM_GUIDE.md`);
+                          setGuideStatus(err ? `Could not open the guide: ${err}` : '');
+                        }}
+                        style={{ background: 'rgba(124,58,237,0.15)', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                      >
+                        Open the system guide
+                      </button>
+                      <span style={{ fontSize: '12px', color: '#9090a0', fontFamily: 'monospace' }}>{root.path}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {guideStatus && <div style={{ fontSize: '13px', color: '#f87171', marginTop: '12px' }}>{guideStatus}</div>}
             </div>
           </div>
         )}

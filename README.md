@@ -40,8 +40,8 @@ npm run electron:dev
 Or launch just the UI with `uv run python run_ui.py` (it warns if
 the engine is not up; the app retries the connection on its own).
 
-First run walks a 3-step onboarding: pick a workspace, add a
-provider API key, choose a default model.
+First run walks a 3-step onboarding: add a provider API key,
+pick a workspace, choose an approval default.
 
 ## Test
 

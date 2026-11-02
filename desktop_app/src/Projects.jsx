@@ -29,7 +29,18 @@ export default function Projects({ wsRef }) {
           }
         } else if (data.type === 'WORKSPACE_REMOVE_RESPONSE') {
           if (data.payload.success) {
-            setWorkspaces(prev => prev.filter(w => w.path !== data.payload.path));
+            setWorkspaces(prev => {
+              const remaining = prev.filter(w => w.path !== data.payload.path);
+              // E6-F11: the first root is the active workspace (the
+              // engine's LIST rule). Removing the active row promotes
+              // its successor — recompute the badge from the reply
+              // instead of leaving every row unmarked until a refetch.
+              const removedWasActive = prev.some(w => w.path === data.payload.path && w.is_active);
+              if (removedWasActive && remaining.length > 0) {
+                return remaining.map((w, idx) => (idx === 0 ? { ...w, is_active: true } : w));
+              }
+              return remaining;
+            });
           }
         }
       } catch (e) {

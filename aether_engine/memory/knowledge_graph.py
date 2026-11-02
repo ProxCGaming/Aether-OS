@@ -17,6 +17,41 @@ logger = logging.getLogger("aether_engine.memory.knowledge_graph")
 # Database path is ~/.aether/memory.db
 DB_PATH = Path.home() / ".aether" / "memory.db"
 
+# E4-F11: application schema version for this store's tables.
+# 1 = the original entities/facts schema; 2 = E4-02's supersede
+# columns (facts.status, facts.superseded_by). Bump with every
+# migration; init records the marker via _record_schema_version so
+# a future migration can gate on it instead of re-deriving the
+# schema's generation from its shape.
+SCHEMA_VERSION = 2
+
+_SCHEMA_META_DDL = """
+    CREATE TABLE IF NOT EXISTS aether_schema_meta (
+        store TEXT PRIMARY KEY,
+        version INTEGER NOT NULL
+    )
+"""
+
+
+def _record_schema_version(conn: sqlite3.Connection, store: str, version: int) -> None:
+    """Record ``store``'s schema version after its migrations ran.
+
+    The per-store row in ``aether_schema_meta`` is the marker a
+    future migration gates on (memory.db is shared by several
+    stores, so one file-level number cannot speak for each of them);
+    ``PRAGMA user_version`` mirrors the highest store version in the
+    file as the file-level marker.
+    """
+    conn.execute(_SCHEMA_META_DDL)
+    conn.execute(
+        "INSERT INTO aether_schema_meta (store, version) VALUES (?, ?) "
+        "ON CONFLICT(store) DO UPDATE SET version = excluded.version",
+        (store, version),
+    )
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version > current:
+        conn.execute(f"PRAGMA user_version = {int(version)}")
+
 # Phase 10.3 A3: DB file paths the one-time KG dedupe migration
 # (dedupe_facts) has already run for in this process. A fresh tmp DB
 # in tests gets its own key, so the migration still runs there on
@@ -64,6 +99,7 @@ def init_kg_db() -> None:
             conn.execute("ALTER TABLE facts ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
         if "superseded_by" not in columns:
             conn.execute("ALTER TABLE facts ADD COLUMN superseded_by TEXT")
+        _record_schema_version(conn, "knowledge_graph", SCHEMA_VERSION)
         conn.commit()
     # Phase 10.3 A3: collapse any duplicate facts left by the old
     # unconditional INSERT in extract_and_store_facts (once per

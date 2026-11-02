@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -109,6 +110,43 @@ def _get_conn(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     return conn
 
+# E4-F11: application schema versions for this module's stores.
+# 1 = the FTS5 episodic_memory + episodic_thinking schema (no column
+# migrations to date). The embeddings store: 1 = the original
+# episodic_embeddings table; 2 = N02's model / dimension identity
+# columns. Bump with every migration; _record_schema_version keeps
+# the recorded marker in step.
+EPISODIC_SCHEMA_VERSION = 1
+EMBEDDINGS_SCHEMA_VERSION = 2
+
+_SCHEMA_META_DDL = """
+    CREATE TABLE IF NOT EXISTS aether_schema_meta (
+        store TEXT PRIMARY KEY,
+        version INTEGER NOT NULL
+    )
+"""
+
+
+def _record_schema_version(conn: sqlite3.Connection, store: str, version: int) -> None:
+    """Record ``store``'s schema version after its migrations ran.
+
+    The per-store row in ``aether_schema_meta`` is the marker a
+    future migration gates on (memory.db is shared by several
+    stores, so one file-level number cannot speak for each of them);
+    ``PRAGMA user_version`` mirrors the highest store version in the
+    file as the file-level marker.
+    """
+    conn.execute(_SCHEMA_META_DDL)
+    conn.execute(
+        "INSERT INTO aether_schema_meta (store, version) VALUES (?, ?) "
+        "ON CONFLICT(store) DO UPDATE SET version = excluded.version",
+        (store, version),
+    )
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version > current:
+        conn.execute(f"PRAGMA user_version = {int(version)}")
+
+
 def init_episodic_db() -> None:
     with _get_conn() as conn:
         conn.execute("""
@@ -128,6 +166,7 @@ def init_episodic_db() -> None:
                 thinking_log TEXT
             )
         """)
+        _record_schema_version(conn, "episodic", EPISODIC_SCHEMA_VERSION)
         conn.commit()
     # Phase 10.3 A2: collapse any duplicate FTS rows left by the old
     # plain-INSERT store_episode (once per process per DB file).
@@ -161,6 +200,7 @@ def init_embeddings_db() -> None:
         if "dimension" not in columns:
             conn.execute(
                 "ALTER TABLE episodic_embeddings ADD COLUMN dimension INTEGER")
+        _record_schema_version(conn, "episodic_embeddings", EMBEDDINGS_SCHEMA_VERSION)
         conn.commit()
 
 def _store_embedding_row(task_id: str, embedding: list[float]) -> None:
@@ -314,11 +354,34 @@ def embedding_breaker_open() -> bool:
     return _embed_breaker_open()
 
 
+# E9-F01: the class NAMES that mark a connection/timeout-class
+# failure for the breaker, matched against the raised type and its
+# bases. The real provider stacks wrap their timeouts in classes
+# that inherit neither builtin: litellm.Timeout inherits
+# openai.APITimeoutError (itself an APIConnectionError), and
+# httpx.ReadTimeout / ConnectTimeout inherit httpx.TimeoutException
+# — the original exact-name check saw none of those, so real
+# timeouts never tripped the breaker and a dead endpoint was retried
+# on every call. Name matching keeps litellm / openai / httpx out of
+# this module's import graph (Epic 9 lazy-import rule). The set is
+# deliberately explicit — arbitrary errors still never trip it.
+_BREAKER_ERROR_NAMES = frozenset({
+    "APIConnectionError",
+    "APITimeoutError",
+    "ConnectError",
+    "ConnectTimeout",
+    "PoolTimeout",
+    "ReadTimeout",
+    "Timeout",
+    "TimeoutException",
+    "WriteTimeout",
+})
+
+
 def _trip_embed_breaker(error: Exception) -> None:
     global _embed_unavailable_until
-    if isinstance(error, (ConnectionError, TimeoutError)) or type(error).__name__ in (
-        "APIConnectionError",
-        "ConnectError",
+    if isinstance(error, (ConnectionError, TimeoutError)) or any(
+        cls.__name__ in _BREAKER_ERROR_NAMES for cls in type(error).__mro__
     ):
         _embed_unavailable_until = time.monotonic() + _EMBED_BREAKER_COOLDOWN_S
 
@@ -560,6 +623,38 @@ async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags:
         "embedded": embedding is not None
     })
 
+_FTS_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+# FTS5 operator words: as bare tokens they are query syntax, not
+# search terms. Dropping them keeps the expression a plain keyword
+# search (implicit AND — dropping AND is exactly its operator
+# meaning; OR/NOT/NEAR lose their widening/negating power rather
+# than hijacking or breaking the query).
+_FTS_OPERATOR_WORDS = frozenset({"AND", "OR", "NOT", "NEAR"})
+
+
+def _fts_match_expression(query: str) -> str:
+    """Build a safe FTS5 MATCH expression from a raw user query.
+
+    E4-F10: FTS5 treats characters like ``?``, ``*``, ``(``, ``:``
+    and the bare words AND/OR/NOT as query syntax, so a raw user
+    query containing them makes MATCH raise OperationalError — and
+    the caller used to swallow that by discarding the entire lexical
+    leg, leaving embeddings-down recall with nothing. The old
+    sanitizer stripped only quotes and colons. Reducing the query
+    to plain word tokens (minus the operator words), each quoted
+    as a literal phrase, makes punctuation degrade to "these words"
+    (implicit AND, as before) instead of a dead search. Returns ""
+    when the query has no searchable tokens — the caller treats
+    that as no-match.
+    """
+    tokens = [
+        token for token in _FTS_TOKEN_RE.findall(query)
+        if token.upper() not in _FTS_OPERATOR_WORDS
+    ]
+    return " ".join(f'"{token}"' for token in tokens)
+
+
 async def query_episodes(query: str, limit: int = 5,
                        *, similarity_threshold: float | None = None,
                        backfill_limit: int = DEFAULT_QUERY_BACKFILL_LIMIT,
@@ -584,10 +679,11 @@ async def query_episodes(query: str, limit: int = 5,
     with _get_conn() as conn:
         cur = conn.cursor()
         
-        # Sanitize query by removing quotes and special FTS characters
-        clean_query = query.replace('"', ' ').replace("'", " ").replace(":", " ")
-        
-        if not clean_query.strip():
+        # E4-F10: never let raw user text reach the FTS5 parser —
+        # build the MATCH expression from word tokens instead.
+        clean_query = _fts_match_expression(query)
+
+        if not clean_query:
             return []
             
         try:

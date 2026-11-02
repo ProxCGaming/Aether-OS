@@ -568,4 +568,106 @@ describe('DiagnosticsPanel', () => {
     });
     expect(screen.getByText('Uninstall CoolPlugin failed: Plugin not found: CoolPlugin')).toBeInTheDocument();
   });
+
+  // E3-F11: resource/prompt LIST failures and REMOVE failures used to
+  // be swallowed entirely — the error never rendered and the previous
+  // (stale) lists stayed on screen looking current. Each failure must
+  // surface through the panel's notice idiom and clear the stale list.
+  const renderWithConnectedServer = () => {
+    const listeners = {};
+    const mockWs = {
+      addEventListener: jest.fn((type, fn) => { listeners[type] = fn; }),
+      removeEventListener: jest.fn(),
+    };
+    useAetherSocket.mockReturnValue({
+      wsRef: { current: mockWs },
+      sendMessage: mockSendMessage,
+    });
+    render(<DiagnosticsPanel activeMenu="MCP" />);
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_SERVER_LIST_RESPONSE',
+          payload: {
+            servers: {
+              fake: { transport: 'streamable_http', url: 'http://127.0.0.1:9000/mcp', status: 'connected', tool_count: 1, auto_connect: true, enabled: true },
+            },
+          },
+        }),
+      });
+    });
+    return listeners;
+  };
+
+  it('shows a failed resource list and clears the stale resources (E3-F11)', () => {
+    const listeners = renderWithConnectedServer();
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_RESOURCE_LIST_RESPONSE',
+          payload: {
+            success: true, name: 'fake',
+            resources: [{ uri: 'fake://notes', name: 'notes', description: 'A note', mimeType: 'text/plain' }],
+          },
+        }),
+      });
+    });
+    expect(screen.getByText('notes')).toBeInTheDocument();
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_RESOURCE_LIST_RESPONSE',
+          payload: { success: false, name: 'fake', error: 'RESOURCE_LIST_SENTINEL' },
+        }),
+      });
+    });
+    expect(screen.getByText('Load resources fake failed: RESOURCE_LIST_SENTINEL')).toBeInTheDocument();
+    expect(screen.queryByText('notes')).not.toBeInTheDocument();
+    // The cached server status is refreshed too.
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'MCP_SERVER_LIST_REQUEST',
+      expect.objectContaining({ payload: {} })
+    );
+  });
+
+  it('shows a failed prompt list and clears the stale prompts (E3-F11)', () => {
+    const listeners = renderWithConnectedServer();
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_PROMPT_LIST_RESPONSE',
+          payload: {
+            success: true, name: 'fake',
+            prompts: [{ name: 'greet', description: 'Greet someone', arguments: [] }],
+          },
+        }),
+      });
+    });
+    expect(screen.getByText('greet')).toBeInTheDocument();
+
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_PROMPT_LIST_RESPONSE',
+          payload: { success: false, name: 'fake', error: 'PROMPT_LIST_SENTINEL' },
+        }),
+      });
+    });
+    expect(screen.getByText('Load prompts fake failed: PROMPT_LIST_SENTINEL')).toBeInTheDocument();
+    expect(screen.queryByText('greet')).not.toBeInTheDocument();
+  });
+
+  it('shows a failed server remove instead of doing nothing (E3-F11)', () => {
+    const listeners = renderWithConnectedServer();
+    act(() => {
+      listeners.message({
+        data: JSON.stringify({
+          type: 'MCP_SERVER_REMOVE_RESPONSE',
+          payload: { success: false, name: 'fake', error: 'REMOVE_SENTINEL' },
+        }),
+      });
+    });
+    expect(screen.getByText('Remove fake failed: REMOVE_SENTINEL')).toBeInTheDocument();
+  });
 });

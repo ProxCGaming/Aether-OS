@@ -115,11 +115,13 @@ def run_environment_diagnostics() -> list[dict[str, Any]]:
 
     # 5. Web Search API
     try:
-        if os.environ.get("TAVILY_API_KEY"):
+        tavily_key = os.environ.get("TAVILY_API_KEY")
+        if tavily_key:
+            status, details = _probe_tavily_key(tavily_key)
             logs.append({
                 "target_name": "Web Search API",
-                "status": "OK",
-                "details": "Key verified",
+                "status": status,
+                "details": details,
                 "timestamp": time.time()
             })
         else:
@@ -138,3 +140,33 @@ def run_environment_diagnostics() -> list[dict[str, Any]]:
         })
 
     return logs
+
+
+def _probe_tavily_key(api_key: str) -> tuple[str, str]:
+    """E5-F18: verify a Tavily key with a real probe, not its presence.
+
+    One cheap authenticated request (the usage endpoint, 3s bound).
+    Only a definitive answer changes the label: HTTP 200 earns
+    "Key verified"; 401/403 means the key was rejected; anything
+    else (other statuses, DNS/timeout/connection failures) reports
+    the key as present but NOT verified rather than guessing.
+    """
+    req = urllib.request.Request(
+        "https://api.tavily.com/usage",
+        method="GET",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=3) as response:
+            if response.status == 200:
+                return "OK", "Key verified"
+            return (
+                "WARN",
+                f"Key present — could not be verified (HTTP {response.status})",
+            )
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return "FAILED", f"Key rejected by Tavily (HTTP {e.code})"
+        return "WARN", f"Key present — could not be verified (HTTP {e.code})"
+    except Exception as e:  # noqa: BLE001 — an unverifiable key is a WARN result, never an exception
+        return "WARN", f"Key present — could not be verified ({e})"

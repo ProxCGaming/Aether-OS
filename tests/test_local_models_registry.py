@@ -91,6 +91,24 @@ class TestLocalModelsRegistry:
 
     @pytest.mark.asyncio
     async def test_download_model_task_progress_events(self, ollama_mgr, tmp_path, healthy_daemon):
+        # E5-F16 alignment (disclosed): a custom destination is now
+        # honoured by relocating the model out of the daemon store,
+        # so the scripted world must include the store a real daemon
+        # would have written — a manifest + its blobs for the model.
+        # Assertions below are unchanged.
+        store = tmp_path / "daemon-store"
+        manifest = {
+            "config": {"digest": "sha256:" + "a" * 64},
+            "layers": [{"digest": "sha256:" + "b" * 64}],
+        }
+        manifest_path = store / "manifests/registry.ollama.ai/library/test-model/latest"
+        manifest_path.parent.mkdir(parents=True)
+        manifest_path.write_text(json.dumps(manifest))
+        blobs = store / "blobs"
+        blobs.mkdir(parents=True)
+        (blobs / ("sha256-" + "a" * 64)).write_bytes(b"cfg")
+        (blobs / ("sha256-" + "b" * 64)).write_bytes(b"layer")
+        ollama_mgr.models_dir = store
         dest_dir = str(tmp_path / "models")
         events = []
 

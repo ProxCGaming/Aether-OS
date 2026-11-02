@@ -64,8 +64,14 @@ def test_is_default_title_shapes():
     assert is_default_title("help me debug the flaky par", "help me debug the flaky parser test") is True
     # A real (renamed or model-written) title is not a prompt prefix.
     assert is_default_title("Parser debugging session", "help me debug the flaky parser test") is False
-    # The full first prompt as title is a user-length edge: not a prefix cut.
-    assert is_default_title("short prompt", "short prompt") is False
+    # E1-F15 alignment: the full first prompt as title IS an auto
+    # title — the creation path stores short prompts verbatim — so it
+    # qualifies for model re-titling. (This pin previously asserted
+    # the opposite; the full-product audit rejected that rationale.)
+    assert is_default_title("short prompt", "short prompt") is True
+    # The long-prompt auto shape: 30-char prefix + "...".
+    long_prompt = "help me debug the flaky parser test that only fails on Tuesdays"
+    assert is_default_title(long_prompt[:30] + "...", long_prompt) is True
 
 
 def test_clean_title_normalises_model_output():

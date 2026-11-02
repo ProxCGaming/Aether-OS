@@ -21,6 +21,7 @@ import logging
 import os
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlencode
 
 logger = logging.getLogger("aether_engine.tools.web_search")
 
@@ -112,7 +113,13 @@ def _search_keyed(provider: str, query: str, max_results: int, transport: Any = 
                         {"query": query, "numResults": max_results})
             results = [{"title": r.get("title"), "url": r.get("url"), "snippet": r.get("text", "")[:500]} for r in body.get("results", [])]
         elif provider == "brave":
-            body = call("GET", f"https://api.search.brave.com/res/v1/web/search?q={query}&count={max_results}",
+            # E2-F12: the query goes through urlencode — interpolating
+            # it raw let &, + and # corrupt the parameter, so a code
+            # search like "C++ & C# examples" arrived as q="C   ".
+            brave_url = "https://api.search.brave.com/res/v1/web/search?" + urlencode(
+                {"q": query, "count": max_results}
+            )
+            body = call("GET", brave_url,
                         {"X-Subscription-Token": key, "Accept": "application/json"}, None)
             results = [{"title": r.get("title"), "url": r.get("url"), "snippet": r.get("description", "")}
                        for r in body.get("web", {}).get("results", [])]

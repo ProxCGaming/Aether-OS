@@ -133,23 +133,51 @@ def resolve_tool_policy(
     top of everything else — a deny rule denies outright (no config
     relaxes a fork bomb), an ask rule raises any allow to ask.
     """
-    shell_verdict = None
-    if tool.name == "execute_shell" and args:
-        from aether_engine.validation.shell_rules import evaluate_shell_command
-
-        extras = shell_extras or {}
-        shell_verdict = evaluate_shell_command(
-            str(args.get("command", "")),
-            extra_deny=extras.get("deny"),
-            extra_ask=extras.get("ask"),
-        )
-        if shell_verdict.verdict == "deny":
-            return "deny"
+    shell_verdict = _shell_verdict(tool, args, shell_extras)
+    if shell_verdict is not None and shell_verdict.verdict == "deny":
+        return "deny"
 
     verdict = _resolve_base_verdict(tool, user_policies, args=args, path_rules=path_rules, approval_mode=approval_mode)
     if shell_verdict is not None and shell_verdict.verdict == "ask" and verdict == "allow":
         return "ask"
     return verdict
+
+
+def _shell_verdict(tool: Tool, args: dict | None, shell_extras: dict | None = None):
+    """The shell safety verdict for an execute_shell call, or None.
+
+    The single evaluation both the verdict path and the audit
+    attribution path (E2-F13) read, so the rule named in the audit
+    trail is always the rule that produced the verdict.
+    """
+    if tool.name != "execute_shell" or not args:
+        return None
+    from aether_engine.validation.shell_rules import evaluate_shell_command
+
+    extras = shell_extras or {}
+    return evaluate_shell_command(
+        str(args.get("command", "")),
+        extra_deny=extras.get("deny"),
+        extra_ask=extras.get("ask"),
+    )
+
+
+def shell_denial_rule(
+    tool: Tool, args: dict | None, shell_extras: dict | None = None
+) -> str | None:
+    """Name of the shell safety rule denying this call, or None.
+
+    E2-F13: :func:`resolve_tool_policy` returns a bare "deny",
+    discarding the evaluator's matched rule, so denial audit events
+    could only record a generic reason. Callers that audit a denial
+    use this to attribute it — the rule name as the policy model
+    carries it (``ShellVerdict.rule``, e.g. "rm-root" or a configured
+    "user-deny-0").
+    """
+    verdict = _shell_verdict(tool, args, shell_extras)
+    if verdict is not None and verdict.verdict == "deny":
+        return verdict.rule
+    return None
 
 
 def _resolve_base_verdict(
@@ -197,23 +225,38 @@ def _resolve_base_verdict(
     return _apply_floor("allow", tool, args)
 
 
-def resolve_policy_by_name(tool_name: str, user_policies: dict[str, str], registry=None, *, args: dict | None = None, path_rules: list | None = None, shell_extras: dict | None = None, approval_mode: str = "ask") -> str:
+def tool_risk_by_name(tool_name: str, registry=None) -> ToolRisk:
+    """The risk class a tool name resolves to for policy purposes.
+
+    The registry's registered risk when the tool is registered, the
+    known non-registry table for supervisor memory tools, and EXECUTE
+    (fail closed) for anything unknown. This is the single derivation
+    :func:`resolve_policy_by_name` uses; the Settings policy setter
+    gates "Always Allow" on it too, so the setter, the Settings list
+    and enforcement can no longer disagree about a tool's risk
+    (E2-F07).
     """
-    Helper to resolve policy given just a tool name, looking up in registry or fallbacks.
-    """
-    from aether_engine.tools.registry import Tool, ToolNotFoundError
+    from aether_engine.tools.registry import ToolNotFoundError
 
     risk = ToolRisk.EXECUTE
 
     if registry:
         try:
-            tool = registry.get_tool(tool_name)
-            risk = tool.risk
+            risk = registry.get_tool(tool_name).risk
         except ToolNotFoundError:
             pass
 
     if risk == ToolRisk.EXECUTE and tool_name in KNOWN_NON_REGISTRY_TOOLS:
         risk = KNOWN_NON_REGISTRY_TOOLS[tool_name]
 
-    dummy_tool = Tool(name=tool_name, description="", risk=risk)
+    return risk
+
+
+def resolve_policy_by_name(tool_name: str, user_policies: dict[str, str], registry=None, *, args: dict | None = None, path_rules: list | None = None, shell_extras: dict | None = None, approval_mode: str = "ask") -> str:
+    """
+    Helper to resolve policy given just a tool name, looking up in registry or fallbacks.
+    """
+    from aether_engine.tools.registry import Tool
+
+    dummy_tool = Tool(name=tool_name, description="", risk=tool_risk_by_name(tool_name, registry))
     return resolve_tool_policy(dummy_tool, user_policies, args=args, path_rules=path_rules, shell_extras=shell_extras, approval_mode=approval_mode)

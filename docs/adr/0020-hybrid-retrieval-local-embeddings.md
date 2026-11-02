@@ -1,7 +1,18 @@
 # ADR-0020: Hybrid Retrieval with Local Embeddings
 
+> **Correction (2 Nov 2026):** this ADR was left at Proposed with its
+> pre-implementation embedding design. Hybrid retrieval shipped — FTS5 +
+> semantic search over a separate `embeddings.db`, merged with RRF — but
+> embeddings are **not** generated in-process by SentenceTransformers/MiniLM:
+> they are produced via LiteLLM against a local Ollama model (first
+> `nomic-embed-text`, recorded in ADR 0023 §B2; the current default is
+> `qwen3-embedding:0.6b`, `UserConfig.embedding_model`). No
+> `sentence-transformers` dependency exists in the project. Decision 1 below
+> is superseded by that implementation; the separate-`embeddings.db` and RRF
+> decisions stand as built.
+
 ## Status
-Proposed
+Accepted (embedding design corrected after implementation — see the correction note above)
 
 ## Context
 Aether currently uses SQLite FTS5 for full-text search in the `episodic.py` memory layer. While keyword search is effective for exact matches, it fails to capture semantic meaning, making it difficult to retrieve relevant past episodes when the terminology differs. 

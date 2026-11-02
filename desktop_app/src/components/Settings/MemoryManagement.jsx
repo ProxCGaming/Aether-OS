@@ -15,6 +15,11 @@ export default function MemoryManagement() {
   const [editingFactId, setEditingFactId] = useState(null);
   const [editText, setEditText] = useState('');
   const [exportStatus, setExportStatus] = useState(null);
+  // E4-F14: the engine's replies are truthful (E4-F08) — failures
+  // carry success=False / an error field, and the UI must surface
+  // them instead of rendering them as emptiness or silent success.
+  const [memoryError, setMemoryError] = useState(null);
+  const [editError, setEditError] = useState(null);
 
   // Debounce the fact search input into the query used for graph requests
   useEffect(() => {
@@ -35,19 +40,59 @@ export default function MemoryManagement() {
     const handleMessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'MEMORY_EPISODES_RESPONSE' || data.type === 'MEMORY_EPISODE_DELETE_RESPONSE') {
-          setEpisodes(data.payload.episodes || []);
-          if (data.payload.backend !== undefined || data.payload.embedding_stats) {
-            setEpisodesMeta({ backend: data.payload.backend, embedding_stats: data.payload.embedding_stats });
+        if (data.type === 'MEMORY_EPISODES_RESPONSE') {
+          // E4-F14: a failed list load is an error state, not an
+          // empty list — keep any rows already on screen and show
+          // the engine's error instead of "No episodes found."
+          if (data.payload.error) {
+            setMemoryError(data.payload.error);
+          } else {
+            setMemoryError(null);
+            setEpisodes(data.payload.episodes || []);
+            if (data.payload.backend !== undefined || data.payload.embedding_stats) {
+              setEpisodesMeta({ backend: data.payload.backend, embedding_stats: data.payload.embedding_stats });
+            }
+          }
+        } else if (data.type === 'MEMORY_EPISODE_DELETE_RESPONSE') {
+          // E4-F14: rows change only on the confirmed result. A
+          // failed delete carries success=False plus an empty list
+          // that must NOT be applied — keep the rows, show why.
+          if (data.payload.success === false) {
+            setMemoryError(data.payload.error || 'The episode could not be deleted.');
+          } else {
+            setMemoryError(null);
+            setEpisodes(data.payload.episodes || []);
+            setSelectedEpisode(prev => (prev && prev.task_id === data.payload.task_id ? null : prev));
+            if (data.payload.backend !== undefined || data.payload.embedding_stats) {
+              setEpisodesMeta({ backend: data.payload.backend, embedding_stats: data.payload.embedding_stats });
+            }
           }
         } else if (data.type === 'MEMORY_EPISODES_CLEAR_RESPONSE') {
-          setEpisodes([]);
-          setSelectedEpisode(null);
+          if (data.payload.success === false) {
+            setMemoryError(data.payload.error || 'Episodic memory could not be cleared.');
+          } else {
+            setMemoryError(null);
+            setEpisodes(data.payload.episodes || []);
+            setSelectedEpisode(null);
+          }
         } else if (data.type === 'MEMORY_GRAPH_RESPONSE' || data.type === 'MEMORY_FACT_DELETE_RESPONSE' || data.type === 'MEMORY_ENTITY_DELETE_RESPONSE') {
-          setFacts(data.payload.facts || []);
+          if (data.payload.success === false || data.payload.error) {
+            setMemoryError(data.payload.error || 'The memory change was not applied.');
+          } else {
+            setMemoryError(null);
+            setFacts(data.payload.facts || []);
+          }
         } else if (data.type === 'MEMORY_FACT_UPDATE_RESPONSE') {
           if (data.payload.facts) setFacts(data.payload.facts);
-          if (data.payload.success) setEditingFactId(null);
+          if (data.payload.success) {
+            setEditingFactId(null);
+            setEditError(null);
+          } else {
+            // E4-F14: a rejected edit keeps the editor open AND says
+            // why — the reply carries success=False without a reason
+            // string, so the explanation is stated plainly.
+            setEditError('The update was rejected — the fact was not changed.');
+          }
         } else if (data.type === 'MEMORY_EXPORT_RESPONSE') {
           if (data.payload.success && data.payload.export) {
             downloadExport(data.payload.export);
@@ -56,7 +101,12 @@ export default function MemoryManagement() {
             setExportStatus(data.payload.error || 'Export failed.');
           }
         } else if (data.type === 'MEMORY_GRAPH_CLEAR_RESPONSE') {
-          setFacts([]);
+          if (data.payload.success === false) {
+            setMemoryError(data.payload.error || 'The knowledge graph could not be cleared.');
+          } else {
+            setMemoryError(null);
+            setFacts(data.payload.facts || []);
+          }
         }
       } catch (e) {
         // ignore
@@ -73,18 +123,18 @@ export default function MemoryManagement() {
     };
   }, [wsRef, sendMessage, memoryTab, searchQuery, includeHistory]);
 
+  // E4-F14: none of the delete/clear actions below touch local
+  // state optimistically — the response handler applies the
+  // confirmed result, and a failure keeps the rows and surfaces
+  // the error.
   const handleDeleteEpisode = (taskId) => {
     if (!taskId) return;
     sendMessage('MEMORY_EPISODE_DELETE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { task_id: taskId } });
-    setEpisodes(prev => prev.filter(ep => ep.task_id !== taskId));
-    if (selectedEpisode?.task_id === taskId) setSelectedEpisode(null);
   };
 
   const handleClearAllEpisodes = () => {
     if (window.confirm("Are you sure you want to clear all stored episodic memories?")) {
       sendMessage('MEMORY_EPISODES_CLEAR_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
-      setEpisodes([]);
-      setSelectedEpisode(null);
     }
   };
 
@@ -92,14 +142,21 @@ export default function MemoryManagement() {
     if (!entityName) return;
     if (window.confirm(`Delete all facts associated with "${entityName}"?`)) {
       sendMessage('MEMORY_ENTITY_DELETE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { entity_name: entityName } });
-      setFacts(prev => prev.filter(f => f.entity_name !== entityName));
     }
+  };
+
+  const handleDeleteFact = (fact) => {
+    if (!fact?.fact_id) return;
+    // E4-F15: delete ONE fact through the engine's existing
+    // MEMORY_FACT_DELETE handler (the entity trash deletes them
+    // all). Same honesty rule as every other action here: the row
+    // disappears when the response confirms the delete.
+    sendMessage('MEMORY_FACT_DELETE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { fact_id: fact.fact_id } });
   };
 
   const handleClearAllFacts = () => {
     if (window.confirm("Are you sure you want to clear all facts from the Knowledge Graph?")) {
       sendMessage('MEMORY_GRAPH_CLEAR_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
-      setFacts([]);
     }
   };
 
@@ -127,6 +184,7 @@ export default function MemoryManagement() {
   const handleStartEdit = (fact) => {
     setEditingFactId(fact.fact_id);
     setEditText(fact.fact_text ?? fact.content ?? '');
+    setEditError(null);
   };
 
   const handleSaveEdit = (fact) => {
@@ -183,6 +241,10 @@ export default function MemoryManagement() {
         )}
       </div>
 
+      {memoryError && (
+        <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '16px' }}>{memoryError}</div>
+      )}
+
       {memoryTab === 'episodic' && (
         <div>
           {episodesMeta && (episodesMeta.backend || episodesMeta.embedding_stats) && (
@@ -206,7 +268,7 @@ export default function MemoryManagement() {
           <div style={{ display: 'flex', gap: '24px', height: '600px' }}>
           <div style={{ width: '320px', display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto', paddingRight: '8px' }} className="chat-scroll">
             {episodes.length === 0 ? (
-              <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center' }}>No episodes found.</div>
+              <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center' }}>{memoryError ? 'Episodes could not be loaded.' : 'No episodes found.'}</div>
             ) : (
               episodes.map(ep => (
                 <div 
@@ -323,7 +385,7 @@ export default function MemoryManagement() {
           )}
           {facts.length === 0 ? (
             <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
-              No facts in Knowledge Graph.
+              {memoryError ? 'Facts could not be loaded.' : 'No facts in Knowledge Graph.'}
             </div>
           ) : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '16px' }}>
@@ -372,12 +434,15 @@ export default function MemoryManagement() {
                                   Save
                                 </button>
                                 <button
-                                  onClick={() => setEditingFactId(null)}
+                                  onClick={() => { setEditingFactId(null); setEditError(null); }}
                                   style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#c9c9d4', padding: '5px 12px', borderRadius: '6px', fontSize: '12px', cursor: 'pointer' }}
                                 >
                                   Cancel
                                 </button>
                               </div>
+                              {editError && (
+                                <div style={{ color: '#f87171', fontSize: '12px' }}>{editError}</div>
+                              )}
                             </div>
                           ) : (
                             <>
@@ -396,6 +461,16 @@ export default function MemoryManagement() {
                               >
                                 <Pencil size={13} />
                                 Edit
+                              </button>
+                              <button
+                                title="Delete this fact"
+                                onClick={() => handleDeleteFact(fact)}
+                                style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'transparent', border: '1px solid rgba(255,255,255,0.12)', color: '#9090a0', padding: '4px 8px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', flexShrink: 0, transition: 'all 0.2s' }}
+                                onMouseEnter={(e) => { e.currentTarget.style.color = '#ef4444'; e.currentTarget.style.borderColor = 'rgba(239,68,68,0.5)'; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.color = '#9090a0'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.12)'; }}
+                              >
+                                <Trash2 size={13} />
+                                Delete
                               </button>
                             </>
                           )}
