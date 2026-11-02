@@ -74,6 +74,11 @@ class GatedEmbedder:
         self.release = {t: asyncio.Event() for t in gated}
 
     async def __call__(self, text, task_id=None, context="store"):
+        # S1-N3: an episode's embedded text is "summary\noutcome
+        # head"; this fake's vectors/gates are keyed by the summary
+        # line that heads it, so resolve the key before lookup.
+        if text not in self.vectors and "\n" in text:
+            text = text.split("\n", 1)[0]
         self.entered.setdefault(text, asyncio.Event()).set()
         gate = self.release.get(text)
         if gate is not None:

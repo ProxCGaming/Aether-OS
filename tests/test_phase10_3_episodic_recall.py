@@ -48,6 +48,11 @@ _VECTORS = {
 
 
 async def _fake_embed(text, task_id=None, context="store"):
+    # S1-N3: an episode's embedded text is "summary\noutcome head";
+    # this fake's vectors are keyed by the summary line that heads it
+    # (queries still arrive as their raw text and hit exactly).
+    if text not in _VECTORS:
+        text = text.split("\n", 1)[0]
     return list(_VECTORS[text])
 
 

@@ -563,7 +563,31 @@ def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
         return 0.0
     return dot / (norm_a * norm_b)
 
+# S1-N3: the semantic leg embeds the summary PLUS the head of the
+# outcome. It used to embed the summary alone — and both learn call
+# sites truncate that summary to 200 characters — so an episode whose
+# substance sat beyond the snippet was semantically unfindable (the
+# BM25/FTS leg always searched the full outcome). The E4-F03 fence
+# stays keyed on task_summary: a re-store replaces summary and outcome
+# together, so summary currency is what detects a stale write.
+_EMBED_OUTCOME_CHARS = 1000
+
+
+def _episode_embed_text(task_summary: str, outcome: str | None) -> str:
+    """The text an episode's semantic embedding is computed over:
+    the summary, then the first _EMBED_OUTCOME_CHARS of the outcome."""
+    summary = (task_summary or "").strip()
+    body = (outcome or "").strip()
+    if not body or body == summary:
+        return summary
+    snippet = body[:_EMBED_OUTCOME_CHARS]
+    return f"{summary}\n{snippet}" if summary else snippet
+
+
 async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags: list[str], outcome: str, thinking_log: str | None = None) -> None:
+    """Store one episode. Its semantic embedding is computed over
+    ``_episode_embed_text(task_summary, outcome)`` — summary plus the
+    head of the outcome (S1-N3) — not the summary alone."""
     init_episodic_db()
     init_embeddings_db()
     now = int(time.time())
@@ -594,7 +618,8 @@ async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags:
     
     # Generate and store embedding
     try:
-        embedding = await _embed_text(task_summary, task_id=task_id)
+        embedding = await _embed_text(
+            _episode_embed_text(task_summary, outcome), task_id=task_id)
     except asyncio.CancelledError:
         # E4-F03: a cancelled embed must leave the same truthful state
         # as a failed one. Without this, the previous revision's
@@ -892,7 +917,7 @@ async def backfill_episodic_embeddings(limit: int | None = None,
         }
     with _get_conn() as conn:
         rows = conn.execute(
-            "SELECT task_id, task_summary FROM episodic_memory"
+            "SELECT task_id, task_summary, outcome FROM episodic_memory"
             " ORDER BY timestamp ASC"
         ).fetchall()
     unembedded = [r for r in rows if r["task_id"] not in embedded_ids]
@@ -908,7 +933,8 @@ async def backfill_episodic_embeddings(limit: int | None = None,
     failed_ids: list[str] = []
     for r in missing:
         embedding = await _embed_text(
-            r["task_summary"], task_id=r["task_id"], context="backfill"
+            _episode_embed_text(r["task_summary"], r["outcome"]),
+            task_id=r["task_id"], context="backfill",
         )
         if embedding:
             # E4-F03 fence: the snapshot above is only a read; the
