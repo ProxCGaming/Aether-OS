@@ -21,11 +21,11 @@ not LangChain chat models, so this module adapts them:
   - after a specialist responds, the provider is consulted again
     with that response in view and its decision rules — delegate on
     (multi-specialist chains), or finish (an END decision, or the
-    tool-mode plain-text finish). The old node's ``_should_end_task``
-    guard, which ended the run on ANY specialist text, broke
-    planner -> coder journeys (E1-F01) and survives only for forced
-    runs and empty post-specialist replies, where the specialist's
-    answer stands as the result.
+    tool-mode plain-text finish). The old node's end-task guard,
+    which ended the run on ANY specialist text, broke
+    planner -> coder journeys (E1-F01); its surviving form covers
+    only forced runs and empty post-specialist replies, where the
+    specialist's answer stands as the result.
 
 - ``supervisor_post_model_hook`` reproduces the supervisor node's
   state bookkeeping (delegation_log entry, context_briefing, plan,

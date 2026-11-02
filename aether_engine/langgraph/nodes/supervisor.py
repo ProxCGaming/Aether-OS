@@ -9,7 +9,6 @@ from langgraph.prebuilt import ToolRuntime
 from aether_common.contracts import Event, EventType
 from aether_engine.audit import AuditLogger
 from aether_engine.event_bus import event_bus
-from aether_engine.langgraph.state import AetherState, message_dicts
 from aether_engine.memory import session_store
 from aether_engine.memory.facade import backend_or_none
 from aether_engine.tools.policy import resolve_policy_by_name
@@ -418,45 +417,6 @@ def build_supervisor_memory_tools() -> list:
     create_supervisor agent's ToolNode.
     """
     return [get_current_chat_history, search_knowledge_graph, search_past_episodes]
-
-
-def _should_end_task(state: AetherState) -> bool:
-    """Determine if the supervisor should end the task instead of delegating again.
-
-    End conditions (any one is sufficient):
-    1. A specialist has already been delegated to AND produced a text response
-       (assistant message with content, no pending tool calls).
-    2. The supervisor has already delegated more than once to the same specialist
-       without any tool calls in between (loop detection).
-    """
-    delegation_log = state.get("delegation_log", [])
-    messages = state.get("messages", [])
-    pending_tool = state.get("pending_tool_call")
-
-    # If a tool call is pending, don't end — the tool flow needs to complete
-    if pending_tool:
-        return False
-
-    # If the supervisor has never delegated yet, don't end
-    if not delegation_log:
-        return False
-
-    last_delegation = delegation_log[-1]
-    last_specialist = last_delegation.get("decision", {}).get("next", "END")
-
-    # If the last delegation was already END, let the supervisor decide again fresh
-    if last_specialist == "END":
-        return False
-
-    # Check if there are any assistant messages (from a specialist) AFTER the initial user message
-    has_specialist_response = False
-    for msg in message_dicts(messages):
-        # A specialist response is an assistant message with content and
-        # no tool calls (not a tool-call-only message).
-        if msg.get("role") == "assistant" and msg.get("content") and not msg.get("tool_calls"):
-            has_specialist_response = True
-
-    return bool(has_specialist_response)
 
 
 def repo_map_context(
