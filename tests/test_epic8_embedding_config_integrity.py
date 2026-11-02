@@ -96,6 +96,11 @@ class _SwitchableEmbedder:
 
     async def embed(self, text, task_id=None, context="store"):
         vec = _VECTORS.get((self.model, text))
+        if vec is None and "\n" in text:
+            # S1-N3: an episode's embedded text is "summary\noutcome
+            # head"; this fake's vectors are keyed by the summary line
+            # that heads it (queries still hit exactly).
+            vec = _VECTORS.get((self.model, text.split("\n", 1)[0]))
         return list(vec) if vec is not None else None
 
     def resolve(self, config=None):
