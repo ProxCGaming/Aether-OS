@@ -32,7 +32,7 @@ from starlette.testclient import TestClient
 
 from aether_common.contracts import Event, EventType
 from aether_engine.app import app, engine_state
-from aether_engine.mcp.client import MCPClientError
+from aether_engine.mcp.client import MCPClientError, _strip_url_userinfo
 from aether_engine.mcp.registry import MCPConfigError, MCPRegistry
 from tests.fake_mcp_http import start_fake_http_server
 
@@ -125,8 +125,11 @@ async def test_s2_stdio_child_does_not_see_engine_secrets(manager, monkeypatch):
     # Proxy config still reaches the child: npx/npm servers need it to
     # resolve packages (verified: without it the filesystem server
     # never answers). Only asserted where the engine actually has one.
+    # Since S2-N2 the child receives the SANITISED value — a proxy URL
+    # can embed credentials as userinfo, and those must not leak into a
+    # child environment — so the expectation is the stripped form.
     if "HTTPS_PROXY" in os.environ:
-        assert (await manager.call_tool("fake", "echo_env", {"name": "HTTPS_PROXY"})).strip() == os.environ["HTTPS_PROXY"]
+        assert (await manager.call_tool("fake", "echo_env", {"name": "HTTPS_PROXY"})).strip() == _strip_url_userinfo(os.environ["HTTPS_PROXY"])
     await manager.disconnect("fake")
 
 
