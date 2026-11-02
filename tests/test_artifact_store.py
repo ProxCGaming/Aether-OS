@@ -485,3 +485,65 @@ def test_s4m9_explicit_artifact_id_still_upserts_by_id(store):
     assert total == 1
     assert items[0]["content"] == "v2"
     assert items[0]["kind"] == "diff"
+
+
+
+# ==============================================================================
+# S4-N1 — artifact GET content cap
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_artifact_get_caps_oversized_text(tmp_path, monkeypatch):
+    from aether_engine.routes.websocket import (
+        ARTIFACT_CONTENT_CAP_BYTES,
+        handle_artifact_get,
+    )
+
+    test_store = ArtifactStore(db_path=tmp_path / "artifacts.db")
+    monkeypatch.setattr("aether_engine.artifacts.store.GLOBAL_ARTIFACT_STORE", test_store)
+
+    big = tmp_path / "big.log"
+    big.write_bytes(b"a" * (ARTIFACT_CONTENT_CAP_BYTES + 100))
+    art = test_store.record_artifact("sess_1", "task_1", "file", "big.log", str(big))
+
+    resp = await handle_artifact_get(art["id"])
+    assert resp["exists"] is True
+    assert resp["error"] is None
+    assert resp["content"].startswith("a" * 1000)
+    assert resp["content"].endswith("artifact preview cap]")
+    assert len(resp["content"]) < ARTIFACT_CONTENT_CAP_BYTES + 200
+
+
+@pytest.mark.asyncio
+async def test_artifact_get_refuses_oversized_image(tmp_path, monkeypatch):
+    from aether_engine.routes.websocket import (
+        ARTIFACT_CONTENT_CAP_BYTES,
+        handle_artifact_get,
+    )
+
+    test_store = ArtifactStore(db_path=tmp_path / "artifacts.db")
+    monkeypatch.setattr("aether_engine.artifacts.store.GLOBAL_ARTIFACT_STORE", test_store)
+
+    big_img = tmp_path / "big.png"
+    big_img.write_bytes(b"\x89PNG" + b"\x00" * ARTIFACT_CONTENT_CAP_BYTES)
+    art = test_store.record_artifact("sess_1", "task_1", "file", "big.png", str(big_img))
+
+    resp = await handle_artifact_get(art["id"])
+    assert resp["content"] is None
+    assert "too large to preview" in resp["error"]
+
+
+@pytest.mark.asyncio
+async def test_artifact_get_small_image_still_returns_data_url(tmp_path, monkeypatch):
+    from aether_engine.routes.websocket import handle_artifact_get
+
+    test_store = ArtifactStore(db_path=tmp_path / "artifacts.db")
+    monkeypatch.setattr("aether_engine.artifacts.store.GLOBAL_ARTIFACT_STORE", test_store)
+
+    small = tmp_path / "small.png"
+    small.write_bytes(b"\x89PNG\r\n\x1a\n")
+    art = test_store.record_artifact("sess_1", "task_1", "file", "small.png", str(small))
+
+    resp = await handle_artifact_get(art["id"])
+    assert resp["error"] is None
+    assert resp["content"].startswith("data:image/png;base64,")

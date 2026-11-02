@@ -320,6 +320,28 @@ async def _run_mcp_prompt_into_chat(
     return {"ok": True, "messages": messages, "session_id": session_id, "error": ""}
 
 
+# S4-N1: one artifact GET used to ship whole files over the socket —
+# a large log or image became a giant frame (and a giant renderer
+# string). Cap what a single GET returns: text is truncated with a
+# marker, and an image over the cap is refused with an honest error
+# (truncated base64 would be a corrupt image anyway).
+ARTIFACT_CONTENT_CAP_BYTES = 10 * 1024 * 1024
+_ARTIFACT_TRUNCATION_MARKER = (
+    "\n\n[Truncated: this file exceeds the 10 MB artifact preview cap]"
+)
+
+
+def _read_text_capped(path: Path) -> str:
+    """Read at most ARTIFACT_CONTENT_CAP_BYTES of a text file,
+    appending the truncation marker when the file is larger (S4-N1)."""
+    with path.open("rb") as fh:
+        raw = fh.read(ARTIFACT_CONTENT_CAP_BYTES + 1)
+    text = raw[:ARTIFACT_CONTENT_CAP_BYTES].decode("utf-8", errors="replace")
+    if len(raw) > ARTIFACT_CONTENT_CAP_BYTES:
+        text += _ARTIFACT_TRUNCATION_MARKER
+    return text
+
+
 async def handle_artifact_get(artifact_id: str) -> dict[str, Any]:
     """Retrieve an artifact and inspect file existence on disk (Epic 8, E8-2.1)."""
     from aether_engine.artifacts.store import get_artifact_store
@@ -355,25 +377,32 @@ async def handle_artifact_get(artifact_id: str) -> dict[str, Any]:
             try:
                 ext = Path(file_path).suffix.lower()
                 if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico"):
-                    import base64
-                    b64 = base64.b64encode(Path(file_path).read_bytes()).decode("ascii")
-                    mime = (
-                        "image/png" if ext == ".png"
-                        else "image/jpeg" if ext in (".jpg", ".jpeg")
-                        else "image/gif" if ext == ".gif"
-                        else "image/webp" if ext == ".webp"
-                        else "application/octet-stream"
-                    )
-                    content = f"data:{mime};base64,{b64}"
+                    size = Path(file_path).stat().st_size
+                    if size > ARTIFACT_CONTENT_CAP_BYTES:
+                        error = (
+                            f"Image is too large to preview ({size} bytes; "
+                            f"the cap is {ARTIFACT_CONTENT_CAP_BYTES} bytes)"
+                        )
+                    else:
+                        import base64
+                        b64 = base64.b64encode(Path(file_path).read_bytes()).decode("ascii")
+                        mime = (
+                            "image/png" if ext == ".png"
+                            else "image/jpeg" if ext in (".jpg", ".jpeg")
+                            else "image/gif" if ext == ".gif"
+                            else "image/webp" if ext == ".webp"
+                            else "application/octet-stream"
+                        )
+                        content = f"data:{mime};base64,{b64}"
                 else:
-                    content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                    content = _read_text_capped(Path(file_path))
             except Exception as read_err:  # noqa: BLE001
                 exists = False
                 error = f"Error reading file: {read_err}"
     else:  # report, html, etc.
         if file_path and Path(file_path).is_file():
             try:
-                content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                content = _read_text_capped(Path(file_path))
             except Exception as read_err:  # noqa: BLE001
                 error = f"Error reading file: {read_err}"
         else:
