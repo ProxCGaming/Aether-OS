@@ -244,3 +244,21 @@ def test_validate_api_key_is_time_bounded(monkeypatch):
     assert result["status"] == "network_error"  # a timeout is never a success
     assert elapsed < 20  # bounded by the 2s timeout (+ generous load slack), not the 60s hang
     assert result["message"]  # an honest failure message, not silence
+
+
+
+def test_last_fallback_failure_raises_the_typed_error(monkeypatch):
+    """S1-N5: when the primary AND the last fallback both fail with a
+    retriable error, the caller gets the typed error (RateLimitError),
+    not the generic post-loop "All models failed" NetworkError the old
+    `is_fallback or` continue produced."""
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs["model"])
+        raise _rate_limit()
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    with pytest.raises(RateLimitError):
+        asyncio.run(_collect(_provider(), [{"role": "user", "content": "hi"}]))
+    assert len(calls) == 2  # primary + fallback both attempted

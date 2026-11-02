@@ -320,7 +320,11 @@ class AetherSupervisorModel(BaseChatModel):
             content, tool_calls = await self._call_provider(provider, dict_messages, offered or None)
         except Exception as e:  # noqa: BLE001 — provider boundary: mirrors the supervisor node, which retries tool failures as a plain text call.
             logger.warning(f"Supervisor adapter call with tools failed: {e}; falling back to text prompt")
-            content, tool_calls = await self._call_provider(provider, dict_messages, None)
+            try:
+                content, tool_calls = await self._call_provider(provider, dict_messages, None)
+            except Exception as retry_error:  # noqa: BLE001 — S1-N5: the tool-less retry was unguarded — a provider down on both attempts escaped as a raw exception and killed the routing step. Degrade to an end result instead.
+                logger.warning(f"Supervisor adapter text fallback also failed: {retry_error}")
+                return _end_result(f"Supervisor model call failed: {retry_error}")
 
         memory_calls = [tc for tc in tool_calls if tc.name in MEMORY_TOOL_NAMES]
         transfer_calls = [tc for tc in tool_calls if tc.name.startswith(HANDOFF_PREFIX)]

@@ -120,3 +120,28 @@ async def test_supervisor_requires_provider():
     instead of hanging."""
     with pytest.raises(RuntimeError, match="Valid provider not found"):
         await _generate()
+
+
+
+class ExplodingProvider:
+    """Provider that fails every call (S1-N5: the tool-less retry)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def call_stream(self, messages, tools=None, node_name=None, **kwargs):
+        self.calls += 1
+        raise RuntimeError("provider down")
+        yield  # pragma: no cover — makes this an async generator
+
+
+@pytest.mark.asyncio
+async def test_supervisor_provider_down_on_both_attempts_ends_task():
+    """S1-N5: when the with-tools call AND the tool-less retry both
+    fail, _agenerate degrades to an end result instead of letting the
+    retry's exception escape raw and kill the routing step."""
+    provider = ExplodingProvider()
+    message = await _generate(provider=provider)
+    assert provider.calls == 2  # with-tools attempt + tool-less retry
+    assert "failed" in str(message.content)
+    assert message.additional_kwargs["aether_decision"]["next"] == "END"

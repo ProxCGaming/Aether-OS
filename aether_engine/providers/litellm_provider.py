@@ -914,10 +914,15 @@ class LiteLLMProvider(BaseProvider):
                         raise TimeoutError(f"Request timed out: {e} (fallback blocked: {blocked})") from e
                     else:
                         raise NetworkError(f"Network/service error: {e} (fallback blocked: {blocked})") from e
-                if is_fallback or model_idx < len(models_to_try) - 1:
+                # S1-N5: no `is_fallback or` here — on the LAST model
+                # that disjunct forced a continue, discarding the typed
+                # error for the generic "All models failed" NetworkError
+                # after the loop. The last model falls through to the
+                # typed raises below.
+                if model_idx < len(models_to_try) - 1:
                     logger.warning(
                         f"Model '{current_model}' failed with retriable error: {e}. "
-                        f"{'Trying next fallback...' if model_idx < len(models_to_try) - 1 else 'No more fallbacks.'}"
+                        f"Trying next fallback..."
                     )
                     continue
                 # No more fallbacks — raise the appropriate typed exception
