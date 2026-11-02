@@ -584,13 +584,22 @@ def search_facts(query: str, limit: int = 10, include_history: bool = False) -> 
     init_kg_db()
     with _get_conn() as conn:
         cur = conn.cursor()
-        search_term = f"%{query.strip()}%"
+        # S1-N2: the query is user text, not a pattern — escape the
+        # LIKE metacharacters so "100%" or "a_b" search literally
+        # instead of silently becoming wildcard matches.
+        escaped = (
+            query.strip()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        search_term = f"%{escaped}%"
         status_filter = "" if include_history else " AND COALESCE(f.status, 'active') = 'active'"
         cur.execute(f"""
             SELECT f.id as fact_id, e.name as entity_name, e.entity_type, f.fact_text, f.timestamp, f.confidence, f.status, f.superseded_by
             FROM facts f
             JOIN entities e ON f.entity_id = e.id
-            WHERE (e.name LIKE ? OR f.fact_text LIKE ?){status_filter}
+            WHERE (e.name LIKE ? ESCAPE '\\' OR f.fact_text LIKE ? ESCAPE '\\'){status_filter}
             ORDER BY COALESCE(CAST(f.confidence AS REAL), 0.0) DESC, f.timestamp DESC LIMIT ?
         """, (search_term, search_term, limit))
         return [dict(row) for row in cur.fetchall()]
