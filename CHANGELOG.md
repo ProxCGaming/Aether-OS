@@ -4,6 +4,9 @@ All notable changes to the **Aether-OS** project will be documented in this file
 
 ## [Unreleased]
 
+### Fixed
+- **[2026-11-04] Engine-less installer trap closed**: `npm run dist` now runs a `predist` guard (`desktop_app/ensure-engine-payload.cjs`) that aborts the build with instructions when the gitignored `engine-payload/` folder has not been assembled — electron-builder previously packaged a shell-only installer without complaint, and the installed app then sat at "initialising" forever with no engine to spawn (hit in Windows QA). Also in `engineLifecycle.cjs`: the bundled engine's health budget raised from 30s to 120s — a cold first start on Windows (antivirus scanning the fresh payload tree, first-run bytecode generation, heavy imports) can legitimately exceed 30s, and on timeout the app used to kill the healthy-but-slow engine and never spawn again.
+
 ### Removed
 - **[2026-11-02] Retired PySide6 UI deleted**: `aether_ui/` removed outright (owner directive) with its six dedicated test files (`test_provider_health_badge`, `test_providers_panel_fixes`, `test_settings_provider_state`, `test_ui_window_geometry`, `test_approval_drawer_override`, `test_ui_state`) and the `legacy-ui` optional extra — PySide6, qasync and markdown had zero imports left outside the deleted tree. The Electron app in `desktop_app/` is the only frontend. The two baseline entries naming the deleted panel tests were removed from `scripts/pytest-known-failures.txt`; `tests/test_legacy_ui_retirement.py` keeps its guards (legacy deps never return as hard dependencies; default-path code never imports the legacy stack).
 

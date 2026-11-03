@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "predist": "node ensure-engine-payload.cjs",
     "dist": "npm run build && electron-builder",
     "lint": "oxlint",
     "preview": "vite preview",
