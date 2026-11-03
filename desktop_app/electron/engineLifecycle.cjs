@@ -62,7 +62,13 @@ const PYTHON_EXE_BY_PLATFORM = {
 // ----------------------------------------------------------------------
 
 const PROBE_TIMEOUT_MS = 750;
-const HEALTH_TIMEOUT_MS = 30000;
+// 120s, raised from 30s on 4 Nov 2026: a cold first start on Windows
+// (antivirus scanning the freshly laid payload tree, first-run .pyc
+// generation, heavy imports, and an engine lifespan that still awaits
+// provider discovery) can legitimately exceed 30s — and the previous
+// behaviour on timeout was to KILL the healthy-but-slow engine and
+// never spawn again, leaving the app at "initialising" forever.
+const HEALTH_TIMEOUT_MS = 120000;
 const HEALTH_POLL_MS = 250;
 // The restart bound: a spawned engine that keeps dying is not
 // restarted forever. After this many restarts the shell gives up
