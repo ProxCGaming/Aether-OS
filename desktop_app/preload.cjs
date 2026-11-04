@@ -6,6 +6,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximizeWindow: () => ipcRenderer.invoke('maximize-window'),
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
   getWsStatus: () => ipcRenderer.invoke('get-ws-status'),
+  // Wave 1 slice 4: startup-gate surface. getEngineState resolves to
+  // { state: 'starting' | 'started' | 'failed', logFilePath } — the
+  // lifecycle STARTUP outcome from main (the socket status above
+  // remains the readiness signal). onEngineState pushes the same
+  // shape on every change.
+  getEngineState: () => ipcRenderer.invoke('get-engine-state'),
+  onEngineState: (callback) => {
+    const handler = (_event, value) => callback(value);
+    ipcRenderer.on('engine-state', handler);
+    return () => ipcRenderer.removeListener('engine-state', handler);
+  },
+  retryEngineStart: () => ipcRenderer.invoke('retry-engine-start'),
+  openEngineLog: () => ipcRenderer.invoke('open-engine-log'),
   getMemoryUsage: () => ipcRenderer.invoke('get-memory-usage'),
   showOpenDialog: (options) => ipcRenderer.invoke('show-open-dialog', options),
   sendEngineMessage: (msg) => ipcRenderer.send('engine-send', msg),

@@ -200,6 +200,43 @@ function getEngineLifecycle() {
   return engineLifecycle;
 }
 
+// Wave 1 slice 4: the renderer's startup gate needs to know when the
+// bundled engine has DEFINITIVELY failed to start — the lifecycle's
+// terminal mode 'none', reached only after its initial-spawn retry —
+// as opposed to "still starting", which can legitimately take the
+// full 120s health budget. The lifecycle exposes no events, so main
+// (its owner) tracks the startup outcome here: 'starting' until
+// start() settles, then 'started' (spawned/external) or 'failed'
+// ('none'). This state is about STARTUP only: mid-session lifecycle
+// outcomes keep flowing through the socket status as before. The
+// socket connecting remains the renderer's real readiness signal;
+// this channel only ever adds the failure fact.
+let engineStartupState = { state: 'starting', logFilePath: null };
+
+function setEngineStartupState(state) {
+  const logFilePath = engineLifecycle ? engineLifecycle.logFilePath() : engineStartupState.logFilePath;
+  engineStartupState = { state, logFilePath };
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('engine-state', engineStartupState);
+  }
+}
+
+// Drives one lifecycle start attempt and mirrors its outcome into
+// engineStartupState. Used at app-ready and by the gate's Retry.
+function startEngineAndTrack() {
+  setEngineStartupState('starting');
+  return getEngineLifecycle().start()
+    .then((result) => {
+      setEngineStartupState(result && result.mode === 'none' ? 'failed' : 'started');
+      return result;
+    })
+    .catch((err) => {
+      console.error('Engine lifecycle start failed:', err);
+      setEngineStartupState('failed');
+      return null;
+    });
+}
+
 function getToken() {
   // E10-F06: when the shell spawned the bundled engine, read THAT
   // engine's token file (the engine writes .run/engine.token
@@ -469,8 +506,7 @@ app.whenReady().then(() => {
   // the bundled one first (packaged builds); connectEngine() itself
   // is unchanged and its reconnect loop covers every outcome,
   // including the dev case where no payload exists.
-  void getEngineLifecycle().start()
-    .catch((err) => console.error('Engine lifecycle start failed:', err))
+  void startEngineAndTrack()
     .finally(() => connectEngine());
   createTray();
   // Epic 6, E6-01: global summon hotkey (Alt+Space toggles the window).
@@ -587,6 +623,48 @@ ipcMain.handle('open-logs-folder', async (event) => {
 ipcMain.handle('get-ws-status', (event) => {
   if (!isTrustedIpcSender(event, 'get-ws-status')) return false;
   return wsClient && wsClient.readyState === WebSocket.OPEN;
+});
+
+// Wave 1 slice 4: startup-gate IPC (see engineStartupState above).
+ipcMain.handle('get-engine-state', (event) => {
+  if (!isTrustedIpcSender(event, 'get-engine-state')) return { state: 'starting', logFilePath: null };
+  const logFilePath = engineLifecycle ? engineLifecycle.logFilePath() : engineStartupState.logFilePath;
+  return { ...engineStartupState, logFilePath };
+});
+
+// The gate's Retry: only a definitively failed start is retried here
+// (the lifecycle refuses nothing itself — start() re-runs from mode
+// 'none' — but an engine that is up or starting must not be disturbed).
+// Not awaited: a retried cold start can take the full health budget
+// twice over; the outcome arrives via the 'engine-state' broadcast.
+ipcMain.handle('retry-engine-start', (event) => {
+  if (!isTrustedIpcSender(event, 'retry-engine-start')) return engineStartupState;
+  if (getEngineLifecycle().getMode() === 'none') {
+    void startEngineAndTrack();
+  }
+  return engineStartupState;
+});
+
+// The gate's "Open engine log": opens the slice-3 log file
+// (<userData>/logs/engine.log) with the OS default viewer. The
+// renderer never learns a path it could fabricate — the location
+// comes only from the lifecycle. Resolves to '' on success or the
+// shell's error string, like 'open-path'.
+ipcMain.handle('open-engine-log', async (event) => {
+  if (!isTrustedIpcSender(event, 'open-engine-log')) return 'Refused: untrusted sender.';
+  const logPath = engineLifecycle ? engineLifecycle.logFilePath() : null;
+  if (!logPath) return 'The engine log location is not known yet.';
+  try {
+    // A failed start logs lifecycle lines, so the file normally
+    // exists; create it empty if it somehow does not, so the open
+    // never dead-ends on a missing file.
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    if (!fs.existsSync(logPath)) fs.writeFileSync(logPath, '');
+  } catch (err) {
+    return `Could not prepare the engine log: ${(err && err.message) || err}`;
+  }
+  const { shell } = require('electron');
+  return shell.openPath(logPath);
 });
 
 ipcMain.on('engine-send', (event, msg) => {

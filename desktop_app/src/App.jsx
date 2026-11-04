@@ -12,6 +12,7 @@ import { resolveSnipHotkey } from './snipHotkey';
 import Dashboard from './Dashboard';
 import Projects from './Projects';
 import Onboarding from './components/Onboarding';
+import StartupGate, { deriveStartupPhase } from './components/StartupGate';
 import CommandPalette from './components/CommandPalette';
 import ArtifactsCanvas from './components/ArtifactsCanvas';
 import GlobalArtifactsView from './components/GlobalArtifactsView';
@@ -174,6 +175,58 @@ function AppContent() {
   const params = new URLSearchParams(window.location.search);
   const isFloating = params.get('floating') === 'true';
   const initialSession = params.get('session');
+
+  // Wave 1 slice 4: the startup gate (the owner's first-launch flow —
+  // loading until the engine is healthy, THEN the setup guide, never
+  // a half-live UI). The gate is active only in the Electron shell:
+  // main's engine-state IPC (preload's getEngineState) is what can
+  // report a definitive startup failure, and its presence is the
+  // signal this window is a real shell window (the floating chat
+  // window and non-Electron render contexts keep the old behaviour).
+  const [engineStartState, setEngineStartState] = useState(null); // null | 'starting' | 'started' | 'failed'
+  const [gatePassed, setGatePassed] = useState(false);
+  const startupGateActive = !isFloating
+    && typeof window !== 'undefined'
+    && !!(window.electronAPI && typeof window.electronAPI.getEngineState === 'function');
+  // Ready = the exact signals the onboarding overlay's mount already
+  // waits for (App.jsx's onboarding gate below): socket connected,
+  // engine config arrived, provider list arrived. Once true it is
+  // LATCHED — a later mid-session drop must never bring the gate back.
+  const engineReady = isConnected && engineConfig !== null && providersLoaded;
+  useEffect(() => {
+    if (engineReady) setGatePassed(true);
+  }, [engineReady]);
+  useEffect(() => {
+    if (!startupGateActive) return undefined;
+    let cancelled = false;
+    const apply = (s) => {
+      if (s && typeof s.state === 'string') setEngineStartState(s.state);
+    };
+    window.electronAPI.getEngineState()
+      .then((s) => { if (!cancelled) apply(s); })
+      .catch(() => {});
+    let unsub = null;
+    if (typeof window.electronAPI.onEngineState === 'function') {
+      unsub = window.electronAPI.onEngineState(apply);
+    }
+    return () => {
+      cancelled = true;
+      if (typeof unsub === 'function') unsub();
+    };
+  }, [startupGateActive]);
+  const handleGateRetry = useCallback(() => {
+    // Back to STARTING immediately; main's own broadcast confirms the
+    // outcome when the retried start settles.
+    setEngineStartState('starting');
+    if (window.electronAPI && typeof window.electronAPI.retryEngineStart === 'function') {
+      Promise.resolve(window.electronAPI.retryEngineStart()).catch(() => {});
+    }
+  }, []);
+  const handleGateOpenLog = useCallback(() => {
+    if (window.electronAPI && typeof window.electronAPI.openEngineLog === 'function') {
+      Promise.resolve(window.electronAPI.openEngineLog()).catch(() => {});
+    }
+  }, []);
 
   const [sessions, setSessions] = useState([]);
   // Epic 1 UI batch: per-session plan mode (E1-09 UI). Keyed by session
@@ -2811,6 +2864,26 @@ function AppContent() {
       if (sessionSearchTimerRef.current) clearTimeout(sessionSearchTimerRef.current);
     };
   }, [sessionSearchQuery]);
+
+  // Wave 1 slice 4: until the engine is ready, the gate REPLACES the
+  // shell. Every hook above keeps running, so engine data keeps
+  // arriving behind the gate and the ready latch flips the moment the
+  // signals land; the onboarding overlay below then mounts on top of
+  // the shell exactly as before for a first run.
+  const startupPhase = deriveStartupPhase({
+    passed: gatePassed,
+    ready: engineReady,
+    engineState: engineStartState,
+  });
+  if (startupGateActive && startupPhase !== 'ready') {
+    return (
+      <StartupGate
+        phase={startupPhase}
+        onRetry={handleGateRetry}
+        onOpenLog={handleGateOpenLog}
+      />
+    );
+  }
 
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', overflow: 'hidden', backgroundColor: isFloating ? 'transparent' : '#05050f', flexDirection: 'column' }}>

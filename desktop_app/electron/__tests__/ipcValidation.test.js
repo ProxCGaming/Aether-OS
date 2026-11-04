@@ -297,6 +297,10 @@ const EXPECTED_CHANNELS = [
   // sit behind the same sender guard, like every other channel.
   'set-floating-transfer-state', 'get-floating-transfer-state',
   'clear-floating-transfer-state',
+  // Wave 1 slice 4 startup-gate channels — same sender guard; the
+  // 'engine-state' broadcast is a webContents.send, not a handler,
+  // so it is not a registered channel here.
+  'get-engine-state', 'retry-engine-start', 'open-engine-log',
 ];
 
 function registrationSlices(source) {
