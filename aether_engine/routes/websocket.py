@@ -868,6 +868,315 @@ async def ws_tasks(ws: WebSocket):
         except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-check; nothing else to do
             logger.debug(f"Could not send capability check result: {e}")
 
+    # ------------------------------------------------------------------
+    # RUX-B-04: the MCP handler family, answered from background tasks.
+    #
+    # Every handler in this family used to await the MCP registry
+    # inline in the message loop at the server's connect timeout
+    # (30 s default, configurable to 300 s — validate_mcp_server_config
+    # in mcp/registry.py), so touching one hung or dead server in
+    # Settings froze ALL control traffic on the socket — model
+    # switches, cancels, approvals — for that long, per click. Now
+    # each branch spawns one of the helpers below; the loop stays
+    # free and the response is sent when the work lands, exactly as
+    # _send_validation_result does for provider Tests.
+    #
+    # Race guard: the serial loop also implicitly guaranteed one MCP
+    # operation per server at a time. The client layer is built for
+    # cross-task session ownership (disconnects are routed through
+    # each session's owner task), but two operations on the SAME
+    # server — connect racing remove, a resource read racing
+    # disconnect — could still interleave destructively against the
+    # registry's session/config state, so each helper holds a
+    # per-server lock around its registry work. Operations on
+    # different servers, and every other message, stay parallel. The
+    # map is per-connection (like active_downloads): separate
+    # connections always had separate loops, so cross-connection
+    # contention remains the registry/client layer's existing
+    # contract, unchanged by this slice.
+    mcp_server_locks: dict[str, asyncio.Lock] = {}
+
+    def _mcp_server_lock(name_: str) -> asyncio.Lock:
+        lock = mcp_server_locks.get(name_)
+        if lock is None:
+            lock = mcp_server_locks[name_] = asyncio.Lock()
+        return lock
+
+    async def _send_mcp_server_remove_result(req_id_, name_):
+        """Answer an MCP_SERVER_REMOVE_REQUEST from a background task (RUX-B-04)."""
+        from aether_engine.mcp.registry import (
+            GLOBAL_MCP_REGISTRY,
+            MCPConfigError,
+        )
+        ok, error = True, ""
+        if name_:
+            # Issue 011 (S5): wrap like ADD/UPDATE — remove_server
+            # raises MCPConfigError via _save_config when the config
+            # file failed to load (corrupt), and without this the
+            # request would end with no response at all. A failed
+            # remove answers success:false + error. remove_server
+            # closes any live session inside the removal (S5).
+            try:
+                async with _mcp_server_lock(name_):
+                    await GLOBAL_MCP_REGISTRY.remove_server(name_)
+            except (MCPConfigError, OSError) as e:
+                # OSError: the config save's storage failure
+                # (E3-F04) — same answer-don't-die rule as ADD.
+                ok, error = False, str(e)
+        try:
+            await ws.send_text(Event(
+                type=EventType.MCP_SERVER_REMOVE_RESPONSE,
+                request_id=req_id_,
+                payload={"success": ok, "name": name_, "error": error},
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-removal; nothing else to do
+            logger.debug(f"Could not send MCP server remove response for {name_}: {e}")
+
+    async def _send_mcp_server_update_result(req_id_, name_, auto_connect_, enabled_):
+        """Answer an MCP_SERVER_UPDATE_REQUEST from a background task (RUX-B-04)."""
+        from aether_engine.mcp.registry import (
+            GLOBAL_MCP_REGISTRY,
+            MCPConfigError,
+        )
+        ok, error, config = True, "", None
+        if not name_:
+            ok, error = False, "Server name is required."
+        else:
+            try:
+                async with _mcp_server_lock(name_):
+                    config = await GLOBAL_MCP_REGISTRY.update_server(
+                        name_,
+                        auto_connect=auto_connect_,
+                        enabled=enabled_,
+                    )
+            except (MCPConfigError, OSError) as e:
+                # OSError: the config save's storage failure
+                # (E3-F04) — same answer-don't-die rule as ADD.
+                ok, error = False, str(e)
+        try:
+            await ws.send_text(Event(
+                type=EventType.MCP_SERVER_UPDATE_RESPONSE,
+                request_id=req_id_,
+                payload={"success": ok, "name": name_, "config": config, "error": error},
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-update; nothing else to do
+            logger.debug(f"Could not send MCP server update response for {name_}: {e}")
+
+    async def _send_mcp_server_connect_result(req_id_, name_):
+        """Answer an MCP_SERVER_CONNECT_REQUEST from a background task (RUX-B-04)."""
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+        if name_:
+            try:
+                async with _mcp_server_lock(name_):
+                    result = await GLOBAL_MCP_REGISTRY.connect_server(name_)
+            except Exception as e:  # noqa: BLE001 — as in _send_validation_result: a failure must still produce a response, never silence (the registry/client convert ordinary failures to result dicts; this net covers the unexpected)
+                logger.warning(f"MCP connect for {name_} raised: {e}")
+                result = {"ok": False, "error": str(e)}
+        else:
+            result = {"ok": False, "error": "Server name is required."}
+        server_status = GLOBAL_MCP_REGISTRY.get_server_status(name_) if name_ else {}
+        try:
+            await ws.send_text(Event(
+                type=EventType.MCP_SERVER_CONNECT_RESPONSE,
+                request_id=req_id_,
+                payload={
+                    "success": result["ok"], "name": name_, "error": result.get("error", ""),
+                    "status": server_status.get("status"), "tool_count": server_status.get("tool_count", 0),
+                },
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-connect; nothing else to do
+            logger.debug(f"Could not send MCP server connect response for {name_}: {e}")
+
+    async def _send_mcp_server_disconnect_result(req_id_, name_):
+        """Answer an MCP_SERVER_DISCONNECT_REQUEST from a background task (RUX-B-04)."""
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+        if name_:
+            try:
+                async with _mcp_server_lock(name_):
+                    result = await GLOBAL_MCP_REGISTRY.disconnect_server(name_)
+            except Exception as e:  # noqa: BLE001 — as in _send_validation_result: a failure must still produce a response, never silence
+                logger.warning(f"MCP disconnect for {name_} raised: {e}")
+                result = {"ok": False, "error": str(e)}
+        else:
+            result = {"ok": False, "error": "Server name is required."}
+        server_status = GLOBAL_MCP_REGISTRY.get_server_status(name_) if name_ else {}
+        try:
+            await ws.send_text(Event(
+                type=EventType.MCP_SERVER_DISCONNECT_RESPONSE,
+                request_id=req_id_,
+                payload={
+                    "success": result["ok"], "name": name_, "error": result.get("error", ""),
+                    "status": server_status.get("status"), "tool_count": server_status.get("tool_count", 0),
+                },
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-disconnect; nothing else to do
+            logger.debug(f"Could not send MCP server disconnect response for {name_}: {e}")
+
+    async def _send_mcp_server_test_result(req_id_, name_):
+        """Answer an MCP_SERVER_TEST_REQUEST from a background task (RUX-B-04)."""
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+        if name_:
+            try:
+                async with _mcp_server_lock(name_):
+                    result = await GLOBAL_MCP_REGISTRY.test_connection(name_)
+            except Exception as e:  # noqa: BLE001 — as in _send_validation_result: a failure must still produce a response, never silence
+                logger.warning(f"MCP connection test for {name_} raised: {e}")
+                result = {"ok": False, "error": str(e), "tools": []}
+        else:
+            result = {"ok": False, "error": "Server name is required.", "tools": []}
+        try:
+            await ws.send_text(Event(
+                type=EventType.MCP_SERVER_TEST_RESPONSE,
+                request_id=req_id_,
+                payload={
+                    "success": result["ok"],
+                    "name": name_,
+                    "error": result.get("error", ""),
+                    "tools": result.get("tools", []),
+                },
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-test; nothing else to do
+            logger.debug(f"Could not send MCP server test response for {name_}: {e}")
+
+    async def _send_mcp_resource_list_result(req_id_, name_):
+        """Answer an MCP_RESOURCE_LIST_REQUEST from a background task (RUX-B-04)."""
+        # Issue 006: list a connected server's resources.
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+        resources, ok, error = [], True, ""
+        if not name_:
+            ok, error = False, "Server name is required."
+        else:
+            try:
+                async with _mcp_server_lock(name_):
+                    resources = await GLOBAL_MCP_REGISTRY.list_resources(name_)
+            except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced in the response payload
+                ok, error = False, str(e)
+        try:
+            await ws.send_text(Event(
+                type=EventType.MCP_RESOURCE_LIST_RESPONSE,
+                request_id=req_id_,
+                payload={"success": ok, "name": name_, "resources": resources, "error": error},
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-list; nothing else to do
+            logger.debug(f"Could not send MCP resource list response for {name_}: {e}")
+
+    async def _send_mcp_resource_read_result(req_id_, name_, uri_, session_id_):
+        """Answer an MCP_RESOURCE_READ_REQUEST from a background task (RUX-B-04)."""
+        # Issue 006: read a resource and load it into the current
+        # chat as a context message. Role "system": it is context,
+        # not something the user said — and the supervisor's
+        # get_current_chat_history briefing reads it back to the
+        # model on the next turn. If no session was given (or it
+        # no longer exists), create one so the resource is never
+        # lost. The UI also gets the message live in this response
+        # (App.jsx appends it) — the Settings panel alone cannot
+        # update the chat view.
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+        ok, error, content, session_id = True, "", "", session_id_
+        if not name_ or not uri_:
+            ok, error = False, "Server name and resource URI are required."
+        else:
+            try:
+                # Only the registry read takes the per-server lock:
+                # the chat persistence below touches no MCP state.
+                async with _mcp_server_lock(name_):
+                    content = await GLOBAL_MCP_REGISTRY.read_resource(name_, uri_)
+            except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced in the response payload
+                ok, error = False, str(e)
+        message = ""
+        truncated = content.endswith("...[resource truncated to 20000 chars]")
+        if ok:
+            # A chat-save failure must return an error, never kill
+            # the websocket (an exception here used to take the
+            # whole connection down with it).
+            try:
+                if session_id:
+                    sess = await asyncio.to_thread(session_store.get_session, session_id)
+                    if sess is None:
+                        session_id = None
+                if not session_id:
+                    session_id, _binding = await _create_bound_session(
+                        f"MCP resource: {uri_}")
+                message = f"[MCP resource from server '{name_}': {uri_}]\n{content}"
+                await asyncio.to_thread(
+                    session_store.add_message, session_id, "system", message
+                )
+            except Exception as e:  # noqa: BLE001 — chat-persistence boundary: a save failure becomes an error response, never a dead websocket
+                logger.error(f"Failed to save MCP resource to chat: {e}")
+                ok, error = False, f"Failed to save resource to chat: {e}"
+                message = ""
+            if ok:
+                engine_state.audit_logger.log_event("MCP_RESOURCE_READ", {
+                    "server": name_, "uri": uri_, "session_id": session_id,
+                    "truncated": truncated,
+                })
+        try:
+            await ws.send_text(Event(
+                type=EventType.MCP_RESOURCE_READ_RESPONSE,
+                request_id=req_id_,
+                payload={
+                    "success": ok, "name": name_, "uri": uri_, "content": content,
+                    "message": message, "truncated": truncated,
+                    "session_id": session_id, "error": error,
+                },
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-read; nothing else to do
+            logger.debug(f"Could not send MCP resource read response for {name_}: {e}")
+
+    async def _send_mcp_prompt_list_result(req_id_, name_):
+        """Answer an MCP_PROMPT_LIST_REQUEST from a background task (RUX-B-04)."""
+        # Issue 007: list a connected server's prompt templates.
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+        prompts, ok, error = [], True, ""
+        if not name_:
+            ok, error = False, "Server name is required."
+        else:
+            try:
+                async with _mcp_server_lock(name_):
+                    prompts = await GLOBAL_MCP_REGISTRY.list_prompts(name_)
+            except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced in the response payload
+                ok, error = False, str(e)
+        try:
+            await ws.send_text(Event(
+                type=EventType.MCP_PROMPT_LIST_RESPONSE,
+                request_id=req_id_,
+                payload={"success": ok, "name": name_, "prompts": prompts, "error": error},
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-list; nothing else to do
+            logger.debug(f"Could not send MCP prompt list response for {name_}: {e}")
+
+    async def _send_mcp_prompt_run_result(req_id_, name_, prompt_name_, arguments_, session_id_):
+        """Answer an MCP_PROMPT_RUN_REQUEST from a background task (RUX-B-04)."""
+        # Issue 007: run a prompt template and insert its messages
+        # into the current chat (same pattern as resources in
+        # 006, but with the prompt's own roles). Never auto-run:
+        # only an explicit Run / slash command reaches here. The
+        # shared _run_mcp_prompt_into_chat bundles the registry call
+        # with the chat insert, so the per-server lock covers the
+        # whole run — the two cannot be split without splitting the
+        # helper the slash path also uses.
+        if name_:
+            async with _mcp_server_lock(name_):
+                result = await _run_mcp_prompt_into_chat(
+                    name_, prompt_name_, arguments_, session_id_
+                )
+        else:
+            result = await _run_mcp_prompt_into_chat(
+                name_, prompt_name_, arguments_, session_id_
+            )
+        try:
+            await ws.send_text(Event(
+                type=EventType.MCP_PROMPT_RUN_RESPONSE,
+                request_id=req_id_,
+                payload={
+                    "success": result["ok"], "name": name_, "prompt": prompt_name_,
+                    "messages": result["messages"],
+                    "session_id": result["session_id"], "error": result["error"],
+                },
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-run; nothing else to do
+            logger.debug(f"Could not send MCP prompt run response for {name_}: {e}")
+
     # Epic 2, E2-10: install the web-search seam for this connection —
     # keys resolve through the encrypted secret store (provider name =
     # "exa"/"brave"/"tavily"/"firecrawl"), and the provider choice is
@@ -3906,213 +4215,76 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_REMOVE_REQUEST:
-                from aether_engine.mcp.registry import (
-                    GLOBAL_MCP_REGISTRY,
-                    MCPConfigError,
-                )
-                name = msg.payload.get("name")
-                ok, error = True, ""
-                if name:
-                    # Issue 011 (S5): wrap like ADD/UPDATE — remove_server
-                    # raises MCPConfigError via _save_config when the
-                    # config file failed to load (corrupt), and without
-                    # this the outer handler ends the websocket session
-                    # with no response. A failed remove answers
-                    # success:false + error; the session stays alive.
-                    try:
-                        # remove_server closes any live session inside the
-                        # removal (S5), awaited here in the session-owner task.
-                        await GLOBAL_MCP_REGISTRY.remove_server(name)
-                    except (MCPConfigError, OSError) as e:
-                        # OSError: the config save's storage failure
-                        # (E3-F04) — same answer-don't-die rule as above.
-                        ok, error = False, str(e)
-                await ws.send_text(Event(
-                    type=EventType.MCP_SERVER_REMOVE_RESPONSE,
-                    request_id=req_id,
-                    payload={"success": ok, "name": name, "error": error},
-                ).to_json())
+                # Off the message loop (see _send_mcp_server_remove_result):
+                # removal closes any live session at the connect
+                # timeout and must not wedge the socket (RUX-B-04).
+                asyncio.create_task(_send_mcp_server_remove_result(
+                    req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_SERVER_UPDATE_REQUEST:
-                from aether_engine.mcp.registry import (
-                    GLOBAL_MCP_REGISTRY,
-                    MCPConfigError,
-                )
-                name = msg.payload.get("name")
-                ok, error, config = True, "", None
-                if not name:
-                    ok, error = False, "Server name is required."
-                else:
-                    try:
-                        config = await GLOBAL_MCP_REGISTRY.update_server(
-                            name,
-                            auto_connect=msg.payload.get("auto_connect"),
-                            enabled=msg.payload.get("enabled"),
-                        )
-                    except (MCPConfigError, OSError) as e:
-                        # OSError: the config save's storage failure
-                        # (E3-F04) — same answer-don't-die rule as ADD.
-                        ok, error = False, str(e)
-                await ws.send_text(Event(
-                    type=EventType.MCP_SERVER_UPDATE_RESPONSE,
-                    request_id=req_id,
-                    payload={"success": ok, "name": name, "config": config, "error": error},
-                ).to_json())
+                # Off the message loop (see _send_mcp_server_update_result):
+                # disabling a server disconnects it at the connect
+                # timeout and must not wedge the socket (RUX-B-04).
+                asyncio.create_task(_send_mcp_server_update_result(
+                    req_id, msg.payload.get("name"),
+                    msg.payload.get("auto_connect"), msg.payload.get("enabled")))
 
             elif msg.type == EventType.MCP_SERVER_CONNECT_REQUEST:
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                name = msg.payload.get("name")
-                result = (
-                    await GLOBAL_MCP_REGISTRY.connect_server(name)
-                    if name
-                    else {"ok": False, "error": "Server name is required."}
-                )
-                server_status = GLOBAL_MCP_REGISTRY.get_server_status(name) if name else {}
-                await ws.send_text(Event(
-                    type=EventType.MCP_SERVER_CONNECT_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "success": result["ok"], "name": name, "error": result.get("error", ""),
-                        "status": server_status.get("status"), "tool_count": server_status.get("tool_count", 0),
-                    },
-                ).to_json())
+                # Off the message loop (see _send_mcp_server_connect_result):
+                # a connect runs at the server's connect timeout —
+                # 30 s default, up to 300 s — and must not wedge the
+                # socket behind it (RUX-B-04).
+                asyncio.create_task(_send_mcp_server_connect_result(
+                    req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_SERVER_DISCONNECT_REQUEST:
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                name = msg.payload.get("name")
-                result = (
-                    await GLOBAL_MCP_REGISTRY.disconnect_server(name)
-                    if name
-                    else {"ok": False, "error": "Server name is required."}
-                )
-                server_status = GLOBAL_MCP_REGISTRY.get_server_status(name) if name else {}
-                await ws.send_text(Event(
-                    type=EventType.MCP_SERVER_DISCONNECT_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "success": result["ok"], "name": name, "error": result.get("error", ""),
-                        "status": server_status.get("status"), "tool_count": server_status.get("tool_count", 0),
-                    },
-                ).to_json())
+                # Off the message loop (see
+                # _send_mcp_server_disconnect_result): closing a hung
+                # session is bounded by the same timeouts and must
+                # not wedge the socket behind it (RUX-B-04).
+                asyncio.create_task(_send_mcp_server_disconnect_result(
+                    req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_SERVER_TEST_REQUEST:
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                name = msg.payload.get("name")
-                result = (
-                    await GLOBAL_MCP_REGISTRY.test_connection(name)
-                    if name
-                    else {"ok": False, "error": "Server name is required.", "tools": []}
-                )
-                await ws.send_text(Event(
-                    type=EventType.MCP_SERVER_TEST_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "success": result["ok"],
-                        "name": name,
-                        "error": result.get("error", ""),
-                        "tools": result.get("tools", []),
-                    },
-                ).to_json())
+                # Off the message loop (see _send_mcp_server_test_result):
+                # a test opens a throwaway session at the connect
+                # timeout and must not wedge the socket (RUX-B-04).
+                asyncio.create_task(_send_mcp_server_test_result(
+                    req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_RESOURCE_LIST_REQUEST:
-                # Issue 006: list a connected server's resources.
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                name = msg.payload.get("name")
-                resources, ok, error = [], True, ""
-                if not name:
-                    ok, error = False, "Server name is required."
-                else:
-                    try:
-                        resources = await GLOBAL_MCP_REGISTRY.list_resources(name)
-                    except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced in the response payload
-                        ok, error = False, str(e)
-                await ws.send_text(Event(
-                    type=EventType.MCP_RESOURCE_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"success": ok, "name": name, "resources": resources, "error": error},
-                ).to_json())
+                # Off the message loop (see _send_mcp_resource_list_result):
+                # the list runs against the live session at its read
+                # timeout and must not wedge the socket (RUX-B-04).
+                asyncio.create_task(_send_mcp_resource_list_result(
+                    req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_RESOURCE_READ_REQUEST:
-                # Issue 006: read a resource and load it into the current
-                # chat as a context message. Role "system": it is context,
-                # not something the user said — and the supervisor's
-                # get_current_chat_history briefing reads it back to the
-                # model on the next turn. If no session was given (or it
-                # no longer exists), create one so the resource is never
-                # lost. The UI also gets the message live in this response
-                # (App.jsx appends it) — the Settings panel alone cannot
-                # update the chat view.
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                name = msg.payload.get("name")
-                uri = msg.payload.get("uri")
-                ok, error, content, session_id = True, "", "", msg.payload.get("session_id")
-                if not name or not uri:
-                    ok, error = False, "Server name and resource URI are required."
-                else:
-                    try:
-                        content = await GLOBAL_MCP_REGISTRY.read_resource(name, uri)
-                    except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced in the response payload
-                        ok, error = False, str(e)
-                message = ""
-                truncated = content.endswith("...[resource truncated to 20000 chars]")
-                if ok:
-                    # A chat-save failure must return an error, never kill
-                    # the websocket (an exception here used to take the
-                    # whole connection down with it).
-                    try:
-                        if session_id:
-                            sess = await asyncio.to_thread(session_store.get_session, session_id)
-                            if sess is None:
-                                session_id = None
-                        if not session_id:
-                            session_id, _binding = await _create_bound_session(
-                                f"MCP resource: {uri}")
-                        message = f"[MCP resource from server '{name}': {uri}]\n{content}"
-                        await asyncio.to_thread(
-                            session_store.add_message, session_id, "system", message
-                        )
-                    except Exception as e:  # noqa: BLE001 — chat-persistence boundary: a save failure becomes an error response, never a dead websocket
-                        logger.error(f"Failed to save MCP resource to chat: {e}")
-                        ok, error = False, f"Failed to save resource to chat: {e}"
-                        message = ""
-                    if ok:
-                        engine_state.audit_logger.log_event("MCP_RESOURCE_READ", {
-                            "server": name, "uri": uri, "session_id": session_id,
-                            "truncated": truncated,
-                        })
-                await ws.send_text(Event(
-                    type=EventType.MCP_RESOURCE_READ_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "success": ok, "name": name, "uri": uri, "content": content,
-                        "message": message, "truncated": truncated,
-                        "session_id": session_id, "error": error,
-                    },
-                ).to_json())
+                # Off the message loop (see _send_mcp_resource_read_result):
+                # the read runs against the live session at its read
+                # timeout and must not wedge the socket (RUX-B-04).
+                asyncio.create_task(_send_mcp_resource_read_result(
+                    req_id, msg.payload.get("name"), msg.payload.get("uri"),
+                    msg.payload.get("session_id")))
 
             elif msg.type == EventType.MCP_PROMPT_LIST_REQUEST:
-                # Issue 007: list a connected server's prompt templates.
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                name = msg.payload.get("name")
-                prompts, ok, error = [], True, ""
-                if not name:
-                    ok, error = False, "Server name is required."
-                else:
-                    try:
-                        prompts = await GLOBAL_MCP_REGISTRY.list_prompts(name)
-                    except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced in the response payload
-                        ok, error = False, str(e)
-                await ws.send_text(Event(
-                    type=EventType.MCP_PROMPT_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"success": ok, "name": name, "prompts": prompts, "error": error},
-                ).to_json())
+                # Off the message loop (see _send_mcp_prompt_list_result):
+                # the list runs against the live session at its read
+                # timeout and must not wedge the socket (RUX-B-04).
+                asyncio.create_task(_send_mcp_prompt_list_result(
+                    req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_PROMPT_RUN_REQUEST:
                 # Issue 007: run a prompt template and insert its messages
                 # into the current chat (same pattern as resources in
                 # 006, but with the prompt's own roles). Never auto-run:
                 # only an explicit Run / slash command reaches here.
+                # The arguments-type rejection is a pure payload check
+                # — instant, answered inline exactly as before; the run
+                # itself is off the message loop (see
+                # _send_mcp_prompt_run_result): it awaits the server at
+                # its read timeout and must not wedge the socket
+                # (RUX-B-04).
                 name = msg.payload.get("name")
                 prompt_name = msg.payload.get("prompt")
                 arguments = msg.payload.get("arguments")
@@ -4127,18 +4299,9 @@ async def ws_tasks(ws: WebSocket):
                         },
                     ).to_json())
                 else:
-                    result = await _run_mcp_prompt_into_chat(
-                        name, prompt_name, arguments, msg.payload.get("session_id")
-                    )
-                    await ws.send_text(Event(
-                        type=EventType.MCP_PROMPT_RUN_RESPONSE,
-                        request_id=req_id,
-                        payload={
-                            "success": result["ok"], "name": name, "prompt": prompt_name,
-                            "messages": result["messages"],
-                            "session_id": result["session_id"], "error": result["error"],
-                        },
-                    ).to_json())
+                    asyncio.create_task(_send_mcp_prompt_run_result(
+                        req_id, name, prompt_name, arguments,
+                        msg.payload.get("session_id")))
 
             elif msg.type == EventType.PLUGIN_LIST_REQUEST:
                 plugins_dict = engine_state.plugin_installer.get_all()
