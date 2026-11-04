@@ -483,7 +483,7 @@ def test_ollama_rows_shape():
     assert rows, "shipped catalogue must produce rows"
     for row in rows:
         assert row["source"] == "ollama"
-        assert row["family"] == "brain"
+        assert row["family"] in ("brain", "embedding")
         assert row["runnability"] == "ollama"
         assert row["formats"] == ["gguf"]
         # the shipped catalogue carries no licence — never invented
@@ -491,6 +491,11 @@ def test_ollama_rows_shape():
         assert row["size_bytes"] and row["size_bytes"] > 0
     names = {r["id"] for r in rows}
     assert "llama3:8b" in names
+    # The catalogue lists the embedders the engine itself needs,
+    # family-labelled as embeddings (they were in NO catalogue
+    # before the catalogue-sync slice).
+    embedding_names = {r["id"] for r in rows if r["family"] == "embedding"}
+    assert embedding_names == {"qwen3-embedding:0.6b", "nomic-embed-text"}
 
 
 def test_ollama_fallback_matches_shipped_json():
