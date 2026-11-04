@@ -69,10 +69,70 @@ function describeQueuedMessage(data) {
   }
 }
 
+// Wave 2 slice 4 (audit Lane A, QUEUE-class caution): the destructive
+// actions that must NOT flush verbatim when the socket reconnects.
+// Everything else in the offline queue is safe to land late — a queued
+// fetch or edit arriving minutes after the click is what the user
+// still wants — but these four can land after the user has
+// context-switched, changed their mind, or started new work, so a
+// queued copy is held for explicit reconfirmation instead (see
+// heldMessages / confirmHeld / discardHeld on the provider value).
+// The set is defined ONCE, here, so no call site decides for itself
+// what counts as destructive:
+//
+//   CONFIG_RESET_REQUEST        — reset every engine setting to
+//                                 defaults (SettingsPanel).
+//   MEMORY_EPISODES_CLEAR_REQUEST / MEMORY_GRAPH_CLEAR_REQUEST
+//                               — MemoryManagement's clear-all actions
+//                                 (episodes and the knowledge graph).
+//   PROVIDER_REMOVE_REQUEST     — remove a provider and its stored
+//                                 key (ProviderSettings disconnect).
+//   CANCEL_TASK                 — cancel the running task. A stale
+//                                 cancel is held on purpose: by the
+//                                 time it would flush, the task it
+//                                 meant to stop may be long finished
+//                                 and a NEW task — started after the
+//                                 reconnect — could be the one it
+//                                 kills.
+export const DESTRUCTIVE_MESSAGE_TYPES = new Set([
+  'CONFIG_RESET_REQUEST',
+  'MEMORY_EPISODES_CLEAR_REQUEST',
+  'MEMORY_GRAPH_CLEAR_REQUEST',
+  'PROVIDER_REMOVE_REQUEST',
+  'CANCEL_TASK',
+]);
+
+// Plain-language label for one held message descriptor (the shape
+// describeQueuedMessage produces), used by the reconfirmation prompt.
+// Where the payload carries a name — the provider being removed —
+// the label names it, so the user confirms the exact action.
+export function destructiveActionLabel(descriptor) {
+  const type = descriptor?.type ?? null;
+  const payload = descriptor?.payload ?? {};
+  switch (type) {
+    case 'CONFIG_RESET_REQUEST':
+      return 'Reset all settings to defaults';
+    case 'MEMORY_EPISODES_CLEAR_REQUEST':
+      return 'Clear all memory episodes';
+    case 'MEMORY_GRAPH_CLEAR_REQUEST':
+      return 'Clear the whole memory graph';
+    case 'PROVIDER_REMOVE_REQUEST':
+      return payload.provider ? `Remove provider “${payload.provider}”` : 'Remove a provider';
+    case 'CANCEL_TASK':
+      return 'Cancel the running task';
+    default:
+      return type ? `Send ${type}` : 'Send a queued action';
+  }
+}
+
 export const SocketProvider = ({ children }) => {
   const [isConnected, setIsConnected] = useState(false);
   const [pendingMessages, setPendingMessages] = useState([]);
+  const [heldMessages, setHeldMessages] = useState([]);
+  const [reconnectCount, setReconnectCount] = useState(0);
   const messageQueue = useRef([]);
+  const heldQueueRef = useRef([]);
+  const sawDisconnectRef = useRef(false);
   const statusRef = useRef(false);
   const wsListeners = useRef(new Map());
   const wsRef = useRef(null);
@@ -88,6 +148,13 @@ export const SocketProvider = ({ children }) => {
   // stable state setter, so the first-render closure stays correct.
   const syncPending = useCallback(() => {
     setPendingMessages(messageQueue.current.map(describeQueuedMessage));
+  }, []);
+
+  // Wave 2 slice 4: the same mirror for the held set — destructive
+  // messages diverted out of the flush by checkQueue live in
+  // heldQueueRef until the user confirms or discards them.
+  const syncHeld = useCallback(() => {
+    setHeldMessages(heldQueueRef.current.map(describeQueuedMessage));
   }, []);
 
   // Lazy-init during render (the documented exception to "don't write refs
@@ -150,15 +217,32 @@ export const SocketProvider = ({ children }) => {
 
   useEffect(() => {
     const checkQueue = () => {
-      if (statusRef.current) {
-        while (messageQueue.current.length > 0) {
-          const msg = messageQueue.current.shift();
-          if (window.electronAPI && window.electronAPI.sendEngineMessage) {
-            window.electronAPI.sendEngineMessage(msg);
-          }
+      if (!statusRef.current) return;
+      const stranded = [];
+      while (messageQueue.current.length > 0) {
+        const msg = messageQueue.current.shift();
+        const { type } = describeQueuedMessage(msg);
+        if (type && DESTRUCTIVE_MESSAGE_TYPES.has(type)) {
+          // Wave 2 slice 4: destructive actions never flush
+          // automatically. They move — in original queue order — to
+          // the held set, where they stay until the user confirms or
+          // discards them (confirmHeld / discardHeld), across as
+          // many further reconnects as happen in between.
+          heldQueueRef.current.push(msg);
+        } else if (window.electronAPI && window.electronAPI.sendEngineMessage) {
+          window.electronAPI.sendEngineMessage(msg);
+        } else {
+          stranded.push(msg);
         }
-        syncPending();
       }
+      if (stranded.length > 0) {
+        // No transport to flush through (no electronAPI bridge):
+        // keep the messages queued, in order, rather than dropping
+        // them on the floor.
+        messageQueue.current.unshift(...stranded);
+      }
+      syncPending();
+      syncHeld();
     };
 
     let unsub = null;
@@ -170,10 +254,20 @@ export const SocketProvider = ({ children }) => {
             if (parsed.status === 'connected') {
               statusRef.current = true;
               setIsConnected(true);
+              // Wave 2 slice 4: reconnectCount is the refetch signal
+              // for fetch-once effects (RUX-A-16/A-17). It counts
+              // only real recoveries — a disconnected period followed
+              // by a connect — never the initial connect, whose
+              // mounts run their own first fetch anyway.
+              if (sawDisconnectRef.current) {
+                sawDisconnectRef.current = false;
+                setReconnectCount((count) => count + 1);
+              }
               checkQueue();
             } else {
               statusRef.current = false;
               setIsConnected(false);
+              sawDisconnectRef.current = true;
             }
           }
         } catch (e) {
@@ -186,7 +280,15 @@ export const SocketProvider = ({ children }) => {
       window.electronAPI.getWsStatus().then((status) => {
         statusRef.current = status;
         setIsConnected(status);
-        if (status) checkQueue();
+        if (status) {
+          if (sawDisconnectRef.current) {
+            sawDisconnectRef.current = false;
+            setReconnectCount((count) => count + 1);
+          }
+          checkQueue();
+        } else {
+          sawDisconnectRef.current = true;
+        }
       });
     }
 
@@ -253,6 +355,44 @@ export const SocketProvider = ({ children }) => {
     return wsRef.current.send(data);
   }, []);
 
+  // Wave 2 slice 4: the user's verdict on held destructive actions.
+  // confirmHeld releases held messages in their original queue order
+  // — all of them, or one by its heldMessages index. If the socket
+  // has dropped again by the time the user decides, the released
+  // messages go back to the FRONT of the offline queue (ahead of
+  // anything queued since): on the next reconnect they are held
+  // again, never flushed. discardHeld drops held messages
+  // permanently — all, or one by index. Neither ever runs on its own:
+  // a held message the user ignores stays held indefinitely.
+  const confirmHeld = useCallback((index = null) => {
+    let release;
+    if (index === null || index === undefined) {
+      release = heldQueueRef.current;
+      heldQueueRef.current = [];
+    } else {
+      if (index < 0 || index >= heldQueueRef.current.length) return;
+      release = [heldQueueRef.current[index]];
+      heldQueueRef.current = heldQueueRef.current.filter((_, i) => i !== index);
+    }
+    syncHeld();
+    if (release.length === 0) return;
+    if (statusRef.current && window.electronAPI && window.electronAPI.sendEngineMessage) {
+      release.forEach((msg) => window.electronAPI.sendEngineMessage(msg));
+    } else {
+      messageQueue.current = [...release, ...messageQueue.current];
+      syncPending();
+    }
+  }, [syncHeld, syncPending]);
+
+  const discardHeld = useCallback((index = null) => {
+    if (index === null || index === undefined) {
+      heldQueueRef.current = [];
+    } else {
+      heldQueueRef.current = heldQueueRef.current.filter((_, i) => i !== index);
+    }
+    syncHeld();
+  }, [syncHeld]);
+
   return (
     <SocketContext.Provider
       value={{
@@ -262,6 +402,11 @@ export const SocketProvider = ({ children }) => {
         wsRef,
         pendingCount: pendingMessages.length,
         pendingMessages,
+        heldMessages,
+        heldCount: heldMessages.length,
+        confirmHeld,
+        discardHeld,
+        reconnectCount,
       }}
     >
       {children}

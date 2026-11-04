@@ -17,6 +17,7 @@ export default function UsageSettingsPanel({
   wsRef,
   safeSend = null,
   pendingMessages = [],
+  reconnectCount = 0,
   initialTotals = null,
   initialBreakdown = null,
   sessionId = null,
@@ -46,7 +47,11 @@ export default function UsageSettingsPanel({
   }, [initialTotals, initialBreakdown, dailyBudget, todaySpend, budgetExceeded]);
 
   useEffect(() => {
-    // If not passed initialTotals or when mounting, query ledger
+    // If not passed initialTotals or when mounting, query ledger.
+    // Wave 2 slice 4 (RUX-A-17): both queries below are OPEN-guarded,
+    // so mounting while the engine was down left the panel rendering
+    // its null state ($0.00 / 0 tokens) with no recovery; the
+    // reconnectCount dep re-runs this effect on every reconnect.
     if (!initialTotals && wsRef?.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'USAGE_LEDGER_QUERY_REQUEST',
@@ -106,7 +111,7 @@ export default function UsageSettingsPanel({
         ws.removeEventListener('message', handleMessage);
       }
     };
-  }, [wsRef, initialTotals, initialBreakdown, sessionId]);
+  }, [wsRef, initialTotals, initialBreakdown, sessionId, reconnectCount]);
 
   // RUX-A-20: Save / Clear are user actions on a money-related
   // setting — through safeSend they QUEUE while the engine is

@@ -24,6 +24,7 @@ export default function GlobalArtifactsView({
   wsRef,
   safeSend = null,
   pendingMessages = [],
+  reconnectCount = 0,
   onNavigateToSession = () => {},
   // N08: media "jump to conversation" has its own navigation path —
   // media ids are not artifact ids (no canvas selection, no
@@ -82,7 +83,11 @@ export default function GlobalArtifactsView({
 
     ws.addEventListener('message', handleMessage);
 
-    // Initial query if we don't have controlled artifacts
+    // Initial query if we don't have controlled artifacts.
+    // Wave 2 slice 4 (RUX-A-17): OPEN-guarded, so a mount while the
+    // engine was down showed the designed "No artifacts found" empty
+    // state for the whole visit; the reconnectCount dep re-runs this
+    // effect (and the query) on every reconnect.
     if (!controlledArtifacts && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: 'ARTIFACT_LIST_REQUEST',
@@ -95,7 +100,7 @@ export default function GlobalArtifactsView({
     return () => {
       ws.removeEventListener('message', handleMessage);
     };
-  }, [wsRef, controlledArtifacts]);
+  }, [wsRef, controlledArtifacts, reconnectCount]);
 
   // Resolve session title helper
   const getSessionTitle = useCallback((sessionId) => {
@@ -343,6 +348,7 @@ export default function GlobalArtifactsView({
           wsRef={wsRef}
           safeSend={safeSend}
           pendingMessages={pendingMessages}
+          reconnectCount={reconnectCount}
           sessions={sessions}
           onNavigateToSession={onNavigateToMedia || onNavigateToSession}
         />

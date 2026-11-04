@@ -23,6 +23,7 @@ export default function MediaLibrary({
   wsRef,
   safeSend = null,
   pendingMessages = [],
+  reconnectCount = 0,
   onNavigateToSession = () => {}
 }) {
   const [internalMedia, setInternalMedia] = useState(() => initialMedia || []);
@@ -208,6 +209,10 @@ export default function MediaLibrary({
 
     ws.addEventListener('message', handleMessage);
 
+    // Wave 2 slice 4 (RUX-A-17): OPEN-guarded, so a mount while the
+    // engine was down left the grid on "No media items yet" for the
+    // whole visit; the reconnectCount dep re-runs this effect (and
+    // the query) on every reconnect.
     if (!controlledMedia && !initialMedia && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: 'MEDIA_LIST_REQUEST',
@@ -220,7 +225,7 @@ export default function MediaLibrary({
     return () => {
       ws.removeEventListener('message', handleMessage);
     };
-  }, [wsRef, controlledMedia, initialMedia, selectedMedia]);
+  }, [wsRef, controlledMedia, initialMedia, selectedMedia, reconnectCount]);
 
   // N07: route search through the backend recall path (transcript +
   // semantic matches) instead of only filtering the loaded page of

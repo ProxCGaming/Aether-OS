@@ -136,13 +136,17 @@ const rowStyle = {
   gap: '16px',
 };
 
-export default function SpeechSettingsPanel({ config, configError, onConfigUpdate, pendingMessages = [], wsRef }) {
+export default function SpeechSettingsPanel({ config, configError, onConfigUpdate, pendingMessages = [], reconnectCount = 0, wsRef }) {
   const [downloadedStt, setDownloadedStt] = useState([]);
   // request_id -> one-shot response handler for the hub pair.
   const pendingRef = useRef(new Map());
 
   // Fetch the hub's downloaded inventory once, on mount: the
   // speech-to-text rows are the extra options in both STT selects.
+  // Wave 2 slice 4 (RUX-A-17): the send below is OPEN-guarded, so a
+  // mount while the engine was down fetched nothing and the selects
+  // kept labelling downloaded models "(not downloaded)" forever;
+  // reconnectCount re-runs the effect on every recovery.
   useEffect(() => {
     const ws = wsRef && wsRef.current;
     if (!ws || typeof ws.addEventListener !== 'function') return undefined;
@@ -176,7 +180,7 @@ export default function SpeechSettingsPanel({ config, configError, onConfigUpdat
       }));
     }
     return () => ws.removeEventListener('message', handleMessage);
-  }, [wsRef]);
+  }, [wsRef, reconnectCount]);
 
   // RUX-A-22: the selects are controlled from the applied config,
   // and onConfigUpdate (SettingsPanel's sendConfigUpdate) QUEUES

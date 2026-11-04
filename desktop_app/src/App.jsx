@@ -19,6 +19,7 @@ import GlobalArtifactsView from './components/GlobalArtifactsView';
 import { groupEntriesByTask } from './components/CostHeaderPopover';
 import RewindConfirmModal from './components/RewindConfirmModal';
 import PendingQueueIndicator from './components/PendingQueueIndicator';
+import HeldActionsPrompt from './components/HeldActionsPrompt';
 import './chat.css';
 
 // Decorative background graph (branding, not live data — see Phase 9 B3)
@@ -121,7 +122,7 @@ function AppContent() {
   // Phase 10.3 C1: the engine-message facade lives in SocketContext, not
   // here. AppContent consumes its wsRef/isConnected; it builds no mock of
   // its own and subscribes to nothing directly.
-  const { wsRef, isConnected, sendMessage, safeSend, pendingMessages } = useAetherSocket();
+  const { wsRef, isConnected, sendMessage, safeSend, pendingMessages, reconnectCount } = useAetherSocket();
 
   const [status, setStatus] = useState('Initializing');
   const [isThinking, setIsThinking] = useState(false);
@@ -283,6 +284,16 @@ function AppContent() {
       payload: { session_id: sessionId },
     }));
   }, [wsRef]);
+  // Wave 2 slice 4 (RUX-A-17): requestRewindManifest is OPEN-guarded,
+  // so a session shown while the engine was down never got its
+  // manifest — and without one the rewind/fork step menus stay hidden
+  // for that session even after the engine returns. Re-request it for
+  // the active session on every reconnect.
+  useEffect(() => {
+    if (reconnectCount > 0 && activeSessionRef.current) {
+      requestRewindManifest(activeSessionRef.current);
+    }
+  }, [reconnectCount, requestRewindManifest]);
   // Per-workspace sessions: the one place SESSION_LIST_REQUEST is
   // built, so every refresh honours the current list view. The
   // payload encodes the store's three filter states — no payload at
@@ -2915,6 +2926,10 @@ function AppContent() {
       {/* Wave 2 slice 1: app-level pending indicator — renders only
           while safeSend-queued user actions wait in the offline queue. */}
       <PendingQueueIndicator />
+
+      {/* Wave 2 slice 4: reconfirmation prompt for queued destructive
+          actions — renders only while the provider holds any. */}
+      <HeldActionsPrompt />
       
       {/* Glowing Orbs for Glassmorphism pop */}
       {!isFloating && (
@@ -3422,6 +3437,7 @@ function AppContent() {
                    wsRef={wsRef}
                    safeSend={safeSend}
                    pendingMessages={pendingMessages}
+                   reconnectCount={reconnectCount}
                    providers={providers}
                    providerHealth={providerHealth}
                    localModels={localModels}
@@ -3439,6 +3455,7 @@ function AppContent() {
                 wsRef={wsRef}
                 safeSend={safeSend}
                 pendingMessages={pendingMessages}
+                reconnectCount={reconnectCount}
                 sessions={sessions}
                 onNavigateToSession={handleNavigateToArtifactSession}
                 onNavigateToMedia={handleNavigateToMediaSession}

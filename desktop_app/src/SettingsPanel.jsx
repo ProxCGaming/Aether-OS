@@ -21,7 +21,7 @@ import SpeechSettingsPanel from './components/Settings/SpeechSettingsPanel';
 import PathRulesPanel from './components/Settings/PathRulesPanel';
 import ProjectConfigPanel from './components/Settings/ProjectConfigPanel';
 
-export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages = [], providers = [], providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null, initialMenu = null, onInitialMenuConsumed = null }) {
+export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages = [], reconnectCount = 0, providers = [], providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null, initialMenu = null, onInitialMenuConsumed = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
   const [modelTab, setModelTab] = useState('cloud'); // 'cloud' or 'local'
   const [validationState, setValidationState] = useState({}); // { provider: 'testing' | 'saving' | 'success' | 'error' }
@@ -656,7 +656,14 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         payload: {}
       }));
     }
-  }, [activeMenu, wsRef]);
+    // Wave 2 slice 4 (RUX-A-16 / RUX-C-01): every branch above is
+    // OPEN-guarded, so a section opened while the engine was down
+    // sent nothing — and with deps of only [activeMenu, wsRef] it
+    // never tried again, leaving the section empty or stale for the
+    // whole visit. reconnectCount (the socket layer's recovery
+    // counter) is now a dep: on reconnect the effect re-runs for the
+    // section currently open and its fetch finally goes out.
+  }, [activeMenu, wsRef, reconnectCount]);
 
   // NOTE (Phase 9, B3): the old llama.cpp "mock check for demo" download flow
   // was deleted here — it was dead code (never rendered, never called). Local
@@ -947,6 +954,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                    configError={configUpdateError}
                    onConfigUpdate={sendConfigUpdate}
                    pendingMessages={pendingMessages}
+                   reconnectCount={reconnectCount}
                    wsRef={wsRef}
                  />
                </>
@@ -1354,7 +1362,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         )}
 
         {activeMenu === 'Usage' && (
-          <UsageSettingsPanel wsRef={wsRef} safeSend={safeSend} pendingMessages={pendingMessages} sessionId={activeSession} dailyBudget={dailyBudget} budgetAlert={budgetAlert} budgetExceeded={!!budgetAlert} />
+          <UsageSettingsPanel wsRef={wsRef} safeSend={safeSend} pendingMessages={pendingMessages} reconnectCount={reconnectCount} sessionId={activeSession} dailyBudget={dailyBudget} budgetAlert={budgetAlert} budgetExceeded={!!budgetAlert} />
         )}
 
         {activeMenu === 'PasswordVault' && (
