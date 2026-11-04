@@ -84,6 +84,27 @@ from aether_engine.version import APP_VERSION
 
 logger = logging.getLogger("aether_engine.routes.websocket")
 
+# Unified logging (5 Nov 2026): incoming message-TYPE tracing. The
+# receive loop records every message's type — INFO for the
+# allowlist below, DEBUG for everything else — and never a payload:
+# the 5 Nov QA model-switch failure was undiagnosable partly
+# because the engine logged no WS traffic at all, so there was no
+# record of the switch request ever arriving. The prefix set
+# mirrors the renderer's (desktop_app/src/logUi.js) — keep them in
+# step.
+_WS_TRACE_INFO_PREFIXES = (
+    "MODEL_", "TASK_", "PROVIDER_", "DIAGNOSTICS_", "CONFIG_", "ENVIRONMENT_",
+)
+
+
+def _log_ws_message_type(msg_type: Any) -> None:
+    """Trace one incoming message type. Types only — never payloads."""
+    name = msg_type.value if isinstance(msg_type, EventType) else str(msg_type)
+    if name.startswith(_WS_TRACE_INFO_PREFIXES):
+        logger.info("WS message received: %s", name)
+    else:
+        logger.debug("WS message received: %s", name)
+
 # Phase 10.3, B1: the only task class with a real engine seam — see
 # AUXILIARY_TASK_CLASSES in aether_engine/config.py (single source of truth).
 # The Settings UI dropped the other six helper tasks in Phase 9 (commit
@@ -2941,6 +2962,11 @@ async def ws_tasks(ws: WebSocket):
 
             req_id = msg.request_id
 
+            # Unified logging: trace the message TYPE as received
+            # (before any handler mutates msg.type, e.g. steer ->
+            # START_TASK). Types only — payloads are never logged.
+            _log_ws_message_type(msg.type)
+
             # -----------------------------------------------------------
             # Steering (Epic 1, E1-07): a message for a session whose
             # task is running — or paused for approval — is queued for
@@ -3448,6 +3474,10 @@ async def ws_tasks(ws: WebSocket):
                     engine_state.active_provider = pname
                     engine_state.active_model = model
                     save_config(engine_state.user_config)
+                    # Unified logging: the applied value goes on
+                    # record — a switch that "didn't stick" can now
+                    # be checked against what the engine applied.
+                    logger.info(f"MODEL_SET_DEFAULT applied: {pname}/{model}")
                 await ws.send_text(Event(
                     type=EventType.MODEL_DEFAULT_CHANGED,
                     request_id=req_id,
