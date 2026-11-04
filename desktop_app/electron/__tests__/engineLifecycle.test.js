@@ -380,6 +380,23 @@ describe('engineLifecycle engine log file (Wave 1 slice 3)', () => {
     expect(after.length).toBeGreaterThan(content.length);
   });
 
+  it('rotates engine.log past 5 MB, keeping the old content as .1', async () => {
+    const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'aether-ud-'));
+    const logDir = path.join(userData, 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, 'engine.log');
+    // Seed an oversized pre-rotation log, as a long-lived install
+    // from before rotation existed would have.
+    fs.writeFileSync(logPath, `${'x'.repeat(1024)}\n`.repeat(5200));
+    const { lifecycle } = makeRealLifecycle(userData);
+    await expect(lifecycle.start()).resolves.toEqual({ mode: 'spawned' });
+    const archived = fs.readFileSync(`${logPath}.1`, 'utf8');
+    expect(archived.length).toBeGreaterThan(5 * 1024 * 1024);
+    const live = fs.readFileSync(logPath, 'utf8');
+    expect(live).toContain('[engine] spawned bundled engine');
+    expect(live.length).toBeLessThan(1024 * 1024);
+  });
+
   it('an unwritable log path never breaks start()', async () => {
     const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'aether-ud-'));
     // A regular FILE where the logs directory must be created:
