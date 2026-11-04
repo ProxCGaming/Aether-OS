@@ -95,6 +95,16 @@ logger = logging.getLogger("aether_engine.routes.websocket")
 
 router = APIRouter()
 
+# RUX-B-03: overall budget for one capability-check "Run Now"
+# (CAPABILITY_CHECK_RUN_NOW). A run fans out to per-provider
+# discovery plus a live self-test per model; with no budget a single
+# click could run for minutes. 180 s is generous for a real sweep
+# yet still bounded — past it the run is cancelled and reported
+# exactly like a failed run whose error is the timeout (see
+# _send_capability_check_result). Tests patch this module attribute
+# to shorten the budget.
+CAPABILITY_CHECK_RUN_BUDGET_SECONDS = 180.0
+
 # Phase 10.1 A1: pending plugin installs awaiting the user's approval.
 # Keyed by request id; each value is the prepare_install() payload
 # ({"source": ..., "manifest": {...}}) for one PLUGIN_INSTALL_REQUEST.
@@ -780,6 +790,83 @@ async def ws_tasks(ws: WebSocket):
             await ws.send_text(response.to_json())
         except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-refresh; nothing else to do
             logger.debug(f"Could not send refresh models response: {e}")
+
+    async def _send_capability_check_result(req_id_, method_):
+        """Answer a CAPABILITY_CHECK_RUN_NOW from a background task (RUX-B-03).
+
+        The run used to be awaited inline in the message loop:
+        per-provider discovery plus a live self-test per model,
+        minutes at a time with NO overall budget, during which every
+        other message on the socket — model switches, cancels,
+        approvals — waited unread and the app looked hung. Now the
+        loop stays free and the CAPABILITY_CHECK_HISTORY_RESPONSE is
+        sent when the run lands, exactly as _send_validation_result
+        does for provider Tests.
+
+        The run is bounded by CAPABILITY_CHECK_RUN_BUDGET_SECONDS.
+        Past the budget the run is cancelled and recorded + reported
+        exactly like a failed run (status FAILED, the timeout as its
+        error_log) — same record shape _execute_check_job persists
+        for its own failures — so the response never changes shape
+        and the timed-out run still appears in history.
+        """
+        mgr = engine_state.scheduler_manager
+        started_at = time.time()
+        try:
+            run_res = await asyncio.wait_for(
+                mgr.run_now(method=method_),
+                timeout=CAPABILITY_CHECK_RUN_BUDGET_SECONDS,
+            )
+        except TimeoutError:
+            run_res = {
+                "id": str(uuid.uuid4()),
+                "method": method_ or mgr.current_method,
+                "started_at": started_at,
+                "finished_at": time.time(),
+                "models_tested": 0,
+                "status": "FAILED",
+                "cost_estimate": 0.0,
+                "error_log": (
+                    f"Capability check timed out after "
+                    f"{CAPABILITY_CHECK_RUN_BUDGET_SECONDS:g} seconds; "
+                    f"the run was cancelled."
+                ),
+            }
+            logger.warning(
+                f"Capability check run exceeded the "
+                f"{CAPABILITY_CHECK_RUN_BUDGET_SECONDS:g}s budget; "
+                f"recorded as a failed run.")
+            try:
+                # Persist it like any other failed run so the summary
+                # and history below (and every later history poll)
+                # include it.
+                mgr._record_run(run_res)
+            except Exception as e:  # noqa: BLE001 — the response matters more than the history row; never lose the reply over persistence
+                logger.warning(f"Could not record timed-out capability run: {e}")
+        except Exception as e:  # noqa: BLE001 — a failed check must still produce a response, never silence
+            logger.warning(f"Capability check run raised: {e}")
+            run_res = {
+                "id": str(uuid.uuid4()),
+                "method": method_ or mgr.current_method,
+                "started_at": started_at,
+                "finished_at": time.time(),
+                "models_tested": 0,
+                "status": "FAILED",
+                "cost_estimate": 0.0,
+                "error_log": str(e),
+            }
+        try:
+            await ws.send_text(Event(
+                type=EventType.CAPABILITY_CHECK_HISTORY_RESPONSE,
+                request_id=req_id_,
+                payload={
+                    "latest_run": run_res,
+                    "summary": mgr.get_status_summary(),
+                    "history": mgr.get_history(),
+                },
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-check; nothing else to do
+            logger.debug(f"Could not send capability check result: {e}")
 
     # Epic 2, E2-10: install the web-search seam for this connection —
     # keys resolve through the encrypted secret store (provider name =
@@ -3345,18 +3432,10 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
 
             elif msg.type == EventType.CAPABILITY_CHECK_RUN_NOW:
-                method = msg.payload.get("method")
-                run_res = await engine_state.scheduler_manager.run_now(method=method)
-                status_sum = engine_state.scheduler_manager.get_status_summary()
-                await ws.send_text(Event(
-                    type=EventType.CAPABILITY_CHECK_HISTORY_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "latest_run": run_res,
-                        "summary": status_sum,
-                        "history": engine_state.scheduler_manager.get_history(),
-                    },
-                ).to_json())
+                # Off the message loop (see _send_capability_check_result):
+                # a run is minutes of discovery + live self-tests and
+                # must not wedge the socket behind it (RUX-B-03).
+                asyncio.create_task(_send_capability_check_result(req_id, msg.payload.get("method")))
 
             elif msg.type == EventType.CAPABILITY_CHECK_GET_HISTORY:
                 status_sum = engine_state.scheduler_manager.get_status_summary()
@@ -3368,7 +3447,11 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
 
             elif msg.type == EventType.ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST:
-                diag_logs = run_environment_diagnostics()
+                # The probes are synchronous (subprocess + urllib,
+                # ~7 s of timeouts on a dead network): run them on a
+                # worker thread so the event loop — and /health with
+                # it — never freezes behind them (RUX-B-05).
+                diag_logs = await asyncio.to_thread(run_environment_diagnostics)
                 # Determine overall summary status based on logs
                 failed_count = sum(1 for log in diag_logs if log["status"] == "FAILED")
                 await ws.send_text(Event(
