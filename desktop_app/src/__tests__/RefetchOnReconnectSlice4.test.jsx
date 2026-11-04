@@ -38,6 +38,7 @@ function SettingsHarness() {
       pendingMessages={socket.pendingMessages}
       reconnectCount={socket.reconnectCount}
       providers={[]}
+      isConnected={socket.isConnected}
       localModels={[]}
       initialMenu="Tools"
     />
@@ -52,6 +53,7 @@ function UsageHarness() {
       safeSend={socket.safeSend}
       pendingMessages={socket.pendingMessages}
       reconnectCount={socket.reconnectCount}
+      isConnected={socket.isConnected}
     />
   );
 }
@@ -111,9 +113,13 @@ describe('Refetch on reconnect (Wave 2 slice 4)', () => {
     await flushPromises();
 
     // Tools section is open, socket down: its OPEN-guarded fetch
-    // never went out, and the section shows its empty state.
+    // never went out. (Wave 3 slice 1: the section now shows its
+    // offline load state — the "No tools registered." this used to
+    // assert was the RUX-C-06 false empty, rendered before any
+    // answer existed.)
     expect(sentTypes()).not.toContain('TOOL_LIST_REQUEST');
-    expect(screen.getByText('No tools registered.')).toBeInTheDocument();
+    expect(screen.queryByText('No tools registered.')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tools-load-state')).toHaveAttribute('data-load-display', 'offline');
 
     emitStatus('connected');
     await flushPromises();

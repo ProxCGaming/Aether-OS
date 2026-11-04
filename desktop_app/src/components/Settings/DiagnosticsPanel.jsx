@@ -4,9 +4,20 @@ import { useAetherSocket } from '../../contexts/SocketContext';
 import Dropdown from '../../Dropdown';
 import MCPNotice from './MCPNotice';
 import PluginsNotice from './PluginsNotice';
+import LoadStateRow from './LoadStateRow';
 
 export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
-  const { wsRef, sendMessage } = useAetherSocket();
+  const { wsRef, sendMessage, isConnected } = useAetherSocket();
+  // Wave 3 slice 1 (RUX-C-06, under the RUX-C-01 umbrella): each
+  // list below tracks whether its engine answer has arrived. Until
+  // then the section renders a load state (loading / offline /
+  // error) — the old code rendered "No MCP servers configured." /
+  // "No plugins installed." / "Loading agents…" from the first
+  // frame, so not-yet-loaded, genuinely-empty, failed and offline
+  // were indistinguishable.
+  const [mcpLoad, setMcpLoad] = useState('loading');
+  const [pluginsLoad, setPluginsLoad] = useState('loading');
+  const [agentsLoad, setAgentsLoad] = useState('loading');
   const [mcpServers, setMcpServers] = useState({});
   const [mcpResources, setMcpResources] = useState({}); // issue 006: server name -> [{uri, name, description, mimeType}]
   const [mcpPrompts, setMcpPrompts] = useState({}); // issue 007: server name -> [{name, description, arguments}]
@@ -40,6 +51,12 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
           if (data.payload.config_error) {
             // B1: the whole config file failed to parse — surface it.
             setMcpTestResult(`MCP config file error: ${data.payload.config_error}`);
+            // RUX-C-06: a broken config is a load ERROR, not an
+            // empty server list (once answered, later errors keep
+            // the list and report through the result line above).
+            setMcpLoad((prev) => (prev === 'ready' ? prev : 'error'));
+          } else {
+            setMcpLoad('ready');
           }
           // Issue 006: list resources for every connected server, so
           // the tab can offer "Load into chat" per resource.
@@ -111,6 +128,7 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
         } else if (data.type === 'PLUGIN_LIST_RESPONSE') {
           const p = data.payload.plugins;
           setPlugins(Array.isArray(p) ? p : Object.values(p || {}));
+          setPluginsLoad('ready');
         } else if (data.type === 'PLUGIN_INSTALL_RESPONSE' || data.type === 'PLUGIN_UNINSTALL_RESPONSE' || data.type === 'PLUGIN_TOGGLE_RESPONSE') {
           if (data.payload.success) {
             setPluginActionResult(null);
@@ -126,6 +144,7 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
           }
         } else if (data.type === 'AGENT_LIST_RESPONSE') {
           setAgents(data.payload.agents || []);
+          setAgentsLoad('ready');
         } else if (data.type === 'TOOL_LIST_RESPONSE') {
           setTools(data.payload.tools || []);
         } else if (data.type === 'SESSION_LIST_RESPONSE') {
@@ -301,7 +320,16 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
 
           <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Configured Servers</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            {Object.keys(mcpServers).length === 0 ? (
+            {Object.keys(mcpServers).length === 0 && mcpLoad !== 'ready' ? (
+              <LoadStateRow
+                loadState={mcpLoad}
+                isConnected={isConnected}
+                testId="mcp-servers-load-state"
+                loadingText="Loading MCP servers…"
+                offlineText="Waiting for the engine — configured servers will appear here once it connects."
+                errorText="The MCP server list could not be loaded — the configuration file could not be read."
+              />
+            ) : Object.keys(mcpServers).length === 0 ? (
               <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
                 No MCP servers configured.
               </div>
@@ -469,7 +497,16 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
 
           <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Installed Plugins</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            {plugins.length === 0 ? (
+            {plugins.length === 0 && pluginsLoad !== 'ready' ? (
+              <LoadStateRow
+                loadState={pluginsLoad}
+                isConnected={isConnected}
+                testId="plugins-load-state"
+                loadingText="Loading plugins…"
+                offlineText="Waiting for the engine — installed plugins will appear here once it connects."
+                errorText="The plugin list could not be loaded."
+              />
+            ) : plugins.length === 0 ? (
               <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
                 No plugins installed.
               </div>
@@ -594,11 +631,24 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
                  </div>
                </div>
              ))}
-             {agents.length === 0 && (
-               <div style={{ textAlign: 'center', color: '#9090a0', marginTop: '16px', fontSize: '13px' }}>
-                 Loading agents...
+             {agents.length === 0 && (agentsLoad !== 'ready' ? (
+               <div style={{ marginTop: '16px' }}>
+                 <LoadStateRow
+                   loadState={agentsLoad}
+                   isConnected={isConnected}
+                   testId="agents-load-state"
+                   variant="plain"
+                   style={{ textAlign: 'center' }}
+                   loadingText="Loading agents…"
+                   offlineText="Waiting for the engine — agents will appear here once it connects."
+                   errorText="The agent list could not be loaded."
+                 />
                </div>
-             )}
+             ) : (
+               <div style={{ textAlign: 'center', color: '#9090a0', marginTop: '16px', fontSize: '13px' }}>
+                 No agents were reported by the engine.
+               </div>
+             ))}
           </div>
         </div>
       )}

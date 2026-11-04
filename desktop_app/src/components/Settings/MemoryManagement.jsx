@@ -1,9 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { Trash2, Pencil, Download } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
+import LoadStateRow from './LoadStateRow';
 
 export default function MemoryManagement() {
-  const { wsRef, sendMessage } = useAetherSocket();
+  const { wsRef, sendMessage, isConnected } = useAetherSocket();
+  // Wave 3 slice 1 (RUX-C-01 umbrella): whether each memory list
+  // has been ANSWERED. Error replies were already honest here
+  // (E4-F14); what was missing is the loading/offline distinction —
+  // "No episodes found." used to render while the first reply was
+  // still in flight or queued behind a dead engine.
+  const [episodesLoad, setEpisodesLoad] = useState('loading');
+  const [factsLoad, setFactsLoad] = useState('loading');
   const [memoryTab, setMemoryTab] = useState('episodic');
   const [episodes, setEpisodes] = useState([]);
   const [facts, setFacts] = useState([]);
@@ -49,6 +57,7 @@ export default function MemoryManagement() {
           } else {
             setMemoryError(null);
             setEpisodes(data.payload.episodes || []);
+            setEpisodesLoad('ready');
             if (data.payload.backend !== undefined || data.payload.embedding_stats) {
               setEpisodesMeta({ backend: data.payload.backend, embedding_stats: data.payload.embedding_stats });
             }
@@ -62,6 +71,7 @@ export default function MemoryManagement() {
           } else {
             setMemoryError(null);
             setEpisodes(data.payload.episodes || []);
+            setEpisodesLoad('ready');
             setSelectedEpisode(prev => (prev && prev.task_id === data.payload.task_id ? null : prev));
             if (data.payload.backend !== undefined || data.payload.embedding_stats) {
               setEpisodesMeta({ backend: data.payload.backend, embedding_stats: data.payload.embedding_stats });
@@ -73,6 +83,7 @@ export default function MemoryManagement() {
           } else {
             setMemoryError(null);
             setEpisodes(data.payload.episodes || []);
+            setEpisodesLoad('ready');
             setSelectedEpisode(null);
           }
         } else if (data.type === 'MEMORY_GRAPH_RESPONSE' || data.type === 'MEMORY_FACT_DELETE_RESPONSE' || data.type === 'MEMORY_ENTITY_DELETE_RESPONSE') {
@@ -81,6 +92,7 @@ export default function MemoryManagement() {
           } else {
             setMemoryError(null);
             setFacts(data.payload.facts || []);
+            setFactsLoad('ready');
           }
         } else if (data.type === 'MEMORY_FACT_UPDATE_RESPONSE') {
           if (data.payload.facts) setFacts(data.payload.facts);
@@ -106,6 +118,7 @@ export default function MemoryManagement() {
           } else {
             setMemoryError(null);
             setFacts(data.payload.facts || []);
+            setFactsLoad('ready');
           }
         }
       } catch (e) {
@@ -268,7 +281,24 @@ export default function MemoryManagement() {
           <div style={{ display: 'flex', gap: '24px', height: '600px' }}>
           <div style={{ width: '320px', display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto', paddingRight: '8px' }} className="chat-scroll">
             {episodes.length === 0 ? (
-              <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center' }}>{memoryError ? 'Episodes could not be loaded.' : 'No episodes found.'}</div>
+              memoryError ? (
+                <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center' }}>Episodes could not be loaded.</div>
+              ) : episodesLoad !== 'ready' ? (
+                <div style={{ padding: '24px', textAlign: 'center' }}>
+                  <LoadStateRow
+                    loadState={episodesLoad}
+                    isConnected={isConnected}
+                    testId="memory-episodes-load-state"
+                    variant="plain"
+                    style={{ fontSize: '14px' }}
+                    loadingText="Loading episodes…"
+                    offlineText="Waiting for the engine — your episodes will appear here once it connects."
+                    errorText="Episodes could not be loaded."
+                  />
+                </div>
+              ) : (
+                <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center' }}>No episodes found.</div>
+              )
             ) : (
               episodes.map(ep => (
                 <div 
@@ -384,9 +414,24 @@ export default function MemoryManagement() {
             <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '16px' }}>{exportStatus}</div>
           )}
           {facts.length === 0 ? (
-            <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
-              {memoryError ? 'Facts could not be loaded.' : 'No facts in Knowledge Graph.'}
-            </div>
+            memoryError ? (
+              <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                Facts could not be loaded.
+              </div>
+            ) : factsLoad !== 'ready' ? (
+              <LoadStateRow
+                loadState={factsLoad}
+                isConnected={isConnected}
+                testId="memory-facts-load-state"
+                loadingText="Loading facts…"
+                offlineText="Waiting for the engine — facts will appear here once it connects."
+                errorText="Facts could not be loaded."
+              />
+            ) : (
+              <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                No facts in Knowledge Graph.
+              </div>
+            )
           ) : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '16px' }}>
               {Object.entries(facts.reduce((acc, f) => {

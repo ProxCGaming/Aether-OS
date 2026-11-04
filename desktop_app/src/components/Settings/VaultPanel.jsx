@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { KeyRound, Pencil, Trash2, ShieldCheck, Timer } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
+import LoadStateRow from './LoadStateRow';
 
 // Epic 8, E8-6.3: Settings → Password Vault. The owner's surface
 // for the credential vault: entries are listed as METADATA ONLY —
@@ -81,10 +82,21 @@ export default function VaultPanel({ wsRef: propWsRef }) {
   const socket = useAetherSocket();
   const wsRef = propWsRef || socket?.wsRef;
   const contextSendMessage = socket?.sendMessage;
+  const isConnected = socket?.isConnected;
 
   const [entries, setEntries] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
   const [error, setError] = useState('');
+  // RUX-C-05 (Wave 3 slice 1): both vault lists track whether the
+  // engine has ANSWERED. Before the first list reply, the panel
+  // renders a load state (loading / offline) — never "No credentials
+  // saved yet" / "No authenticator codes yet", which used to show
+  // while the list was in flight or the engine was down. A failure
+  // reply is an error state, not an empty list. Once a list is
+  // 'ready', a later failure keeps the answered data on screen and
+  // reports through the error banner instead.
+  const [entriesLoad, setEntriesLoad] = useState('loading');
+  const [codesLoad, setCodesLoad] = useState('loading');
 
   // Authenticator (Open Point 14): standalone TOTP entries
   // (metadata only), the engine-served live codes, the enrolment
@@ -161,8 +173,18 @@ export default function VaultPanel({ wsRef: propWsRef }) {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'VAULT_ENTRY_LIST_RESPONSE' && data.payload) {
-          setEntries(Array.isArray(data.payload.entries) ? data.payload.entries : []);
-          setError('');
+          // RUX-C-05: a list failure (success:false / an error / a
+          // payload with no entries array) is an ERROR state — it
+          // must not clear the error and render as an empty vault,
+          // which is what the unconditional setEntries([]) did.
+          if (data.payload.success === false || data.payload.error || !Array.isArray(data.payload.entries)) {
+            setError(data.payload.error || 'Your saved credentials could not be loaded.');
+            setEntriesLoad((prev) => (prev === 'ready' ? prev : 'error'));
+          } else {
+            setEntries(data.payload.entries);
+            setEntriesLoad('ready');
+            setError('');
+          }
         } else if (data.type === 'VAULT_ENTRY_SAVE_RESPONSE' && data.payload) {
           if (data.payload.success) {
             setForm(EMPTY_FORM);
@@ -178,11 +200,27 @@ export default function VaultPanel({ wsRef: propWsRef }) {
             setError('That entry could not be deleted.');
           }
         } else if (data.type === 'VAULT_TOTP_LIST_RESPONSE' && data.payload) {
-          setTotpEntries(Array.isArray(data.payload.entries) ? data.payload.entries : []);
+          // RUX-C-05: same failure rule as the credential list — a
+          // failed metadata list must not read as "no entries".
+          if (data.payload.success === false || data.payload.error || !Array.isArray(data.payload.entries)) {
+            setTotpError(data.payload.error || 'Your authenticator codes could not be loaded.');
+            setCodesLoad((prev) => (prev === 'ready' ? prev : 'error'));
+          } else {
+            setTotpEntries(data.payload.entries);
+          }
         } else if (data.type === 'VAULT_TOTP_CODES_RESPONSE' && data.payload) {
-          const served = Array.isArray(data.payload.codes) ? data.payload.codes : [];
-          setCodes(served);
-          setCountdown(served.length > 0 ? served[0].seconds_remaining : 0);
+          // RUX-C-05: the codes response is what the Authenticator
+          // list renders from; only a well-formed one marks the list
+          // answered. A failure is an error state, never an empty one.
+          if (data.payload.success === false || data.payload.error || !Array.isArray(data.payload.codes)) {
+            setTotpError(data.payload.error || 'Your authenticator codes could not be loaded.');
+            setCodesLoad((prev) => (prev === 'ready' ? prev : 'error'));
+          } else {
+            const served = data.payload.codes;
+            setCodes(served);
+            setCountdown(served.length > 0 ? served[0].seconds_remaining : 0);
+            setCodesLoad('ready');
+          }
         } else if (data.type === 'VAULT_TOTP_SAVE_RESPONSE' && data.payload) {
           if (data.payload.success) {
             setTotpForm(EMPTY_TOTP_FORM);
@@ -300,7 +338,17 @@ export default function VaultPanel({ wsRef: propWsRef }) {
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-        {entries.length === 0 && (
+        {entriesLoad !== 'ready' ? (
+          <LoadStateRow
+            loadState={entriesLoad}
+            isConnected={isConnected}
+            testId="vault-entries-load-state"
+            variant="plain"
+            loadingText="Loading your saved credentials…"
+            offlineText="Waiting for the engine — your saved credentials will appear here once it connects."
+            errorText="Your saved credentials could not be loaded."
+          />
+        ) : entries.length === 0 && (
           <div style={{ color: '#9090a0', fontSize: '13px' }}>
             No credentials saved yet. Add one below, or let an agent save a login it creates
             during a signup task — it will appear here for your review.
@@ -497,7 +545,17 @@ export default function VaultPanel({ wsRef: propWsRef }) {
           </div>
         )}
 
-        {codes.length === 0 && (
+        {codesLoad !== 'ready' ? (
+          <LoadStateRow
+            loadState={codesLoad}
+            isConnected={isConnected}
+            testId="vault-totp-load-state"
+            variant="plain"
+            loadingText="Loading your authenticator codes…"
+            offlineText="Waiting for the engine — your authenticator codes will appear here once it connects."
+            errorText="Your authenticator codes could not be loaded."
+          />
+        ) : codes.length === 0 && (
           <div style={{ color: '#9090a0', fontSize: '13px' }}>
             No authenticator codes yet. Add one below with the setup key a site shows beside
             its QR code, or save a TOTP secret on a credential above.

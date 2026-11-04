@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Key, CheckCircle2 } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
+import LoadStateRow from './LoadStateRow';
 
-export default function ProviderSettings({ providers = [], health = {} }) {
-  const { wsRef, sendMessage } = useAetherSocket();
+export default function ProviderSettings({ providers = [], health = {}, providersLoaded = false }) {
+  const { wsRef, sendMessage, isConnected } = useAetherSocket();
   const [keys, setKeys] = useState({});
   const [baseUrls, setBaseUrls] = useState({});
   const [expandedProvider, setExpandedProvider] = useState(null);
@@ -18,6 +19,12 @@ export default function ProviderSettings({ providers = [], health = {} }) {
   const testTimersRef = useRef({});
   const [testingSince, setTestingSince] = useState({});
   const [nowTick, setNowTick] = useState(Date.now());
+  // RUX-C-03 (Wave 3 slice 1): Save gets the same no-answer honesty
+  // as Test below — a save whose response never comes (offline, the
+  // request merely queued) must not sit on "Saving..." forever. The
+  // saving ref + timer mirror the test pair exactly.
+  const savingRef = useRef({});
+  const saveTimersRef = useRef({});
 
   useEffect(() => {
     if (Object.keys(testingSince).length === 0) return;
@@ -27,6 +34,7 @@ export default function ProviderSettings({ providers = [], health = {} }) {
 
   useEffect(() => () => {
     Object.values(testTimersRef.current).forEach(clearTimeout);
+    Object.values(saveTimersRef.current).forEach(clearTimeout);
   }, []);
 
   const clearTestTracking = (provider) => {
@@ -41,6 +49,14 @@ export default function ProviderSettings({ providers = [], health = {} }) {
       delete next[provider];
       return next;
     });
+  };
+
+  const clearSaveTracking = (provider) => {
+    savingRef.current[provider] = false;
+    if (saveTimersRef.current[provider]) {
+      clearTimeout(saveTimersRef.current[provider]);
+      delete saveTimersRef.current[provider];
+    }
   };
 
   useEffect(() => {
@@ -64,6 +80,11 @@ export default function ProviderSettings({ providers = [], health = {} }) {
           }
         } else if (data.type === 'PROVIDER_SAVE_RESPONSE') {
           const provider = data.payload.provider;
+          // The save was clicked under the form's own key (the real
+          // provider name, or 'custom_openai' for a custom save whose
+          // response carries the generated name) — clear both.
+          clearSaveTracking(provider);
+          clearSaveTracking('custom_openai');
           const isCustomSave = provider.startsWith('custom_');
           const discErr = data.payload.discovery_error;
           const discErrText = discErr
@@ -109,7 +130,24 @@ export default function ProviderSettings({ providers = [], health = {} }) {
     }
 
     setValidationState(prev => ({ ...prev, [providerName]: 'saving' }));
-    
+    setValidationMsg(prev => ({ ...prev, [providerName]: '' }));
+    // RUX-C-03: mirror the Test path's 35s rule — if no save
+    // response comes back in 35s, say so plainly and release the
+    // button instead of claiming "Saving..." indefinitely. A late
+    // response still lands afterwards and overwrites this, exactly
+    // as a late test result does.
+    savingRef.current[providerName] = true;
+    if (saveTimersRef.current[providerName]) {
+      clearTimeout(saveTimersRef.current[providerName]);
+    }
+    saveTimersRef.current[providerName] = setTimeout(() => {
+      if (savingRef.current[providerName]) {
+        savingRef.current[providerName] = false;
+        setValidationState(prev => ({ ...prev, [providerName]: 'error' }));
+        setValidationMsg(prev => ({ ...prev, [providerName]: 'No answer from the engine in 35s — the save may only be queued, or the engine may be busy or offline. Try again.' }));
+      }
+    }, 35000);
+
     const apiKeyToSave = keys[providerName] || '';
     // Phase 10.1 C1: keys are NEVER mirrored to localStorage (or any other
     // renderer storage). The engine's secure secret store is the only
@@ -172,6 +210,26 @@ export default function ProviderSettings({ providers = [], health = {} }) {
       <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Configure your API keys for cloud-based inference.</p>
       
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        {/* RUX-C-03 (Wave 3 slice 1): an empty providers prop used to
+            render unexplained blank space — the cold-start window
+            exactly. Not-yet-loaded (loading / offline, via App's
+            providersLoaded signal) and answered-empty are different
+            situations and now read differently. */}
+        {(Array.isArray(providers) ? providers : []).length === 0 && !providersLoaded && (
+          <LoadStateRow
+            loadState="loading"
+            isConnected={isConnected}
+            testId="providers-load-state"
+            variant="plain"
+            loadingText="Loading providers…"
+            offlineText="Waiting for the engine — providers will appear here once it connects."
+          />
+        )}
+        {(Array.isArray(providers) ? providers : []).length === 0 && providersLoaded && (
+          <div data-testid="providers-empty" style={{ color: '#9090a0', fontSize: '13px' }}>
+            No providers were reported by the engine.
+          </div>
+        )}
         {(Array.isArray(providers) ? providers : []).map(p => {
           const providerName = p.name;
           const displayName = p.display_name || (providerName.charAt(0).toUpperCase() + providerName.slice(1));

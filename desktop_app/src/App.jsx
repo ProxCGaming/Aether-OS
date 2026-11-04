@@ -3439,6 +3439,8 @@ function AppContent() {
                    pendingMessages={pendingMessages}
                    reconnectCount={reconnectCount}
                    providers={providers}
+                   providersLoaded={providersLoaded}
+                   isConnected={isConnected}
                    providerHealth={providerHealth}
                    localModels={localModels}
                    activeSession={activeSession}

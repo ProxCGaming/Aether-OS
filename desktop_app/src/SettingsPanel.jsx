@@ -17,11 +17,12 @@ import BrowserPolicyPanel from './components/Settings/BrowserPolicyPanel';
 import UsageSettingsPanel from './components/Settings/UsageSettingsPanel';
 import VaultPanel from './components/Settings/VaultPanel';
 import OrchestrationPanel from './components/Settings/OrchestrationPanel';
+import LoadStateRow from './components/Settings/LoadStateRow';
 import SpeechSettingsPanel from './components/Settings/SpeechSettingsPanel';
 import PathRulesPanel from './components/Settings/PathRulesPanel';
 import ProjectConfigPanel from './components/Settings/ProjectConfigPanel';
 
-export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages = [], reconnectCount = 0, providers = [], providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null, initialMenu = null, onInitialMenuConsumed = null }) {
+export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages = [], reconnectCount = 0, providers = [], providersLoaded = false, isConnected = null, providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null, initialMenu = null, onInitialMenuConsumed = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
   const [modelTab, setModelTab] = useState('cloud'); // 'cloud' or 'local'
   const [validationState, setValidationState] = useState({}); // { provider: 'testing' | 'saving' | 'success' | 'error' }
@@ -290,12 +291,31 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     sendSettingsAction('APPROVAL_GRANT_REVOKE_REQUEST', { id });
   };
 
+  // Wave 3 slice 1 (RUX-C-01, the Settings umbrella): which engine
+  // answers this panel has actually RECEIVED, keyed by data set.
+  // Wave 2 slice 4 made the fetch-on-open effects refire on
+  // reconnect; this is the render-side half — until a data set is
+  // marked answered, its section renders a load state (loading, or
+  // offline when the socket is known to be down) instead of the
+  // false content Lane C catalogued: "No tools registered." before
+  // the tool list lands, remembered-grants emptiness before the
+  // grants reply, factory defaults presented as saved config. The
+  // message handler below marks each set as its response arrives;
+  // an answered-empty list is a genuine empty and renders as one.
+  const [answered, setAnswered] = useState({});
+  const markAnswered = (key) => {
+    setAnswered(prev => (prev[key] ? prev : { ...prev, [key]: true }));
+  };
+
   useEffect(() => {
     if (!wsRef.current) return;
 
     // Apply a full config payload (CONFIG_GET / CONFIG_UPDATE /
     // CONFIG_RESET replies all carry one) to the live controls.
     const applyConfigValues = (config) => {
+      // RUX-C-01: a full config payload IS the config answer — the
+      // config-driven sections stop showing their load state.
+      markAnswered('config');
       // E6-F05: the handed-off panels are controlled from the same
       // applied payload, and a successful apply clears any refusal.
       setEngineConfig(config);
@@ -354,6 +374,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
           }
         } else if (data.type === 'TOOL_LIST_RESPONSE') {
           setTools(data.payload.tools || []);
+          markAnswered('tools');
           if (data.payload.approval_mode) {
             setApprovalMode(data.payload.approval_mode);
           }
@@ -363,10 +384,12 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
           }
         } else if (data.type === 'APPROVAL_GRANTS_RESPONSE') {
           setApprovalGrants(data.payload.grants || []);
+          markAnswered('grants');
         } else if (data.type === 'APPROVAL_GRANT_REVOKE_RESPONSE') {
           // The revoke response carries the refreshed grants list.
           if (Array.isArray(data.payload.grants)) {
             setApprovalGrants(data.payload.grants);
+            markAnswered('grants');
           }
         } else if (data.type === 'TOOL_POLICY_SET_RESPONSE') {
           if (data.payload.success) {
@@ -391,9 +414,13 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
           // E6-F14: feeds the About section's local-guide entry point.
           setAboutWorkspaces(data.payload.workspaces || []);
         } else if (data.type === 'SKILL_TOGGLE_RESPONSE') {
-          if (data.payload.skills) setSkills(data.payload.skills);
+          if (data.payload.skills) {
+            setSkills(data.payload.skills);
+            markAnswered('skills');
+          }
         } else if (data.type === 'SKILL_LIST_RESPONSE') {
           setSkills(data.payload.skills || []);
+          markAnswered('skills');
         } else if (data.type === 'PLUGIN_INSTALL_RESPONSE' || data.type === 'PLUGIN_UNINSTALL_RESPONSE' || data.type === 'PLUGIN_TOGGLE_RESPONSE') {
           if (data.payload.success) {
             // P-2: success clears any earlier failure notice and
@@ -782,7 +809,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             functional must be functional, or it must go — this one went. */}
 
         {activeMenu === 'Providers' && (
-          <ProviderSettings providers={providers} health={providerHealth} />
+          <ProviderSettings providers={providers} health={providerHealth} providersLoaded={providersLoaded} />
         )}
 
         {activeMenu === 'Models' && (
@@ -806,6 +833,22 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
 
             {modelTab === 'cloud' && (
                <>
+                 {/* RUX-C-01: config-driven controls on this tab
+                     (reasoning effort, auxiliary models, speech)
+                     show engine defaults until the first config
+                     answer lands — the tab says so until then. */}
+                 {!answered.config && (
+                   <div style={{ marginBottom: '24px' }}>
+                     <LoadStateRow
+                       loadState="loading"
+                       isConnected={isConnected}
+                       testId="models-config-load-state"
+                       variant="plain"
+                       loadingText="Loading your saved model settings…"
+                       offlineText="Waiting for the engine — your saved model settings will appear here once it connects."
+                     />
+                   </div>
+                 )}
                  <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', marginBottom: '24px' }}>
                    <div style={{ display: 'flex', gap: '24px' }}>
                      <div style={{ flex: 1 }}>
@@ -979,6 +1022,20 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         {activeMenu === 'Agents' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
             <DiagnosticsPanel activeMenu='Agents' />
+            {/* RUX-C-01: the orchestration controls below are driven
+                by the applied config; until the first config answer
+                lands they would present factory defaults as the
+                saved configuration, so the section says so. */}
+            {!answered.config && (
+              <LoadStateRow
+                loadState="loading"
+                isConnected={isConnected}
+                testId="agents-config-load-state"
+                variant="plain"
+                loadingText="Loading your saved agent settings…"
+                offlineText="Waiting for the engine — your saved agent settings will appear here once it connects."
+              />
+            )}
             <OrchestrationPanel config={engineConfig} configError={configUpdateError} onConfigUpdate={sendConfigUpdate} />
           </div>
         )}
@@ -1127,7 +1184,16 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             <div data-testid="approval-grants" style={{ marginBottom: '24px' }}>
               <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '4px' }}>Approval grants</h3>
               <p style={{ fontSize: '13px', color: '#9090a0', marginBottom: '12px' }}>Files and folders you approved with &quot;remember&quot; — matching tool calls run without asking until you revoke the grant. A grant covers any tool at or below its risk ceiling under the path; the tool named on each grant is the one it was created from.</p>
-              {approvalGrants.length === 0 ? (
+              {!answered.grants && approvalGrants.length === 0 ? (
+                <LoadStateRow
+                  loadState="loading"
+                  isConnected={isConnected}
+                  testId="approval-grants-load-state"
+                  loadingText="Loading approval grants…"
+                  offlineText="Waiting for the engine — remembered approval grants will appear here once it connects."
+                  style={{ padding: '16px' }}
+                />
+              ) : approvalGrants.length === 0 ? (
                 <div style={{ color: '#9090a0', fontSize: '14px', padding: '16px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
                   No approval grants remembered.
                 </div>
@@ -1166,10 +1232,31 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               )}
             </div>
 
-            <PathRulesPanel rules={engineConfig ? engineConfig.path_rules : undefined} configError={configUpdateError} onConfigUpdate={sendConfigUpdate} />
+            {/* RUX-C-06: the path-rules editor is config-driven —
+                before the config answer it showed "No path rules."
+                for a config that simply had not loaded yet. */}
+            {!answered.config ? (
+              <LoadStateRow
+                loadState="loading"
+                isConnected={isConnected}
+                testId="path-rules-load-state"
+                loadingText="Loading path rules…"
+                offlineText="Waiting for the engine — your path rules will appear here once it connects."
+              />
+            ) : (
+              <PathRulesPanel rules={engineConfig ? engineConfig.path_rules : undefined} configError={configUpdateError} onConfigUpdate={sendConfigUpdate} />
+            )}
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {tools.length === 0 ? (
+              {!answered.tools && tools.length === 0 ? (
+                <LoadStateRow
+                  loadState="loading"
+                  isConnected={isConnected}
+                  testId="tools-load-state"
+                  loadingText="Loading tools…"
+                  offlineText="Waiting for the engine — registered tools will appear here once it connects."
+                />
+              ) : tools.length === 0 ? (
                 <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
                   No tools registered.
                 </div>
@@ -1285,7 +1372,15 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               Dynamic behaviors, prompts, and tool requirements loaded from `.agents/skills`. Trigger these in chat with slash commands.
             </p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {skills.length === 0 ? (
+              {!answered.skills && skills.length === 0 ? (
+                <LoadStateRow
+                  loadState="loading"
+                  isConnected={isConnected}
+                  testId="skills-load-state"
+                  loadingText="Loading skills…"
+                  offlineText="Waiting for the engine — skills from your workspace will appear here once it connects."
+                />
+              ) : skills.length === 0 ? (
                 <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
                   No skills found in workspace. Create a skill in <code>.agents/skills/</code>.
                 </div>
@@ -1362,7 +1457,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         )}
 
         {activeMenu === 'Usage' && (
-          <UsageSettingsPanel wsRef={wsRef} safeSend={safeSend} pendingMessages={pendingMessages} reconnectCount={reconnectCount} sessionId={activeSession} dailyBudget={dailyBudget} budgetAlert={budgetAlert} budgetExceeded={!!budgetAlert} />
+          <UsageSettingsPanel wsRef={wsRef} safeSend={safeSend} pendingMessages={pendingMessages} reconnectCount={reconnectCount} sessionId={activeSession} dailyBudget={dailyBudget} budgetAlert={budgetAlert} budgetExceeded={!!budgetAlert} isConnected={isConnected} />
         )}
 
         {activeMenu === 'PasswordVault' && (
@@ -1375,6 +1470,21 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Advanced Settings</h2>
               <p style={{ color: '#9090a0', fontSize: '14px' }}>System configurations and developer options.</p>
             </div>
+
+            {/* RUX-C-01: the routing/fallback controls and the
+                project layer below are config-driven — until the
+                first config answer lands, the section says its
+                saved values are still loading. */}
+            {!answered.config && (
+              <LoadStateRow
+                loadState="loading"
+                isConnected={isConnected}
+                testId="advanced-config-load-state"
+                variant="plain"
+                loadingText="Loading your saved settings…"
+                offlineText="Waiting for the engine — your saved settings will appear here once it connects."
+              />
+            )}
 
             <div style={{ background: 'rgba(239,68,68,0.05)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: '12px', padding: '24px' }}>
               <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Reset all settings</h3>
@@ -1695,6 +1805,23 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>
               Fine-tune speech detection and endpointing thresholds. Changes take effect on the next voice session.
             </p>
+
+            {/* RUX-C-01: the sliders below are config-driven — until
+                the first config answer lands they hold local
+                defaults, and the section says so rather than letting
+                0.50 / 700 ms pose as the saved values. */}
+            {!answered.config && (
+              <div style={{ marginBottom: '24px' }}>
+                <LoadStateRow
+                  loadState="loading"
+                  isConnected={isConnected}
+                  testId="voice-config-load-state"
+                  variant="plain"
+                  loadingText="Loading your saved voice settings…"
+                  offlineText="Waiting for the engine — your saved voice settings will appear here once it connects."
+                />
+              </div>
+            )}
 
             <div style={{
               background: 'rgba(255,255,255,0.02)',

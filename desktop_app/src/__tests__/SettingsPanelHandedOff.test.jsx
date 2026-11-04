@@ -77,8 +77,13 @@ describe('SettingsPanel handed-off surfaces (E6-F05)', () => {
     const { wsRef, sent, deliver } = makeWsRef();
     render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
     fireEvent.click(screen.getByText('Tools'));
-    expect(screen.getByText('Path rules')).toBeInTheDocument();
+    // Wave 3 slice 1 (RUX-C-01/C-06): before the config answer the
+    // editor is NOT mounted — it would render "No path rules." for
+    // a config that has not loaded yet. A load state shows instead.
+    expect(screen.queryByText('Path rules')).not.toBeInTheDocument();
+    expect(screen.getByTestId('path-rules-load-state')).toBeInTheDocument();
     deliver({ type: 'CONFIG_GET_RESPONSE', payload: { config: FULL_CONFIG } });
+    expect(screen.getByText('Path rules')).toBeInTheDocument();
     expect(screen.getByTestId('path-rule-prefix-0')).toHaveValue('/home/u/projects');
     fireEvent.change(screen.getByTestId('path-rule-prefix-0'), {
       target: { value: '/home/u/work' },

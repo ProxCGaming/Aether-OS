@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Globe, ShieldAlert, Wallet, Layers, KeyRound } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
+import LoadStateRow from './LoadStateRow';
 
 // Epic 8, E8-6.2: Settings → Browser Agent Policy. The owner's
 // confirmation policy for the agent browser: a master switch, the
@@ -78,9 +79,17 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
   const socket = useAetherSocket();
   const wsRef = propWsRef || socket?.wsRef;
   const contextSendMessage = socket?.sendMessage;
+  const isConnected = socket?.isConnected;
 
   const [policy, setPolicy] = useState(PRESET);
   const [error, setError] = useState('');
+  // RUX-C-02 (Wave 3 slice 1): PRESET is only a merge base for a real
+  // reply — it must never RENDER as the live policy. Until the GET
+  // reply lands, the panel shows a load state (loading / offline /
+  // error) instead of the controls, so nobody can read — or flip a
+  // toggle against — values the engine never reported.
+  const [policyLoad, setPolicyLoad] = useState('loading');
+  const [policyLoadError, setPolicyLoadError] = useState('');
 
   const sendEvent = useCallback(
     (type, payload = {}) => {
@@ -114,14 +123,25 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'BROWSER_POLICY_GET_RESPONSE' && data.payload) {
-          setPolicy({ ...PRESET, ...data.payload, categories: { ...PRESET.categories, ...(data.payload.categories || {}) } });
-          setError('');
+          // A successful GET carries the policy fields themselves; a
+          // failure carries success:false / an error instead. The
+          // failure is a load ERROR state (RUX-C-02) — never a silent
+          // fall-through to the preset.
+          if (data.payload.success === false || data.payload.error) {
+            setPolicyLoadError(data.payload.error || 'The browser policy could not be loaded.');
+            setPolicyLoad('error');
+          } else {
+            setPolicy({ ...PRESET, ...data.payload, categories: { ...PRESET.categories, ...(data.payload.categories || {}) } });
+            setPolicyLoad('ready');
+            setError('');
+          }
         } else if (data.type === 'BROWSER_POLICY_SET_RESPONSE' && data.payload) {
           // The response carries the full authoritative policy —
           // render exactly that (a rejected update echoes the
           // unchanged policy, so the controls snap back).
           if (data.payload.policy) {
             setPolicy({ ...PRESET, ...data.payload.policy, categories: { ...PRESET.categories, ...(data.payload.policy.categories || {}) } });
+            setPolicyLoad('ready');
           }
           setError(data.payload.success ? '' : data.payload.error || 'The policy update was rejected.');
         }
@@ -170,6 +190,18 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
           {error}
         </div>
       )}
+
+      {policyLoad !== 'ready' ? (
+        <LoadStateRow
+          loadState={policyLoad}
+          isConnected={isConnected}
+          testId="browser-policy-load-state"
+          loadingText="Loading your saved browser policy…"
+          offlineText="Waiting for the engine — your saved browser policy will appear here once it connects. Nothing is in force on this screen until it does."
+          errorText={policyLoadError || 'The browser policy could not be loaded.'}
+        />
+      ) : (
+      <>
 
       <div style={rowStyle}>
         <div style={{ display: 'flex', gap: '12px' }}>
@@ -267,6 +299,9 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
           ))}
         </div>
       </div>
+
+      </>
+      )}
     </div>
   );
 }

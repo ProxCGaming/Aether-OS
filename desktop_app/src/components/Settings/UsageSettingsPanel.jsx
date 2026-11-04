@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { AlertTriangle, Check } from 'lucide-react';
 import { formatUsd } from '../CostHeaderPopover';
 import { COMPONENT_COLORS, componentSharePct, contextCapacity, contextShareBasis } from '../ContextBar';
+import LoadStateRow from './LoadStateRow';
 
 // Epic 8, E8-A8.1b: Usage & Budget Settings Panel.
 //
@@ -21,9 +22,10 @@ export default function UsageSettingsPanel({
   initialTotals = null,
   initialBreakdown = null,
   sessionId = null,
-  todaySpend = 0,
+  todaySpend = null,
   dailyBudget = null,
   budgetExceeded = false,
+  isConnected = null,
 }) {
   const [totals, setTotals] = useState(initialTotals);
   const [breakdown, setBreakdown] = useState(initialBreakdown);
@@ -31,18 +33,31 @@ export default function UsageSettingsPanel({
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isExceeded, setIsExceeded] = useState(budgetExceeded);
   const [currentTodaySpend, setCurrentTodaySpend] = useState(todaySpend);
+  // RUX-C-04 (Wave 3 slice 1): the ledger and context queries track
+  // whether the engine has ANSWERED. Until a query answers, its
+  // figures are not rendered at all — the old code rendered the
+  // null totals as "$0.00 / 0 tokens", false financial data a user
+  // could budget against. A reply without the expected data is an
+  // error state, never zeros. "Today's spend" follows the same
+  // rule: no source (no prop value, no budget event) renders "—".
+  const [ledgerState, setLedgerState] = useState(initialTotals ? 'ready' : 'loading');
+  const [ledgerError, setLedgerError] = useState('');
+  const [breakdownState, setBreakdownState] = useState(initialBreakdown ? 'ready' : 'loading');
+  const [breakdownError, setBreakdownError] = useState('');
 
   useEffect(() => {
     if (initialTotals) {
       setTotals(initialTotals);
+      setLedgerState('ready');
     }
     if (initialBreakdown) {
       setBreakdown(initialBreakdown);
+      setBreakdownState('ready');
     }
     if (dailyBudget != null) {
       setBudgetInput(String(dailyBudget));
     }
-    setIsExceeded(budgetExceeded || (dailyBudget != null && todaySpend > dailyBudget));
+    setIsExceeded(budgetExceeded || (dailyBudget != null && todaySpend != null && todaySpend > dailyBudget));
     setCurrentTodaySpend(todaySpend);
   }, [initialTotals, initialBreakdown, dailyBudget, todaySpend, budgetExceeded]);
 
@@ -79,12 +94,23 @@ export default function UsageSettingsPanel({
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'USAGE_LEDGER_QUERY_RESPONSE') {
+          // RUX-C-04: a reply carrying totals answers the query; a
+          // reply without them (a failure payload) is an error
+          // state — totals stay unrendered, never $0.00.
           if (data.payload?.totals) {
             setTotals(data.payload.totals);
+            setLedgerState('ready');
+          } else {
+            setLedgerError(data.payload?.error || 'The usage ledger could not be loaded.');
+            setLedgerState((prev) => (prev === 'ready' ? prev : 'error'));
           }
         } else if (data.type === 'CONTEXT_BREAKDOWN_RESPONSE') {
-          if (data.payload) {
+          if (data.payload && (data.payload.components || data.payload.model)) {
             setBreakdown(data.payload);
+            setBreakdownState('ready');
+          } else if (data.payload?.success === false || data.payload?.error) {
+            setBreakdownError(data.payload.error || 'The current context snapshot could not be loaded.');
+            setBreakdownState((prev) => (prev === 'ready' ? prev : 'error'));
           }
         } else if (data.type === 'DAILY_BUDGET_SET_RESPONSE') {
           const b = data.payload?.daily_budget_usd;
@@ -184,7 +210,7 @@ export default function UsageSettingsPanel({
           <AlertTriangle size={20} />
           <div>
             <div style={{ fontWeight: 600, fontSize: '14px' }}>
-              Daily Budget Exceeded ({formatUsd(currentTodaySpend)} spent today)
+              Daily Budget Exceeded ({currentTodaySpend != null ? `${formatUsd(currentTodaySpend)} spent today` : 'spend today not reported'})
             </div>
             <div style={{ fontSize: '12px', color: 'rgba(255, 255, 255, 0.7)', marginTop: '2px' }}>
               Running tasks finish uninterrupted. Budget limits are soft alerts and never halt work mid-flight.
@@ -214,7 +240,7 @@ export default function UsageSettingsPanel({
           <div style={{ textAlign: 'right' }}>
             <span style={{ fontSize: '12px', color: '#9090a0' }}>Today's spend</span>
             <div style={{ fontSize: '16px', fontWeight: 600, color: '#fff' }}>
-              {formatUsd(currentTodaySpend)}
+              {currentTodaySpend != null ? formatUsd(currentTodaySpend) : '—'}
             </div>
           </div>
         </div>
@@ -317,8 +343,16 @@ export default function UsageSettingsPanel({
         </div>
 
         {!breakdown ? (
-          <div style={{ color: '#9090a0', fontSize: '13px', padding: '12px 0' }}>
-            No current context snapshot yet — it appears once the engine answers for the active session.
+          <div style={{ padding: '12px 0' }}>
+            <LoadStateRow
+              loadState={breakdownState}
+              isConnected={isConnected}
+              testId="usage-context-load-state"
+              variant="plain"
+              loadingText="Loading the current context snapshot — it appears once the engine answers for the active session."
+              offlineText="Waiting for the engine — the current context snapshot will appear here once it connects."
+              errorText={breakdownError || 'The current context snapshot could not be loaded.'}
+            />
           </div>
         ) : (
           <>
@@ -409,6 +443,31 @@ export default function UsageSettingsPanel({
           </>
         )}
       </div>
+
+      {/* RUX-C-04: until the ledger query answers, neither usage
+          card renders — the totals (and their $0.00 placeholder
+          arithmetic) appear only with a real answer behind them. */}
+      {ledgerState !== 'ready' ? (
+        <div
+          style={{
+            background: 'rgba(255, 255, 255, 0.02)',
+            border: '1px solid rgba(255, 255, 255, 0.08)',
+            borderRadius: '12px',
+            padding: '20px',
+          }}
+        >
+          <LoadStateRow
+            loadState={ledgerState}
+            isConnected={isConnected}
+            testId="usage-ledger-load-state"
+            variant="plain"
+            loadingText="Loading usage from the ledger…"
+            offlineText="Waiting for the engine — usage totals will appear here once it connects."
+            errorText={ledgerError || 'The usage ledger could not be loaded.'}
+          />
+        </div>
+      ) : (
+      <>
 
       {/* Usage by Model */}
       <div
@@ -536,6 +595,9 @@ export default function UsageSettingsPanel({
           </div>
         )}
       </div>
+
+      </>
+      )}
     </div>
   );
 }
