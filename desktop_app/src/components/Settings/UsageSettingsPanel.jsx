@@ -15,6 +15,8 @@ import { COMPONENT_COLORS, componentSharePct, contextCapacity, contextShareBasis
 
 export default function UsageSettingsPanel({
   wsRef,
+  safeSend = null,
+  pendingMessages = [],
   initialTotals = null,
   initialBreakdown = null,
   sessionId = null,
@@ -106,19 +108,36 @@ export default function UsageSettingsPanel({
     };
   }, [wsRef, initialTotals, initialBreakdown, sessionId]);
 
+  // RUX-A-20: Save / Clear are user actions on a money-related
+  // setting — through safeSend they QUEUE while the engine is
+  // unreachable instead of being discarded by the readyState guard
+  // this used to carry (the click produced neither success nor
+  // error, and "Saved" only ever appeared on an engine response).
+  // The standalone-mount fallback keeps the exact legacy envelope,
+  // request_id prefixes included. While a change is queued, the
+  // controls below are inert and the note names what will land —
+  // the "Saved" confirmation still comes only from the response.
+  const sendBudgetSet = (value) => {
+    if (safeSend) return safeSend('DAILY_BUDGET_SET_REQUEST', { daily_budget_usd: value });
+    if (wsRef?.current) {
+      wsRef.current.send(JSON.stringify({
+        type: 'DAILY_BUDGET_SET_REQUEST',
+        schema_version: 1,
+        request_id: `${value === null ? 'budget_clear' : 'budget_set'}_${Date.now()}`,
+        payload: { daily_budget_usd: value },
+      }));
+    }
+    return undefined;
+  };
+  const pendingBudgetEntry = (pendingMessages || []).find(
+    (m) => m && m.type === 'DAILY_BUDGET_SET_REQUEST',
+  );
+
   const handleSaveBudget = (e) => {
     e.preventDefault();
     const parsed = parseFloat(budgetInput);
     const validBudget = !isNaN(parsed) && parsed > 0 ? parsed : null;
-
-    if (wsRef?.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'DAILY_BUDGET_SET_REQUEST',
-        schema_version: 1,
-        request_id: `budget_set_${Date.now()}`,
-        payload: { daily_budget_usd: validBudget },
-      }));
-    }
+    sendBudgetSet(validBudget);
   };
 
   const byModel = totals?.by_model || {};
@@ -221,6 +240,7 @@ export default function UsageSettingsPanel({
           <button
             type="submit"
             data-testid="daily-budget-save-btn"
+            disabled={Boolean(pendingBudgetEntry)}
             style={{
               padding: '9px 18px',
               borderRadius: '8px',
@@ -237,19 +257,20 @@ export default function UsageSettingsPanel({
           >
             {savedSuccess ? <><Check size={14} /> Saved</> : 'Save Budget'}
           </button>
+          {pendingBudgetEntry && (
+            <span data-testid="daily-budget-queued" style={{ fontSize: '12px', color: '#fbbf24' }}>
+              {pendingBudgetEntry.payload && pendingBudgetEntry.payload.daily_budget_usd != null
+                ? `Daily budget change to $${pendingBudgetEntry.payload.daily_budget_usd} queued — will apply when the engine reconnects.`
+                : 'Daily budget clear queued — will apply when the engine reconnects.'}
+            </span>
+          )}
           {budgetInput && (
             <button
               type="button"
+              disabled={Boolean(pendingBudgetEntry)}
               onClick={() => {
                 setBudgetInput('');
-                if (wsRef?.current?.readyState === WebSocket.OPEN) {
-                  wsRef.current.send(JSON.stringify({
-                    type: 'DAILY_BUDGET_SET_REQUEST',
-                    schema_version: 1,
-                    request_id: `budget_clear_${Date.now()}`,
-                    payload: { daily_budget_usd: null },
-                  }));
-                }
+                sendBudgetSet(null);
               }}
               style={{
                 background: 'transparent',

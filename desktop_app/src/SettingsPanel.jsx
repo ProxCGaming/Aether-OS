@@ -24,12 +24,8 @@ import ProjectConfigPanel from './components/Settings/ProjectConfigPanel';
 export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages = [], providers = [], providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null, initialMenu = null, onInitialMenuConsumed = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
   const [modelTab, setModelTab] = useState('cloud'); // 'cloud' or 'local'
-  const [keys, setKeys] = useState({});
-  const [baseUrls, setBaseUrls] = useState({});
-  const [expandedProvider, setExpandedProvider] = useState(null);
   const [validationState, setValidationState] = useState({}); // { provider: 'testing' | 'saving' | 'success' | 'error' }
   const [validationMsg, setValidationMsg] = useState({});
-  const [customDisplayNames, setCustomDisplayNames] = useState({}); // for custom_openai
   
   const [tools, setTools] = useState([]);
   // Epic 2: approval mode ('ask' | 'write', from TOOL_LIST_RESPONSE) and
@@ -120,14 +116,15 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     }
     setSnipHotkey(hotkey);
     setSnipHotkeyError('');
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'CONFIG_UPDATE_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { config: { snip_hotkey: hotkey } }
-      }));
-    }
+    // RUX-A-12: persisting the hotkey engine-side is a user action —
+    // it goes through the shared safe-send helper (defined below),
+    // so a change made while the engine is unreachable is QUEUED
+    // and lands on reconnect instead of being discarded by the
+    // readyState guard this used to carry (the field showed the new
+    // value while the engine kept the old one, and the change
+    // silently reverted on the next config load). The queued state
+    // is shown under the field via pendingConfigValue('snip_hotkey').
+    sendSettingsAction('CONFIG_UPDATE_REQUEST', { config: { snip_hotkey: hotkey } });
     return true;
   };
   // Voice Tuning State (E8-5.2)
@@ -143,70 +140,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   const [memoryTab, setMemoryTab] = useState('episodic');
   const [episodes, setEpisodes] = useState([]);
   const [facts, setFacts] = useState([]);
-  const [selectedEpisode, setSelectedEpisode] = useState(null);
   
   const [capabilityHistory, setCapabilityHistory] = useState([]);
   const [capabilityStatus, setCapabilityStatus] = useState(null);
   const [isDiagnosticsRunning, setIsDiagnosticsRunning] = useState(false);
-
-  const handleDeleteEpisode = (taskId) => {
-    if (!taskId) return;
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'MEMORY_EPISODE_DELETE_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { task_id: taskId }
-      }));
-    }
-    setEpisodes(prev => prev.filter(ep => ep.task_id !== taskId));
-    if (selectedEpisode?.task_id === taskId) {
-      setSelectedEpisode(null);
-    }
-  };
-
-  const handleClearAllEpisodes = () => {
-    if (window.confirm("Are you sure you want to clear all stored episodic memories?")) {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'MEMORY_EPISODES_CLEAR_REQUEST',
-          schema_version: 1,
-          request_id: Date.now().toString(),
-          payload: {}
-        }));
-      }
-      setEpisodes([]);
-      setSelectedEpisode(null);
-    }
-  };
-
-  const handleDeleteFact = (factId) => {
-    if (!factId) return;
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'MEMORY_FACT_DELETE_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { fact_id: factId }
-      }));
-    }
-    setFacts(prev => prev.filter(f => f.fact_id !== factId));
-  };
-
-  const handleDeleteEntity = (entityName) => {
-    if (!entityName) return;
-    if (window.confirm(`Delete all facts associated with "${entityName}"?`)) {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'MEMORY_ENTITY_DELETE_REQUEST',
-          schema_version: 1,
-          request_id: Date.now().toString(),
-          payload: { entity_name: entityName }
-        }));
-      }
-      setFacts(prev => prev.filter(f => f.entity_name !== entityName));
-    }
-  };
 
   // E6-F05: the handed-off panels report edits as partial config
   // objects; they go out through the one CONFIG_UPDATE flow.
@@ -258,6 +195,48 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   );
   const modelSwitchQueued = Boolean(pendingModelSwitch);
 
+  // Wave 2 slice 3a (RUX-A-10/A-11/A-12/A-14/A-15): the same
+  // treatment for the remaining Settings user actions that still
+  // carried readyState guards — tool policy changes, approval-grant
+  // revokes, the snip-hotkey persist, skill toggles and the Voice
+  // Tuning sliders. sendSettingsAction is sendModelDefault generalised:
+  // safeSend when App handed it down, the unconditional facade send
+  // (E6-F15 discipline, same wire envelope) otherwise. The pending*
+  // derivations read the REAL offline queue through pendingMessages,
+  // so every affordance below clears itself the moment the queue
+  // flushes on reconnect — no local flag can drift from the truth.
+  const sendSettingsAction = (type, payload) => {
+    if (safeSend) return safeSend(type, payload);
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({
+        type,
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload
+      }));
+    }
+    return undefined;
+  };
+  const pendingOfType = (type) => (pendingMessages || []).filter(
+    (m) => m && m.type === type
+  );
+  const pendingToolPolicyFor = (toolName) => pendingOfType('TOOL_POLICY_SET_REQUEST')
+    .find((m) => m.payload && m.payload.tool_name === toolName);
+  const pendingGrantRevokeFor = (id) => pendingOfType('APPROVAL_GRANT_REVOKE_REQUEST')
+    .some((m) => m.payload && m.payload.id === id);
+  const pendingSkillToggleFor = (name) => pendingOfType('SKILL_TOGGLE_REQUEST')
+    .find((m) => m.payload && m.payload.name === name);
+  // CONFIG_UPDATE_REQUEST entries carry { config: { key: value } };
+  // the value a queued edit will land, or undefined when no queued
+  // edit touches that key. Shared by the snip field (A-12), the
+  // Voice sliders (A-15) and — via the pendingMessages prop — the
+  // Speech dropdowns (A-22).
+  const pendingConfigValue = (key) => {
+    const entry = pendingOfType('CONFIG_UPDATE_REQUEST')
+      .find((m) => m.payload && m.payload.config && key in m.payload.config);
+    return entry ? entry.payload.config[key] : undefined;
+  };
+
   const handleProjectLayerSave = (content) => {
     if (wsRef.current) {
       wsRef.current.send(JSON.stringify({
@@ -294,29 +273,13 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     sendConfigUpdate({ approval_binding_mode: mode });
   };
 
+  // RUX-A-11: a revoke is a security-relevant user action — through
+  // safeSend it QUEUES while the engine is unreachable instead of
+  // being silently discarded by the guard this used to carry. The
+  // grant row stays (it is still in force) and its button shows the
+  // queued state until the revoke response replaces the list.
   const handleRevokeGrant = (id) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'APPROVAL_GRANT_REVOKE_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { id }
-      }));
-    }
-  };
-
-  const handleClearAllFacts = () => {
-    if (window.confirm("Are you sure you want to clear all facts from the Knowledge Graph?")) {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'MEMORY_GRAPH_CLEAR_REQUEST',
-          schema_version: 1,
-          request_id: Date.now().toString(),
-          payload: {}
-        }));
-      }
-      setFacts([]);
-    }
+    sendSettingsAction('APPROVAL_GRANT_REVOKE_REQUEST', { id });
   };
 
   useEffect(() => {
@@ -443,7 +406,6 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
           setEpisodes(data.payload.episodes || []);
         } else if (data.type === 'MEMORY_EPISODES_CLEAR_RESPONSE') {
           setEpisodes([]);
-          setSelectedEpisode(null);
         } else if (data.type === 'MEMORY_GRAPH_RESPONSE' || data.type === 'MEMORY_FACT_DELETE_RESPONSE' || data.type === 'MEMORY_ENTITY_DELETE_RESPONSE') {
           setFacts(data.payload.facts || []);
         } else if (data.type === 'MEMORY_GRAPH_CLEAR_RESPONSE') {
@@ -687,88 +649,6 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
       }));
     }
   }, [activeMenu, wsRef]);
-
-  useEffect(() => {
-    // Initialize local state with backend keys.
-    // Phase 10.1 C1: we never receive the actual API key for security, and
-    // keys are never mirrored to localStorage — the password field always
-    // starts empty; the user re-enters a key to change it. Configured state
-    // comes from the engine's has_key, never from a stored key.
-    const initBaseUrls = {};
-    if (Array.isArray(providers)) {
-      providers.forEach(p => {
-        initBaseUrls[p.name] = p.base_url || '';
-      });
-    }
-    setBaseUrls(prev => ({...initBaseUrls, ...prev}));
-  }, [providers]);
-
-  const handleSaveKey = (providerName) => {
-    let finalProviderName = providerName;
-    let displayName = undefined;
-    
-    if (providerName === 'custom_openai') {
-      const name = customDisplayNames[providerName];
-      if (!name) {
-        setValidationState(prev => ({ ...prev, [providerName]: 'error' }));
-        setValidationMsg(prev => ({ ...prev, [providerName]: 'Display Name is required.' }));
-        return;
-      }
-      finalProviderName = `custom_${name.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
-      displayName = name;
-    }
-
-    setValidationState(prev => ({ ...prev, [providerName]: 'saving' }));
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      const apiKeyToSave = keys[providerName] || '';
-      // Phase 10.1 C1: keys are NEVER mirrored to localStorage (or any other
-      // renderer storage). The engine's secure secret store is the only
-      // destination — the key goes out via PROVIDER_SAVE_REQUEST only.
-      wsRef.current.send(JSON.stringify({
-        type: 'PROVIDER_SAVE_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: {
-          provider: finalProviderName,
-          api_key: apiKeyToSave,
-          base_url: baseUrls[providerName] || '',
-          ...(displayName && { display_name: displayName, provider_type: 'openai_compatible' })
-        }
-      }));
-    }
-  };
-
-  const handleTestKey = (providerName) => {
-    setValidationState(prev => ({ ...prev, [providerName]: 'testing' }));
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'SETTINGS_PROVIDER_VALIDATE_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: {
-          provider: providerName,
-          api_key: keys[providerName] || '',
-          base_url: baseUrls[providerName] || ''
-        }
-      }));
-    }
-  };
-
-  const handleDisconnect = (e, providerName) => {
-    e.stopPropagation(); // prevent accordion from expanding/collapsing
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'PROVIDER_REMOVE_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: {
-          provider: providerName
-        }
-      }));
-      setExpandedProvider(null);
-    }
-  };
-
 
   // NOTE (Phase 9, B3): the old llama.cpp "mock check for demo" download flow
   // was deleted here — it was dead code (never rendered, never called). Local
@@ -1058,6 +938,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                    config={engineConfig}
                    configError={configUpdateError}
                    onConfigUpdate={sendConfigUpdate}
+                   pendingMessages={pendingMessages}
                    wsRef={wsRef}
                  />
                </>
@@ -1232,12 +1113,24 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                           <span style={{ fontSize: '11px', color: '#9090a0', marginLeft: '8px' }}>originating tool: {grant.tool_name}</span>
                         )}
                       </div>
-                      <button
-                        onClick={() => handleRevokeGrant(grant.id)}
-                        style={{ padding: '6px 12px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.15)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.35)', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}
-                      >
-                        Revoke
-                      </button>
+                      {pendingGrantRevokeFor(grant.id) ? (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <button
+                            disabled
+                            style={{ padding: '6px 12px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.08)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.2)', cursor: 'default', fontSize: '12px', fontWeight: 500, opacity: 0.55 }}
+                          >
+                            Revoke queued
+                          </button>
+                          <span style={{ fontSize: '11px', color: '#fbbf24' }}>will apply when the engine reconnects</span>
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => handleRevokeGrant(grant.id)}
+                          style={{ padding: '6px 12px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.15)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.35)', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}
+                        >
+                          Revoke
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1300,22 +1193,38 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                         )}
                       </div>
                       <div>
-                        <Dropdown 
-                          value={tool.policy_is_default ? effectivePolicyValue : tool.policy}
-                          onChange={(val) => {
-                            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                              wsRef.current.send(JSON.stringify({
-                                type: 'TOOL_POLICY_SET_REQUEST',
-                                schema_version: 1,
-                                request_id: Date.now().toString(),
-                                payload: { tool_name: tool.function.name, policy: val }
-                              }));
-                            }
-                          }}
-                          options={options}
-                          style={{ width: '220px' }}
-                          align="right"
-                        />
+                        {(() => {
+                          // RUX-A-10: the dropdown is controlled from
+                          // the engine's tool list, so a discarded
+                          // change snapped back with no explanation —
+                          // and a user could believe a tool restricted
+                          // when it was not. Through safeSend the pick
+                          // QUEUES while offline; while THIS tool's
+                          // change is queued its dropdown is inert and
+                          // names the pending policy, and the reply
+                          // drives the control when it lands.
+                          const pendingPolicy = pendingToolPolicyFor(tool.function.name);
+                          return (
+                            <>
+                              <div style={{ opacity: pendingPolicy ? 0.55 : 1, pointerEvents: pendingPolicy ? 'none' : 'auto' }}>
+                                <Dropdown
+                                  value={tool.policy_is_default ? effectivePolicyValue : tool.policy}
+                                  onChange={(val) => {
+                                    sendSettingsAction('TOOL_POLICY_SET_REQUEST', { tool_name: tool.function.name, policy: val });
+                                  }}
+                                  options={options}
+                                  style={{ width: '220px' }}
+                                  align="right"
+                                />
+                              </div>
+                              {pendingPolicy && (
+                                <div style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px', width: '220px' }}>
+                                  Policy change to {pendingPolicy.payload.policy} queued — will apply when the engine reconnects.
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                     </div>
                   );
@@ -1380,19 +1289,26 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                     <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', gap: '10px' }}>
                       <button
                         onClick={() => {
-                          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                            wsRef.current.send(JSON.stringify({
-                              type: 'SKILL_TOGGLE_REQUEST',
-                              schema_version: 1,
-                              request_id: Date.now().toString(),
-                              payload: { name: skill.name, enabled: skill.enabled === false }
-                            }));
-                          }
+                          // RUX-A-14: through safeSend the toggle
+                          // QUEUES while the engine is unreachable
+                          // instead of being discarded by the guard
+                          // this used to carry (the click visibly did
+                          // nothing). The label stays driven by the
+                          // engine's list — no fake state — and the
+                          // pending note below carries the honesty
+                          // until the refreshed list lands.
+                          sendSettingsAction('SKILL_TOGGLE_REQUEST', { name: skill.name, enabled: skill.enabled === false });
                         }}
-                        style={{ background: skill.enabled === false ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.12)', color: skill.enabled === false ? '#10b981' : '#f87171', border: '1px solid rgba(255,255,255,0.12)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px' }}
+                        disabled={Boolean(pendingSkillToggleFor(skill.name))}
+                        style={{ background: skill.enabled === false ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.12)', color: skill.enabled === false ? '#10b981' : '#f87171', border: '1px solid rgba(255,255,255,0.12)', padding: '6px 14px', borderRadius: '8px', cursor: pendingSkillToggleFor(skill.name) ? 'default' : 'pointer', fontSize: '12px', opacity: pendingSkillToggleFor(skill.name) ? 0.55 : 1 }}
                       >
                         {skill.enabled === false ? 'Enable skill' : 'Disable skill'}
                       </button>
+                      {pendingSkillToggleFor(skill.name) && (
+                        <span style={{ fontSize: '12px', color: '#fbbf24' }}>
+                          {pendingSkillToggleFor(skill.name).payload.enabled ? 'Enable' : 'Disable'} queued — will apply when the engine reconnects
+                        </span>
+                      )}
                       {skill.enabled === false && (
                         <span style={{ fontSize: '12px', color: '#9090a0' }}>Disabled — hidden from agents</span>
                       )}
@@ -1417,7 +1333,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         )}
 
         {activeMenu === 'Usage' && (
-          <UsageSettingsPanel wsRef={wsRef} sessionId={activeSession} dailyBudget={dailyBudget} budgetAlert={budgetAlert} budgetExceeded={!!budgetAlert} />
+          <UsageSettingsPanel wsRef={wsRef} safeSend={safeSend} pendingMessages={pendingMessages} sessionId={activeSession} dailyBudget={dailyBudget} budgetAlert={budgetAlert} budgetExceeded={!!budgetAlert} />
         )}
 
         {activeMenu === 'PasswordVault' && (
@@ -1645,6 +1561,11 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                   {snipHotkeyError}
                 </div>
               )}
+              {pendingConfigValue('snip_hotkey') !== undefined && (
+                <div data-testid="snip-hotkey-queued" style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
+                  Snip hotkey change to {pendingConfigValue('snip_hotkey')} queued — will be saved when the engine reconnects.
+                </div>
+              )}
               <button
                 type="button"
                 data-testid="snip-hotkey-reset"
@@ -1762,18 +1683,24 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                   value={vadThreshold}
                   onChange={(e) => {
                     const val = parseFloat(e.target.value);
+                    // RUX-A-15: optimistic like the E6-F15 Advanced
+                    // controls — the slider shows the user's intent,
+                    // and the edit goes through safeSend so it QUEUES
+                    // while offline instead of being discarded by the
+                    // guard this used to carry (the displayed value
+                    // then silently snapped back on the next config
+                    // reply). The queued note under the slider names
+                    // the pending value until the reply lands.
                     setVadThreshold(val);
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                      wsRef.current.send(JSON.stringify({
-                        type: 'CONFIG_UPDATE_REQUEST',
-                        schema_version: 1,
-                        request_id: Date.now().toString(),
-                        payload: { config: { vad_threshold: val } }
-                      }));
-                    }
+                    sendSettingsAction('CONFIG_UPDATE_REQUEST', { config: { vad_threshold: val } });
                   }}
                   style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
                 />
+                {pendingConfigValue('vad_threshold') !== undefined && (
+                  <div data-testid="vad-threshold-queued" style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
+                    VAD threshold change to {Number(pendingConfigValue('vad_threshold')).toFixed(2)} queued — will apply when the engine reconnects.
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1798,18 +1725,19 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                   value={silenceDurationMs}
                   onChange={(e) => {
                     const val = parseInt(e.target.value, 10);
+                    // RUX-A-15: same conversion as the VAD slider
+                    // above — optimistic display, safeSend delivery,
+                    // queued note below while the edit is pending.
                     setSilenceDurationMs(val);
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                      wsRef.current.send(JSON.stringify({
-                        type: 'CONFIG_UPDATE_REQUEST',
-                        schema_version: 1,
-                        request_id: Date.now().toString(),
-                        payload: { config: { silence_duration_ms: val } }
-                      }));
-                    }
+                    sendSettingsAction('CONFIG_UPDATE_REQUEST', { config: { silence_duration_ms: val } });
                   }}
                   style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
                 />
+                {pendingConfigValue('silence_duration_ms') !== undefined && (
+                  <div data-testid="silence-duration-queued" style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
+                    Silence duration change to {pendingConfigValue('silence_duration_ms')} ms queued — will apply when the engine reconnects.
+                  </div>
+                )}
               </div>
             </div>
           </div>

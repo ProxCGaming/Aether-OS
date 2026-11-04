@@ -136,7 +136,7 @@ const rowStyle = {
   gap: '16px',
 };
 
-export default function SpeechSettingsPanel({ config, configError, onConfigUpdate, wsRef }) {
+export default function SpeechSettingsPanel({ config, configError, onConfigUpdate, pendingMessages = [], wsRef }) {
   const [downloadedStt, setDownloadedStt] = useState([]);
   // request_id -> one-shot response handler for the hub pair.
   const pendingRef = useRef(new Map());
@@ -178,6 +178,25 @@ export default function SpeechSettingsPanel({ config, configError, onConfigUpdat
     return () => ws.removeEventListener('message', handleMessage);
   }, [wsRef]);
 
+  // RUX-A-22: the selects are controlled from the applied config,
+  // and onConfigUpdate (SettingsPanel's sendConfigUpdate) QUEUES
+  // while the engine is unreachable — so an offline pick used to
+  // snap straight back and then ghost-apply on reconnect with no
+  // hint at any point. SettingsPanel hands down the socket layer's
+  // reactive queue (pendingMessages); a queued CONFIG_UPDATE whose
+  // config touches a field marks exactly that field: its select goes
+  // inert and names the pending value until the config reply lands
+  // and the control follows it for real.
+  const pendingConfigEntry = (key) => (pendingMessages || []).find(
+    (m) => m && m.type === 'CONFIG_UPDATE_REQUEST'
+      && m.payload && m.payload.config && key in m.payload.config,
+  );
+  const queuedHintStyle = { fontSize: '12px', color: '#fbbf24', marginTop: '8px', width: '280px' };
+  const inertWrap = (pending) => ({
+    opacity: pending ? 0.55 : 1,
+    pointerEvents: pending ? 'none' : 'auto',
+  });
+
   const error = configError || '';
   // Engine defaults (H3) until the first config payload lands.
   const sttModel = (config && config.speech_stt_model) || 'small';
@@ -216,13 +235,20 @@ export default function SpeechSettingsPanel({ config, configError, onConfigUpdat
             </p>
           </div>
           <div data-testid="speech-stt-select">
-            <Dropdown
-              value={sttModel}
-              onChange={(val) => onConfigUpdate({ speech_stt_model: val })}
-              options={sttOptions(sttModel, downloadedStt)}
-              style={{ width: '280px' }}
-              align="right"
-            />
+            <div style={inertWrap(pendingConfigEntry('speech_stt_model'))}>
+              <Dropdown
+                value={sttModel}
+                onChange={(val) => onConfigUpdate({ speech_stt_model: val })}
+                options={sttOptions(sttModel, downloadedStt)}
+                style={{ width: '280px' }}
+                align="right"
+              />
+            </div>
+            {pendingConfigEntry('speech_stt_model') && (
+              <div data-testid="speech-stt-queued" style={queuedHintStyle}>
+                Speech-to-text change to {pendingConfigEntry('speech_stt_model').payload.config.speech_stt_model} queued — will apply when the engine reconnects.
+              </div>
+            )}
           </div>
         </div>
 
@@ -237,13 +263,20 @@ export default function SpeechSettingsPanel({ config, configError, onConfigUpdat
             </p>
           </div>
           <div data-testid="speech-voice-select">
-            <Dropdown
-              value={ttsVoice}
-              onChange={(val) => onConfigUpdate({ speech_tts_voice: val })}
-              options={voiceOptions(ttsVoice)}
-              style={{ width: '280px' }}
-              align="right"
-            />
+            <div style={inertWrap(pendingConfigEntry('speech_tts_voice'))}>
+              <Dropdown
+                value={ttsVoice}
+                onChange={(val) => onConfigUpdate({ speech_tts_voice: val })}
+                options={voiceOptions(ttsVoice)}
+                style={{ width: '280px' }}
+                align="right"
+              />
+            </div>
+            {pendingConfigEntry('speech_tts_voice') && (
+              <div data-testid="speech-voice-queued" style={queuedHintStyle}>
+                Voice change to {pendingConfigEntry('speech_tts_voice').payload.config.speech_tts_voice} queued — will apply when the engine reconnects.
+              </div>
+            )}
           </div>
         </div>
 
@@ -258,13 +291,20 @@ export default function SpeechSettingsPanel({ config, configError, onConfigUpdat
             </p>
           </div>
           <div data-testid="speech-transcription-select">
-            <Dropdown
-              value={transcriptionModel}
-              onChange={(val) => onConfigUpdate({ transcription_stt_model: val })}
-              options={sttOptions(transcriptionModel, downloadedStt)}
-              style={{ width: '280px' }}
-              align="right"
-            />
+            <div style={inertWrap(pendingConfigEntry('transcription_stt_model'))}>
+              <Dropdown
+                value={transcriptionModel}
+                onChange={(val) => onConfigUpdate({ transcription_stt_model: val })}
+                options={sttOptions(transcriptionModel, downloadedStt)}
+                style={{ width: '280px' }}
+                align="right"
+              />
+            </div>
+            {pendingConfigEntry('transcription_stt_model') && (
+              <div data-testid="speech-transcription-queued" style={queuedHintStyle}>
+                Transcription model change to {pendingConfigEntry('transcription_stt_model').payload.config.transcription_stt_model} queued — will apply when the engine reconnects.
+              </div>
+            )}
           </div>
         </div>
       </div>
