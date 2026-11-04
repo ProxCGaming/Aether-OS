@@ -8,7 +8,7 @@ import React from 'react';
 // "will NOT be reverted". Nothing is sent to the engine until the
 // user confirms; App owns the request and the undo window that
 // follows.
-export default function RewindConfirmModal({ entry, filesNotReverted = [], onConfirm, onCancel }) {
+export default function RewindConfirmModal({ entry, filesNotReverted = [], onConfirm, onCancel, queued = false }) {
   if (!entry) return null;
   const files = Array.isArray(filesNotReverted) ? filesNotReverted : [];
   return (
@@ -34,24 +34,50 @@ export default function RewindConfirmModal({ entry, filesNotReverted = [], onCon
         ) : (
           <p className="rewind-confirm-body">No files were written after this point.</p>
         )}
-        <div className="rewind-confirm-actions">
-          <button
-            type="button"
-            className="rewind-confirm-btn"
-            data-testid="rewind-confirm-btn"
-            onClick={onConfirm}
-          >
-            Rewind
-          </button>
-          <button
-            type="button"
-            className="rewind-cancel-btn"
-            data-testid="rewind-cancel-btn"
-            onClick={onCancel}
-          >
-            Cancel
-          </button>
-        </div>
+        {queued ? (
+          <>
+            {/* Wave 2 slice 2 (RUX-A-03): the rewind was confirmed
+                while the engine was unreachable, so it sits in the
+                offline queue. The modal stays open and says exactly
+                that — it must not close as if the rewind had already
+                happened. The request is committed to the queue, so
+                the only action left is acknowledgement; App closes
+                the modal when the flushed request lands. */}
+            <p className="rewind-confirm-body" data-testid="rewind-queued-note">
+              Queued — the engine is unreachable, so this rewind isn’t done yet.
+              It will be sent as soon as the connection returns.
+            </p>
+            <div className="rewind-confirm-actions">
+              <button
+                type="button"
+                className="rewind-cancel-btn"
+                data-testid="rewind-queued-ok-btn"
+                onClick={onCancel}
+              >
+                OK
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="rewind-confirm-actions">
+            <button
+              type="button"
+              className="rewind-confirm-btn"
+              data-testid="rewind-confirm-btn"
+              onClick={onConfirm}
+            >
+              Rewind
+            </button>
+            <button
+              type="button"
+              className="rewind-cancel-btn"
+              data-testid="rewind-cancel-btn"
+              onClick={onCancel}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

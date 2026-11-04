@@ -364,32 +364,40 @@ function AppContent() {
   }, [rewindManifest]);
   const handleRewindConfirm = useCallback(() => {
     if (!rewindConfirm || !rewindManifest) return;
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'TASK_REWIND_REQUEST',
-        schema_version: 1,
-        request_id: `task_rewind_${Date.now()}`,
-        payload: {
-          session_id: rewindManifest.session_id,
-          task_id: rewindManifest.task_id,
-          step_index: rewindConfirm.entry.step_index,
-          checkpoint_id: rewindConfirm.entry.checkpoint_id,
-        },
-      }));
+    // Wave 2 slice 2 (RUX-A-03): the rewind goes out via safeSend —
+    // never discarded. While 'sent', behaviour is unchanged (the
+    // modal closes; TASK_REWIND_RESPONSE does the rest). While
+    // 'queued', the modal must NOT close as if the rewind had
+    // completed: it stays open in its queued state (the modal says
+    // the rewind will be sent on reconnect), and the response
+    // handler closes it when the flushed request actually lands.
+    const disposition = safeSend('TASK_REWIND_REQUEST', {
+      session_id: rewindManifest.session_id,
+      task_id: rewindManifest.task_id,
+      step_index: rewindConfirm.entry.step_index,
+      checkpoint_id: rewindConfirm.entry.checkpoint_id,
+    });
+    if (disposition === 'queued') {
+      setRewindConfirm(prev => (prev ? { ...prev, queued: true } : prev));
+    } else {
+      setRewindConfirm(null);
     }
-    setRewindConfirm(null);
-  }, [rewindConfirm, rewindManifest, wsRef]);
+  }, [rewindConfirm, rewindManifest, safeSend]);
   const handleRewindUndoClick = useCallback(() => {
     if (!rewindUndo) return;
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'TASK_REWIND_UNDO_REQUEST',
-        schema_version: 1,
-        request_id: `task_rewind_undo_${Date.now()}`,
-        payload: { session_id: rewindUndo.sessionId },
-      }));
+    // Wave 2 slice 2 (RUX-A-03): the undo goes out via safeSend. A
+    // click inside the toast's window used to be discarded outright
+    // when the socket was down, and the window then expired — the
+    // undo opportunity was gone for good. Queued, it flushes on
+    // reconnect; the toast flags that state instead of pretending
+    // the restore already happened.
+    const disposition = safeSend('TASK_REWIND_UNDO_REQUEST', {
+      session_id: rewindUndo.sessionId,
+    });
+    if (disposition === 'queued') {
+      setRewindUndo(prev => (prev ? { ...prev, queued: true } : prev));
     }
-  }, [rewindUndo, wsRef]);
+  }, [rewindUndo, safeSend]);
   const handleRewindUndoExpire = useCallback(() => {
     // The window closed (toast countdown or the local timer): the
     // engine has pruned; drop the display and refetch the manifest.
@@ -406,20 +414,17 @@ function AppContent() {
   const handleForkRequest = useCallback(({ message_id, step_index } = {}) => {
     const sessionId = activeSessionRef.current;
     if (!sessionId) return;
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'SESSION_FORK_REQUEST',
-        schema_version: 1,
-        request_id: `session_fork_${Date.now()}`,
-        payload: {
-          session_id: sessionId,
-          message_id: message_id ?? null,
-          step_index: step_index ?? null,
-          new_title: null,
-        },
-      }));
-    }
-  }, [wsRef]);
+    // Wave 2 slice 2 (RUX-A-04): via safeSend — a fork clicked while
+    // the socket is down is queued and lands on reconnect (the
+    // SESSION_FORK_RESPONSE handler switches into the fork whenever
+    // it arrives), instead of silently doing nothing at all.
+    safeSend('SESSION_FORK_REQUEST', {
+      session_id: sessionId,
+      message_id: message_id ?? null,
+      step_index: step_index ?? null,
+      new_title: null,
+    });
+  }, [safeSend]);
   const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Artifacts', 'Projects', 'Settings'
   const [initialInput, setInitialInput] = useState('');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -689,7 +694,12 @@ function AppContent() {
   const [browserSessions, setBrowserSessions] = useState({});
   const browserSessionIdsRef = useRef({});
   const handleBrowserControl = useCallback((action) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    // Wave 2 slice 2 (RUX-A-06): via safeSend — pause/resume/stop for
+    // the agent's browser session is the user's emergency control;
+    // the old early return made it silently do nothing exactly when
+    // the connection was already in trouble. Queued, the control
+    // flushes on reconnect and the BROWSER_TASK_PAUSE_RESPONSE
+    // handler updates the card whenever it lands.
     const chatSessionId = activeSessionRef.current;
     const payload = {
       chat_session_id: chatSessionId,
@@ -697,13 +707,8 @@ function AppContent() {
     };
     const browserSessionId = chatSessionId ? browserSessionIdsRef.current[chatSessionId] : null;
     if (browserSessionId) payload.session_id = browserSessionId;
-    wsRef.current.send(JSON.stringify({
-      type: 'BROWSER_TASK_PAUSE_REQUEST',
-      schema_version: 1,
-      request_id: `browser_control_${Date.now()}`,
-      payload
-    }));
-  }, [wsRef]);
+    safeSend('BROWSER_TASK_PAUSE_REQUEST', payload);
+  }, [safeSend]);
   
   // S3-M7: purge the legacy localStorage copy of the transfer state
   // left behind by older builds, so the plaintext chat history does
@@ -746,6 +751,14 @@ function AppContent() {
 
   const graphRef = useRef();
   const pendingSessionSwitchRef = useRef(null);
+  // Wave 2 slice 2 (RUX-A-01): a session switch now goes out via
+  // safeSend, whose request_id is minted inside the facade — the
+  // switch can no longer register its own id in pendingSessionSwitchRef
+  // ahead of the send. The target session id is registered here
+  // instead, and the SESSION_GET_RESPONSE handler honours a reply
+  // whose session matches it (a reply for any other session is still
+  // ignored, so echoed broadcasts cannot hijack the view).
+  const pendingSessionSwitchIdRef = useRef(null);
   const sessionCacheRef = useRef({});
   const activeTaskSessionRef = useRef(null);
 
@@ -1214,8 +1227,18 @@ function AppContent() {
           }
         } else if (data.type === 'SESSION_GET_RESPONSE') {
           // Only replace chat messages if we explicitly requested a session switch and it matches exactly.
-          if (data.request_id && data.request_id === pendingSessionSwitchRef.current) {
+          // Wave 2 slice 2 (RUX-A-01): a switch sent via safeSend has a
+          // facade-minted request_id, so it registers its target in
+          // pendingSessionSwitchIdRef instead; a reply whose session
+          // matches that target is honoured the same way. Replies for
+          // any other session are still ignored (echoed broadcasts
+          // cannot hijack the view).
+          const switchByRequest = data.request_id && data.request_id === pendingSessionSwitchRef.current;
+          const switchBySession = pendingSessionSwitchIdRef.current !== null
+            && data.payload?.session?.id === pendingSessionSwitchIdRef.current;
+          if (switchByRequest || switchBySession) {
             pendingSessionSwitchRef.current = null; // Clear immediately to ignore any subsequent echoed broadcasts
+            pendingSessionSwitchIdRef.current = null;
             const sess = data.payload.session;
             setChatMessages(prev => {
               const backendMessages = (sess && sess.messages) ? sess.messages.map(m => {
@@ -1269,6 +1292,10 @@ function AppContent() {
           // only as a fallback for responses without the history.
           // Then arm the undo window.
           if (data.payload?.session_id === activeSessionRef.current) {
+            // Wave 2 slice 2 (RUX-A-03): a rewind confirmed while
+            // offline kept its modal open in the queued state; the
+            // flushed request has now actually landed, so close it.
+            setRewindConfirm(null);
             if (data.payload.ok) {
               if (Array.isArray(data.payload.messages)) {
                 setChatMessages(data.payload.messages.map(m => {
@@ -2073,6 +2100,14 @@ function AppContent() {
     requestContextBreakdown();
   }, [activeSession, isConnected, requestCostBreakdown, requestContextBreakdown]);
 
+  // Wave 2 slice 2 (RUX-A-08): the canvas/artifact open sends below
+  // go through safeSend. Opening the canvas or selecting an artifact
+  // while the socket was down used to discard the ARTIFACT_GET /
+  // DEV_SERVER_DETECT request — the canvas opened blank with no
+  // loading or error state and stayed that way. Queued, the content
+  // request flushes on reconnect and the ARTIFACT_GET_RESPONSE /
+  // DEV_SERVER_DETECT_RESPONSE handlers fill the canvas whenever
+  // they land; the selection itself is local state and stays honest.
   const handleToggleCanvas = useCallback(() => {
     setIsCanvasOpen(prev => {
       const next = !prev;
@@ -2082,47 +2117,26 @@ function AppContent() {
         if (activeSession) {
           localStorage.setItem(`aether_canvas_selected_${activeSession}`, firstId);
         }
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'ARTIFACT_GET_REQUEST',
-            schema_version: 1,
-            request_id: Date.now().toString(),
-            payload: { artifact_id: firstId }
-          }));
-        }
+        safeSend('ARTIFACT_GET_REQUEST', { artifact_id: firstId });
       }
       return next;
     });
-  }, [canvasArtifacts, selectedArtifactId, activeSession, wsRef]);
+  }, [canvasArtifacts, selectedArtifactId, activeSession, safeSend]);
 
   const handleSelectArtifact = useCallback((artifactId) => {
     setSelectedArtifactId(artifactId);
     if (activeSession) {
       localStorage.setItem(`aether_canvas_selected_${activeSession}`, artifactId);
     }
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'ARTIFACT_GET_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { artifact_id: artifactId }
-      }));
-    }
-  }, [activeSession, wsRef]);
+    safeSend('ARTIFACT_GET_REQUEST', { artifact_id: artifactId });
+  }, [activeSession, safeSend]);
 
   // Epic 8, E8-2.2: ask the engine to probe for a dev server in the
   // artifact's project directory; the answer lands in devServerInfo
   // via DEV_SERVER_DETECT_RESPONSE.
   const handleDetectDevServer = useCallback(({ workspace_root = null, project_path = null } = {}) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'DEV_SERVER_DETECT_REQUEST',
-        schema_version: 1,
-        request_id: `dev_server_detect_${Date.now()}`,
-        payload: { workspace_root, project_path }
-      }));
-    }
-  }, [wsRef]);
+    safeSend('DEV_SERVER_DETECT_REQUEST', { workspace_root, project_path });
+  }, [safeSend]);
 
   const handleOpenArtifact = useCallback((pathOrTitle) => {
     setIsCanvasOpen(true);
@@ -2134,15 +2148,10 @@ function AppContent() {
     );
     if (match) {
       handleSelectArtifact(match.id);
-    } else if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'ARTIFACT_LIST_REQUEST',
-        schema_version: 1,
-        request_id: `session_artifacts_${activeSession}_${Date.now()}`,
-        payload: { session_id: activeSession, global: false }
-      }));
+    } else {
+      safeSend('ARTIFACT_LIST_REQUEST', { session_id: activeSession, global: false });
     }
-  }, [canvasArtifacts, handleSelectArtifact, activeSession, wsRef]);
+  }, [canvasArtifacts, handleSelectArtifact, activeSession, safeSend]);
 
   const handleSendMessage = (text, attachments = []) => {
     // E8-1.1b: sending a message while the rewind undo toast is up
@@ -2234,16 +2243,16 @@ function AppContent() {
       return sessionCacheRef.current[id] || [];
     });
     setActiveSession(id);
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      const reqId = `switch_${Date.now()}`;
-      pendingSessionSwitchRef.current = reqId;
-      wsRef.current.send(JSON.stringify({
-        type: 'SESSION_GET_REQUEST',
-        schema_version: 1,
-        request_id: reqId,
-        payload: { session_id: id }
-      }));
-    }
+    // Wave 2 slice 2 (RUX-A-01): the fetch goes out via safeSend —
+    // a session clicked while the socket is down is queued, not
+    // discarded, so the full history replaces the cached (or empty)
+    // list as soon as the connection returns, instead of the cached
+    // list being presented as that session forever. safeSend mints
+    // the request_id inside the facade, so the pending switch is
+    // registered by target session id (see pendingSessionSwitchIdRef).
+    pendingSessionSwitchRef.current = null;
+    pendingSessionSwitchIdRef.current = id;
+    safeSend('SESSION_GET_REQUEST', { session_id: id });
   };
 
   // N08: exact-message scrolling for "jump to conversation". The
@@ -2290,20 +2299,16 @@ function AppContent() {
     }
     setSelectedArtifactId(artifact.id);
     setIsCanvasOpen(true);
-    if (artifact.id && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'ARTIFACT_GET_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { artifact_id: artifact.id }
-      }));
+    if (artifact.id) {
+      // RUX-A-08: via safeSend, like handleSelectArtifact above.
+      safeSend('ARTIFACT_GET_REQUEST', { artifact_id: artifact.id });
     }
     setActiveTab('Chat');
 
     if (artifact.message_id) {
       queueMessageScroll(artifact.session_id || activeSession, artifact.message_id);
     }
-  }, [activeSession, wsRef, queueMessageScroll]);
+  }, [activeSession, safeSend, queueMessageScroll]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // N08: media "jump to conversation" — a separate path from artifact
   // navigation. Media ids are NOT artifact ids: no canvas selection
@@ -2324,14 +2329,20 @@ function AppContent() {
 
   const handleNewChat = () => {
     setRewindManifest(null); // E8-1.1a: a fresh chat has no points yet
-    setChatMessages([]); // Clear immediately for instant feel
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'SESSION_CREATE_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { title: 'New Conversation' }
-      }));
+    // Wave 2 slice 2 (RUX-A-02): the create goes out via safeSend —
+    // never discarded. While 'sent', the chat clears immediately for
+    // instant feel, exactly as before. While 'queued', the chat is
+    // NOT cleared and the current session stays active: clearing
+    // into a fake-empty view while activeSession still names the old
+    // session was the worst silent failure in the app — the user's
+    // next message silently landed in the session they believed
+    // they had left. The queued create flushes on reconnect and the
+    // SESSION_CREATE_RESPONSE handler performs the switch and the
+    // clear when the new session actually exists; the app-level
+    // pending indicator shows the action is waiting meanwhile.
+    const disposition = safeSend('SESSION_CREATE_REQUEST', { title: 'New Conversation' });
+    if (disposition === 'sent') {
+      setChatMessages([]); // Clear immediately for instant feel
     }
   };
 
@@ -2465,28 +2476,22 @@ function AppContent() {
     return () => window.removeEventListener('keydown', onKey);
   }, [isFloating, shortcutsOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Wave 2 slice 2 (RUX-A-07): delete / export / import / move below
+  // all go out via safeSend. Each used to no-op silently while the
+  // socket was down (move returned before even closing its menu).
+  // None of them mutate local state optimistically — the session
+  // list, the export download, the import status and the move tally
+  // are all driven by the engine's responses — so queueing is the
+  // whole fix: the action lands on reconnect and its response drives
+  // the UI then, with the pending indicator covering the wait.
   const handleDeleteSession = (id, e) => {
     e.stopPropagation(); // prevent triggering handleSessionSwitch
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'SESSION_DELETE_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { session_id: id }
-      }));
-    }
+    safeSend('SESSION_DELETE_REQUEST', { session_id: id });
   };
 
   const handleExportSession = (format) => {
     if (!activeSession) return;
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'SESSION_EXPORT_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { session_id: activeSession, format }
-      }));
-    }
+    safeSend('SESSION_EXPORT_REQUEST', { session_id: activeSession, format });
   };
 
   const handleTriggerImport = () => {
@@ -2505,65 +2510,76 @@ function AppContent() {
       reader.onload = (event) => {
         const raw = event.target.result;
         const b64 = typeof raw === 'string' && raw.includes(',') ? raw.split(',')[1] : raw;
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'SESSION_IMPORT_REQUEST',
-            schema_version: 1,
-            request_id: Date.now().toString(),
-            payload: {
-              format: 'zip',
-              content: b64,
-              file_path: file.path || null
-            }
-          }));
-        }
+        // RUX-A-07: via safeSend (see handleDeleteSession above).
+        safeSend('SESSION_IMPORT_REQUEST', {
+          format: 'zip',
+          content: b64,
+          file_path: file.path || null
+        });
       };
       reader.readAsDataURL(file);
     } else {
       reader.onload = (event) => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'SESSION_IMPORT_REQUEST',
-            schema_version: 1,
-            request_id: Date.now().toString(),
-            payload: {
-              format: 'json',
-              content: event.target.result,
-              file_path: file.path || null
-            }
-          }));
-        }
+        // RUX-A-07: via safeSend (see handleDeleteSession above).
+        safeSend('SESSION_IMPORT_REQUEST', {
+          format: 'json',
+          content: event.target.result,
+          file_path: file.path || null
+        });
       };
       reader.readAsText(file);
     }
   };
 
+  // Wave 2 slice 2 (RUX-A-05): an approval decision is marked on its
+  // chat card when it could only be queued (see handleToolApproval).
+  // The card stays in place — disabled, with the decision shown as
+  // queued — instead of vanishing (sent) or silently staying live
+  // while its decision was thrown away (the old discard).
+  const markApprovalDecisionQueued = (requestId, key, approved) => {
+    setChatMessages(prev => prev.map(m =>
+      (m.id === requestId || (key && m.approval_key === key))
+        ? { ...m, decisionQueued: true, decisionApproved: approved }
+        : m));
+  };
+
   const handleToolApproval = (requestId, approved, approvalKey, scope, editedArgs, browserEnvelope) => {
+    const key = approvalKey || requestId;
+    // Wave 2 slice 2 (RUX-A-05): the decision goes out via safeSend —
+    // never discarded. The envelope request_id stays the approval's
+    // own id (the engine correlates on payload.approval_key, with the
+    // request_id as its fallback). The pendingApprovalsRef entry is
+    // removed only AFTER the decision is actually sent or queued:
+    // the old order removed it before a readyState guard that then
+    // threw the send away, which killed the Ctrl+Enter shortcut path
+    // for that approval while its card stayed on screen undecided.
+    const disposition = safeSend(
+      approved ? 'TOOL_APPROVAL_GRANTED' : 'TOOL_APPROVAL_REJECTED',
+      {
+        approval_key: key,
+        approved: approved,
+        // Epic 2, E2-09: a scoped grant ("file" / "folder") rides the
+        // GRANTED event; a plain approve sends no scope (= "once").
+        ...(approved && scope ? { scope } : {}),
+        // Epic 8, E8-1.3: approval-time argument edits ride the
+        // GRANTED event as the full replacement argument set; the
+        // engine re-runs the full policy pipeline on them.
+        ...(approved && editedArgs ? { edited_args: editedArgs } : {}),
+        // Epic 8, E8-6.2: a per-task envelope grant made at a
+        // browser confirmation rides the GRANTED event; the engine
+        // scopes it to the confirmed action's category + site.
+        ...(approved && browserEnvelope ? { browser_envelope: browserEnvelope } : {})
+      },
+      requestId,
+    );
     // E6-F13: decided now — no longer shortcut-actionable.
     pendingApprovalsRef.current = pendingApprovalsRef.current.filter(
       (entry) => !(entry.kind === 'tool' && entry.id === requestId));
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      const key = approvalKey || requestId;
-      wsRef.current.send(JSON.stringify({
-        type: approved ? 'TOOL_APPROVAL_GRANTED' : 'TOOL_APPROVAL_REJECTED',
-        schema_version: 1,
-        request_id: requestId,
-        payload: {
-          approval_key: key,
-          approved: approved,
-          // Epic 2, E2-09: a scoped grant ("file" / "folder") rides the
-          // GRANTED event; a plain approve sends no scope (= "once").
-          ...(approved && scope ? { scope } : {}),
-          // Epic 8, E8-1.3: approval-time argument edits ride the
-          // GRANTED event as the full replacement argument set; the
-          // engine re-runs the full policy pipeline on them.
-          ...(approved && editedArgs ? { edited_args: editedArgs } : {}),
-          // Epic 8, E8-6.2: a per-task envelope grant made at a
-          // browser confirmation rides the GRANTED event; the engine
-          // scopes it to the confirmed action's category + site.
-          ...(approved && browserEnvelope ? { browser_envelope: browserEnvelope } : {})
-        }
-      }));
+    if (disposition === 'queued') {
+      // The card stays, showing the decision as queued; thinking
+      // resumes when the flushed decision actually starts the tool.
+      markApprovalDecisionQueued(requestId, key, approved);
+    } else {
       // Remove the approval card from chat
       setChatMessages(prev => prev.filter(m => m.id !== requestId && m.approval_key !== key));
       if (approved) setIsThinking(true);
@@ -2579,16 +2595,22 @@ function AppContent() {
   };
 
   const handlePluginApproval = (requestId, approved) => {
+    // Wave 2 slice 2 (RUX-A-05): via safeSend, like handleToolApproval
+    // above — including the ref ordering. The requestId argument is
+    // load-bearing here: the engine pops the pending plugin install
+    // by the decision's envelope request_id, so it must be the
+    // PLUGIN_APPROVAL_REQUEST's own id, not a minted one.
+    const disposition = safeSend(
+      approved ? 'PLUGIN_APPROVAL_GRANTED' : 'PLUGIN_APPROVAL_REJECTED',
+      {},
+      requestId,
+    );
     // E6-F13: decided now — no longer shortcut-actionable.
     pendingApprovalsRef.current = pendingApprovalsRef.current.filter(
       (entry) => !(entry.kind === 'plugin' && entry.id === requestId));
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: approved ? 'PLUGIN_APPROVAL_GRANTED' : 'PLUGIN_APPROVAL_REJECTED',
-        schema_version: 1,
-        request_id: requestId,
-        payload: {}
-      }));
+    if (disposition === 'queued') {
+      markApprovalDecisionQueued(requestId, null, approved);
+    } else {
       setChatMessages(prev => prev.filter(m => m.id !== requestId));
       if (approved) setIsThinking(true);
     }
@@ -2775,17 +2797,15 @@ function AppContent() {
   // SESSION_MOVE_RESPONSE branch of the message handler.
   const startSessionMoves = (sessionIds, targetWorkspace) => {
     if (!sessionIds.length) return;
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    // RUX-A-07: via safeSend (see handleDeleteSession above) — the
+    // menu closes and the batch tally is armed even while offline;
+    // the moves flush in order on reconnect and the
+    // SESSION_MOVE_RESPONSE tally settles when the replies land.
     setMoveMenuFor(null);
     setMoveStatus(null);
     moveBatchRef.current = { total: sessionIds.length, settled: 0, moved: 0, failed: 0, firstError: null };
     sessionIds.forEach((sid) => {
-      wsRef.current.send(JSON.stringify({
-        type: 'SESSION_MOVE_REQUEST',
-        schema_version: 1,
-        request_id: `move_${Date.now()}_${sid}`,
-        payload: { session_id: sid, workspace: targetWorkspace },
-      }));
+      safeSend('SESSION_MOVE_REQUEST', { session_id: sid, workspace: targetWorkspace });
     });
   };
 
@@ -3355,6 +3375,7 @@ function AppContent() {
           filesNotReverted={rewindConfirm.filesNotReverted}
           onConfirm={handleRewindConfirm}
           onCancel={() => setRewindConfirm(null)}
+          queued={!!rewindConfirm.queued}
         />
       )}
 

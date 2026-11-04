@@ -235,11 +235,19 @@ export const SocketProvider = ({ children }) => {
   // sends that must keep an existing non-envelope wire shape stay on
   // sendMessage / wsRef.send (audit class RUX-A-18 — those paths are
   // not user actions, and several self-heal via reconnect effects).
-  const safeSend = useCallback((type, payload = {}) => {
+  //
+  // The optional requestId exists for the rare user action whose
+  // envelope id is a CORRELATION id the engine answers against —
+  // plugin approvals are the case in point: the engine parks the
+  // pending install under the PLUGIN_APPROVAL_REQUEST's request_id
+  // and pops it by the decision's request_id, so a facade-minted id
+  // would orphan the install. Pass the id the engine is waiting for;
+  // every other caller leaves it null and gets a minted one.
+  const safeSend = useCallback((type, payload = {}, requestId = null) => {
     const data = JSON.stringify({
       type,
       schema_version: 1,
-      request_id: Date.now().toString(),
+      request_id: requestId !== null && requestId !== undefined ? String(requestId) : Date.now().toString(),
       payload,
     });
     return wsRef.current.send(data);

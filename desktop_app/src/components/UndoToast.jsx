@@ -8,7 +8,7 @@ import React, { useEffect, useRef, useState } from 'react';
 // engine prunes on its own timer regardless, and sending a new
 // message in the session dismisses the toast even sooner (App
 // clears it in handleSendMessage; the engine commits on START_TASK).
-export default function UndoToast({ expiresAt, onUndo, onExpire }) {
+export default function UndoToast({ expiresAt, onUndo, onExpire, queued = false }) {
   const [remaining, setRemaining] = useState(() =>
     Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000)));
   const expiredRef = useRef(false);
@@ -33,8 +33,14 @@ export default function UndoToast({ expiresAt, onUndo, onExpire }) {
   if (remaining <= 0) return null;
   return (
     <div className="rewind-undo-toast" data-testid="rewind-undo-toast" role="status">
-      <span>Rewound. The discarded steps will be deleted in {remaining}s.</span>
-      <button type="button" data-testid="rewind-undo-btn" onClick={onUndo}>
+      {/* Wave 2 slice 2 (RUX-A-03): an Undo clicked while the engine
+          was unreachable is queued, not done — the toast says so and
+          the button disables, instead of the click vanishing inside
+          the window (the old discard) while the countdown ran out. */}
+      <span>{queued
+        ? 'Undo queued — it will be sent when the engine reconnects.'
+        : `Rewound. The discarded steps will be deleted in ${remaining}s.`}</span>
+      <button type="button" data-testid="rewind-undo-btn" onClick={onUndo} disabled={queued}>
         Undo
       </button>
     </div>

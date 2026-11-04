@@ -368,6 +368,10 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
   // never opened) calls back with the exact legacy argument list;
   // a real edit appends editedArgs as the final argument.
   const approvalArgs = (pendingApproval && pendingApproval.tool_args) || tool_args || {};
+  // Wave 2 slice 2 (RUX-A-05): a decision that could only be queued
+  // (engine unreachable) disables the card — the decision is final
+  // and will flush on reconnect; App marks the approval message for us.
+  const decisionQueued = !!(pendingApproval && pendingApproval.decisionQueued);
   const browserConfirmation = (pendingApproval && pendingApproval.browser_confirmation) || payload.browser_confirmation || null;
   const approveWithEdits = (scope) => {
     if (!onApproveTool || !pendingApproval) return;
@@ -481,6 +485,7 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
               <button
                 data-testid="approval-edit-args-btn"
                 onClick={openArgsEditor}
+                disabled={decisionQueued}
                 style={{ alignSelf: 'flex-start', padding: '6px 12px', borderRadius: '8px', background: 'rgba(255, 255, 255, 0.08)', color: '#e2e8f0', border: '1px solid rgba(255, 255, 255, 0.15)', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>
                 Edit arguments
               </button>
@@ -499,9 +504,15 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                 )}
               </div>
             )}
+            {decisionQueued && (
+              <div data-testid="approval-decision-queued" style={{ padding: '8px 12px', borderRadius: '8px', background: 'rgba(251, 191, 36, 0.15)', border: '1px solid rgba(251, 191, 36, 0.35)', color: '#fbbf24', fontSize: '12px' }}>
+                {pendingApproval.decisionApproved ? 'Approval' : 'Rejection'} queued — will send when the engine reconnects.
+              </div>
+            )}
             <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'flex-end', marginTop: '4px' }}>
               <button 
                 onClick={() => onApproveTool && onApproveTool(pendingApproval.id, false, pendingApproval.approval_key)}
+                disabled={decisionQueued}
                 style={{
                   padding: '6px 14px',
                   borderRadius: '8px',
@@ -519,6 +530,7 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                 <>
                   <button
                     onClick={() => approveWithEdits('file')}
+                disabled={decisionQueued}
 
                     style={{
                       padding: '6px 14px',
@@ -535,6 +547,7 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                   </button>
                   <button
                     onClick={() => approveWithEdits('folder')}
+                disabled={decisionQueued}
 
                     style={{
                       padding: '6px 14px',
@@ -553,6 +566,7 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
               )}
               <button 
                 onClick={() => approveWithEdits()}
+                disabled={decisionQueued}
 
                 style={{
                   padding: '6px 14px',
@@ -2649,6 +2663,7 @@ export default function DraggableChatWindow({
                           <button
                             data-testid="approval-edit-args-btn"
                             onClick={() => setApprovalArgEdits(prev => ({ ...prev, [msg.id]: { text: JSON.stringify(msg.tool_args || {}, null, 2), error: '' } }))}
+                            disabled={!!msg.decisionQueued}
                             style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', marginBottom: '20px' }}>
                             Edit arguments
                           </button>
@@ -2667,9 +2682,15 @@ export default function DraggableChatWindow({
                             )}
                           </div>
                         )}
+                        {msg.decisionQueued && (
+                          <div data-testid="approval-decision-queued" style={{ marginBottom: '16px', padding: '8px 12px', borderRadius: '8px', background: 'rgba(251, 191, 36, 0.15)', border: '1px solid rgba(251, 191, 36, 0.35)', color: '#fbbf24', fontSize: '12px' }}>
+                            {msg.decisionApproved ? 'Approval' : 'Rejection'} queued — will send when the engine reconnects.
+                          </div>
+                        )}
                         <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                           <button 
                             onClick={() => onApproveTool && onApproveTool(msg.id, false, msg.approval_key)}
+                            disabled={!!msg.decisionQueued}
                             className="ios-close-btn"
                             style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center' }}
                           >
@@ -2680,6 +2701,7 @@ export default function DraggableChatWindow({
                             <>
                               <button 
                                 onClick={() => approveToolWithEdits(msg, 'file')}
+                            disabled={!!msg.decisionQueued}
 
                                 className="ios-close-btn"
                                 style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center' }}
@@ -2688,6 +2710,7 @@ export default function DraggableChatWindow({
                               </button>
                               <button 
                                 onClick={() => approveToolWithEdits(msg, 'folder')}
+                            disabled={!!msg.decisionQueued}
 
                                 className="ios-close-btn"
                                 style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center' }}
@@ -2698,6 +2721,7 @@ export default function DraggableChatWindow({
                           )}
                           <button 
                             onClick={() => approveToolWithEdits(msg)}
+                            disabled={!!msg.decisionQueued}
 
                             className="ios-close-btn"
                             style={{ background: 'rgba(239, 68, 68, 0.2)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#fca5a5', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
@@ -2732,9 +2756,15 @@ export default function DraggableChatWindow({
                         <div style={{ background: 'rgba(0,0,0,0.5)', padding: '12px', borderRadius: '8px', fontFamily: 'monospace', fontSize: '12px', color: '#60a5fa', marginBottom: '20px', overflowX: 'auto' }}>
                           {JSON.stringify(msg.plugin_details, null, 2)}
                         </div>
+                        {msg.decisionQueued && (
+                          <div data-testid="approval-decision-queued" style={{ marginBottom: '16px', padding: '8px 12px', borderRadius: '8px', background: 'rgba(251, 191, 36, 0.15)', border: '1px solid rgba(251, 191, 36, 0.35)', color: '#fbbf24', fontSize: '12px' }}>
+                            {msg.decisionApproved ? 'Approval' : 'Rejection'} queued — will send when the engine reconnects.
+                          </div>
+                        )}
                         <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
                           <button 
                             onClick={() => onApprovePlugin && onApprovePlugin(msg.id, false)}
+                            disabled={!!msg.decisionQueued}
                             className="ios-close-btn"
                             style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center' }}
                           >
@@ -2743,6 +2773,7 @@ export default function DraggableChatWindow({
                           </button>
                           <button 
                             onClick={() => onApprovePlugin && onApprovePlugin(msg.id, true)}
+                            disabled={!!msg.decisionQueued}
                             className="ios-close-btn"
                             style={{ background: 'rgba(59, 130, 246, 0.2)', border: '1px solid rgba(59, 130, 246, 0.4)', color: '#93c5fd', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
                           >
@@ -3350,6 +3381,7 @@ export default function DraggableChatWindow({
             expiresAt={rewindUndo.expiresAt}
             onUndo={() => { if (onRewindUndo) onRewindUndo(); }}
             onExpire={() => { if (onRewindUndoExpire) onRewindUndoExpire(); }}
+            queued={!!rewindUndo.queued}
           />
         )}
 
