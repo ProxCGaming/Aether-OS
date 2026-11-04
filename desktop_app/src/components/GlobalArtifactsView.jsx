@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import '../chat.css';
 import MediaLibrary from './MediaLibrary';
+import LoadStateRow from './Settings/LoadStateRow';
 
 export default function GlobalArtifactsView({
   artifacts: controlledArtifacts,
@@ -31,10 +32,20 @@ export default function GlobalArtifactsView({
   // ARTIFACT_GET_REQUEST). Falls back to onNavigateToSession for
   // callers that predate the split.
   onNavigateToMedia,
-  initialSection = 'artifacts'
+  initialSection = 'artifacts',
+  isConnected = null
 }) {
   const [internalArtifacts, setInternalArtifacts] = useState(
     () => initialArtifacts || []
+  );
+  // RUX-C-09: the designed "No artifacts found" empty state used to
+  // render from the first frame — during the list fetch and through
+  // any outage — because nothing distinguished "not answered yet"
+  // from "answered empty". Controlled/seeded mounts already hold
+  // real data and start ready; the fetched list starts loading and
+  // only an answered list may render the empty state.
+  const [listLoad, setListLoad] = useState(
+    () => (controlledArtifacts || initialArtifacts ? 'ready' : 'loading')
   );
   const [activeSection, setActiveSection] = useState(initialSection); // 'artifacts' | 'media'
   const [searchQuery, setSearchQuery] = useState('');
@@ -55,7 +66,12 @@ export default function GlobalArtifactsView({
         if (data.type === 'ARTIFACT_LIST_RESPONSE') {
           // If request was global or has artifacts array
           if (data.request_id?.startsWith('global_artifacts_') || data.payload?.global) {
-            setInternalArtifacts(data.payload?.artifacts || []);
+            if (data.payload?.error) {
+              setListLoad('error');
+            } else {
+              setListLoad('ready');
+              setInternalArtifacts(data.payload?.artifacts || []);
+            }
           }
         } else if (data.type === 'SESSION_DELETE_RESPONSE') {
           const deletedId = data.payload?.session_id;
@@ -350,6 +366,7 @@ export default function GlobalArtifactsView({
           pendingMessages={pendingMessages}
           reconnectCount={reconnectCount}
           sessions={sessions}
+          isConnected={isConnected}
           onNavigateToSession={onNavigateToMedia || onNavigateToSession}
         />
       ) : (
@@ -463,7 +480,18 @@ export default function GlobalArtifactsView({
 
       {/* Main Content Area */}
       <div style={{ flex: 1, overflowY: 'auto' }} className="chat-scroll">
-        {effectiveArtifacts.length === 0 ? (
+        {listLoad !== 'ready' && effectiveArtifacts.length === 0 ? (
+          <div style={{ padding: '24px' }}>
+            <LoadStateRow
+              loadState={listLoad}
+              isConnected={isConnected}
+              testId="artifacts-list-load-state"
+              loadingText="Loading artifacts…"
+              offlineText="Waiting for the engine — artifacts will appear here once it connects."
+              errorText="Artifacts could not be loaded."
+            />
+          </div>
+        ) : effectiveArtifacts.length === 0 ? (
           <div
             data-testid="empty-artifacts-state"
             style={{

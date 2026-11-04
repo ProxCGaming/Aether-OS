@@ -136,7 +136,15 @@ const rowStyle = {
   gap: '16px',
 };
 
-export default function SpeechSettingsPanel({ config, configError, onConfigUpdate, pendingMessages = [], reconnectCount = 0, wsRef }) {
+export default function SpeechSettingsPanel({ config, configError, onConfigUpdate, pendingMessages = [], reconnectCount = 0, wsRef, configReady }) {
+  // RUX-C-11: until the first config answer lands, the selects
+  // below show engine defaults ('small', 'af_heart') — values the
+  // user may never have chosen, presented as their configuration.
+  // The selects are disabled (one fieldset) until the config is
+  // actually known; the Models tab's banner explains why. Callers
+  // that don't pass configReady get the derived rule: a non-null
+  // config IS an answer.
+  const ready = configReady !== undefined ? configReady : config != null;
   const [downloadedStt, setDownloadedStt] = useState([]);
   // request_id -> one-shot response handler for the hub pair.
   const pendingRef = useRef(new Map());
@@ -227,7 +235,15 @@ export default function SpeechSettingsPanel({ config, configError, onConfigUpdat
         </div>
       )}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      <fieldset
+        data-testid="speech-config-gate"
+        disabled={!ready}
+        style={{
+          border: 0, margin: 0, padding: 0, minWidth: 0,
+          display: 'flex', flexDirection: 'column', gap: '8px',
+          opacity: ready ? 1 : 0.55,
+        }}
+      >
         <div style={rowStyle}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -311,7 +327,7 @@ export default function SpeechSettingsPanel({ config, configError, onConfigUpdat
             )}
           </div>
         </div>
-      </div>
+      </fieldset>
     </div>
   );
 }

@@ -1,9 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { FolderPlus, Folder, Trash2, Search } from 'lucide-react';
 import './chat.css';
+import LoadStateRow from './components/Settings/LoadStateRow';
 
-export default function Projects({ wsRef }) {
+export default function Projects({ wsRef, isConnected = null }) {
   const [workspaces, setWorkspaces] = useState([]);
+  // RUX-C-08: the workspace list is a load state until the first
+  // WORKSPACE_LIST_RESPONSE lands — "No workspaces added" before
+  // that was the panel's initial state impersonating the engine's
+  // answer, indistinguishable from a genuinely empty account.
+  const [listLoad, setListLoad] = useState('loading');
+  // RUX-C-08: add / set-active / remove replies used to be applied
+  // only on success and silently dropped on failure, leaving the
+  // user unable to tell whether anything happened. A refused action
+  // is now a visible, named error until the next attempt or success.
+  const [actionError, setActionError] = useState(null);
   // Per-workspace sessions: the reply-level count of sessions filed
   // under no workspace, and the row currently armed for removal
   // (the Q7 confirmation shows before any REMOVE is sent).
@@ -18,16 +29,22 @@ export default function Projects({ wsRef }) {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'WORKSPACE_LIST_RESPONSE') {
+          setListLoad('ready');
           setWorkspaces(data.payload.workspaces || []);
           if (typeof data.payload.unbound_session_count === 'number') {
             setUnboundSessionCount(data.payload.unbound_session_count);
           }
         } else if (data.type === 'WORKSPACE_ADD_RESPONSE') {
           if (data.payload.success && data.payload.workspace) {
+            setActionError(null);
             setWorkspaces(prev => [...prev, data.payload.workspace]);
+          } else if (data.payload.success === false) {
+            setActionError(data.payload.error || 'The workspace could not be added.');
           }
         } else if (data.type === 'WORKSPACE_SET_ACTIVE_RESPONSE') {
-          if (data.payload.success && wsRef.current) {
+          if (data.payload.success === false) {
+            setActionError(data.payload.error || 'That workspace could not be made active.');
+          } else if (data.payload.success && wsRef.current) {
             wsRef.current.send(JSON.stringify({
               type: 'WORKSPACE_LIST_REQUEST',
               schema_version: 1,
@@ -36,7 +53,10 @@ export default function Projects({ wsRef }) {
             }));
           }
         } else if (data.type === 'WORKSPACE_REMOVE_RESPONSE') {
-          if (data.payload.success) {
+          if (data.payload.success === false) {
+            setActionError(data.payload.error || 'The workspace could not be removed.');
+          } else if (data.payload.success) {
+            setActionError(null);
             setConfirmRemovePath(null);
             // Q7: the sessions the removed root owned are unbound
             // now — the engine reports how many in the reply, so
@@ -100,6 +120,7 @@ export default function Projects({ wsRef }) {
   };
 
   const handleSetActive = (path) => {
+    setActionError(null);
     if (wsRef?.current) {
       wsRef.current.send(JSON.stringify({
         type: 'WORKSPACE_SET_ACTIVE_REQUEST',
@@ -111,6 +132,7 @@ export default function Projects({ wsRef }) {
   };
 
   const handleRemoveWorkspace = (path) => {
+    setActionError(null);
     if (wsRef?.current) {
       wsRef.current.send(JSON.stringify({
         type: 'WORKSPACE_REMOVE_REQUEST',
@@ -136,7 +158,26 @@ export default function Projects({ wsRef }) {
         </button>
       </div>
 
+      {actionError && (
+        <div
+          data-testid="projects-action-error"
+          style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '12px', padding: '12px 16px', fontSize: '13px', color: '#fca5a5', marginBottom: '16px' }}
+        >
+          {actionError}
+        </div>
+      )}
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        {listLoad !== 'ready' && workspaces.length === 0 && (
+          <LoadStateRow
+            loadState={listLoad}
+            isConnected={isConnected}
+            testId="projects-list-load-state"
+            loadingText="Loading workspaces…"
+            offlineText="Waiting for the engine — your workspaces will appear here once it connects."
+            errorText="Workspaces could not be loaded."
+          />
+        )}
         {workspaces.map(ws => (
           <div key={ws.path} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', opacity: ws.exists === false ? 0.55 : 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
@@ -214,7 +255,7 @@ export default function Projects({ wsRef }) {
             <div style={{ color: '#a78bfa', fontSize: '13px' }}>{unboundSessionCount} unbound session{unboundSessionCount === 1 ? '' : 's'}</div>
           </div>
         )}
-        {workspaces.length === 0 && (
+        {listLoad === 'ready' && workspaces.length === 0 && (
           <div style={{ textAlign: 'center', color: '#9090a0', padding: '40px', background: 'rgba(255,255,255,0.02)', borderRadius: '16px' }}>
             No workspaces added. Add a local folder to get started.
           </div>

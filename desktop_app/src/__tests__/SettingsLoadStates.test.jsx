@@ -82,6 +82,44 @@ describe('SettingsPanel load states (RUX-C-01/C-06)', () => {
     expect(screen.queryByTestId('voice-config-load-state')).not.toBeInTheDocument();
   });
 
+  test('Voice (RUX-C-11): the sliders are disabled until the first config answer lands', () => {
+    const { wsRef, feed } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+    fireEvent.click(screen.getByText('Voice Tuning'));
+    // 0.50 / 700 ms are local defaults — until the engine answers
+    // they must not be editable as if they were the saved values.
+    expect(screen.getByTestId('vad-threshold-slider')).toBeDisabled();
+    expect(screen.getByTestId('silence-duration-slider')).toBeDisabled();
+    feed('CONFIG_GET_RESPONSE', { config: {} });
+    expect(screen.getByTestId('vad-threshold-slider')).not.toBeDisabled();
+    expect(screen.getByTestId('silence-duration-slider')).not.toBeDisabled();
+  });
+
+  test('Agents (RUX-C-11): the orchestration controls are gated until the config answer', () => {
+    const { wsRef, feed } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+    fireEvent.click(screen.getByText('Agents'));
+    expect(screen.getByTestId('orchestration-config-gate')).toBeDisabled();
+    expect(screen.getByTestId('spawn-restrict-toggle')).toBeDisabled();
+    feed('CONFIG_GET_RESPONSE', { config: {} });
+    expect(screen.getByTestId('orchestration-config-gate')).not.toBeDisabled();
+    expect(screen.getByTestId('spawn-restrict-toggle')).not.toBeDisabled();
+  });
+
+  test('Advanced (RUX-C-11): the project layer editor is gated until its GET reply lands', () => {
+    const { wsRef, feed } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+    fireEvent.click(screen.getByText('Advanced'));
+    // Pre-answer the panel must not claim there is no workspace.
+    expect(screen.getByTestId('project-config-root')).toHaveTextContent('Loading the project layer…');
+    expect(screen.getByTestId('project-config-content')).toBeDisabled();
+    expect(screen.getByTestId('project-config-save')).toBeDisabled();
+    feed('PROJECT_CONFIG_GET_RESPONSE', { workspace_root: '/home/user/proj', content: '{}', exists: true });
+    expect(screen.getByTestId('project-config-root')).toHaveTextContent('Workspace: /home/user/proj');
+    expect(screen.getByTestId('project-config-content')).not.toBeDisabled();
+    expect(screen.getByTestId('project-config-save')).not.toBeDisabled();
+  });
+
   test('Providers: App\'s loaded signal threads through — loading row before, empty state after', () => {
     const { wsRef } = makeWsRef();
     const { rerender } = render(

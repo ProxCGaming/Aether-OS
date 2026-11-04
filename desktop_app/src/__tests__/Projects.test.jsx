@@ -252,3 +252,76 @@ describe('Projects per-workspace session counts (renderer slice, Q7)', () => {
     expect(screen.getByText('3 unbound sessions')).toBeInTheDocument();
   });
 });
+
+describe('Projects load states (RUX-C-08)', () => {
+  it('shows a loading state, not "No workspaces added", before the list reply', () => {
+    const { wsRef } = makeWsRef();
+    render(<Projects wsRef={wsRef} />);
+    const row = screen.getByTestId('projects-list-load-state');
+    expect(row.dataset.loadDisplay).toBe('loading');
+    expect(screen.queryByText(/No workspaces added/)).not.toBeInTheDocument();
+  });
+
+  it('shows the waiting-for-engine state while disconnected', () => {
+    const { wsRef } = makeWsRef();
+    render(<Projects wsRef={wsRef} isConnected={false} />);
+    const row = screen.getByTestId('projects-list-load-state');
+    expect(row.dataset.loadDisplay).toBe('offline');
+    expect(row.textContent).toMatch(/Waiting for the engine/);
+  });
+
+  it('an answered-empty list renders the genuine empty state', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<Projects wsRef={wsRef} />);
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_LIST_RESPONSE',
+          payload: { workspaces: [] },
+        }),
+      });
+    });
+    expect(screen.queryByTestId('projects-list-load-state')).not.toBeInTheDocument();
+    expect(screen.getByText(/No workspaces added/)).toBeInTheDocument();
+  });
+
+  it('a refused remove is surfaced instead of silently ignored', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<Projects wsRef={wsRef} />);
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_LIST_RESPONSE',
+          payload: { workspaces: [{ path: '/home/user/proj', name: 'proj', is_indexed: false }] },
+        }),
+      });
+    });
+    fireEvent.click(screen.getByTitle('Remove workspace'));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_REMOVE_RESPONSE',
+          payload: { success: false, error: 'The folder is in use by a running task.' },
+        }),
+      });
+    });
+    expect(screen.getByTestId('projects-action-error').textContent).toMatch(/in use by a running task/);
+    // The workspace is still listed — the refusal changed nothing.
+    expect(screen.getByText('/home/user/proj')).toBeInTheDocument();
+  });
+
+  it('a refused add without an engine reason still names the failure', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<Projects wsRef={wsRef} />);
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_ADD_RESPONSE',
+          payload: { success: false },
+        }),
+      });
+    });
+    expect(screen.getByTestId('projects-action-error').textContent).toMatch(/could not be added/);
+  });
+});

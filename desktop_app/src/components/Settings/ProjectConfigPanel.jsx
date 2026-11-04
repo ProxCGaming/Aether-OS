@@ -23,6 +23,13 @@ export default function ProjectConfigPanel({
   warning,
   status,
   onSave,
+  // RUX-C-11: until the PROJECT_CONFIG_GET reply lands, the panel
+  // showed an empty editor and "No active workspace." — a pre-answer
+  // state dressed as a fact about the user's setup. While not
+  // ready the editor and save are disabled and the root line says
+  // the layer is still loading. Standalone callers that never pass
+  // it keep the old always-ready behaviour.
+  configReady = true,
 }) {
   const [content, setContent] = useState(appliedContent || '');
 
@@ -50,7 +57,9 @@ export default function ProjectConfigPanel({
         value replaces). This editor shows the layer itself — not the merged result.
       </p>
       <div data-testid="project-config-root" style={{ fontSize: '13px', color: '#c0c0cc', marginBottom: '12px', fontFamily: 'monospace' }}>
-        {workspaceRoot ? `Workspace: ${workspaceRoot}` : 'No active workspace.'}
+        {!configReady
+          ? 'Loading the project layer…'
+          : workspaceRoot ? `Workspace: ${workspaceRoot}` : 'No active workspace.'}
       </div>
       {warning && (
         <div
@@ -67,7 +76,7 @@ export default function ProjectConfigPanel({
         placeholder={exists ? '' : '{\n  "reasoning_effort": "high"\n}'}
         rows={10}
         spellCheck={false}
-        disabled={!workspaceRoot}
+        disabled={!workspaceRoot || !configReady}
         aria-label="Project config layer JSON"
         style={{
           width: '100%',
@@ -94,10 +103,10 @@ export default function ProjectConfigPanel({
           type="button"
           data-testid="project-config-save"
           onClick={() => onSave && onSave(content)}
-          disabled={!workspaceRoot}
+          disabled={!workspaceRoot || !configReady}
           style={{
             background: 'rgba(124,58,237,0.15)',
-            color: workspaceRoot ? '#c4b5fd' : '#6b6b7a',
+            color: workspaceRoot && configReady ? '#c4b5fd' : '#6b6b7a',
             border: '1px solid rgba(124,58,237,0.4)',
             padding: '8px 16px',
             borderRadius: '8px',

@@ -143,8 +143,15 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
             setPluginActionResult(`${verb}${data.payload.name ? ` ${data.payload.name}` : ''} failed: ${data.payload.error}`);
           }
         } else if (data.type === 'AGENT_LIST_RESPONSE') {
-          setAgents(data.payload.agents || []);
-          setAgentsLoad('ready');
+          // RUX-C-10 (residual): an errored reply is the error
+          // state — marking it ready rendered "No agents were
+          // reported by the engine" for a failed fetch.
+          if (data.payload.error) {
+            setAgentsLoad('error');
+          } else {
+            setAgents(data.payload.agents || []);
+            setAgentsLoad('ready');
+          }
         } else if (data.type === 'TOOL_LIST_RESPONSE') {
           setTools(data.payload.tools || []);
         } else if (data.type === 'SESSION_LIST_RESPONSE') {

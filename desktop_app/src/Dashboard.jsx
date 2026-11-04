@@ -1,8 +1,16 @@
 import React, { useEffect, useState } from 'react';
 import { Activity, Cpu, Database, HardDrive, HeartPulse, Network, Zap } from 'lucide-react';
 import './chat.css';
+import { useSlowLoad, DEFAULT_SLOW_TEXT } from './components/Settings/LoadStateRow';
 
-export default function Dashboard({ status = 'Initializing', activeTasks = 0, pluginCount = 0, memoryMb = null, providerHealth = {}, wsRef = null, onStartWorkflow }) {
+export default function Dashboard({ status = 'Initializing', activeTasks = 0, pluginCount = null, memoryMb = null, providerHealth = null, providerHealthLoaded = null, wsRef = null, onStartWorkflow }) {
+  // RUX-C-14: a metric the engine has not answered yet is unknown
+  // ('—'), never 0. Provider health counts as answered when App
+  // says a snapshot arrived, or — for standalone callers — when a
+  // health object was handed in at all.
+  const healthLoaded = providerHealthLoaded !== null && providerHealthLoaded !== undefined
+    ? providerHealthLoaded
+    : providerHealth !== null && providerHealth !== undefined;
   const isOnline = status === 'Online' || status.startsWith('Online');
   // Epic 6, E6-05: memory stats come from the engine on mount
   // (MEMORY_EPISODES_RESPONSE carries backend + embedding stats).
@@ -11,6 +19,10 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
   // backend/stats (unavailable backend). Like MemoryManagement, that is
   // an error state — never a healthy-looking native/zero default.
   const [memoryError, setMemoryError] = useState(null);
+  // Mechanism 5: the memory card's "Loading…" used to be able to
+  // wait forever in silence (the request queues offline) — after
+  // the shared slow interval it says so.
+  const memorySlow = useSlowLoad(memoryStats === null && !memoryError);
   useEffect(() => {
     if (!wsRef?.current) return;
     const handleMessage = (event) => {
@@ -69,7 +81,7 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a78bfa', marginBottom: '12px' }}>
             <Cpu size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Active Tasks</span>
           </div>
-          <div style={{ fontSize: '24px', fontWeight: 500 }}>{activeTasks}</div>
+          <div style={{ fontSize: '24px', fontWeight: 500 }}>{isOnline ? activeTasks : '—'}</div>
         </div>
 
         {/* Plugins — real count from PLUGIN_LIST_RESPONSE */}
@@ -77,7 +89,7 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a78bfa', marginBottom: '12px' }}>
             <Network size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Plugins</span>
           </div>
-          <div style={{ fontSize: '24px', fontWeight: 500 }}>{pluginCount} Active</div>
+          <div style={{ fontSize: '24px', fontWeight: 500 }}>{pluginCount === null || pluginCount === undefined ? '—' : `${pluginCount} Active`}</div>
         </div>
 
         {/* Provider Health — Epic 5 health snapshot via App state */}
@@ -85,7 +97,11 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a78bfa', marginBottom: '12px' }}>
             <HeartPulse size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Provider Health</span>
           </div>
-          {healthEntries.length === 0 ? (
+          {!healthLoaded ? (
+            <div style={{ fontSize: '15px', color: '#9090a0' }}>
+              {isOnline ? 'Waiting for the first health report…' : 'Waiting for the engine — health will appear here once it connects.'}
+            </div>
+          ) : healthEntries.length === 0 ? (
             <div style={{ fontSize: '15px', color: '#9090a0' }}>No providers reporting yet</div>
           ) : (
             <div style={{ fontSize: '15px', lineHeight: 1.7 }}>
@@ -107,7 +123,12 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
               <div style={{ color: '#f87171', fontSize: '13px' }}>{memoryError}</div>
             </div>
           ) : memoryStats === null ? (
-            <div style={{ fontSize: '15px', color: '#9090a0' }}>Loading…</div>
+            <div style={{ fontSize: '15px', color: '#9090a0' }}>
+              Loading…
+              {memorySlow && (
+                <div style={{ fontSize: '12px', marginTop: '4px' }}>{DEFAULT_SLOW_TEXT}</div>
+              )}
+            </div>
           ) : (
             <div style={{ fontSize: '15px', lineHeight: 1.7 }}>
               <div>Backend: {memoryStats.backend}</div>

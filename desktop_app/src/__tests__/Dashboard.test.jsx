@@ -118,3 +118,45 @@ describe('Dashboard memory honesty (E4-F14 family)', () => {
     expect(screen.queryByText(/could not be loaded/)).not.toBeInTheDocument();
   });
 });
+
+describe('Dashboard metric honesty (RUX-C-14)', () => {
+  it('unanswered metrics render as unknown (—), never as 0', () => {
+    render(<Dashboard status="Initializing" activeTasks={0} pluginCount={null} providerHealth={null} />);
+    // Active Tasks while offline and a not-yet-reported plugin
+    // count are unknowns, not zeros.
+    expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText('0 Active')).not.toBeInTheDocument();
+    expect(screen.getByText(/Waiting for the engine/)).toBeInTheDocument();
+    expect(screen.queryByText('No providers reporting yet')).not.toBeInTheDocument();
+  });
+
+  it('answered metrics render their real values', () => {
+    render(
+      <Dashboard
+        status="Online"
+        activeTasks={3}
+        pluginCount={2}
+        providerHealth={{}}
+        providerHealthLoaded
+      />,
+    );
+    expect(screen.getByText('3')).toBeInTheDocument();
+    expect(screen.getByText('2 Active')).toBeInTheDocument();
+    // An answered-but-empty health snapshot is genuinely "none reporting".
+    expect(screen.getByText('No providers reporting yet')).toBeInTheDocument();
+  });
+
+  it('the memory card gains the slow notice instead of loading forever in silence', () => {
+    jest.useFakeTimers();
+    try {
+      render(<Dashboard status="Online" />);
+      expect(screen.getByText('Loading…')).toBeInTheDocument();
+      expect(screen.queryByText(/taking longer than usual/)).not.toBeInTheDocument();
+      const { act } = require('@testing-library/react');
+      act(() => { jest.advanceTimersByTime(20000); });
+      expect(screen.getByText(/taking longer than usual/)).toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});

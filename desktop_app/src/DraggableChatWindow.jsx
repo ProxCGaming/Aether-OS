@@ -9,6 +9,7 @@ import CostHeaderPopover, { formatUsd } from './components/CostHeaderPopover';
 import ContextBar, { CompactContextBar } from './components/ContextBar';
 import VoiceOverlay from './components/VoiceOverlay';
 import { sanitizeSvg } from './sanitizeSvg';
+import { useSlowLoad, DEFAULT_SLOW_TEXT } from './components/Settings/LoadStateRow';
 import './chat.css';
 
 export function getNodeStyle(nodeName = '') {
@@ -1531,6 +1532,7 @@ export default function DraggableChatWindow({
   onSendMessage, 
   onStopTask,
   status = 'Online',
+  sessionSwitchPending = false,
   isThinking,
   onApproveTool,
   onApprovePlugin,
@@ -1589,6 +1591,14 @@ export default function DraggableChatWindow({
   onReadAloudStop = null
 }) {
   const [input, setInput] = useState(initialInput);
+  // RUX-C-16: the header dot is currently the only in-chat sign
+  // that the engine is gone; the banner below the header states
+  // it in words, where the user is typing. It derives from the
+  // same status signal as the dot and clears itself on reconnect.
+  const chatOffline = !(status || '').includes('Online');
+  // RUX-C-13 mechanism 5: a session switch that outlasts the
+  // shared slow interval gains the taking-longer line.
+  const switchSlow = useSlowLoad(sessionSwitchPending);
   const [isMinimized, setIsMinimized] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportMenuRef = useRef(null);
@@ -2587,6 +2597,26 @@ export default function DraggableChatWindow({
           </div>
         </div>
 
+        {/* RUX-C-16: slim offline notice for the chat area. The
+            PendingQueueIndicator counts queued ACTIONS; this states
+            the connection FACT. It renders only while disconnected
+            and removes itself on reconnect — nothing to dismiss. */}
+        {!isMinimized && chatOffline && (
+          <div
+            data-testid="chat-offline-banner"
+            style={{
+              padding: '8px 16px',
+              background: 'rgba(239, 68, 68, 0.08)',
+              borderBottom: '1px solid rgba(239, 68, 68, 0.25)',
+              color: '#fca5a5',
+              fontSize: '12.5px',
+              textAlign: 'center'
+            }}
+          >
+            Engine disconnected — you are viewing the last known state. Actions will queue until the connection returns.
+          </div>
+        )}
+
         {/* Chat Feed */}
         {!isMinimized && (
           <>
@@ -2599,9 +2629,16 @@ export default function DraggableChatWindow({
               gap: '16px'
             }}>
               {messages.length === 0 && !isThinking && (
+                sessionSwitchPending ? (
+                  <div data-testid="session-switch-loading" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'center', justifyContent: 'center', color: '#9090a0', textAlign: 'center' }}>
+                    <p style={{ margin: 0 }}>{chatOffline ? 'Waiting for the engine — this session will load once it connects.' : 'Loading session…'}</p>
+                    {switchSlow && <p style={{ margin: 0, fontSize: '12.5px' }}>{DEFAULT_SLOW_TEXT}</p>}
+                  </div>
+                ) : (
                 <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9090a0', textAlign: 'center' }}>
                   <p>No active session. Open a project or start a new chat.</p>
                 </div>
+                )
               )}
 
               {messages.map((msg, i) => {

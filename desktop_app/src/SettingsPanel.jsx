@@ -506,6 +506,11 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             applyConfigValues(data.payload.config);
           }
         } else if (data.type === 'PROJECT_CONFIG_GET_RESPONSE') {
+          // RUX-C-11: success or refusal, this reply IS the project
+          // layer's answer — the editor stops presenting its
+          // pre-answer state ("No active workspace.", empty editor)
+          // as fact from here on.
+          markAnswered('projectConfig');
           const p = data.payload || {};
           if (p.success === false) {
             setProjectLayer((prev) => ({
@@ -998,6 +1003,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                    onConfigUpdate={sendConfigUpdate}
                    pendingMessages={pendingMessages}
                    reconnectCount={reconnectCount}
+                   configReady={!!answered.config}
                    wsRef={wsRef}
                  />
                </>
@@ -1036,7 +1042,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                 offlineText="Waiting for the engine — your saved agent settings will appear here once it connects."
               />
             )}
-            <OrchestrationPanel config={engineConfig} configError={configUpdateError} onConfigUpdate={sendConfigUpdate} />
+            <OrchestrationPanel config={engineConfig} configError={configUpdateError} onConfigUpdate={sendConfigUpdate} configReady={!!answered.config} />
           </div>
         )}
 
@@ -1670,6 +1676,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             </div>
 
             <ProjectConfigPanel
+              configReady={!!answered.projectConfig}
               workspaceRoot={projectLayer.workspaceRoot}
               content={projectLayer.content}
               exists={projectLayer.exists}
@@ -1854,6 +1861,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                   min="0.1"
                   max="0.9"
                   step="0.05"
+                  disabled={!answered.config}
                   value={vadThreshold}
                   onChange={(e) => {
                     const val = parseFloat(e.target.value);
@@ -1896,6 +1904,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                   min="200"
                   max="2000"
                   step="50"
+                  disabled={!answered.config}
                   value={silenceDurationMs}
                   onChange={(e) => {
                     const val = parseInt(e.target.value, 10);

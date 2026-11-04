@@ -1,6 +1,6 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
-import LoadStateRow, { loadDisplay } from '../LoadStateRow';
+import { render, screen, act } from '@testing-library/react';
+import LoadStateRow, { loadDisplay, LOAD_SLOW_NOTICE_MS, DEFAULT_SLOW_TEXT } from '../LoadStateRow';
 
 const TEXTS = {
   loadingText: 'Loading credentials…',
@@ -55,5 +55,42 @@ describe('LoadStateRow', () => {
     const row = screen.getByTestId('row');
     expect(row.dataset.loadDisplay).toBe('error');
     expect(row.textContent).toBe(TEXTS.errorText);
+  });
+});
+
+describe('LoadStateRow slow notice (Wave 3 slice 2, mechanism 5)', () => {
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  it('gains the slow line after LOAD_SLOW_NOTICE_MS of loading, and only then', () => {
+    render(<LoadStateRow loadState="loading" isConnected testId="row" {...TEXTS} />);
+    expect(screen.queryByTestId('row-slow')).not.toBeInTheDocument();
+    act(() => { jest.advanceTimersByTime(LOAD_SLOW_NOTICE_MS - 1); });
+    expect(screen.queryByTestId('row-slow')).not.toBeInTheDocument();
+    act(() => { jest.advanceTimersByTime(1); });
+    expect(screen.getByTestId('row-slow').textContent).toBe(DEFAULT_SLOW_TEXT);
+    // The base copy is unchanged — the slow line is an addition,
+    // never a state change or substitute data.
+    expect(screen.getByTestId('row').dataset.loadDisplay).toBe('loading');
+  });
+
+  it('also applies while waiting offline, with custom copy when given', () => {
+    render(
+      <LoadStateRow loadState="loading" isConnected={false} testId="row" slowText="Still waiting." {...TEXTS} />,
+    );
+    act(() => { jest.advanceTimersByTime(LOAD_SLOW_NOTICE_MS); });
+    expect(screen.getByTestId('row-slow').textContent).toBe('Still waiting.');
+  });
+
+  it('never appears for an error, however long it sits', () => {
+    render(<LoadStateRow loadState="error" isConnected testId="row" {...TEXTS} />);
+    act(() => { jest.advanceTimersByTime(LOAD_SLOW_NOTICE_MS * 3); });
+    expect(screen.queryByTestId('row-slow')).not.toBeInTheDocument();
+  });
+
+  it('slowText={null} opts the surface out', () => {
+    render(<LoadStateRow loadState="loading" isConnected testId="row" slowText={null} {...TEXTS} />);
+    act(() => { jest.advanceTimersByTime(LOAD_SLOW_NOTICE_MS * 2); });
+    expect(screen.queryByTestId('row-slow')).not.toBeInTheDocument();
   });
 });

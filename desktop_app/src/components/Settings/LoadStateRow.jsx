@@ -1,4 +1,29 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+
+// Wave 3 slice 2 (mechanism 5 — no in-flight state may wait
+// forever in silence): after this long in a loading/offline state,
+// the row gains a "taking longer than usual" line. The value
+// matches the StartupGate's slow notice (STARTUP_SLOW_NOTICE_MS):
+// long enough to calm, never a declaration of failure — the load
+// state itself does not change, and no fake data is substituted.
+export const LOAD_SLOW_NOTICE_MS = 20000;
+
+export const DEFAULT_SLOW_TEXT = 'This is taking longer than usual — the engine may be busy or still starting.';
+
+// True once `active` has been continuously true for
+// LOAD_SLOW_NOTICE_MS; resets the moment it goes false.
+export function useSlowLoad(active) {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    if (!active) {
+      setSlow(false);
+      return undefined;
+    }
+    const timer = setTimeout(() => setSlow(true), LOAD_SLOW_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [active]);
+  return slow;
+}
 
 // Wave 3 slice 1 (RUX-C-01…C-05): the shared load-state idiom for
 // engine-backed surfaces. Every such surface tracks ONE load state
@@ -57,20 +82,32 @@ export default function LoadStateRow({
   loadingText,
   offlineText,
   errorText,
+  // Slow-notice line for a load that outlasts LOAD_SLOW_NOTICE_MS:
+  // omit for the shared default copy, pass a string to customise,
+  // or null to opt the surface out. Errors never gain the line —
+  // they have already resolved, just badly.
+  slowText,
   testId,
   variant = 'box',
   style,
 }) {
   const display = loadDisplay(loadState, isConnected);
+  const slow = useSlowLoad(display === 'loading' || display === 'offline');
   if (display === null) return null;
   const text = display === 'error' ? errorText : display === 'offline' ? offlineText : loadingText;
   if (!text) return null;
   const base = variant === 'plain'
     ? (display === 'error' ? plainError : plainBase)
     : (display === 'error' ? boxError : boxBase);
+  const showSlow = slow && slowText !== null;
   return (
     <div data-testid={testId} data-load-display={display} style={{ ...base, ...style }}>
       {text}
+      {showSlow && (
+        <div data-testid={testId ? `${testId}-slow` : undefined} style={{ marginTop: '6px' }}>
+          {slowText || DEFAULT_SLOW_TEXT}
+        </div>
+      )}
     </div>
   );
 }

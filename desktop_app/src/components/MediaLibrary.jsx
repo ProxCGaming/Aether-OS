@@ -15,6 +15,7 @@ import {
   FolderGit2
 } from 'lucide-react';
 import '../chat.css';
+import LoadStateRow from './Settings/LoadStateRow';
 
 export default function MediaLibrary({
   media: controlledMedia,
@@ -24,9 +25,17 @@ export default function MediaLibrary({
   safeSend = null,
   pendingMessages = [],
   reconnectCount = 0,
+  isConnected = null,
   onNavigateToSession = () => {}
 }) {
   const [internalMedia, setInternalMedia] = useState(() => initialMedia || []);
+  // RUX-C-09: "No media items yet" rendered from the first frame —
+  // during the list fetch and through any outage. Controlled/seeded
+  // mounts hold real data and start ready; the fetched list starts
+  // loading, and only an answered list may render the empty state.
+  const [listLoad, setListLoad] = useState(
+    () => (controlledMedia || initialMedia ? 'ready' : 'loading')
+  );
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCollection, setActiveCollection] = useState('all'); // 'all' | 'user' | 'snips' | 'generated'
   const [selectedMedia, setSelectedMedia] = useState(null); // for detail modal
@@ -97,7 +106,10 @@ export default function MediaLibrary({
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'MEDIA_LIST_RESPONSE') {
-          if (Array.isArray(data.payload?.media)) {
+          if (data.payload?.error) {
+            setListLoad('error');
+          } else if (Array.isArray(data.payload?.media)) {
+            setListLoad('ready');
             setInternalMedia(data.payload.media);
           }
         } else if (data.type === 'MEDIA_RECORDED') {
@@ -675,7 +687,18 @@ export default function MediaLibrary({
 
       {/* Main Grid View */}
       <div style={{ flex: 1, overflowY: 'auto' }} className="chat-scroll">
-        {effectiveMedia.length === 0 ? (
+        {listLoad !== 'ready' && effectiveMedia.length === 0 ? (
+          <div style={{ padding: '24px' }}>
+            <LoadStateRow
+              loadState={listLoad}
+              isConnected={isConnected}
+              testId="media-list-load-state"
+              loadingText="Loading media…"
+              offlineText="Waiting for the engine — your media will appear here once it connects."
+              errorText="Media could not be loaded."
+            />
+          </div>
+        ) : effectiveMedia.length === 0 ? (
           <div
             data-testid="empty-media-state"
             style={{

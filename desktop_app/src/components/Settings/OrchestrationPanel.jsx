@@ -48,7 +48,15 @@ const saveButtonStyle = {
 
 const canonical = (names) => SPECIALISTS.filter((s) => names.includes(s));
 
-export default function OrchestrationPanel({ config, configError, onConfigUpdate }) {
+export default function OrchestrationPanel({ config, configError, onConfigUpdate, configReady }) {
+  // RUX-C-11: until the first config answer lands, every control
+  // below holds a local default — presenting those as the user's
+  // saved configuration was the lie. The whole control set is
+  // disabled (one fieldset) until the config is actually known;
+  // SettingsPanel's banner above the panel explains why. Callers
+  // that don't pass configReady get the derived rule: a non-null
+  // config IS an answer.
+  const ready = configReady !== undefined ? configReady : config != null;
   const [spawnRestricted, setSpawnRestricted] = useState(false);
   const [spawnAllowed, setSpawnAllowed] = useState([...SPECIALISTS]);
   const [delegationCap, setDelegationCap] = useState('8');
@@ -219,6 +227,16 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
         </div>
       )}
 
+      <fieldset
+        data-testid="orchestration-config-gate"
+        disabled={!ready}
+        style={{
+          border: 0, margin: 0, padding: 0, minWidth: 0,
+          display: 'flex', flexDirection: 'column', gap: '20px',
+          opacity: ready ? 1 : 0.55,
+        }}
+      >
+
       <div style={cardStyle}>
         <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Supervisor spawn policy</h3>
         <p style={{ fontSize: '13px', color: '#9090a0', margin: '0 0 16px 0' }}>
@@ -360,6 +378,7 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
           Save compaction thresholds
         </button>
       </div>
+      </fieldset>
     </div>
   );
 }

@@ -171,7 +171,12 @@ function AppContent() {
 
   // Dashboard State (real data, not hardcoded)
   const [activeTaskIds, setActiveTaskIds] = useState(new Set());
-  const [pluginCount, setPluginCount] = useState(0);
+  // RUX-C-14: null until the first PLUGIN_LIST_RESPONSE lands —
+  // the Dashboard must not render an initial 0 as a real count.
+  const [pluginCount, setPluginCount] = useState(null);
+  // RUX-C-14: provider health starts as {} which the Dashboard
+  // cannot tell from an answered-empty snapshot; this flag can.
+  const [providerHealthLoaded, setProviderHealthLoaded] = useState(false);
   const [memoryMb, setMemoryMb] = useState(null);
 
   const params = new URLSearchParams(window.location.search);
@@ -770,6 +775,13 @@ function AppContent() {
   // whose session matches it (a reply for any other session is still
   // ignored, so echoed broadcasts cannot hijack the view).
   const pendingSessionSwitchIdRef = useRef(null);
+  // RUX-C-13: the reactive half of the pending switch — the id of
+  // a session whose history has been requested but not yet
+  // answered AND which has no cached copy to show. While it is
+  // set, the chat pane renders a switching/loading state instead
+  // of "No active session": an uncached session in flight is not
+  // an empty session. Cleared by the honoured SESSION_GET reply.
+  const [sessionSwitchPendingId, setSessionSwitchPendingId] = useState(null);
   const sessionCacheRef = useRef({});
   const activeTaskSessionRef = useRef(null);
 
@@ -1250,6 +1262,7 @@ function AppContent() {
           if (switchByRequest || switchBySession) {
             pendingSessionSwitchRef.current = null; // Clear immediately to ignore any subsequent echoed broadcasts
             pendingSessionSwitchIdRef.current = null;
+            setSessionSwitchPendingId(null);
             const sess = data.payload.session;
             setChatMessages(prev => {
               const backendMessages = (sess && sess.messages) ? sess.messages.map(m => {
@@ -1586,7 +1599,10 @@ function AppContent() {
           setProviders(Array.isArray(list) ? list : (list && typeof list === 'object' ? Object.values(list) : []));
           setProvidersLoaded(true);
           // Epic 5, E5-05: per-provider health travels with the list.
-          if (data.payload.health && typeof data.payload.health === 'object') setProviderHealth(data.payload.health);
+          if (data.payload.health && typeof data.payload.health === 'object') {
+            setProviderHealth(data.payload.health);
+            setProviderHealthLoaded(true);
+          }
         } else if (data.type === 'CONFIG_GET_RESPONSE' || data.type === 'CONFIG_UPDATE_RESPONSE' || data.type === 'CONFIG_RESET_RESPONSE') {
           if (data.payload && data.payload.config) setEngineConfig(data.payload.config);
           if (data.type === 'CONFIG_RESET_RESPONSE' && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -2263,6 +2279,10 @@ function AppContent() {
     // registered by target session id (see pendingSessionSwitchIdRef).
     pendingSessionSwitchRef.current = null;
     pendingSessionSwitchIdRef.current = id;
+    // RUX-C-13: a cached copy renders instantly and needs no
+    // loading state (the fetch still refreshes it); an uncached
+    // target shows the switching state until the reply lands.
+    setSessionSwitchPendingId(sessionCacheRef.current[id] ? null : id);
     safeSend('SESSION_GET_REQUEST', { session_id: id });
   };
 
@@ -3316,6 +3336,7 @@ function AppContent() {
         <DraggableChatWindow 
           messages={chatMessages} 
           sessionId={activeSession}
+          sessionSwitchPending={!!sessionSwitchPendingId && sessionSwitchPendingId === activeSession}
           onExportSession={handleExportSession}
           onSendMessage={handleSendMessage} 
           onStopTask={handleStopTask}
@@ -3451,19 +3472,20 @@ function AppContent() {
                  />
                </div>
             )}
-            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} providerHealth={providerHealth} wsRef={wsRef} onStartWorkflow={() => setActiveTab('Chat')} />}
+            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} providerHealth={providerHealth} providerHealthLoaded={providerHealthLoaded} wsRef={wsRef} onStartWorkflow={() => setActiveTab('Chat')} />}
             {activeTab === 'Artifacts' && (
               <GlobalArtifactsView
                 wsRef={wsRef}
                 safeSend={safeSend}
                 pendingMessages={pendingMessages}
                 reconnectCount={reconnectCount}
+                isConnected={isConnected}
                 sessions={sessions}
                 onNavigateToSession={handleNavigateToArtifactSession}
                 onNavigateToMedia={handleNavigateToMediaSession}
               />
             )}
-            {activeTab === 'Projects' && <Projects wsRef={wsRef} />}
+            {activeTab === 'Projects' && <Projects wsRef={wsRef} isConnected={isConnected} />}
             {activeTab !== 'Settings' && activeTab !== 'Dashboard' && activeTab !== 'Artifacts' && activeTab !== 'Projects' && (
                <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: '#9090a0' }}>
                  <h2>{activeTab} view coming soon.</h2>

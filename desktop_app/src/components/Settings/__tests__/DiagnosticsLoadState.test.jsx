@@ -93,4 +93,13 @@ describe('DiagnosticsPanel load states (RUX-C-06)', () => {
     expect(screen.queryByTestId('agents-load-state')).not.toBeInTheDocument();
     expect(screen.getByText('No agents were reported by the engine.')).toBeInTheDocument();
   });
+
+  test('Agents: an errored reply is the error state, not an answered empty (RUX-C-10 residual)', () => {
+    const { simulateMessage } = makeHarness();
+    render(<DiagnosticsPanel activeMenu="Agents" />);
+    simulateMessage({ type: 'AGENT_LIST_RESPONSE', payload: { error: 'agent registry unavailable' } });
+    const row = screen.getByTestId('agents-load-state');
+    expect(row).toHaveAttribute('data-load-display', 'error');
+    expect(screen.queryByText('No agents were reported by the engine.')).not.toBeInTheDocument();
+  });
 });

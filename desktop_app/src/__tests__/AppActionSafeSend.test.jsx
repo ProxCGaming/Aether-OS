@@ -244,6 +244,52 @@ describe('App user actions via safeSend (Wave 2 slice 2)', () => {
     });
   });
 
+  describe('RUX-C-13/C-16 chat switch + offline states (Wave 3 slice 2)', () => {
+    it('switching to an uncached session shows the switching state until its history lands', async () => {
+      await seedActiveSession();
+
+      fireEvent.click(screen.getByText('Second Chat'));
+
+      // s2 has no cached copy: while its SESSION_GET is in flight
+      // the pane must say it is loading — "No active session"
+      // would claim the session does not exist.
+      expect(screen.getByTestId('session-switch-loading')).toBeInTheDocument();
+      expect(screen.queryByText(/No active session/)).not.toBeInTheDocument();
+
+      respondToLastGet({
+        id: 's2', title: 'Second Chat',
+        messages: [{ id: 'u9', role: 'user', content: 'other task', thoughts: [] },
+                   { id: 'a9', role: 'assistant', content: 'second answer', thoughts: [] }],
+      });
+      await flushPromises();
+      expect(screen.queryByTestId('session-switch-loading')).not.toBeInTheDocument();
+      expect(screen.getByText('second answer')).toBeInTheDocument();
+    });
+
+    it('a session that answers empty shows its genuine empty state', async () => {
+      await seedActiveSession();
+
+      fireEvent.click(screen.getByText('Second Chat'));
+      expect(screen.getByTestId('session-switch-loading')).toBeInTheDocument();
+
+      respondToLastGet({ id: 's2', title: 'Second Chat', messages: [] });
+      await flushPromises();
+      expect(screen.queryByTestId('session-switch-loading')).not.toBeInTheDocument();
+      expect(screen.getByText(/No active session/)).toBeInTheDocument();
+    });
+
+    it('the chat shows the offline banner while disconnected and clears it on reconnect', async () => {
+      await seedActiveSession();
+      expect(screen.queryByTestId('chat-offline-banner')).not.toBeInTheDocument();
+
+      await disconnect();
+      expect(screen.getByTestId('chat-offline-banner')).toHaveTextContent(/Engine disconnected/);
+
+      await reconnect();
+      expect(screen.queryByTestId('chat-offline-banner')).not.toBeInTheDocument();
+    });
+  });
+
   describe('RUX-A-07 session delete', () => {
     it('offline: the delete is queued, the row stays until the engine confirms, and it flushes on reconnect', async () => {
       await seedActiveSession();

@@ -286,3 +286,65 @@ describe('WorkspaceIndexingPanel Component', () => {
     expect(screen.getByText(/pending/i)).toBeInTheDocument();
   });
 });
+
+describe('WorkspaceIndexingPanel load states (RUX-C-07)', () => {
+  const mockWorkspace = '/home/user/workspace/my-project';
+
+  test('before the first status reply, the fabricated placeholder is never rendered as fact', () => {
+    const { wsRef } = makeWsRef();
+    render(<WorkspaceIndexingPanel wsRef={wsRef} initialWorkspace={mockWorkspace} />);
+    const row = screen.getByTestId('indexing-status-load-state');
+    expect(row.dataset.loadDisplay).toBe('loading');
+    expect(row.textContent).toMatch(/Loading indexing status/);
+    // The invented record — an embedder presented as the user's,
+    // zero files, an Idle badge — must not appear pre-answer.
+    expect(screen.queryByText('Idle / Up-to-date')).not.toBeInTheDocument();
+    expect(screen.queryByText('Indexed Files')).not.toBeInTheDocument();
+    expect(screen.queryByText('No indexed prose files found.')).not.toBeInTheDocument();
+    // The embedder select is inert until the real value lands.
+    expect(screen.getByLabelText('Embedding Model')).toBeDisabled();
+  });
+
+  test('while disconnected, the gate reads as waiting for the engine', () => {
+    const { wsRef } = makeWsRef();
+    useAetherSocket.mockReturnValue({ wsRef, sendMessage: null, isConnected: false });
+    render(<WorkspaceIndexingPanel wsRef={wsRef} initialWorkspace={mockWorkspace} />);
+    const row = screen.getByTestId('indexing-status-load-state');
+    expect(row.dataset.loadDisplay).toBe('offline');
+    expect(row.textContent).toMatch(/Waiting for the engine/);
+  });
+
+  test('a status reply carrying an error is the error state, not idle zeros', () => {
+    const { wsRef, simulateMessage } = makeWsRef();
+    render(<WorkspaceIndexingPanel wsRef={wsRef} initialWorkspace={mockWorkspace} />);
+    act(() => {
+      simulateMessage({
+        type: 'WORKSPACE_INDEX_STATUS_RESPONSE',
+        payload: { error: 'index store unavailable' },
+      });
+    });
+    const row = screen.getByTestId('indexing-status-load-state');
+    expect(row.dataset.loadDisplay).toBe('error');
+    expect(row.textContent).toMatch(/could not be loaded/);
+    expect(screen.queryByText('Idle / Up-to-date')).not.toBeInTheDocument();
+  });
+
+  test('an answered status renders the real card and re-enables the embedder select', () => {
+    const { wsRef, simulateMessage } = makeWsRef();
+    render(<WorkspaceIndexingPanel wsRef={wsRef} initialWorkspace={mockWorkspace} />);
+    act(() => {
+      simulateMessage({
+        type: 'WORKSPACE_INDEX_STATUS_RESPONSE',
+        payload: {
+          status: 'idle', total_files: 2, indexed_files: 2, total_chunks: 5,
+          embedder: 'qwen3-embedding:4b', paused: false, indexed_docs: [], excluded_files: [],
+        },
+      });
+    });
+    expect(screen.queryByTestId('indexing-status-load-state')).not.toBeInTheDocument();
+    expect(screen.getByText('Idle / Up-to-date')).toBeInTheDocument();
+    expect(screen.getByLabelText('Embedding Model')).not.toBeDisabled();
+    // An answered-empty file list is a genuine empty.
+    expect(screen.getByText('No indexed prose files found.')).toBeInTheDocument();
+  });
+});

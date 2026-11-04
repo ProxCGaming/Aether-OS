@@ -14,6 +14,7 @@ import {
   Folder,
 } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
+import LoadStateRow from './LoadStateRow';
 
 const REASON_METADATA = {
   gitignore: { label: 'Gitignored', color: '#818cf8', bg: 'rgba(99, 102, 241, 0.15)' },
@@ -34,6 +35,14 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
   const socket = useAetherSocket();
   const wsRef = propWsRef || socket?.wsRef;
   const contextSendMessage = socket?.sendMessage;
+  const isConnected = socket?.isConnected;
+  // RUX-C-07: the status record below starts as a fabricated
+  // placeholder (an embedder the user may not have, zero files) —
+  // until the first real status reply lands, the panel renders a
+  // load state instead of those invented numbers. A status reply
+  // carrying an error is the error state; progress events only
+  // exist once the engine knows the status, so they answer it too.
+  const [statusLoad, setStatusLoad] = useState('loading');
 
   const [activeWorkspace, setActiveWorkspace] = useState(initialWorkspace);
   const [workspaces, setWorkspaces] = useState([]);
@@ -83,6 +92,9 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
   // Request status when activeWorkspace is ready
   useEffect(() => {
     if (activeWorkspace) {
+      // A (re)fetch for this workspace is unanswered until its
+      // status reply lands — including workspace switches.
+      setStatusLoad('loading');
       sendEvent('WORKSPACE_INDEX_STATUS_REQUEST', { workspace_root: activeWorkspace });
     }
   }, [activeWorkspace, sendEvent]);
@@ -100,9 +112,16 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
           if (!activeWorkspace && list.length > 0) {
             const active = list.find((w) => w.is_active) || list[0];
             setActiveWorkspace(active.path);
+          } else if (list.length === 0) {
+            // No workspace exists, so no status fetch will ever be
+            // sent — the placeholder gate must not spin forever.
+            setStatusLoad('ready');
           }
         } else if (data.type === 'WORKSPACE_INDEX_STATUS_RESPONSE') {
-          if (data.payload) {
+          if (data.payload?.error) {
+            setStatusLoad('error');
+          } else if (data.payload) {
+            setStatusLoad('ready');
             setStatus((prev) => ({
               ...prev,
               ...data.payload,
@@ -115,6 +134,9 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
             }
           }
         } else if (data.type === 'WORKSPACE_INDEX_PROGRESS') {
+          // Progress is only emitted for a workspace whose status
+          // the engine is tracking — it answers the gate too.
+          setStatusLoad('ready');
           setProgress(data.payload);
           if (data.payload.status) {
             setStatus((prev) => ({ ...prev, status: data.payload.status }));
@@ -128,9 +150,11 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
           }));
         } else if (data.type === 'WORKSPACE_INDEX_CONFIG_RESPONSE') {
           if (data.payload?.ok) {
+            setStatusLoad('loading');
             sendEvent('WORKSPACE_INDEX_STATUS_REQUEST', { workspace_root: activeWorkspace });
           }
         } else if (data.type === 'WORKSPACE_INDEX_START_RESPONSE') {
+          setStatusLoad('loading');
           sendEvent('WORKSPACE_INDEX_STATUS_REQUEST', { workspace_root: activeWorkspace });
         }
       } catch {
@@ -271,7 +295,20 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
         )}
       </div>
 
-      {/* Status & Action Bar */}
+      {/* RUX-C-07: until the first real status reply lands, a load
+          state stands where the status card would be — the
+          placeholder record (idle, 0 files, a default embedder) is
+          never rendered as if the engine had reported it. */}
+      {statusLoad !== 'ready' ? (
+        <LoadStateRow
+          loadState={statusLoad}
+          isConnected={isConnected}
+          testId="indexing-status-load-state"
+          loadingText="Loading indexing status…"
+          offlineText="Waiting for the engine — indexing status will appear here once it connects."
+          errorText="Indexing status could not be loaded."
+        />
+      ) : (
       <div
         style={{
           background: 'rgba(255, 255, 255, 0.03)',
@@ -462,6 +499,7 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
           </div>
         </div>
       </div>
+      )}
 
       {/* Embedder Configuration Box */}
       <div
@@ -491,6 +529,7 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
             id="embedder-select"
             aria-label="Embedding Model"
             value={status.embedder || 'qwen3-embedding:0.6b'}
+            disabled={statusLoad !== 'ready'}
             onChange={handleEmbedderSelectChange}
             style={{
               width: '100%',
@@ -620,9 +659,24 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
           {activeTab === 'indexed' && (
             <div data-testid="indexed-files-list">
               {filteredIndexedDocs.length === 0 ? (
-                <div style={{ padding: '36px 16px', textAlign: 'center', color: '#9090a0', fontSize: '13px' }}>
-                  No indexed prose files found.
-                </div>
+                statusLoad !== 'ready' ? (
+                  <div style={{ padding: '24px 16px' }}>
+                    <LoadStateRow
+                      loadState={statusLoad}
+                      isConnected={isConnected}
+                      testId="indexing-files-load-state"
+                      variant="plain"
+                      style={{ textAlign: 'center' }}
+                      loadingText="Loading indexed files…"
+                      offlineText="Waiting for the engine — the indexed file list will appear here once it connects."
+                      errorText="The indexed file list could not be loaded."
+                    />
+                  </div>
+                ) : (
+                  <div style={{ padding: '36px 16px', textAlign: 'center', color: '#9090a0', fontSize: '13px' }}>
+                    No indexed prose files found.
+                  </div>
+                )
               ) : (
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                   <thead>
@@ -687,9 +741,23 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
           {activeTab === 'excluded' && (
             <div data-testid="excluded-files-list">
               {filteredExcludedFiles.length === 0 ? (
-                <div style={{ padding: '36px 16px', textAlign: 'center', color: '#9090a0', fontSize: '13px' }}>
-                  No excluded files found.
-                </div>
+                statusLoad !== 'ready' ? (
+                  <div style={{ padding: '24px 16px' }}>
+                    <LoadStateRow
+                      loadState={statusLoad}
+                      isConnected={isConnected}
+                      variant="plain"
+                      style={{ textAlign: 'center' }}
+                      loadingText="Loading excluded files…"
+                      offlineText="Waiting for the engine — the excluded file list will appear here once it connects."
+                      errorText="The excluded file list could not be loaded."
+                    />
+                  </div>
+                ) : (
+                  <div style={{ padding: '36px 16px', textAlign: 'center', color: '#9090a0', fontSize: '13px' }}>
+                    No excluded files found.
+                  </div>
+                )
               ) : (
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                   <thead>
