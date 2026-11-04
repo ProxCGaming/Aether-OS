@@ -87,13 +87,14 @@ const downloadButtonStyle = {
   justifyContent: 'center', alignItems: 'center', gap: '8px', transition: 'all 0.2s',
 };
 
-export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultModel = '' }) {
+export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages = [], defaultProvider = '', defaultModel = '' }) {
   const [source, setSource] = useState('hf');
   const [searchQuery, setSearchQuery] = useState('');
   const [family, setFamily] = useState('all');
   const [results, setResults] = useState([]);
   const [resultsError, setResultsError] = useState(null);
   const [searching, setSearching] = useState(false);
+  const [searchQueued, setSearchQueued] = useState(false);
   const [searched, setSearched] = useState(false);
 
   const [expandedKey, setExpandedKey] = useState(null);
@@ -121,23 +122,62 @@ export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultMod
     setActiveDefault({ provider: defaultProvider, model: defaultModel });
   }, [defaultProvider, defaultModel]);
 
+  // RUX-A-19: every send in this tab used to route through one of
+  // two readyState-gated helpers whose discarded/null result every
+  // caller ignored — offline, the search spinner never cleared,
+  // download / delete / detail clicks silently did nothing, cancel
+  // cleared the progress UI while the engine kept downloading, and
+  // set-active (the REF model-switch pattern's fourth path) was
+  // thrown away. Both helpers now go through safeSend and return
+  // the disposition ('sent' | 'queued'), so callers can keep local
+  // state honest about what is merely queued. The hub pairs are
+  // answered against their request_id, so the id rides along as
+  // safeSend's correlation id and the one-shot handler stays
+  // registered: a request queued offline is answered for real when
+  // the queue flushes on reconnect. The standalone-mount fallback
+  // keeps the exact legacy envelopes on the unconditional facade
+  // send (the E6-F15 discipline).
   const sendRequest = useCallback((type, payload, onResponse) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return null;
+    if (!safeSend && !wsRef.current) return null;
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     if (onResponse) pendingRef.current.set(requestId, onResponse);
-    ws.send(JSON.stringify({ type, schema_version: 1, request_id: requestId, payload }));
-    return requestId;
-  }, [wsRef]);
+    if (safeSend) return safeSend(type, payload, requestId);
+    return wsRef.current.send(JSON.stringify({ type, schema_version: 1, request_id: requestId, payload }));
+  }, [wsRef, safeSend]);
 
-  const sendFireAndForget = useCallback((type, payload) => {
+  const sendAction = useCallback((type, payload) => {
+    if (safeSend) return safeSend(type, payload);
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
+    if (ws) {
+      return ws.send(JSON.stringify({
         type, schema_version: 1, request_id: Date.now().toString(), payload,
       }));
     }
-  }, [wsRef]);
+    return undefined;
+  }, [wsRef, safeSend]);
+
+  // Queued affordances derive from the REAL offline queue
+  // (pendingMessages), so each one clears itself the moment the
+  // queue flushes — no local flag can drift from the truth.
+  const pendingHubEntry = useCallback((type, match) => (pendingMessages || []).find(
+    (m) => m && m.type === type && m.payload && match(m.payload)
+  ), [pendingMessages]);
+  const pendingDownloadFor = useCallback((row) => pendingHubEntry(
+    'MODEL_HUB_DOWNLOAD_REQUEST',
+    (p) => p.source === row.source && p.id === row.id
+  ), [pendingHubEntry]);
+  const pendingDeleteFor = useCallback((row) => pendingHubEntry(
+    'MODEL_HUB_DELETE_REQUEST',
+    (p) => p.source === row.source && p.id === row.id
+  ), [pendingHubEntry]);
+  const pendingSetActiveFor = useCallback((row) => pendingHubEntry(
+    'MODEL_SET_DEFAULT',
+    (p) => p.provider === 'ollama' && p.model === row.id
+  ), [pendingHubEntry]);
+  const pendingCancelFor = useCallback((engineKey) => pendingHubEntry(
+    'LOCAL_MODEL_DOWNLOAD_CANCEL',
+    (p) => p.model === engineKey
+  ), [pendingHubEntry]);
 
   const refreshDownloaded = useCallback(() => {
     sendRequest('MODEL_HUB_DOWNLOADED_REQUEST', {}, (payload) => {
@@ -149,17 +189,28 @@ export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultMod
   const runSearch = useCallback(() => {
     const seq = ++searchSeqRef.current;
     setSearching(true);
-    sendRequest(
+    const disposition = sendRequest(
       'MODEL_HUB_SEARCH_REQUEST',
       { source, query: searchQuery, family: family === 'all' ? null : family },
       (payload) => {
         if (seq !== searchSeqRef.current) return; // a newer search owns the list
         setSearching(false);
+        setSearchQueued(false);
         setSearched(true);
         setResults(payload && Array.isArray(payload.models) ? payload.models : []);
         setResultsError(payload && payload.error ? payload.error : null);
       }
     );
+    if (disposition === 'queued') {
+      // RUX-A-19: end the spinner NOW with the honest outcome — the
+      // search is queued, not running. Its response handler above
+      // stays registered and completes the search for real when the
+      // flushed request is answered after reconnect.
+      setSearching(false);
+      setSearchQueued(true);
+    } else if (disposition) {
+      setSearchQueued(false);
+    }
   }, [sendRequest, source, searchQuery, family]);
 
   useEffect(() => { runSearch(); }, [runSearch]);
@@ -256,7 +307,16 @@ export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultMod
   };
 
   const handleCancel = (engineKey) => {
-    sendFireAndForget('LOCAL_MODEL_DOWNLOAD_CANCEL', { model: engineKey });
+    const disposition = sendAction('LOCAL_MODEL_DOWNLOAD_CANCEL', { model: engineKey });
+    if (disposition === 'queued') {
+      // RUX-A-19: the engine is STILL downloading — clearing the
+      // progress UI here (the old behaviour) told the user the
+      // download had stopped when it had not. The progress stays
+      // visible with a "Cancel queued" marking derived from the
+      // real queue, and TASK_CANCELLED clears it for real when the
+      // flushed cancel lands.
+      return;
+    }
     setDownloadProgress(prev => {
       const next = { ...prev };
       delete next[engineKey];
@@ -277,8 +337,12 @@ export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultMod
 
   // Phase 10.3 C2 (preserved): set a downloaded Ollama model as the
   // engine's default via MODEL_SET_DEFAULT (provider 'ollama').
+  // RUX-A-19: through safeSend this QUEUES while the engine is
+  // unreachable (it was the REF pattern's discarded fourth path);
+  // the row derives its "Set Active queued" state from the queue
+  // and the MODEL_DEFAULT_CHANGED broadcast confirms it for real.
   const handleSetActive = (modelName) => {
-    sendFireAndForget('MODEL_SET_DEFAULT', { provider: 'ollama', model: modelName });
+    sendAction('MODEL_SET_DEFAULT', { provider: 'ollama', model: modelName });
   };
 
   // ---- detail ----------------------------------------------------
@@ -291,7 +355,7 @@ export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultMod
     }
     setExpandedKey(key);
     if (!details[key]) {
-      sendRequest('MODEL_HUB_DETAIL_REQUEST', { source: row.source, id: row.id }, (payload) => {
+      const disposition = sendRequest('MODEL_HUB_DETAIL_REQUEST', { source: row.source, id: row.id }, (payload) => {
         setDetails(prev => ({
           ...prev,
           [key]: {
@@ -300,27 +364,48 @@ export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultMod
           },
         }));
       });
+      if (disposition === 'queued') {
+        // RUX-A-19: say the details are queued instead of leaving
+        // "Loading details…" up for a request that has not run yet;
+        // the response handler above replaces this entry when the
+        // flushed request is answered.
+        setDetails(prev => ({
+          ...prev,
+          [key]: { detail: null, error: null, queued: true },
+        }));
+      }
     }
   };
 
   // ---- rendering -------------------------------------------------
 
-  const renderProgress = (progress) => (
-    <>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'rgb(var(--accent-rgb, 167, 139, 250))', fontSize: '13px', fontWeight: 600 }}>
-        <RefreshCw size={14} className="spin-animation" /> {Math.round(progress.percent || 0)}%
-        {progress.status ? <span style={{ color: 'var(--text-secondary, #9090a0)', fontWeight: 500 }}>{progress.status}</span> : null}
-      </div>
-      <button onClick={() => handleCancel(progress.key)} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: '#ef4444', cursor: 'pointer', border: '1px solid rgba(239,68,68,0.3)' }} title="Cancel Download">
-        <X size={14} />
-      </button>
-    </>
-  );
+  const renderProgress = (progress) => {
+    // RUX-A-19: a cancel sitting in the offline queue is marked on
+    // the progress row it belongs to — the download is still
+    // running until TASK_CANCELLED says otherwise.
+    const cancelQueued = Boolean(pendingCancelFor(progress.key));
+    return (
+      <>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'rgb(var(--accent-rgb, 167, 139, 250))', fontSize: '13px', fontWeight: 600 }}>
+          <RefreshCw size={14} className="spin-animation" /> {Math.round(progress.percent || 0)}%
+          {progress.status ? <span style={{ color: 'var(--text-secondary, #9090a0)', fontWeight: 500 }}>{progress.status}</span> : null}
+          {cancelQueued && (
+            <span data-testid={`cancel-queued-${progress.key}`} style={{ color: '#fbbf24', fontWeight: 500 }}>
+              Cancel queued — still downloading
+            </span>
+          )}
+        </div>
+        <button onClick={() => handleCancel(progress.key)} disabled={cancelQueued} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: '#ef4444', cursor: cancelQueued ? 'default' : 'pointer', opacity: cancelQueued ? 0.45 : 1, border: '1px solid rgba(239,68,68,0.3)' }} title={cancelQueued ? 'Cancel already queued — will apply when the engine reconnects' : 'Cancel Download'}>
+          <X size={14} />
+        </button>
+      </>
+    );
+  };
 
   const renderVariant = (row, variant) => {
     const label = variant.quant || (variant.kind === 'gguf' ? 'GGUF' : variant.kind);
     const downloadable = row.runnability === 'ollama' && variant.kind === 'gguf'
-      && !isDownloaded(row) && !progressForRow(row);
+      && !isDownloaded(row) && !progressForRow(row) && !pendingDownloadFor(row);
     return (
       <div
         key={variant.file || variant.kind}
@@ -357,6 +442,13 @@ export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultMod
     const entry = details[rowKey(row)];
     if (!entry) {
       return <div style={{ fontSize: '13px', color: 'var(--text-secondary, #9090a0)' }}>Loading details…</div>;
+    }
+    if (entry.queued && !entry.detail) {
+      return (
+        <div data-testid={`detail-queued-${rowKey(row)}`} style={{ fontSize: '13px', color: '#fbbf24' }}>
+          Details queued — will load when the engine reconnects.
+        </div>
+      );
     }
     if (entry.error) {
       return <div style={{ fontSize: '13px', color: '#f87171' }}>{entry.error}</div>;
@@ -449,7 +541,11 @@ export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultMod
         )}
 
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center', justifyContent: 'space-between', marginTop: 'auto' }}>
-          {progress ? renderProgress(progress) : wholeRepoDownloadable ? (
+          {progress ? renderProgress(progress) : pendingDownloadFor(row) ? (
+            <span data-testid={`download-queued-${rowKey(row)}`} style={{ fontSize: '12px', color: '#fbbf24', fontWeight: 500 }}>
+              Download queued — will start when the engine reconnects.
+            </span>
+          ) : wholeRepoDownloadable ? (
             <button onClick={() => handleDownload(row)} className="ios-glass" style={{ ...downloadButtonStyle, flex: 1 }}>
               <Download size={16} /> Download
             </button>
@@ -479,6 +575,9 @@ export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultMod
     const sizeText = formatBytes(row.size_bytes);
     const isActive = row.source === 'ollama'
       && activeDefault.provider === 'ollama' && activeDefault.model === row.id;
+    // RUX-A-19: queued states for this row, from the real queue.
+    const setActiveQueued = Boolean(pendingSetActiveFor(row));
+    const deleteQueued = Boolean(pendingDeleteFor(row));
     return (
       <div
         key={rowKey(row)}
@@ -501,13 +600,22 @@ export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultMod
             <button disabled title="Currently the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
               Active
             </button>
+          ) : setActiveQueued ? (
+            <button disabled data-testid={`set-active-queued-${rowKey(row)}`} title="Set-active queued — will apply when the engine reconnects" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(251, 191, 36, 0.12)', color: '#fbbf24', border: '1px solid rgba(251, 191, 36, 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+              Set Active Queued
+            </button>
           ) : (
             <button onClick={() => handleSetActive(row.id)} title="Set as the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)', color: 'var(--text-primary, #fff)', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
               Set Active
             </button>
           )
         )}
-        <button onClick={() => handleDeleteDownloaded(row)} className="ios-glass" style={{ padding: '8px 10px', background: 'rgba(239,68,68,0.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '10px', cursor: 'pointer' }} title="Delete Model">
+        {deleteQueued && (
+          <span data-testid={`hub-delete-queued-${rowKey(row)}`} style={{ fontSize: '12px', color: '#fbbf24', fontWeight: 500 }}>
+            Delete queued
+          </span>
+        )}
+        <button onClick={() => handleDeleteDownloaded(row)} disabled={deleteQueued} className="ios-glass" style={{ padding: '8px 10px', background: 'rgba(239,68,68,0.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '10px', cursor: deleteQueued ? 'default' : 'pointer', opacity: deleteQueued ? 0.45 : 1 }} title={deleteQueued ? 'Delete already queued — will apply when the engine reconnects' : 'Delete Model'}>
           <Trash2 size={16} />
         </button>
       </div>
@@ -601,6 +709,10 @@ export default function LocalModelsTab({ wsRef, defaultProvider = '', defaultMod
         ) : searching && results.length === 0 ? (
           <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
             <RefreshCw size={14} className="spin-animation" /> Searching {SOURCE_LABELS[source]}…
+          </div>
+        ) : searchQueued && results.length === 0 ? (
+          <div data-testid="hub-search-queued" style={{ color: '#fbbf24', fontSize: '14px' }}>
+            Search queued — the engine is offline. Results will load when it reconnects.
           </div>
         ) : searched && results.length === 0 ? (
           <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px' }}>

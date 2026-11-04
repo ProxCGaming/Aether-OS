@@ -208,7 +208,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   const sendSettingsAction = (type, payload) => {
     if (safeSend) return safeSend(type, payload);
     if (wsRef.current) {
-      wsRef.current.send(JSON.stringify({
+      // The facade's send reports its own disposition ('sent' /
+      // 'queued'); slice 3b's callers (RUX-A-13) read it to resolve
+      // their pending states honestly even on a standalone mount.
+      return wsRef.current.send(JSON.stringify({
         type,
         schema_version: 1,
         request_id: Date.now().toString(),
@@ -236,6 +239,11 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
       .find((m) => m.payload && m.payload.config && key in m.payload.config);
     return entry ? entry.payload.config[key] : undefined;
   };
+  // RUX-A-13: a diagnostics run sitting in the offline queue — the
+  // Run button derives its inert/queued state from this, and the
+  // ENVIRONMENT_DIAGNOSTIC_RESPONSE handler resolves the run when
+  // the flushed request is answered after reconnect.
+  const diagnosticsQueued = pendingOfType('ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST').length > 0;
 
   const handleProjectLayerSave = (content) => {
     if (wsRef.current) {
@@ -947,6 +955,8 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             {modelTab === 'local' && (
                <LocalModelsTab
                  wsRef={wsRef}
+                 safeSend={safeSend}
+                 pendingMessages={pendingMessages}
                  localModels={localModels}
                  // Phase 10.3 C2: the active model lives on the providers
                  // array (the provider flagged is_default); LocalModelsTab
@@ -976,19 +986,22 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                   <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: capabilityStatus && capabilityStatus.failed_count === 0 ? '#10b981' : (capabilityStatus && capabilityStatus.failed_count > 0 ? '#ef4444' : '#6b7280'), boxShadow: capabilityStatus && capabilityStatus.failed_count === 0 ? '0 0 10px rgba(16,185,129,0.5)' : 'none' }}></div>
                   <h3 style={{ fontSize: '16px' }}>{capabilityStatus ? (capabilityStatus.failed_count === 0 ? 'System Healthy' : `${capabilityStatus.failed_count} Issues Detected`) : 'Status Unknown'}</h3>
                 </div>
-                <button 
+                <button
                   onClick={() => {
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isDiagnosticsRunning) {
+                    if (isDiagnosticsRunning || diagnosticsQueued) return;
+                    // RUX-A-13: through sendSettingsAction the run
+                    // QUEUES while the engine is unreachable instead
+                    // of being discarded by the readyState guard it
+                    // used to sit behind. The running state arms only
+                    // for a live send; a queued run is inert with its
+                    // own note (derived from the real queue above)
+                    // until the flush + response land the result.
+                    const disposition = sendSettingsAction('ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST', {});
+                    if (disposition !== 'queued') {
                       setIsDiagnosticsRunning(true);
-                      wsRef.current.send(JSON.stringify({
-                        type: 'ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST',
-                        schema_version: 1,
-                        request_id: Date.now().toString(),
-                        payload: {}
-                      }));
                     }
                   }}
-                  disabled={isDiagnosticsRunning}
+                  disabled={isDiagnosticsRunning || diagnosticsQueued}
                   style={{ 
                     background: isDiagnosticsRunning ? 'rgba(124, 58, 237, 0.2)' : 'transparent', 
                     color: isDiagnosticsRunning ? '#a78bfa' : '#7c3aed', 
@@ -1009,11 +1022,19 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                       </svg>
                       Testing...
                     </>
+                  ) : diagnosticsQueued ? (
+                    'Run Queued'
                   ) : (
                     'Run Diagnostics Now'
                   )}
                 </button>
               </div>
+
+              {diagnosticsQueued && (
+                <div data-testid="diagnostics-run-queued" style={{ fontSize: '13px', color: '#fbbf24', marginBottom: '16px' }}>
+                  Diagnostics run queued — will run when the engine reconnects.
+                </div>
+              )}
               
               <div style={{ background: 'rgba(0,0,0,0.5)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', padding: '16px', fontFamily: 'monospace', fontSize: '13px', color: '#10b981', height: '200px', overflowY: 'auto' }} className="chat-scroll">
                 {capabilityHistory.length === 0 ? (
@@ -1386,10 +1407,17 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
                 <button
                   onClick={() => {
-                    setBackupStatus('Creating backup…');
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                      wsRef.current.send(JSON.stringify({ type: 'BACKUP_CREATE_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: { include_secrets: includeSecrets } }));
-                    }
+                    // RUX-A-13: through sendSettingsAction the
+                    // request QUEUES while the engine is unreachable
+                    // instead of being discarded after the status was
+                    // already armed — 'Creating backup…' used to sit
+                    // on screen forever offline. A queued backup says
+                    // so; the BACKUP_CREATE_RESPONSE overwrites the
+                    // status with the real outcome when it lands.
+                    const disposition = sendSettingsAction('BACKUP_CREATE_REQUEST', { include_secrets: includeSecrets });
+                    setBackupStatus(disposition === 'queued'
+                      ? 'Backup queued — will run when the engine reconnects.'
+                      : 'Creating backup…');
                   }}
                   style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
                 >
@@ -1412,10 +1440,14 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                 <button
                   onClick={() => {
                     if (!restorePath.trim()) { setRestoreStatus('Enter the path to a backup zip first.'); return; }
-                    setRestoreStatus('Restoring…');
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                      wsRef.current.send(JSON.stringify({ type: 'BACKUP_RESTORE_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: { path: restorePath.trim() } }));
-                    }
+                    // RUX-A-13: same honest-status treatment as
+                    // backup create — queue instead of discard, and
+                    // never leave 'Restoring…' armed for a restore
+                    // that has not started.
+                    const disposition = sendSettingsAction('BACKUP_RESTORE_REQUEST', { path: restorePath.trim() });
+                    setRestoreStatus(disposition === 'queued'
+                      ? 'Restore queued — will run when the engine reconnects.'
+                      : 'Restoring…');
                   }}
                   style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
                 >
@@ -1426,10 +1458,12 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', marginTop: '20px', paddingTop: '16px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                 <button
                   onClick={() => {
-                    setVersionCheck('Checking…');
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                      wsRef.current.send(JSON.stringify({ type: 'VERSION_CHECK_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
-                    }
+                    // RUX-A-13: queue instead of discard; 'Checking…'
+                    // only for a check that is actually running.
+                    const disposition = sendSettingsAction('VERSION_CHECK_REQUEST', {});
+                    setVersionCheck(disposition === 'queued'
+                      ? 'Update check queued — will run when the engine reconnects.'
+                      : 'Checking…');
                   }}
                   style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
                 >
@@ -1437,8 +1471,13 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                 </button>
                 <button
                   onClick={() => {
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                      wsRef.current.send(JSON.stringify({ type: 'DIAGNOSTICS_EXPORT_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+                    // RUX-A-13: the export used to be discarded in
+                    // complete silence (no state at all). Queued, it
+                    // says where it is; sent, the response produces
+                    // the download + confirmation as before.
+                    const disposition = sendSettingsAction('DIAGNOSTICS_EXPORT_REQUEST', {});
+                    if (disposition === 'queued') {
+                      setVersionCheck('Diagnostics export queued — the file will download when the engine reconnects.');
                     }
                   }}
                   style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}

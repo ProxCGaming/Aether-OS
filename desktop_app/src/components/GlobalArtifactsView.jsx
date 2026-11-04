@@ -22,6 +22,8 @@ export default function GlobalArtifactsView({
   initialArtifacts,
   sessions = [],
   wsRef,
+  safeSend = null,
+  pendingMessages = [],
   onNavigateToSession = () => {},
   // N08: media "jump to conversation" has its own navigation path —
   // media ids are not artifact ids (no canvas selection, no
@@ -339,6 +341,8 @@ export default function GlobalArtifactsView({
       {activeSection === 'media' ? (
         <MediaLibrary
           wsRef={wsRef}
+          safeSend={safeSend}
+          pendingMessages={pendingMessages}
           sessions={sessions}
           onNavigateToSession={onNavigateToMedia || onNavigateToSession}
         />

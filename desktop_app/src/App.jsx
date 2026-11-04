@@ -3437,6 +3437,8 @@ function AppContent() {
             {activeTab === 'Artifacts' && (
               <GlobalArtifactsView
                 wsRef={wsRef}
+                safeSend={safeSend}
+                pendingMessages={pendingMessages}
                 sessions={sessions}
                 onNavigateToSession={handleNavigateToArtifactSession}
                 onNavigateToMedia={handleNavigateToMediaSession}

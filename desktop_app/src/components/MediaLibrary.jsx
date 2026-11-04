@@ -21,6 +21,8 @@ export default function MediaLibrary({
   initialMedia,
   sessions = [],
   wsRef,
+  safeSend = null,
+  pendingMessages = [],
   onNavigateToSession = () => {}
 }) {
   const [internalMedia, setInternalMedia] = useState(() => initialMedia || []);
@@ -47,6 +49,43 @@ export default function MediaLibrary({
   const [editNotes, setEditNotes] = useState('');
 
   const effectiveMedia = controlledMedia ?? internalMedia;
+
+  // RUX-A-09: metadata save and delete are user actions — through
+  // safeSend they QUEUE while the engine is unreachable instead of
+  // being discarded by the readyState guard both handlers used to
+  // carry *behind a local mutation applied first*, so an offline
+  // edit looked saved and an offline delete looked done while the
+  // engine never heard of either (edits vanished on reload, deleted
+  // items resurrected on the next list load). The disposition now
+  // drives the local state:
+  //   'sent'   — the old optimistic behaviour stands: the reply
+  //              confirms it (metadata merge is idempotent; a
+  //              refused delete is restored with a notice — OP12).
+  //   'queued' — NOTHING is applied locally. The item stays exactly
+  //              as it is; the card/detail markings below derive
+  //              from the real offline queue (pendingMessages), and
+  //              the response handlers apply the real outcome when
+  //              the flushed request is answered after reconnect.
+  // The standalone-mount fallback keeps the exact legacy envelopes
+  // (request_id prefixes included) on the unconditional facade send.
+  const sendMediaAction = (type, payload, legacyRequestId) => {
+    if (safeSend) return safeSend(type, payload);
+    const ws = wsRef?.current;
+    if (ws) {
+      return ws.send(JSON.stringify({
+        type,
+        schema_version: 1,
+        request_id: legacyRequestId,
+        payload
+      }));
+    }
+    return undefined;
+  };
+  const pendingEntryFor = (type, mediaId) => (pendingMessages || []).find(
+    (m) => m && m.type === type && m.payload && m.payload.media_id === mediaId
+  );
+  const pendingDeleteFor = (mediaId) => pendingEntryFor('MEDIA_DELETE_REQUEST', mediaId);
+  const pendingMetaFor = (mediaId) => pendingEntryFor('MEDIA_METADATA_UPDATE_REQUEST', mediaId);
 
   // Request media list on mount or WebSocket ready
   useEffect(() => {
@@ -348,26 +387,24 @@ export default function MediaLibrary({
     const tags = editTags;
     const notes = editNotes;
 
-    // Local optimistic update
-    setInternalMedia(prev => prev.map(m => {
-      if (m.id === mediaId) {
-        return { ...m, tags, user_notes: notes };
-      }
-      return m;
-    }));
+    const disposition = sendMediaAction(
+      'MEDIA_METADATA_UPDATE_REQUEST',
+      { media_id: mediaId, tags, notes },
+      `meta_update_${Date.now()}`
+    );
 
-    // Send WS update
-    const ws = wsRef?.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'MEDIA_METADATA_UPDATE_REQUEST',
-        schema_version: 1,
-        request_id: `meta_update_${Date.now()}`,
-        payload: {
-          media_id: mediaId,
-          tags,
-          notes
+    if (disposition !== 'queued') {
+      // Sent (or a legacy standalone send): local optimistic update
+      // as before — the MEDIA_METADATA_UPDATE_RESPONSE merge is
+      // idempotent, so the reply simply confirms it. Queued: apply
+      // NOTHING locally (RUX-A-09) — the card marks the edit as
+      // queued from the real queue, and the response handler
+      // applies the real values when the answer lands.
+      setInternalMedia(prev => prev.map(m => {
+        if (m.id === mediaId) {
+          return { ...m, tags, user_notes: notes };
         }
+        return m;
       }));
     }
 
@@ -377,6 +414,9 @@ export default function MediaLibrary({
   // Trigger delete prompt
   const handleDeletePrompt = (item, e) => {
     if (e) e.stopPropagation();
+    // A delete for this item is already sitting in the offline
+    // queue — a second one would only duplicate it on flush.
+    if (pendingDeleteFor(item.id)) return;
     setDeleteTarget(item);
     setDeleteUnderlyingFile(false);
   };
@@ -388,31 +428,34 @@ export default function MediaLibrary({
     const delFile = deleteUnderlyingFile;
 
     // OP12: remember the request so the response handler can tell
-    // "file deleted as asked" apart from "file silently kept".
+    // "file deleted as asked" apart from "file silently kept". This
+    // is recorded for queued deletes too — when the flushed request
+    // is answered after reconnect, the judgement runs exactly as
+    // for a live delete.
     pendingDeletesRef.current.set(mid, {
       item: deleteTarget,
       name: (deleteTarget.file_path || '').split(/[/\\]/).pop() || 'the file',
       deleteFile: delFile,
     });
 
-    // Optimistic removal
-    setInternalMedia(prev => prev.filter(m => m.id !== mid));
+    const disposition = sendMediaAction(
+      'MEDIA_DELETE_REQUEST',
+      { media_id: mid, delete_underlying_file: delFile },
+      `media_delete_${Date.now()}`
+    );
 
-    const ws = wsRef?.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'MEDIA_DELETE_REQUEST',
-        schema_version: 1,
-        request_id: `media_delete_${Date.now()}`,
-        payload: {
-          media_id: mid,
-          delete_underlying_file: delFile
-        }
-      }));
+    if (disposition !== 'queued') {
+      // Sent (or a legacy standalone send): optimistic removal as
+      // before — the reply confirms it, or restores the entry with
+      // a notice when the engine refused (OP12). Queued: the item
+      // STAYS in the grid marked "Delete queued" (RUX-A-09) and is
+      // removed only by the MEDIA_DELETE_RESPONSE handler when the
+      // real answer lands — never by the click alone.
+      setInternalMedia(prev => prev.filter(m => m.id !== mid));
+      if (selectedMedia?.id === mid) setSelectedMedia(null);
     }
 
     setDeleteTarget(null);
-    if (selectedMedia?.id === mid) setSelectedMedia(null);
   };
 
   const getOriginLabel = (origin, collection) => {
@@ -692,6 +735,10 @@ export default function MediaLibrary({
               const sessTitle = getSessionTitle(item.session_id);
               const originLabel = getOriginLabel(item.origin, item.collection);
               const isMissing = item.file_exists === false;
+              // RUX-A-09: queued markings derive from the real
+              // offline queue — they clear themselves on flush.
+              const deleteQueued = Boolean(pendingDeleteFor(item.id));
+              const metaQueued = Boolean(pendingMetaFor(item.id));
 
               return (
                 <div
@@ -823,7 +870,8 @@ export default function MediaLibrary({
                       type="button"
                       data-testid={`media-delete-btn-${item.id}`}
                       onClick={(e) => handleDeletePrompt(item, e)}
-                      title="Delete from library"
+                      disabled={deleteQueued}
+                      title={deleteQueued ? 'Delete queued — will apply when the engine reconnects' : 'Delete from library'}
                       style={{
                         position: 'absolute',
                         top: '8px',
@@ -833,7 +881,8 @@ export default function MediaLibrary({
                         borderRadius: '6px',
                         color: '#94a3b8',
                         padding: '5px',
-                        cursor: 'pointer',
+                        cursor: deleteQueued ? 'default' : 'pointer',
+                        opacity: deleteQueued ? 0.45 : 1,
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
@@ -943,6 +992,30 @@ export default function MediaLibrary({
                         ))}
                         {item.tags.length > 3 && (
                           <span style={{ fontSize: '10px', color: '#64748b' }}>+{item.tags.length - 3}</span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* RUX-A-09: queued markings — the action is in
+                        the offline queue, NOT applied. Shown until
+                        the flush + reply lands the real outcome. */}
+                    {(deleteQueued || metaQueued) && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        {deleteQueued && (
+                          <span
+                            data-testid={`media-delete-queued-${item.id}`}
+                            style={{ fontSize: '11px', color: '#fbbf24', fontWeight: 500 }}
+                          >
+                            Delete queued — will apply when the engine reconnects.
+                          </span>
+                        )}
+                        {metaQueued && (
+                          <span
+                            data-testid={`media-meta-queued-${item.id}`}
+                            style={{ fontSize: '11px', color: '#fbbf24', fontWeight: 500 }}
+                          >
+                            Edit queued — will apply when the engine reconnects.
+                          </span>
                         )}
                       </div>
                     )}
@@ -1249,6 +1322,27 @@ export default function MediaLibrary({
               />
             </div>
 
+            {/* RUX-A-09: queued state for THIS item, derived from
+                the real queue — an earlier offline save/delete is
+                still waiting to land, so say so here too instead of
+                letting a second edit stack onto the pending one. */}
+            {Boolean(pendingDeleteFor(selectedMedia.id)) && (
+              <div
+                data-testid="media-detail-delete-queued"
+                style={{ fontSize: '12px', color: '#fbbf24', background: 'rgba(251, 191, 36, 0.08)', border: '1px solid rgba(251, 191, 36, 0.3)', borderRadius: '8px', padding: '8px 12px' }}
+              >
+                Delete queued — this item will be removed when the engine reconnects.
+              </div>
+            )}
+            {Boolean(pendingMetaFor(selectedMedia.id)) && (
+              <div
+                data-testid="media-detail-meta-queued"
+                style={{ fontSize: '12px', color: '#fbbf24', background: 'rgba(251, 191, 36, 0.08)', border: '1px solid rgba(251, 191, 36, 0.3)', borderRadius: '8px', padding: '8px 12px' }}
+              >
+                An edit for this item is queued — it will apply when the engine reconnects.
+              </div>
+            )}
+
             {/* Actions */}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' }}>
               <button
@@ -1270,6 +1364,7 @@ export default function MediaLibrary({
                 type="button"
                 data-testid="media-save-metadata-btn"
                 onClick={handleSaveMetadata}
+                disabled={Boolean(pendingMetaFor(selectedMedia.id))}
                 style={{
                   background: '#8b5cf6',
                   border: 'none',
@@ -1278,7 +1373,8 @@ export default function MediaLibrary({
                   padding: '8px 18px',
                   fontSize: '12px',
                   fontWeight: 600,
-                  cursor: 'pointer'
+                  cursor: pendingMetaFor(selectedMedia.id) ? 'default' : 'pointer',
+                  opacity: pendingMetaFor(selectedMedia.id) ? 0.55 : 1
                 }}
               >
                 Save Changes
