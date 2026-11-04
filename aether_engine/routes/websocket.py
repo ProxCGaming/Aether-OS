@@ -49,6 +49,10 @@ from aether_engine.memory.facade import backend_or_none
 from aether_engine.orchestration.core import (
     _build_provider_list_async,
     _create_provider_instance,
+    clear_discovery_failure,
+    discover_pending_provider_models,
+    discovery_recently_failed,
+    record_discovery_failure,
     validate_provider_key_shared,
 )
 from aether_engine.providers.discovery import fetch_available_models
@@ -635,6 +639,147 @@ async def ws_tasks(ws: WebSocket):
             await ws.send_text(Event(type=resp_type, request_id=req_id_, payload=result).to_json())
         except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-validation; nothing else to do
             logger.debug(f"Could not send validation result for {pname_}: {e}")
+
+    async def _send_provider_list_update(req_id_):
+        """Background half of PROVIDER_LIST_REQUEST (RUX-B-02).
+
+        The handler answers immediately from the model cache; this
+        task runs discovery for providers whose cache is still empty
+        and, if any model list changed, pushes a refreshed
+        PROVIDER_LIST_RESPONSE — the same message the renderer already
+        applies for list updates. Discovery of one dead provider costs
+        a full DISCOVERY_TIMEOUT, so it must never run on the message
+        loop (it fires on every connect and after save/remove/reset).
+        """
+        try:
+            changed = await discover_pending_provider_models(secret_store)
+        except Exception as e:  # noqa: BLE001 — discovery is best-effort; the cached list already went out
+            logger.warning(f"Provider discovery for list update failed: {e}")
+            return
+        if not changed:
+            return
+        try:
+            providers = await _build_provider_list_async(secret_store, discover=False)
+            cfg = engine_state.user_config
+            await ws.send_text(Event(
+                type=EventType.PROVIDER_LIST_RESPONSE,
+                request_id=req_id_,
+                payload={"providers": providers, "default_provider": cfg.default_provider, "default_model": cfg.default_model, "health": engine_state.health_manager.get_all_statuses()},
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-discovery; nothing else to do
+            logger.debug(f"Could not send provider list update: {e}")
+
+    async def _send_refresh_models_result(req_id_, payload_):
+        """Answer a REFRESH_MODELS_REQUEST from a background task (RUX-B-01).
+
+        The refresh used to be awaited inline in the message loop:
+        a discovery pass over every stored provider, then a second
+        pass inside _build_provider_list_async — up to ~100 s during
+        which every other message on the socket (model switches,
+        cancels, approvals) waited unread. Now the loop stays free
+        and the REFRESH_MODELS_RESPONSE is sent when the work lands,
+        exactly as _send_validation_result does for provider Tests.
+        """
+        try:
+            target_provider = payload_.get("provider")
+            stored = set(secret_store.list_providers())
+            cfg = engine_state.user_config
+
+            providers_to_refresh = set(stored)
+            for p in cfg.custom_provider_types:
+                if cfg.custom_provider_types[p] == "openai_compatible":
+                    providers_to_refresh.add(p)
+            providers_to_refresh.add("custom_openai")
+
+            if target_provider:
+                providers_to_refresh = [target_provider]
+            else:
+                providers_to_refresh = list(providers_to_refresh)
+
+            refreshed_models: dict[str, Any] = {}
+
+            for pname in providers_to_refresh:
+                try:
+                    payload_key = payload_.get("api_key")
+                    payload_url = payload_.get("base_url")
+
+                    if payload_key is not None:
+                        key = payload_key
+                    else:
+                        key = secret_store.load_provider(pname) if pname in stored else ""
+
+                    if payload_url is not None:
+                        base_url = payload_url
+                    else:
+                        base_url = cfg.custom_base_urls.get(pname)
+
+                    is_custom = pname == "custom_openai" or cfg.custom_provider_types.get(pname) == "openai_compatible"
+                    if (key or is_custom) and not discovery_recently_failed(pname):
+                        disc = await fetch_available_models(
+                            provider_name=pname,
+                            api_key=key,
+                            base_url=base_url,
+                            filter_reachability=True,
+                            force_reachability=True,
+                            provider_flavor=custom_provider_flavor(pname, cfg),
+                        )
+                        if disc.ok:
+                            clear_discovery_failure(pname)
+                        else:
+                            record_discovery_failure(pname)
+                        # Do not persist discovery data for unsaved/template
+                        # providers; models still flow back to the UI response.
+                        if disc.models or disc.excluded or disc.error:
+                            refreshed_models[pname] = disc
+                        is_registered = (
+                            pname in stored
+                            or pname in cfg.custom_base_urls
+                            or pname in cfg.custom_provider_types
+                        )
+                        # E5-F14: a targeted refresh of a REGISTERED
+                        # (saved) provider applies and persists
+                        # exactly like the full refresh — the old
+                        # "manual click should not save" gate left
+                        # config/registry/disk holding the stale
+                        # catalog while the response showed the new
+                        # one, so the refresh evaporated on the next
+                        # listing/restart. Unsaved templates stay
+                        # unpersisted via is_registered above.
+                        if disc.models and is_registered:
+                            cfg.provider_models[pname] = disc.models
+                            cfg.provider_excluded_models[pname] = disc.excluded
+                            engine_state.model_registry.update_provider_models(pname, disc.models)
+                            save_config(cfg)
+                except Exception as ref_err:  # noqa: BLE001 — per-provider isolation: one provider's refresh failure must not abort the refresh for the rest
+                    record_discovery_failure(pname)
+                    logger.error(f"Error during refresh models for {pname}: {ref_err}")
+
+            updated_providers = await _build_provider_list_async(secret_store)
+            # Surface freshly discovered models for the target provider even if
+            # it is an unsaved template (whose data we intentionally don't persist).
+            for prov in updated_providers:
+                disc = refreshed_models.get(prov.get("name"))
+                if disc is not None:
+                    prov["models"] = disc.models
+                    prov["excluded_models"] = disc.excluded
+                    if disc.error is not None:
+                        prov["discovery_error"] = disc.error.to_dict()
+            response = Event(
+                type=EventType.REFRESH_MODELS_RESPONSE,
+                request_id=req_id_,
+                payload={
+                    "providers": updated_providers,
+                    "default_provider": cfg.default_provider,
+                    "default_model": cfg.default_model,
+                },
+            )
+        except Exception as e:  # noqa: BLE001 — a refresh failure must still be logged, never kill the connection
+            logger.error(f"Refresh models failed: {e}")
+            return
+        try:
+            await ws.send_text(response.to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-refresh; nothing else to do
+            logger.debug(f"Could not send refresh models response: {e}")
 
     # Epic 2, E2-10: install the web-search seam for this connection —
     # keys resolve through the encrypted secret store (provider name =
@@ -1937,13 +2082,18 @@ async def ws_tasks(ws: WebSocket):
             # Provider management & health events
             # -----------------------------------------------------------
             elif msg.type == EventType.PROVIDER_LIST_REQUEST:
-                providers = await _build_provider_list_async(secret_store)
+                # RUX-B-02: answer from the model cache immediately;
+                # discovery for providers with an empty cache runs in
+                # a background task and pushes a refreshed list when
+                # it lands (see _send_provider_list_update).
+                providers = await _build_provider_list_async(secret_store, discover=False)
                 cfg = engine_state.user_config
                 await ws.send_text(Event(
                     type=EventType.PROVIDER_LIST_RESPONSE,
                     request_id=req_id,
                     payload={"providers": providers, "default_provider": cfg.default_provider, "default_model": cfg.default_model, "health": engine_state.health_manager.get_all_statuses()},
                 ).to_json())
+                asyncio.create_task(_send_provider_list_update(req_id))
 
             elif msg.type in (EventType.PROVIDER_VALIDATE_REQUEST, EventType.SETTINGS_PROVIDER_VALIDATE_REQUEST):
                 pname = msg.payload.get("provider", "")
@@ -1968,15 +2118,10 @@ async def ws_tasks(ws: WebSocket):
                     if saved_url:
                         base_url = saved_url
                 
-                # Only persist discovered models for providers that are already
-                # saved; testing a throwaway/template provider must not leak
-                # discovery data into the persisted config.
-                is_registered = (
-                    pname in set(secret_store.list_providers())
-                    or pname in engine_state.user_config.custom_base_urls
-                    or pname in engine_state.user_config.custom_provider_types
-                )
-
+                # _send_validation_result validates with
+                # persist_models=False: testing a throwaway/template
+                # provider must not leak discovery data into the
+                # persisted config.
                 if not key and not is_custom:
                     await ws.send_text(Event(
                         type=resp_type,
@@ -3236,93 +3381,10 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
 
             elif msg.type == EventType.REFRESH_MODELS_REQUEST:
-                target_provider = msg.payload.get("provider")
-                stored = set(secret_store.list_providers())
-                cfg = engine_state.user_config
-                
-                providers_to_refresh = set(stored)
-                for p in cfg.custom_provider_types:
-                    if cfg.custom_provider_types[p] == "openai_compatible":
-                        providers_to_refresh.add(p)
-                providers_to_refresh.add("custom_openai")
-                
-                if target_provider:
-                    providers_to_refresh = [target_provider]
-                else:
-                    providers_to_refresh = list(providers_to_refresh)
-
-                refreshed_models: dict[str, list[str]] = {}
-
-                for pname in providers_to_refresh:
-                    try:
-                        payload_key = msg.payload.get("api_key")
-                        payload_url = msg.payload.get("base_url")
-                        
-                        if payload_key is not None:
-                            key = payload_key
-                        else:
-                            key = secret_store.load_provider(pname) if pname in stored else ""
-                            
-                        if payload_url is not None:
-                            base_url = payload_url
-                        else:
-                            base_url = cfg.custom_base_urls.get(pname)
-
-                        is_custom = pname == "custom_openai" or cfg.custom_provider_types.get(pname) == "openai_compatible"
-                        if key or is_custom:
-                            disc = await fetch_available_models(
-                                provider_name=pname,
-                                api_key=key,
-                                base_url=base_url,
-                                filter_reachability=True,
-                                force_reachability=True,
-                                provider_flavor=custom_provider_flavor(pname, cfg),
-                            )
-                            # Do not persist discovery data for unsaved/template
-                            # providers; models still flow back to the UI response.
-                            if disc.models or disc.excluded or disc.error:
-                                refreshed_models[pname] = disc
-                            is_registered = (
-                                pname in stored
-                                or pname in cfg.custom_base_urls
-                                or pname in cfg.custom_provider_types
-                            )
-                            # E5-F14: a targeted refresh of a REGISTERED
-                            # (saved) provider applies and persists
-                            # exactly like the full refresh — the old
-                            # "manual click should not save" gate left
-                            # config/registry/disk holding the stale
-                            # catalog while the response showed the new
-                            # one, so the refresh evaporated on the next
-                            # listing/restart. Unsaved templates stay
-                            # unpersisted via is_registered above.
-                            if disc.models and is_registered:
-                                cfg.provider_models[pname] = disc.models
-                                cfg.provider_excluded_models[pname] = disc.excluded
-                                engine_state.model_registry.update_provider_models(pname, disc.models)
-                                save_config(cfg)
-                    except Exception as ref_err:  # noqa: BLE001 — per-provider isolation: one provider's refresh failure must not abort the refresh for the rest
-                        logger.error(f"Error during refresh models for {pname}: {ref_err}")
-
-                updated_providers = await _build_provider_list_async(secret_store)
-                # Surface freshly discovered models for the target provider even if
-                # it is an unsaved template (whose data we intentionally don't persist).
-                for prov in updated_providers:
-                    disc = refreshed_models.get(prov.get("name"))
-                    if disc is not None:
-                        prov["models"] = disc.models
-                        prov["excluded_models"] = disc.excluded
-                        if disc.error is not None:
-                            prov["discovery_error"] = disc.error.to_dict()
-                await ws.send_text(Event(
-                    type=EventType.REFRESH_MODELS_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "providers": updated_providers,
-                        "default_provider": cfg.default_provider,
-                        "default_model": cfg.default_model,
-                    },
-                ).to_json())
+                # Off the message loop (see _send_refresh_models_result):
+                # a refresh can take ~100 s of discovery and must not
+                # wedge the socket behind it (RUX-B-01).
+                asyncio.create_task(_send_refresh_models_result(req_id, dict(msg.payload)))
 
             # -----------------------------------------------------------
             # Tools, MCP, Plugins, Memory Events

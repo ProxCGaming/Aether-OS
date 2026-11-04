@@ -1,8 +1,32 @@
 import asyncio
 import logging
+import time
 from typing import Any
 
 MAX_VALIDATION_PINGS = 5
+
+# Negative cache for provider model discovery (RUX-B-02): a provider
+# whose discovery just failed is not re-fetched on every list/refresh
+# request — each attempt costs a full DISCOVERY_TIMEOUT stall. While
+# the last failure is younger than the TTL, discovery for that provider
+# is skipped; a successful discovery clears the record immediately.
+DISCOVERY_FAILURE_TTL_SECONDS = 60.0
+
+_discovery_failures: dict[str, float] = {}
+
+
+def discovery_recently_failed(provider_name: str) -> bool:
+    """True while ``provider_name``'s last discovery failure is within the TTL."""
+    failed_at = _discovery_failures.get(provider_name)
+    return failed_at is not None and (time.monotonic() - failed_at) < DISCOVERY_FAILURE_TTL_SECONDS
+
+
+def record_discovery_failure(provider_name: str) -> None:
+    _discovery_failures[provider_name] = time.monotonic()
+
+
+def clear_discovery_failure(provider_name: str) -> None:
+    _discovery_failures.pop(provider_name, None)
 
 
 from aether_engine.config import (
@@ -22,27 +46,113 @@ from aether_engine.state import engine_state
 
 logger = logging.getLogger("aether_engine.orchestration.core")
 
-async def _build_provider_list_async(store: SecretStore) -> list:
-    """Build provider status list for PROVIDER_LIST_RESPONSE with auto-discovery."""
+async def _discover_cloud_provider_models(store: SecretStore, provider) -> bool:
+    """Fetch + cache models for one cloud provider with an empty cache.
+
+    Returns True when the provider's model list changed. Best-effort:
+    failures are recorded in the negative cache (RUX-B-02) and logged,
+    never raised.
+    """
+    cfg = engine_state.user_config
+    pname = provider.name
+    if discovery_recently_failed(pname):
+        return False
+    try:
+        key = store.load_provider(pname)
+        if not key:
+            return False
+        disc = await fetch_available_models(
+            pname, key, base_url=cfg.custom_base_urls.get(pname, ""))
+    except Exception as e:  # noqa: BLE001 — discovery is best-effort per provider; failure is logged, never fatal
+        record_discovery_failure(pname)
+        logger.warning(f"Error discovering models for {pname}: {e}")
+        return False
+    if not disc.ok:
+        record_discovery_failure(pname)
+        return False
+    clear_discovery_failure(pname)
+    if not disc.models:
+        return False
+    cfg.provider_models[pname] = disc.models
+    cfg.provider_excluded_models[pname] = disc.excluded
+    engine_state.model_registry.update_provider_models(pname, disc.models)
+    save_config(cfg)
+    return True
+
+
+async def _discover_custom_provider_models(store: SecretStore, pname: str, stored: set) -> bool:
+    """Fetch + cache models for one dynamic custom provider with an empty cache.
+
+    Same contract as :func:`_discover_cloud_provider_models`.
+    """
+    cfg = engine_state.user_config
+    if discovery_recently_failed(pname):
+        return False
+    provider_type = cfg.custom_provider_types.get(pname, "openai_compatible")
+    try:
+        key = store.load_provider(pname) if pname in stored else ""
+        if not (key or provider_type == "openai_compatible"):
+            return False
+        disc = await fetch_available_models(
+            pname, key, base_url=cfg.custom_base_urls.get(pname, ""),
+            provider_flavor=custom_provider_flavor(pname, cfg))
+    except Exception as e:  # noqa: BLE001 — discovery is best-effort per provider; failure is logged, never fatal
+        record_discovery_failure(pname)
+        logger.warning(f"Error discovering models for {pname}: {e}")
+        return False
+    if not disc.ok:
+        record_discovery_failure(pname)
+        return False
+    clear_discovery_failure(pname)
+    if not disc.models:
+        return False
+    cfg.provider_models[pname] = disc.models
+    cfg.provider_excluded_models[pname] = disc.excluded
+    engine_state.model_registry.update_provider_models(pname, disc.models)
+    save_config(cfg)
+    return True
+
+
+async def discover_pending_provider_models(store: SecretStore) -> bool:
+    """Discover models for every provider whose cache is still empty.
+
+    This is the discovery half of :func:`_build_provider_list_async`,
+    split out so PROVIDER_LIST can answer from cache immediately and
+    run this in a background task (RUX-B-02). Returns True when at
+    least one provider's model list changed.
+    """
+    stored = set(store.list_providers())
+    cfg = engine_state.user_config
+    changed = False
+    for p in CLOUD_PROVIDERS:
+        if not cfg.provider_models.get(p.name) and p.name in stored and await _discover_cloud_provider_models(store, p):
+            changed = True
+    known_names = {p.name for p in CLOUD_PROVIDERS}
+    all_custom = set(cfg.custom_base_urls.keys()) | set(cfg.provider_models.keys()) | stored
+    for pname in sorted(all_custom - known_names):
+        provider_type = cfg.custom_provider_types.get(pname, "openai_compatible")
+        if not cfg.provider_models.get(pname) and (pname in stored or provider_type == "openai_compatible") and await _discover_custom_provider_models(store, pname, stored):
+            changed = True
+    return changed
+
+
+async def _build_provider_list_async(store: SecretStore, discover: bool = True) -> list:
+    """Build provider status list for PROVIDER_LIST_RESPONSE with auto-discovery.
+
+    With ``discover=False`` the list is built from the model cache
+    only — no network fetches — so the caller can answer immediately
+    and run :func:`discover_pending_provider_models` off the message
+    loop instead (RUX-B-02).
+    """
     result = []
     stored = set(store.list_providers())
     cfg = engine_state.user_config
     for p in CLOUD_PROVIDERS:
         models = cfg.provider_models.get(p.name)
         base_url = cfg.custom_base_urls.get(p.name, "")
-        if (not models) and (p.name in stored):
-            try:
-                key = store.load_provider(p.name)
-                if key:
-                    disc = await fetch_available_models(p.name, key, base_url=base_url)
-                    if disc.models:
-                        models = disc.models
-                        cfg.provider_models[p.name] = disc.models
-                        cfg.provider_excluded_models[p.name] = disc.excluded
-                        engine_state.model_registry.update_provider_models(p.name, disc.models)
-                        save_config(cfg)
-            except Exception as e:  # noqa: BLE001 — discovery is best-effort per provider; failure is logged, never fatal
-                logger.warning(f"Error discovering models for {p.name}: {e}")
+        if discover and (not models) and (p.name in stored):
+            await _discover_cloud_provider_models(store, p)
+            models = cfg.provider_models.get(p.name)
 
         models = models or []
 
@@ -72,21 +182,9 @@ async def _build_provider_list_async(store: SecretStore) -> list:
         display_name = cfg.custom_provider_names.get(pname, fallback_name.replace("_", " ").title())
         provider_type = cfg.custom_provider_types.get(pname, "openai_compatible")
 
-        if not models and (pname in stored or provider_type == "openai_compatible"):
-            try:
-                key = store.load_provider(pname) if pname in stored else ""
-                if key or provider_type == "openai_compatible":
-                    disc = await fetch_available_models(
-                        pname, key, base_url=base_url,
-                        provider_flavor=custom_provider_flavor(pname, cfg))
-                    if disc.models:
-                        models = disc.models
-                        cfg.provider_models[pname] = disc.models
-                        cfg.provider_excluded_models[pname] = disc.excluded
-                        engine_state.model_registry.update_provider_models(pname, disc.models)
-                        save_config(cfg)
-            except Exception as e:  # noqa: BLE001 — discovery is best-effort per provider; failure is logged, never fatal
-                logger.warning(f"Error discovering models for {pname}: {e}")
+        if discover and not models and (pname in stored or provider_type == "openai_compatible"):
+            await _discover_custom_provider_models(store, pname, stored)
+            models = cfg.provider_models.get(pname, [])
 
         result.append({
             "name": pname,
