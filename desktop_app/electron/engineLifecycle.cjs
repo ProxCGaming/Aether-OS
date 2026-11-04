@@ -37,6 +37,14 @@
 //   a grace period, then SIGKILL (POSIX) / taskkill /T /F (Windows,
 //   so the engine's own worker children go with it).
 //
+//   Wave 1 slice 3 hardening: the INITIAL spawn is retried once if
+//   it misses the health budget (INITIAL_SPAWN_ATTEMPTS), a healthy
+//   respawn resets the restart budget (RUX-B-11 — the bound means
+//   consecutive failed restarts, not restarts per session), and
+//   every lifecycle line is also appended to <userData>/logs/
+//   engine.log, the copy a user or QA can actually retrieve from a
+//   packaged app whose console nobody can see.
+//
 // All decisions live here with injected dependencies so Jest can
 // drive them without Electron; main.cjs is wiring only (its half is
 // pinned by source-contract assertions in the tests).
@@ -76,6 +84,14 @@ const HEALTH_POLL_MS = 250;
 const MAX_RESTARTS = 3;
 const RESTART_DELAY_MS = 1000;
 const KILL_GRACE_MS = 5000;
+// The initial spawn gets ONE retry (two attempts total, never a
+// loop). A cold first start can miss the health budget for transient
+// reasons — antivirus still scanning the freshly laid payload tree,
+// a port briefly held — that are gone moments later; the pre-fix
+// behaviour terminated the child and gave up for the whole session,
+// leaving a dead "Initializing" UI (Lane B §4, point 3).
+const INITIAL_SPAWN_ATTEMPTS = 2;
+const SPAWN_RETRY_DELAY_MS = 1000;
 
 function createEngineLifecycle(deps) {
   const {
@@ -96,6 +112,7 @@ function createEngineLifecycle(deps) {
   const maxRestarts = tuning.maxRestarts ?? MAX_RESTARTS;
   const restartDelayMs = tuning.restartDelayMs ?? RESTART_DELAY_MS;
   const killGraceMs = tuning.killGraceMs ?? KILL_GRACE_MS;
+  const spawnRetryDelayMs = tuning.spawnRetryDelayMs ?? SPAWN_RETRY_DELAY_MS;
   const timers = deps.timers || { setTimeout, clearTimeout };
   const now = deps.now || Date.now;
 
@@ -107,6 +124,46 @@ function createEngineLifecycle(deps) {
   let stopping = false;
   let startPromise = null;
   let exitWaiters = [];
+
+  // Engine log file (Wave 1 slice 3): every lifecycle line ALSO
+  // lands in <userData>/logs/engine.log. The injected log sink is
+  // console.log in the packaged main process — a GUI process whose
+  // console nobody can see (Lane B §4, point 6) — so the file is
+  // the copy a user or QA can retrieve. Best-effort by
+  // construction: the directory is created lazily, a write failure
+  // is swallowed and disables file logging, and it must NEVER throw
+  // into lifecycle logic.
+  const engineLogFilePath = userDataPath
+    ? path.join(userDataPath, 'logs', 'engine.log')
+    : null;
+  let engineLogReady = false;
+  let engineLogBroken = false;
+
+  function appendToEngineLog(message) {
+    if (!engineLogFilePath || engineLogBroken) return;
+    try {
+      if (!engineLogReady) {
+        fs.mkdirSync(path.dirname(engineLogFilePath), { recursive: true });
+        engineLogReady = true;
+      }
+      const stamp = new Date(now()).toISOString();
+      const body = String(message)
+        .split('\n')
+        .map((line) => `${stamp} ${line}`)
+        .join('\n');
+      fs.appendFileSync(engineLogFilePath, `${body}\n`);
+    } catch {
+      engineLogBroken = true;
+    }
+  }
+
+  // The one sink every lifecycle message in this module goes
+  // through: the injected log exactly as before, plus the durable
+  // file copy above.
+  function logLine(message) {
+    log(message);
+    appendToEngineLog(message);
+  }
 
   const sleep = (ms) => new Promise((resolve) => timers.setTimeout(resolve, ms));
 
@@ -166,7 +223,7 @@ function createEngineLifecycle(deps) {
     try {
       fs.mkdirSync(cwd, { recursive: true });
     } catch (err) {
-      log(`[engine] could not create engine run directory ${cwd}: ${err}`);
+      logLine(`[engine] could not create engine run directory ${cwd}: ${err}`);
       return null;
     }
     const env = { ...baseEnv, PYTHONUNBUFFERED: '1' };
@@ -182,22 +239,22 @@ function createEngineLifecycle(deps) {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (err) {
-      log(`[engine] failed to spawn bundled engine: ${err}`);
+      logLine(`[engine] failed to spawn bundled engine: ${err}`);
       return null;
     }
     child = proc;
     childExited = false;
     if (proc.stdout && typeof proc.stdout.on === 'function') {
-      proc.stdout.on('data', (chunk) => log(`[engine] ${String(chunk).trimEnd()}`));
+      proc.stdout.on('data', (chunk) => logLine(`[engine] ${String(chunk).trimEnd()}`));
     }
     if (proc.stderr && typeof proc.stderr.on === 'function') {
-      proc.stderr.on('data', (chunk) => log(`[engine] ${String(chunk).trimEnd()}`));
+      proc.stderr.on('data', (chunk) => logLine(`[engine] ${String(chunk).trimEnd()}`));
     }
     if (typeof proc.on === 'function') {
-      proc.on('error', (err) => log(`[engine] process error: ${err}`));
+      proc.on('error', (err) => logLine(`[engine] process error: ${err}`));
       proc.on('exit', (code, signal) => onChildExit(proc, code, signal));
     }
-    log(`[engine] spawned bundled engine (pid ${proc.pid}) from ${payload.root}`);
+    logLine(`[engine] spawned bundled engine (pid ${proc.pid}) from ${payload.root}`);
     return proc;
   }
 
@@ -208,7 +265,7 @@ function createEngineLifecycle(deps) {
     exitWaiters = [];
     waiters.forEach((resolve) => resolve());
     if (stopping) return;
-    log(`[engine] bundled engine exited (code=${code}, signal=${signal})`);
+    logLine(`[engine] bundled engine exited (code=${code}, signal=${signal})`);
     if (mode === 'spawned') {
       scheduleRestart();
     }
@@ -217,13 +274,13 @@ function createEngineLifecycle(deps) {
   function scheduleRestart() {
     if (stopping) return;
     if (restartCount >= maxRestarts) {
-      log(`[engine] restart bound reached (${maxRestarts}); not restarting the bundled engine`);
+      logLine(`[engine] restart bound reached (${maxRestarts}); not restarting the bundled engine`);
       mode = 'none';
       child = null;
       return;
     }
     restartCount += 1;
-    log(`[engine] restarting bundled engine (attempt ${restartCount}/${maxRestarts})`);
+    logLine(`[engine] restarting bundled engine (attempt ${restartCount}/${maxRestarts})`);
     restartTimer = timers.setTimeout(() => {
       restartTimer = null;
       void respawn();
@@ -246,9 +303,14 @@ function createEngineLifecycle(deps) {
     if (stopping) return;
     if (healthy) {
       mode = 'spawned';
-      log('[engine] bundled engine is healthy after restart');
+      // RUX-B-11: a respawn that becomes healthy earns the budget
+      // back (mirrors the reset in start()). Without this the bound
+      // was cumulative per session, so three individually recovered
+      // crashes permanently ended supervision.
+      restartCount = 0;
+      logLine('[engine] bundled engine is healthy after restart');
     } else {
-      log('[engine] restarted engine did not become healthy');
+      logLine('[engine] restarted engine did not become healthy');
       await terminateChild(proc);
       if (!stopping && mode === 'spawned') scheduleRestart();
     }
@@ -284,14 +346,14 @@ function createEngineLifecycle(deps) {
           });
         }
       } catch (err) {
-        log(`[engine] taskkill failed: ${err}`);
+        logLine(`[engine] taskkill failed: ${err}`);
       }
     } else {
       try { proc.kill('SIGKILL'); } catch { /* already gone */ }
       await waitForExit(killGraceMs);
     }
     if (isCurrent && !childExited) {
-      log('[engine] bundled engine did not exit within the kill grace period');
+      logLine('[engine] bundled engine did not exit within the kill grace period');
     }
   }
 
@@ -301,29 +363,40 @@ function createEngineLifecycle(deps) {
     startPromise = (async () => {
       if (await probe()) {
         mode = 'external';
-        log('[engine] an engine already answers on port ' + ENGINE_PORT + '; using it');
+        logLine('[engine] an engine already answers on port ' + ENGINE_PORT + '; using it');
         return { mode };
       }
       const payload = resolvePayload();
       if (!payload) {
         mode = 'none';
-        log('[engine] no engine is running and no bundled engine payload is present');
+        logLine('[engine] no engine is running and no bundled engine payload is present');
         return { mode };
       }
-      const proc = spawnEngine(payload);
-      if (!proc) {
-        mode = 'none';
-        return { mode };
+      // Wave 1 slice 3: the initial spawn is retried ONCE when it
+      // misses the health budget (see INITIAL_SPAWN_ATTEMPTS). The
+      // failed child is terminated exactly as the single-attempt
+      // path always did before the next attempt. A spawn that never
+      // produced a child (mkdir/spawn failure) is deterministic —
+      // it still gives up immediately, unchanged.
+      for (let attempt = 1; attempt <= INITIAL_SPAWN_ATTEMPTS; attempt += 1) {
+        const proc = spawnEngine(payload);
+        if (!proc) {
+          mode = 'none';
+          return { mode };
+        }
+        if (await waitForHealth(proc)) {
+          mode = 'spawned';
+          restartCount = 0;
+          logLine('[engine] bundled engine is healthy');
+          return { mode };
+        }
+        await terminateChild(proc);
+        if (child === proc) child = null;
+        if (stopping || attempt === INITIAL_SPAWN_ATTEMPTS) break;
+        logLine(`[engine] bundled engine did not become healthy in time; retrying the spawn (attempt ${attempt + 1} of ${INITIAL_SPAWN_ATTEMPTS})`);
+        await sleep(spawnRetryDelayMs);
       }
-      if (await waitForHealth(proc)) {
-        mode = 'spawned';
-        restartCount = 0;
-        log('[engine] bundled engine is healthy');
-        return { mode };
-      }
-      log('[engine] bundled engine did not become healthy in time; falling back to the normal connection retry');
-      await terminateChild(proc);
-      if (child === proc) child = null;
+      logLine('[engine] bundled engine did not become healthy in time; falling back to the normal connection retry');
       mode = 'none';
       return { mode };
     })();
@@ -364,6 +437,7 @@ function createEngineLifecycle(deps) {
     probe,
     resolvePayload,
     tokenFilePath,
+    logFilePath: () => engineLogFilePath,
     runDir,
     getMode: () => mode,
     isSpawned: () => mode === 'spawned',
@@ -385,4 +459,6 @@ module.exports = {
   MAX_RESTARTS,
   RESTART_DELAY_MS,
   KILL_GRACE_MS,
+  INITIAL_SPAWN_ATTEMPTS,
+  SPAWN_RETRY_DELAY_MS,
 };

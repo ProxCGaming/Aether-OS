@@ -12,12 +12,14 @@
  * only the paths each scenario plants.
  */
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
 
 const {
   createEngineLifecycle,
   MAX_RESTARTS,
+  INITIAL_SPAWN_ATTEMPTS,
 } = require('../engineLifecycle.cjs');
 
 const appRoot = path.join(__dirname, '..', '..');
@@ -68,7 +70,17 @@ function makeLifecycle(overrides = {}) {
       }
       const child = fakeChild(nextPid++, overrides.childOptions || {});
       state.children.push(child);
-      if (overrides.engineBoots !== false) state.healthUp = true;
+      // engineBoots === false: no spawn ever brings the engine up.
+      // respawnBoots === false: only the FIRST spawn brings it up;
+      // respawns stay down (restarts that never recover). Default:
+      // every spawn brings it up, as before.
+      if (overrides.engineBoots === false) {
+        state.healthUp = false;
+      } else if (state.children.length > 1 && overrides.respawnBoots === false) {
+        state.healthUp = false;
+      } else {
+        state.healthUp = true;
+      }
       return child;
     }),
     httpGet: jest.fn(async () => {
@@ -90,6 +102,7 @@ function makeLifecycle(overrides = {}) {
       healthPollMs: 5,
       restartDelayMs: 5,
       killGraceMs: 25,
+      spawnRetryDelayMs: 5,
       maxRestarts: overrides.maxRestarts ?? 2,
     },
   };
@@ -163,21 +176,39 @@ describe('engineLifecycle.start', () => {
 
 describe('engineLifecycle supervision', () => {
   it('restarts a crashed engine only up to the bound, then gives up', async () => {
+    // Wave 1 slice 3 / RUX-B-11 semantics: the bound counts
+    // CONSECUTIVE FAILED restarts — a respawn that becomes healthy
+    // resets it (see the RUX-B-11 test below). So the bound is
+    // exercised here with respawns that never recover.
     const { lifecycle, state } = makeLifecycle({
       existing: [PAYLOAD_EXE, PAYLOAD_APP],
       maxRestarts: 2,
+      respawnBoots: false,
     });
     await lifecycle.start();
     expect(state.children).toHaveLength(1);
     state.children[0].die(1);
-    await until(() => state.children.length === 2);
-    state.children[1].die(1);
-    await until(() => state.children.length === 3);
-    state.children[2].die(1);
-    await tick(60);
-    expect(state.children).toHaveLength(3); // 1 initial + 2 restarts, no more
-    expect(lifecycle.getMode()).toBe('none');
+    await until(() => lifecycle.getMode() === 'none', 4000);
+    expect(state.children).toHaveLength(3); // 1 initial + 2 failed restarts, no more
     expect(state.logs.join('\n')).toMatch(/restart bound reached/);
+  });
+
+  it('RUX-B-11: a respawn that becomes healthy resets the restart budget', async () => {
+    const { lifecycle, state } = makeLifecycle({
+      existing: [PAYLOAD_EXE, PAYLOAD_APP],
+      maxRestarts: 1, // tightest bound: one recovered crash used to end supervision
+    });
+    await lifecycle.start();
+    state.children[0].die(1);
+    await until(() => state.children.length === 2);
+    await until(() => state.logs.join('\n').includes('healthy after restart'));
+    state.children[1].die(1);
+    // Before the fix the budget was cumulative per session, so
+    // this second crash hit the bound and no third child ever
+    // spawned. With the reset, the restart is allowed.
+    await until(() => state.children.length === 3);
+    expect(lifecycle.getMode()).toBe('spawned');
+    expect(state.logs.join('\n')).not.toMatch(/restart bound reached/);
   });
 
   it('ships a visible production restart bound', () => {
@@ -252,5 +283,111 @@ describe('main.cjs wiring (source contract)', () => {
     // The URL itself stays a bare literal — the token is never
     // interpolated into it (Phase 10.2 B1).
     expect(mainSrc).toContain("const wsUrl = 'ws://127.0.0.1:8000/ws/tasks';");
+  });
+});
+
+describe('engineLifecycle initial-spawn retry (Wave 1 slice 3)', () => {
+  it('retries the initial spawn once and succeeds when the second attempt becomes healthy', async () => {
+    const { lifecycle, deps, state } = makeLifecycle({
+      existing: [PAYLOAD_EXE, PAYLOAD_APP],
+      engineBoots: false, // the test flips healthUp by hand
+    });
+    const started = lifecycle.start();
+    // First attempt never comes up; wait for its replacement to be
+    // spawned, then let THAT one answer /health.
+    await until(() => state.children.length === 2);
+    state.healthUp = true;
+    await expect(started).resolves.toEqual({ mode: 'spawned' });
+    expect(deps.spawn).toHaveBeenCalledTimes(2);
+    // The failed first child was terminated before the retry.
+    expect(state.children[0].killCalls).toContain('SIGTERM');
+    expect(state.logs.join('\n')).toMatch(/retrying the spawn \(attempt 2 of 2\)/);
+  });
+
+  it('gives up after exactly two attempts when neither becomes healthy', async () => {
+    const { lifecycle, deps, state } = makeLifecycle({
+      existing: [PAYLOAD_EXE, PAYLOAD_APP],
+      engineBoots: false,
+    });
+    await expect(lifecycle.start()).resolves.toEqual({ mode: 'none' });
+    expect(deps.spawn).toHaveBeenCalledTimes(2);
+    expect(state.children).toHaveLength(2);
+    expect(state.children[1].killCalls).toEqual(['SIGTERM', 'SIGKILL']);
+  });
+
+  it('ships a visible single-retry bound for the initial spawn', () => {
+    expect(INITIAL_SPAWN_ATTEMPTS).toBe(2);
+  });
+});
+
+describe('engineLifecycle engine log file (Wave 1 slice 3)', () => {
+  // Real fs against tmp dirs: the file sink is the behaviour under
+  // test, so this block does not use makeLifecycle's fake fs.
+  function makeRealLifecycle(userDataPath) {
+    const resourcesPath = fs.mkdtempSync(path.join(os.tmpdir(), 'aether-res-'));
+    const exe = path.join(resourcesPath, 'engine', 'python', 'bin', 'python3');
+    fs.mkdirSync(path.dirname(exe), { recursive: true });
+    fs.writeFileSync(exe, '');
+    fs.mkdirSync(path.join(resourcesPath, 'engine', 'app'), { recursive: true });
+    const children = [];
+    let up = false;
+    const lifecycle = createEngineLifecycle({
+      spawn: jest.fn(() => {
+        const child = fakeChild(6000 + children.length);
+        children.push(child);
+        up = true;
+        return child;
+      }),
+      httpGet: jest.fn(async () => {
+        if (!up) throw new Error('ECONNREFUSED');
+        return 200;
+      }),
+      fs,
+      platform: 'linux',
+      isPackaged: true,
+      resourcesPath,
+      userDataPath,
+      baseEnv: {},
+      log: () => {},
+      tuning: {
+        healthTimeoutMs: 150,
+        healthPollMs: 5,
+        restartDelayMs: 5,
+        killGraceMs: 25,
+        spawnRetryDelayMs: 5,
+        maxRestarts: 2,
+      },
+    });
+    return { lifecycle, children };
+  }
+
+  it('appends timestamped lifecycle lines to <userData>/logs/engine.log', async () => {
+    const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'aether-ud-'));
+    const { lifecycle, children } = makeRealLifecycle(userData);
+    const logPath = path.join(userData, 'logs', 'engine.log');
+    expect(lifecycle.logFilePath()).toBe(logPath);
+    await expect(lifecycle.start()).resolves.toEqual({ mode: 'spawned' });
+    const content = fs.readFileSync(logPath, 'utf8');
+    expect(content).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \[engine\] spawned bundled engine/,
+    );
+    expect(content).toContain('[engine] bundled engine is healthy');
+    // Later lifecycle events append to the same file.
+    children[0].die(1);
+    await until(() => fs.readFileSync(logPath, 'utf8').includes('healthy after restart'));
+    const after = fs.readFileSync(logPath, 'utf8');
+    expect(after).toContain('[engine] bundled engine exited (code=1, signal=null)');
+    expect(after.length).toBeGreaterThan(content.length);
+  });
+
+  it('an unwritable log path never breaks start()', async () => {
+    const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'aether-ud-'));
+    // A regular FILE where the logs directory must be created:
+    // mkdir/append under it fails, and the lifecycle must swallow
+    // that and carry on exactly as before.
+    fs.writeFileSync(path.join(userData, 'logs'), 'not a directory');
+    const { lifecycle } = makeRealLifecycle(userData);
+    await expect(lifecycle.start()).resolves.toEqual({ mode: 'spawned' });
+    expect(lifecycle.isSpawned()).toBe(true);
   });
 });
