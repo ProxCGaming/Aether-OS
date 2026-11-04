@@ -35,10 +35,24 @@
 #     using the repo's .gitleaks.toml allowlist.
 #   - Coverage on both jobs (S5-M11): measured and uploaded as
 #     artifacts, with NO failing threshold — measurement first.
+#   - Locked dependencies (Risk #1, closed): pyproject.toml is the
+#     intent and uv.lock is the ONLY install source — the old
+#     requirements.txt / requirements-lock.txt pair is deleted (the
+#     lock was a test-venv freeze missing 8 packages: uvicorn,
+#     PySide6, qasync, google-genai, APScheduler, pywin32, ddgs,
+#     keyring). Every Python job (a) fails if uv.lock is out of date
+#     with pyproject.toml (`uv lock --check`), (b) creates its venv
+#     explicitly (`uv venv .venv --python 3.12`), and (c) installs
+#     ONLY from the lock (`uv sync --locked` — CI can never silently
+#     re-resolve or drift). The dedicated deps job goes further: a
+#     clean venv installed with `--all-extras` (so the voice extra
+#     is locked and importable too, not just the default set) plus
+#     an import smoke test for the packages the old lock missed.
+#     tests/test_locked_deps_ci.py pins this contract.
 #
 # Known limits (do NOT read a green run here as a full release gate):
-#   - The pytest job installs dependencies with `uv sync` from
-#     pyproject.toml / uv.lock, which include APScheduler, so scheduler
+#   - The pytest job installs dependencies with `uv sync --locked`
+#     from pyproject.toml / uv.lock, which include APScheduler, so scheduler
 #     tests run with HAS_APSCHEDULER=True rather than the graceful
 #     degradation seen in the old .venv-phase9 environment (see ADR 0025).
 #   - The pytest job does not run the Electron app or the Windows-only
@@ -53,6 +67,36 @@ on:
   pull_request:
 
 jobs:
+  deps:
+    name: locked deps (uv.lock + venv)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Check uv.lock is up to date with pyproject.toml
+        run: uv lock --check
+      - name: Create venv (Python 3.12)
+        run: uv venv .venv --python 3.12
+      - name: Install ALL dependencies from the lock (incl. extras)
+        run: uv sync --locked --all-extras
+      - name: Verify the venv is complete (import smoke test)
+        # The old requirements-lock.txt was frozen from a test venv
+        # and silently missed 8 packages. This smoke test imports
+        # exactly the packages that lock missed (PySide6/qasync left
+        # with the retired UI; pywin32 is Windows-only and resolves
+        # via its platform marker there) plus the voice extra, so a
+        # lock that is incomplete again fails HERE, loudly.
+        run: >-
+          .venv/bin/python -c "import sys;
+          assert sys.version_info[:2] == (3, 12), sys.version;
+          import uvicorn, google.genai, apscheduler, ddgs, keyring,
+          aiosqlite, faster_whisper, kokoro, onnxruntime, silero_vad;
+          print('locked venv import smoke: ok')"
+
   python:
     name: pytest (Python 3.12)
     runs-on: ubuntu-latest
@@ -63,8 +107,12 @@ jobs:
           python-version: "3.12"
       - name: Install uv
         uses: astral-sh/setup-uv@v7
-      - name: Install dependencies
-        run: uv sync
+      - name: Check uv.lock is up to date with pyproject.toml
+        run: uv lock --check
+      - name: Create venv (Python 3.12)
+        run: uv venv .venv --python 3.12
+      - name: Install dependencies (locked)
+        run: uv sync --locked
       - name: Run pytest with coverage
         # pytest's exit code is deliberately discarded (|| true): the
         # suite is judged by its failure LIST via the subset rule in
@@ -133,8 +181,12 @@ jobs:
           python-version: "3.12"
       - name: Install uv
         uses: astral-sh/setup-uv@v7
-      - name: Install Python dependencies
-        run: uv sync
+      - name: Check uv.lock is up to date with pyproject.toml
+        run: uv lock --check
+      - name: Create venv (Python 3.12)
+        run: uv venv .venv --python 3.12
+      - name: Install Python dependencies (locked)
+        run: uv sync --locked
       - name: Ruff on changed Python files (repo script)
         # Same judgement as the local commit gate: lint-staged runs
         # scripts/run-ruff.sh on the files being committed, so CI runs

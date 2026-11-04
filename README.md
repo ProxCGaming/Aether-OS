@@ -35,7 +35,8 @@ Node 24, Git.
 ```bash
 git clone https://github.com/ProxCGaming/Aether-OS.git
 cd Aether-OS
-uv sync                    # engine dependencies
+uv venv .venv --python 3.12   # create the venv (Python 3.12 only)
+uv sync --locked              # engine deps, exactly as pinned in uv.lock
 cd desktop_app && npm ci   # desktop dependencies
 cd ..
 ```
