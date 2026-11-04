@@ -36,7 +36,7 @@ export function filterPaletteItems(items, query) {
   return scored.slice(0, 12).map((s) => s.item);
 }
 
-export default function CommandPalette({ open, items = [], onClose }) {
+export default function CommandPalette({ open, items = [], onClose, isConnected = true }) {
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState(0);
   const inputRef = useRef(null);
@@ -114,6 +114,24 @@ export default function CommandPalette({ open, items = [], onClose }) {
             color: '#fff', fontSize: '15px',
           }}
         />
+        {/* Lane C grouped S4: items are host-supplied, so while the
+            engine is disconnected the palette silently offers fewer,
+            staler items (actions only, stale sessions/models) with
+            no sign of why. The note states the fact; item behaviour
+            is unchanged — actions still run and queue via safeSend. */}
+        {isConnected === false && (
+          <div
+            data-testid="palette-offline-note"
+            role="status"
+            style={{
+              padding: '8px 16px', color: '#fbbf24', fontSize: '12.5px',
+              background: 'rgba(251, 191, 36, 0.08)',
+              borderBottom: '1px solid rgba(255,255,255,0.08)',
+            }}
+          >
+            Engine disconnected — sessions and models may be stale, and actions will queue until it reconnects.
+          </div>
+        )}
         <div style={{ maxHeight: '46vh', overflowY: 'auto' }}>
           {results.length === 0 && (
             <div style={{ padding: '16px', color: '#9090a0', fontSize: '14px' }}>No matches.</div>

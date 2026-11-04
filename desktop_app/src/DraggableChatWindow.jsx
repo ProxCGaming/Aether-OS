@@ -1856,6 +1856,14 @@ export default function DraggableChatWindow({
   const handleSnipCaptured = (snip) => {
     setIsSnipOverlayOpen(false);
     setAttachments(prev => [...prev, snip]);
+    // Lane C grouped S4: after capture the snip rides the normal
+    // chat send path, whose only offline sign was the generic
+    // "Queued" tag on the eventual bubble. Captured while the
+    // engine is down, the snip gets its own one-line notice at the
+    // moment of capture — the send itself already queues (Wave 2).
+    if (chatOffline) {
+      showToast('Snip captured — it will send when the engine reconnects.');
+    }
   };
 
   const handleRemoveAttachment = (idxToRemove) => {

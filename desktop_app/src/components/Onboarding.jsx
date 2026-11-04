@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useAetherSocket } from '../contexts/SocketContext';
 
 /**
@@ -16,13 +16,40 @@ export default function Onboarding({ providers = [], onDone }) {
   const [step, setStep] = useState(0);
   const [providerName, setProviderName] = useState('');
   const [apiKey, setApiKey] = useState('');
-  const [saveState, setSaveState] = useState(null); // null | 'saving' | 'error'
+  const [saveState, setSaveState] = useState(null); // null | 'saving' | 'error' | 'timeout'
   const [workspacePath, setWorkspacePath] = useState('');
-  const [workspaceState, setWorkspaceState] = useState(null); // null | 'saving' | 'error'
+  const [workspaceState, setWorkspaceState] = useState(null); // null | 'saving' | 'error' | 'timeout'
   const [workspaceError, setWorkspaceError] = useState('');
   const [workspaceSaved, setWorkspaceSaved] = useState(false);
   const [approvalMode, setApprovalMode] = useState('ask');
-  const [approvalState, setApprovalState] = useState(null); // null | 'saving' | 'error'
+  const [approvalState, setApprovalState] = useState(null); // null | 'saving' | 'error' | 'timeout'
+
+  // Lane C grouped S4: a save sent while CONNECTED to a wedged
+  // engine sat at "Saving…" forever — the disconnected case had
+  // its queued notice (E6-F03); the no-answer case had nothing, and
+  // the step's button stayed disabled. Mirror ProviderSettings'
+  // 35s rule (RUX-C-03): every save arms a timer, and if no
+  // acknowledgement lands within 35s the state resolves to
+  // 'timeout' — the no-answer note shows and the control works
+  // again. A late acknowledgement still lands afterwards and
+  // advances the step exactly as before.
+  const SAVE_NO_ANSWER_MS = 35000;
+  const saveTimersRef = useRef({});
+  const clearSaveTimer = (kind) => {
+    if (saveTimersRef.current[kind]) {
+      clearTimeout(saveTimersRef.current[kind]);
+      saveTimersRef.current[kind] = null;
+    }
+  };
+  const armSaveTimer = (kind, setState) => {
+    clearSaveTimer(kind);
+    saveTimersRef.current[kind] = setTimeout(() => {
+      setState((s) => (s === 'saving' ? 'timeout' : s));
+    }, SAVE_NO_ANSWER_MS);
+  };
+  useEffect(() => () => {
+    Object.values(saveTimersRef.current).forEach((t) => { if (t) clearTimeout(t); });
+  }, []);
 
   useEffect(() => {
     if (!providerName && providers.length > 0) {
@@ -36,6 +63,7 @@ export default function Onboarding({ providers = [], onDone }) {
         const data = JSON.parse(event.data);
         const payload = data.payload || {};
         if (data.type === 'PROVIDER_SAVE_RESPONSE') {
+          clearSaveTimer('provider');
           if (payload.success) {
             setSaveState(null);
             // Advance only if the user is still on this step — a save
@@ -46,6 +74,7 @@ export default function Onboarding({ providers = [], onDone }) {
             setSaveState('error');
           }
         } else if (data.type === 'WORKSPACE_ADD_RESPONSE') {
+          clearSaveTimer('workspace');
           if (payload.success) {
             setWorkspaceState(null);
             setWorkspaceError('');
@@ -58,6 +87,7 @@ export default function Onboarding({ providers = [], onDone }) {
             setWorkspaceError(payload.error || '');
           }
         } else if (data.type === 'APPROVAL_MODE_SET_RESPONSE') {
+          clearSaveTimer('approval');
           if (payload.success) {
             setApprovalState(null);
             setStep((s) => (s === 2 ? 3 : s));
@@ -78,6 +108,7 @@ export default function Onboarding({ providers = [], onDone }) {
   const saveProvider = () => {
     if (!providerName) return;
     setSaveState('saving');
+    armSaveTimer('provider', setSaveState);
     sendMessage('PROVIDER_SAVE_REQUEST', {
       schema_version: 1,
       request_id: Date.now().toString(),
@@ -95,6 +126,7 @@ export default function Onboarding({ providers = [], onDone }) {
       setWorkspacePath(selected);
       setWorkspaceSaved(false);
       setWorkspaceState('saving');
+      armSaveTimer('workspace', setWorkspaceState);
       setWorkspaceError('');
       sendMessage('WORKSPACE_ADD_REQUEST', {
         schema_version: 1,
@@ -107,6 +139,7 @@ export default function Onboarding({ providers = [], onDone }) {
   const saveApprovalMode = () => {
     if (approvalState === 'saving') return;
     setApprovalState('saving');
+    armSaveTimer('approval', setApprovalState);
     sendMessage('APPROVAL_MODE_SET_REQUEST', {
       schema_version: 1,
       request_id: Date.now().toString(),
@@ -142,11 +175,11 @@ export default function Onboarding({ providers = [], onDone }) {
   const pendingLabels = [];
   const failedLabels = [];
   if (saveState === 'saving') pendingLabels.push('your provider key');
-  else if (saveState === 'error') failedLabels.push('your provider key');
+  else if (saveState === 'error' || saveState === 'timeout') failedLabels.push('your provider key');
   if (workspaceState === 'saving') pendingLabels.push('your workspace folder');
-  else if (workspaceState === 'error') failedLabels.push('your workspace folder');
+  else if (workspaceState === 'error' || workspaceState === 'timeout') failedLabels.push('your workspace folder');
   if (approvalState === 'saving') pendingLabels.push('your approval default');
-  else if (approvalState === 'error') failedLabels.push('your approval default');
+  else if (approvalState === 'error' || approvalState === 'timeout') failedLabels.push('your approval default');
   const joinLabels = (labels) => (labels.length <= 1
     ? labels[0] || ''
     : `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`);
@@ -216,6 +249,9 @@ export default function Onboarding({ providers = [], onDone }) {
               {saveState === 'error' && (
                 <div style={errorStyle}>That key could not be saved — check it and try again, or skip this step.</div>
               )}
+              {saveState === 'timeout' && (
+                <div style={errorStyle}>No answer from the engine in 35s — the save may only be queued, or the engine may be busy or offline. Try again, or skip this step.</div>
+              )}
               {saveState === 'saving' && !isConnected && (
                 <div style={queuedStyle}>Queued — the engine is unreachable, so this key isn't saved yet. It will be sent when the connection returns, or skip this step.</div>
               )}
@@ -241,7 +277,7 @@ export default function Onboarding({ providers = [], onDone }) {
             {workspacePath ? (
               <div style={{ fontFamily: 'monospace', fontSize: '13px', color: workspaceSaved ? '#10b981' : '#f0f0f5' }}>{workspacePath}</div>
             ) : null}
-            {(!workspacePath || workspaceState === 'error') && (
+            {(!workspacePath || workspaceState === 'error' || workspaceState === 'timeout') && (
               <button style={{ ...primaryBtn, marginTop: workspacePath ? '10px' : 0 }} onClick={pickWorkspace}>Choose folder…</button>
             )}
             {workspaceState === 'saving' && isConnected && (
@@ -257,6 +293,11 @@ export default function Onboarding({ providers = [], onDone }) {
                 {workspaceError
                   ? `That folder could not be added: ${workspaceError}`
                   : 'That folder could not be added — try another, or skip this step.'}
+              </div>
+            )}
+            {workspaceState === 'timeout' && (
+              <div style={{ ...errorStyle, marginTop: '10px' }}>
+                No answer from the engine in 35s — the save may only be queued, or the engine may be busy or offline. Choose the folder again to retry, or skip this step.
               </div>
             )}
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '20px' }}>
@@ -287,6 +328,9 @@ export default function Onboarding({ providers = [], onDone }) {
             </div>
             {approvalState === 'error' && (
               <div style={{ ...errorStyle, marginTop: '10px' }}>That approval default could not be saved — try again, or skip setup.</div>
+            )}
+            {approvalState === 'timeout' && (
+              <div style={{ ...errorStyle, marginTop: '10px' }}>No answer from the engine in 35s — the save may only be queued, or the engine may be busy or offline. Try again, or skip setup.</div>
             )}
             {approvalState === 'saving' && !isConnected && (
               <div style={{ ...queuedStyle, marginTop: '10px' }}>Queued — the engine is unreachable, so this choice isn't saved yet. It will be sent when the connection returns, or skip setup.</div>

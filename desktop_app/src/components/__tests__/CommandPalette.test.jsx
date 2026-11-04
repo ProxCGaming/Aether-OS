@@ -42,6 +42,35 @@ describe('CommandPalette component', () => {
   });
 });
 
+describe('CommandPalette offline note (Lane C grouped S4)', () => {
+  it('shows no offline note while connected (the default)', () => {
+    render(<CommandPalette open items={items} onClose={jest.fn()} />);
+    expect(screen.queryByTestId('palette-offline-note')).not.toBeInTheDocument();
+    render(<CommandPalette open items={items} onClose={jest.fn()} isConnected />);
+    expect(screen.queryByTestId('palette-offline-note')).not.toBeInTheDocument();
+  });
+
+  it('while disconnected, a slim note says items may be stale — and items still run', () => {
+    const run = jest.fn();
+    const onClose = jest.fn();
+    render(
+      <CommandPalette
+        open
+        items={[{ id: 'a', kind: 'action', label: 'Do thing', run }]}
+        onClose={onClose}
+        isConnected={false}
+      />
+    );
+    const note = screen.getByTestId('palette-offline-note');
+    expect(note).toHaveTextContent(/Engine disconnected/);
+    expect(note).toHaveTextContent(/stale/);
+    // Item behaviour is unchanged: Enter still runs the selection.
+    fireEvent.keyDown(screen.getByLabelText('Search commands'), { key: 'Enter' });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('CommandPalette search input focus ring (E6-F16)', () => {
   it('the palette search input carries the shared focus-ring class', () => {
     render(<CommandPalette open items={items} onClose={jest.fn()} />);

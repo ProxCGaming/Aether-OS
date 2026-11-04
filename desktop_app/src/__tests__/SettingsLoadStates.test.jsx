@@ -120,6 +120,36 @@ describe('SettingsPanel load states (RUX-C-01/C-06)', () => {
     expect(screen.getByTestId('project-config-save')).not.toBeDisabled();
   });
 
+  test('About (grouped S4): the guide area shows a load state until the workspace list answers', () => {
+    const { wsRef, feed } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} />);
+    fireEvent.click(screen.getByText('About'));
+
+    // Pre-answer the section must not claim no workspace exists.
+    expect(screen.getByTestId('about-workspaces-load-state')).toHaveAttribute('data-load-display', 'loading');
+    expect(screen.queryByText(/Add a workspace that contains the Aether-OS project/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Open the system guide')).not.toBeInTheDocument();
+
+    // An answered-empty list is a genuine empty: the guide line is
+    // now the truth and renders as before.
+    feed('WORKSPACE_LIST_RESPONSE', { workspaces: [] });
+    expect(screen.queryByTestId('about-workspaces-load-state')).not.toBeInTheDocument();
+    expect(screen.getByText(/Add a workspace that contains the Aether-OS project/)).toBeInTheDocument();
+  });
+
+  test('About (grouped S4): an answered list renders the guide entry points; offline shows the waiting variant', () => {
+    const { wsRef, feed } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} localModels={[]} isConnected={false} />);
+    fireEvent.click(screen.getByText('About'));
+    expect(screen.getByTestId('about-workspaces-load-state')).toHaveAttribute('data-load-display', 'offline');
+    expect(screen.getByTestId('about-workspaces-load-state')).toHaveTextContent(/Waiting for the engine/);
+
+    feed('WORKSPACE_LIST_RESPONSE', { workspaces: [{ path: '/home/user/Aether-OS' }] });
+    expect(screen.queryByTestId('about-workspaces-load-state')).not.toBeInTheDocument();
+    expect(screen.getByText('Open the system guide')).toBeInTheDocument();
+    expect(screen.getByText('/home/user/Aether-OS')).toBeInTheDocument();
+  });
+
   test('Providers: App\'s loaded signal threads through — loading row before, empty state after', () => {
     const { wsRef } = makeWsRef();
     const { rerender } = render(

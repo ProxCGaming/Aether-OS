@@ -2067,9 +2067,43 @@ function AppContent() {
         }
         return prev;
       });
+      // Lane C grouped S4: a drop DURING a voice session, dictation
+      // or read-aloud left each surface looking live over a dead
+      // engine session (starting one while offline was already
+      // honest). The engine ends its voice pipelines on disconnect,
+      // so flip each live voice state to its error presentation —
+      // the same finalise-don't-fake treatment as the pending
+      // message above. Nothing auto-resumes on reconnect; the user
+      // restarts, and the error states say so.
+      const voice = voiceStateRef.current;
+      if (voice && (voice.status === 'starting' || voice.status === 'active')) {
+        setVoiceRtcAnswer(null);
+        setVoiceRtcRemoteCandidate(null);
+        applyVoiceState({
+          ...voice,
+          status: 'error',
+          error: 'Voice session ended — the engine connection was lost. Start voice again once it reconnects.',
+          webrtcConfig: null,
+        });
+      }
+      if (dictationState && (dictationState.status === 'starting' || dictationState.status === 'active')) {
+        setDictationState({
+          ...dictationState,
+          status: 'error',
+          error: 'Dictation stopped — the engine connection was lost.',
+        });
+      }
+      if (readAloudState && (readAloudState.status === 'starting' || readAloudState.status === 'playing')) {
+        stopAppReadAloud();
+        setReadAloudState({
+          ...readAloudState,
+          status: 'error',
+          error: 'Read aloud stopped — the engine connection was lost.',
+        });
+      }
     }
     wasConnectedRef.current = isConnected;
-  }, [isConnected, wsRef, sendSessionListRequest, requestWorkspaceList]);
+  }, [isConnected, wsRef, sendSessionListRequest, requestWorkspaceList, dictationState, readAloudState, applyVoiceState, stopAppReadAloud]);
 
   // Per-workspace sessions (Q5): when the ACTIVE workspace changes,
   // the session list re-files itself under the new workspace — the
@@ -3506,7 +3540,7 @@ function AppContent() {
         <Onboarding providers={providers} onDone={handleOnboardingDone} />
       )}
       {!isFloating && (
-        <CommandPalette open={paletteOpen} items={paletteItems} onClose={() => setPaletteOpen(false)} />
+        <CommandPalette open={paletteOpen} items={paletteItems} onClose={() => setPaletteOpen(false)} isConnected={isConnected} />
       )}
       {!isFloating && shortcutsOpen && (
         <div data-testid="shortcuts-dialog" style={{ position: 'fixed', inset: 0, background: 'rgba(5,5,10,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 205 }} onClick={() => setShortcutsOpen(false)}>

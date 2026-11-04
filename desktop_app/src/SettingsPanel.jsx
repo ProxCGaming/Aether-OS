@@ -412,6 +412,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
           setPlugins(Array.isArray(p) ? p : Object.values(p || {}));
         } else if (data.type === 'WORKSPACE_LIST_RESPONSE') {
           // E6-F14: feeds the About section's local-guide entry point.
+          // Lane C grouped S4: the reply is also the About section's
+          // load answer — until it lands, the guide area shows a load
+          // state instead of claiming no workspace exists.
+          markAnswered('workspaces');
           setAboutWorkspaces(data.payload.workspaces || []);
         } else if (data.type === 'SKILL_TOGGLE_RESPONSE') {
           if (data.payload.skills) {
@@ -581,6 +585,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
 
   // E6-F14: the About section's guide entry point needs the
   // workspace roots (the guide ships inside the project checkout).
+  // Lane C grouped S4: reconnectCount is a dep for the same reason
+  // as the section fetch effect below (Wave 2 slice 4) — a visit
+  // that began while the engine was down retries on reconnect
+  // instead of sitting on the load state for the whole visit.
   useEffect(() => {
     if (activeMenu === 'About' && wsRef.current) {
       wsRef.current.send(JSON.stringify({
@@ -590,7 +598,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         payload: {}
       }));
     }
-  }, [activeMenu, wsRef]);
+  }, [activeMenu, wsRef, reconnectCount]);
 
   useEffect(() => {
     if (activeMenu === 'Tools' && wsRef.current?.readyState === WebSocket.OPEN) {
@@ -1771,7 +1779,16 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                 The system guide ships with the project (docs/AETHER_SYSTEM_GUIDE.md) and opens with your
                 default Markdown reader — nothing is fetched from the network.
               </p>
-              {aboutWorkspaces.length === 0 ? (
+              {!answered.workspaces ? (
+                <LoadStateRow
+                  loadState="loading"
+                  isConnected={isConnected}
+                  testId="about-workspaces-load-state"
+                  variant="plain"
+                  loadingText="Loading your workspaces…"
+                  offlineText="Waiting for the engine — your workspaces will appear here once it connects."
+                />
+              ) : aboutWorkspaces.length === 0 ? (
                 <div style={{ fontSize: '13px', color: '#9090a0' }}>
                   Add a workspace that contains the Aether-OS project and the guide can be opened from here.
                 </div>
