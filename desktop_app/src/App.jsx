@@ -18,6 +18,7 @@ import ArtifactsCanvas from './components/ArtifactsCanvas';
 import GlobalArtifactsView from './components/GlobalArtifactsView';
 import { groupEntriesByTask } from './components/CostHeaderPopover';
 import RewindConfirmModal from './components/RewindConfirmModal';
+import PendingQueueIndicator from './components/PendingQueueIndicator';
 import './chat.css';
 
 // Decorative background graph (branding, not live data — see Phase 9 B3)
@@ -120,7 +121,7 @@ function AppContent() {
   // Phase 10.3 C1: the engine-message facade lives in SocketContext, not
   // here. AppContent consumes its wsRef/isConnected; it builds no mock of
   // its own and subscribes to nothing directly.
-  const { wsRef, isConnected, sendMessage } = useAetherSocket();
+  const { wsRef, isConnected, sendMessage, safeSend, pendingMessages } = useAetherSocket();
 
   const [status, setStatus] = useState('Initializing');
   const [isThinking, setIsThinking] = useState(false);
@@ -2402,20 +2403,17 @@ function AppContent() {
         p.models.forEach(m => {
           items.push({
             id: `model-${p.name}-${m}`, kind: 'model', label: m, hint: p.name,
-            run: () => {
-              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({
-                  type: 'MODEL_SET_DEFAULT', schema_version: 1,
-                  request_id: Date.now().toString(),
-                  payload: { provider: p.name, model: m },
-                }));
-              }
-            },
+            // Wave 2 slice 1 (REF): a palette model switch is a user
+            // action — it goes through safeSend, so a switch picked
+            // while the engine is unreachable is queued (and shown by
+            // the pending indicator) instead of being silently
+            // discarded by the readyState guard this used to carry.
+            run: () => { safeSend('MODEL_SET_DEFAULT', { provider: p.name, model: m }); },
           });
         });
       });
     return items;
-  }, [sessions, providers, wsRef, workspaces]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessions, providers, wsRef, workspaces, safeSend]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Epic 6, E6-03: the wired shortcut set (the dialog lists exactly
   // these): Ctrl+K palette, Ctrl+N new chat, Ctrl+, Settings.
@@ -2572,15 +2570,12 @@ function AppContent() {
     }
   };
 
+  // Wave 2 slice 1 (REF): the chat-window (HUD) model switch already
+  // queued via the facade; it now goes through safeSend like the
+  // Settings and palette paths, so all three model-switch routes share
+  // one send discipline and one pending state.
   const handleChangeModel = (provider, model) => {
-    if (wsRef.current) {
-      wsRef.current.send(JSON.stringify({
-        type: 'MODEL_SET_DEFAULT',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { provider, model }
-      }));
-    }
+    safeSend('MODEL_SET_DEFAULT', { provider, model });
   };
 
   const handlePluginApproval = (requestId, approved) => {
@@ -2889,13 +2884,17 @@ function AppContent() {
     <div style={{ width: '100vw', height: '100vh', display: 'flex', overflow: 'hidden', backgroundColor: isFloating ? 'transparent' : '#05050f', flexDirection: 'column' }}>
       
       {!isFloating && (
-        <TitleBar 
+        <TitleBar
           isChatDetached={isChatDetached}
           onReattachChat={handleReattachChat}
           isThinking={isThinking}
           onStopTask={handleStopTask}
         />
       )}
+
+      {/* Wave 2 slice 1: app-level pending indicator — renders only
+          while safeSend-queued user actions wait in the offline queue. */}
+      <PendingQueueIndicator />
       
       {/* Glowing Orbs for Glassmorphism pop */}
       {!isFloating && (
@@ -3400,6 +3399,8 @@ function AppContent() {
                  </div>
                  <SettingsPanel
                    wsRef={wsRef}
+                   safeSend={safeSend}
+                   pendingMessages={pendingMessages}
                    providers={providers}
                    providerHealth={providerHealth}
                    localModels={localModels}

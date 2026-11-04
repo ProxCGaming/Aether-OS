@@ -21,7 +21,7 @@ import SpeechSettingsPanel from './components/Settings/SpeechSettingsPanel';
 import PathRulesPanel from './components/Settings/PathRulesPanel';
 import ProjectConfigPanel from './components/Settings/ProjectConfigPanel';
 
-export default function SettingsPanel({ wsRef, providers = [], providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null, initialMenu = null, onInitialMenuConsumed = null }) {
+export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages = [], providers = [], providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null, initialMenu = null, onInitialMenuConsumed = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
   const [modelTab, setModelTab] = useState('cloud'); // 'cloud' or 'local'
   const [keys, setKeys] = useState({});
@@ -228,6 +228,35 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
       }));
     }
   };
+
+  // Wave 2 slice 1 (REF, the runtime/UX audit's reference pattern):
+  // the Global Default switch is a user action, so it goes through
+  // the shared safeSend App passes down — a switch picked while the
+  // engine is unreachable is QUEUED and applies on reconnect, instead
+  // of being silently discarded by the readyState guard this handler
+  // used to carry (the dropdown is controlled from the engine's reply,
+  // so a discarded switch looked exactly like a switch that "didn't
+  // stick"). The wsRef fallback keeps the same unconditional facade
+  // send (the E6-F15 discipline) for standalone mounts that are not
+  // given the prop. While a switch sits in the queue, the dropdown
+  // below is inert and says why — queuing a second, conflicting
+  // switch on top of the pending one would only confuse the outcome.
+  const sendModelDefault = (provider, model) => {
+    if (safeSend) return safeSend('MODEL_SET_DEFAULT', { provider, model });
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({
+        type: 'MODEL_SET_DEFAULT',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { provider, model }
+      }));
+    }
+    return undefined;
+  };
+  const pendingModelSwitch = (pendingMessages || []).find(
+    (m) => m && m.type === 'MODEL_SET_DEFAULT'
+  );
+  const modelSwitchQueued = Boolean(pendingModelSwitch);
 
   const handleProjectLayerSave = (content) => {
     if (wsRef.current) {
@@ -886,7 +915,8 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                    <div style={{ display: 'flex', gap: '24px' }}>
                      <div style={{ flex: 1 }}>
                        <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Global Default Model</h3>
-                       <Dropdown 
+                       <div style={{ opacity: modelSwitchQueued ? 0.55 : 1, pointerEvents: modelSwitchQueued ? 'none' : 'auto' }}>
+                       <Dropdown
                          value={
                            (Array.isArray(providers) ? providers : []).find(p => p.is_default)
                              ? `${(Array.isArray(providers) ? providers : []).find(p => p.is_default).name}:::${(Array.isArray(providers) ? providers : []).find(p => p.is_default).default_model}`
@@ -894,14 +924,7 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                          }
                          onChange={(val) => {
                            const [provider, model] = val.split(':::');
-                           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                             wsRef.current.send(JSON.stringify({
-                               type: 'MODEL_SET_DEFAULT',
-                               schema_version: 1,
-                               request_id: Date.now().toString(),
-                               payload: { provider, model }
-                             }));
-                           }
+                           if (provider && model) sendModelDefault(provider, model);
                          }}
                          options={
                            (Array.isArray(providers) ? providers : [])
@@ -914,6 +937,12 @@ export default function SettingsPanel({ wsRef, providers = [], providerHealth = 
                          placeholder="Select a default model..."
                          style={{ width: '100%' }}
                        />
+                       </div>
+                       {modelSwitchQueued && (
+                         <div style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
+                           Model switch{pendingModelSwitch.payload && pendingModelSwitch.payload.model ? ` to ${pendingModelSwitch.payload.model}` : ''} queued — will apply when the engine reconnects.
+                         </div>
+                       )}
                      </div>
                      <div style={{ width: '200px' }}>
                        <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Reasoning Effort</h3>

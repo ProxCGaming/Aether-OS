@@ -47,12 +47,48 @@ function packetIdentityKey(data) {
   return `${id}|${ts}|${parsed.type ?? ''}|${data}`;
 }
 
+// Wave 2 slice 1: a descriptor for one message sitting in the offline
+// queue. The queue stores serialized envelopes, so the descriptor is
+// recovered by parsing the entry. Envelope messages (safeSend and the
+// component sends) carry their arguments under `payload`; flat
+// sendMessage traffic spreads its fields at the top level, so the
+// remaining fields stand in as the payload. Unparseable entries (none
+// are produced today) describe as a null type rather than throwing —
+// the count is the load-bearing part.
+function describeQueuedMessage(data) {
+  try {
+    const parsed = JSON.parse(data);
+    if (!parsed || typeof parsed !== 'object') return { type: null, payload: null };
+    if (parsed.payload !== undefined) {
+      return { type: parsed.type ?? null, payload: parsed.payload };
+    }
+    const { type, ...rest } = parsed;
+    return { type: type ?? null, payload: rest };
+  } catch (e) {
+    return { type: null, payload: null };
+  }
+}
+
 export const SocketProvider = ({ children }) => {
   const [isConnected, setIsConnected] = useState(false);
+  const [pendingMessages, setPendingMessages] = useState([]);
   const messageQueue = useRef([]);
   const statusRef = useRef(false);
   const wsListeners = useRef(new Map());
   const wsRef = useRef(null);
+
+  // Wave 2 slice 1: the offline queue is a ref (the facade below is
+  // built once, outside React's render cycle), so its contents are
+  // mirrored into state — pendingMessages / pendingCount are the
+  // reactive view the UI reads (the app-level pending indicator, a
+  // control waiting on a queued action). syncPending runs after every
+  // queue mutation: facade queue-push, sendMessage queue-push, and the
+  // reconnect flush. Defined before the facade because the facade's
+  // send() calls it; it only touches the stable queue ref and the
+  // stable state setter, so the first-render closure stays correct.
+  const syncPending = useCallback(() => {
+    setPendingMessages(messageQueue.current.map(describeQueuedMessage));
+  }, []);
 
   // Lazy-init during render (the documented exception to "don't write refs
   // during render"): AppContent mounts at the same time as this provider
@@ -67,9 +103,11 @@ export const SocketProvider = ({ children }) => {
       send: (data) => {
         if (statusRef.current && window.electronAPI && window.electronAPI.sendEngineMessage) {
           window.electronAPI.sendEngineMessage(data);
-        } else {
-          messageQueue.current.push(data);
+          return 'sent';
         }
+        messageQueue.current.push(data);
+        syncPending();
+        return 'queued';
       },
       addEventListener: (event, handler) => {
         if (event === 'message' && window.electronAPI && window.electronAPI.onEngineMessage) {
@@ -119,6 +157,7 @@ export const SocketProvider = ({ children }) => {
             window.electronAPI.sendEngineMessage(msg);
           }
         }
+        syncPending();
       }
     };
 
@@ -166,11 +205,57 @@ export const SocketProvider = ({ children }) => {
       wsRef.current.send(data);
     } else {
       messageQueue.current.push(data);
+      syncPending();
     }
+  }, [syncPending]);
+
+  // safeSend(type, payload) — the send path for USER ACTIONS: anything
+  // a person deliberately did in the UI (a model switch, a settings
+  // edit, an approval decision, a destructive command). It builds the
+  // standard component envelope ({ type, schema_version, request_id,
+  // payload }) the call sites used to hand-roll, hands it to the
+  // facade, and reports what actually happened:
+  //
+  //   'sent'   — the engine connection is live; the message is gone.
+  //   'queued' — the connection is down; the message is in the offline
+  //              queue and will flush, in order, on reconnect.
+  //
+  // A user action sent through safeSend is NEVER silently dropped —
+  // that guarantee is the whole point. The old failure mode (Lane A of
+  // the runtime/UX audit) was a readyState guard in front of the send
+  // throwing the action away while the socket was down, before the
+  // facade's queue could ever see it. Callers that get 'queued' should
+  // surface it (the app-level pending indicator tracks the queue via
+  // pendingCount / pendingMessages; a control whose value only changes
+  // on the engine's reply should additionally show its own pending
+  // affordance, as the Settings model dropdown does).
+  //
+  // Do NOT use safeSend for engine-internal traffic: response chains
+  // fired from inside message handlers, fetch-on-open requests, and
+  // sends that must keep an existing non-envelope wire shape stay on
+  // sendMessage / wsRef.send (audit class RUX-A-18 — those paths are
+  // not user actions, and several self-heal via reconnect effects).
+  const safeSend = useCallback((type, payload = {}) => {
+    const data = JSON.stringify({
+      type,
+      schema_version: 1,
+      request_id: Date.now().toString(),
+      payload,
+    });
+    return wsRef.current.send(data);
   }, []);
 
   return (
-    <SocketContext.Provider value={{ isConnected, sendMessage, wsRef }}>
+    <SocketContext.Provider
+      value={{
+        isConnected,
+        sendMessage,
+        safeSend,
+        wsRef,
+        pendingCount: pendingMessages.length,
+        pendingMessages,
+      }}
+    >
       {children}
     </SocketContext.Provider>
   );
