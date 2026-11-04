@@ -213,7 +213,7 @@ class TestDiscoveryWebSocket:
         return Event.from_json(ws.receive_text())
 
     def test_save_surfaces_discovery_error_with_code(self, ws_client):
-        from aether_common.contracts import EventType
+        from aether_common.contracts import Event, EventType
 
         ws, _engine_state = ws_client
         disc = DiscoveryResult(error=DiscoveryError(code=403, message="forbidden"))
@@ -221,10 +221,17 @@ class TestDiscoveryWebSocket:
                    new=AsyncMock(return_value=disc)):
             resp = self._roundtrip(ws, EventType.PROVIDER_SAVE_REQUEST,
                                    {"provider": "openai", "api_key": "sk-x"})
-        assert resp.type == EventType.PROVIDER_SAVE_RESPONSE
-        assert resp.payload["success"] is True  # key saved; list failed
-        assert resp.payload["discovery_error"]["code"] == 403
-        assert resp.payload["discovery_error"]["message"] == "forbidden"
+            # RUX-B-06: the save answers immediately, before discovery;
+            # the discovery error now lands on the provider's entry in
+            # the PROVIDER_LIST_RESPONSE push that follows.
+            assert resp.type == EventType.PROVIDER_SAVE_RESPONSE
+            assert resp.payload["success"] is True  # key saved; list failed
+            assert "discovery_error" not in resp.payload
+            push = Event.from_json(ws.receive_text())
+        assert push.type == EventType.PROVIDER_LIST_RESPONSE
+        openai = next(p for p in push.payload["providers"] if p["name"] == "openai")
+        assert openai["discovery_error"]["code"] == 403
+        assert openai["discovery_error"]["message"] == "forbidden"
 
     def test_provider_list_includes_excluded_models(self, ws_client):
         from aether_common.contracts import EventType

@@ -597,6 +597,22 @@ async def ws_tasks(ws: WebSocket):
     # resumed — lets STEER_TASK tell "a task is live for this session"
     # apart from "start a new task" (Epic 1, E1-07).
     task_session_id: str | None = None
+    # RUX-B-07: START_TASK's pre-work runs in a launch task, not in
+    # the receive loop. Launches are chained in receipt order (each
+    # launch waits for the previous one) so the ordering the serial
+    # loop used to guarantee between successive task starts — cancel
+    # the old runner first, commit any staged rewind, then build the
+    # new task — is preserved inside the launch pipeline.
+    task_start_tail: asyncio.Task | None = None
+    # RUX-B-09: dictation chunk/stop work is chained the same way —
+    # transcription results are applied in arrival order even though
+    # each chunk runs off the receive loop.
+    dictation_tail: asyncio.Task | None = None
+    # RUX-B-09: voice session start/stop operations are chained too,
+    # so a stop sent while a start is still opening its stages lands
+    # after that start — the order the serial loop used to give —
+    # instead of racing it and leaving a session running.
+    voice_op_tail: asyncio.Task | None = None
     active_downloads: dict[str, asyncio.Task] = {}
     secret_store = SecretStore()
     # Epic 8, E8-5.1a: this connection's voice session, if any. The
@@ -678,6 +694,86 @@ async def ws_tasks(ws: WebSocket):
             ).to_json())
         except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-discovery; nothing else to do
             logger.debug(f"Could not send provider list update: {e}")
+
+    async def _push_provider_list(req_id_, discovery_provider_=None, discovery_error_=None):
+        """Push a PROVIDER_LIST_RESPONSE built from the current cache.
+
+        This is the send half of _send_provider_list_update, shared
+        with the deferred PROVIDER_SAVE discovery below (RUX-B-06):
+        the list is the message the renderer already applies for
+        provider updates, and a discovery error rides its provider
+        entry exactly as REFRESH_MODELS_RESPONSE entries carry it.
+        """
+        try:
+            providers = await _build_provider_list_async(secret_store, discover=False)
+            if discovery_provider_ is not None and discovery_error_ is not None:
+                for prov in providers:
+                    if prov.get("name") == discovery_provider_:
+                        prov["discovery_error"] = discovery_error_
+                        break
+            cfg = engine_state.user_config
+            await ws.send_text(Event(
+                type=EventType.PROVIDER_LIST_RESPONSE,
+                request_id=req_id_,
+                payload={"providers": providers, "default_provider": cfg.default_provider, "default_model": cfg.default_model, "health": engine_state.health_manager.get_all_statuses()},
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-push; nothing else to do
+            logger.debug(f"Could not push provider list: {e}")
+
+    async def _complete_provider_save_discovery(
+            req_id_, pname_, key_, base_url_, resolve_default_):
+        """Deferred discovery half of PROVIDER_SAVE_REQUEST (RUX-B-06).
+
+        The save branch persists the key/config and answers at once;
+        only the model discovery moves here. It applies exactly what
+        the old inline fetch applied — models + excluded models to
+        config and registry, and, for an is_default save, the default
+        model resolution the branch deferred — then pushes the
+        refreshed provider list. A discovery failure is recorded in
+        the negative cache (RUX-B-02) and reported on the provider's
+        list entry instead of blocking the save response.
+        """
+        cfg = engine_state.user_config
+        discovery_error = None
+        try:
+            disc = await fetch_available_models(
+                pname_, key_, base_url=base_url_,
+                provider_flavor=custom_provider_flavor(pname_, cfg))
+        except Exception as e:  # noqa: BLE001 — discovery is best-effort beside a completed save; surface it on the list entry
+            logger.warning(f"Deferred discovery for saved provider {pname_} raised: {e}")
+            disc = None
+            discovery_error = {"code": None, "message": str(e)}
+        if disc is not None:
+            if disc.ok:
+                clear_discovery_failure(pname_)
+            else:
+                record_discovery_failure(pname_)
+            if disc.error is not None:
+                discovery_error = disc.error.to_dict()
+            elif disc.excluded:
+                cfg.provider_excluded_models[pname_] = disc.excluded
+            if disc.models:
+                cfg.provider_models[pname_] = disc.models
+                engine_state.model_registry.update_provider_models(pname_, disc.models)
+        if resolve_default_ and cfg.default_provider == pname_:
+            # The save branch set this provider as the default but
+            # deferred choosing its model until discovery landed —
+            # the same registry-priority resolution (never raw list
+            # position) the inline path used (F-10 residual).
+            default_entry = engine_state.model_registry.get_default_model_for_provider(pname_)
+            resolved_default = default_entry.id if default_entry else ""
+            if not resolved_default:
+                cur_models = cfg.provider_models.get(pname_, [])
+                resolved_default = cur_models[0] if cur_models else ""
+            if resolved_default:
+                cfg.default_model = resolved_default
+                engine_state.active_provider = pname_
+                engine_state.active_model = resolved_default
+        try:
+            save_config(cfg)
+        except Exception as e:  # noqa: BLE001 — the in-memory state still landed; the list push below reports it
+            logger.warning(f"Could not persist deferred discovery for {pname_}: {e}")
+        await _push_provider_list(req_id_, pname_, discovery_error)
 
     async def _send_refresh_models_result(req_id_, payload_):
         """Answer a REFRESH_MODELS_REQUEST from a background task (RUX-B-01).
@@ -1176,6 +1272,601 @@ async def ws_tasks(ws: WebSocket):
             ).to_json())
         except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-run; nothing else to do
             logger.debug(f"Could not send MCP prompt run response for {name_}: {e}")
+
+    # ------------------------------------------------------------------
+    # RUX-B-08: read-path lookups + exports, answered from background
+    # tasks. Each of these branches used to await external HTTP (or
+    # run synchronous bulk work) inline in the message loop — seconds
+    # per call, and the two exports scale with memory size. The async
+    # lookups now run in tasks like the Wave 1 helpers; the sync
+    # exports run on worker threads. Response shapes are unchanged.
+    # ------------------------------------------------------------------
+
+    async def _send_media_search_result(req_id_, query_, collection_, limit_):
+        """Answer a MEDIA_SEARCH_REQUEST from a background task (RUX-B-08)."""
+        from aether_engine.tools.media_recall import search_media_entries
+        if query_:
+            try:
+                recall = await search_media_entries(
+                    query_, limit=limit_, collection=collection_)
+            except Exception as e:  # noqa: BLE001 — a failed recall must not kill the connection; the loop staying alive is the point of the move
+                logger.warning(f"Media search for {query_!r} raised: {e}")
+                return
+            results = recall["results"]
+            degraded = bool(recall["degraded"])
+        else:
+            results = []
+            degraded = False
+        try:
+            await ws.send_text(Event(
+                type=EventType.MEDIA_SEARCH_RESPONSE,
+                request_id=req_id_,
+                payload={
+                    "query": query_,
+                    "media": results,
+                    "degraded": degraded,
+                },
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-search; nothing else to do
+            logger.debug(f"Could not send media search response: {e}")
+
+    async def _send_local_model_list_result(req_id_):
+        """Answer a LOCAL_MODEL_LIST_REQUEST from a background task (RUX-B-08)."""
+        try:
+            models = await engine_state.ollama_manager.list_models()
+        except Exception as e:  # noqa: BLE001 — a dead daemon must not kill the connection; the loop staying alive is the point of the move
+            logger.warning(f"Local model list raised: {e}")
+            return
+        try:
+            await ws.send_text(Event(
+                type=EventType.LOCAL_MODEL_LIST_RESPONSE,
+                request_id=req_id_,
+                payload={"models": models},
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-list; nothing else to do
+            logger.debug(f"Could not send local model list response: {e}")
+
+    async def _send_local_model_delete_result(req_id_, model_name_):
+        """Answer a LOCAL_MODEL_DELETE_REQUEST from a background task (RUX-B-08)."""
+        try:
+            deleted = await engine_state.ollama_manager.delete_model(model_name_)
+        except Exception as e:  # noqa: BLE001 — a dead daemon must not kill the connection; the loop staying alive is the point of the move
+            logger.warning(f"Local model delete for {model_name_} raised: {e}")
+            return
+        try:
+            await ws.send_text(Event(
+                type=EventType.LOCAL_MODEL_DELETE_RESPONSE,
+                request_id=req_id_,
+                payload={"model": model_name_, "deleted": deleted},
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-delete; nothing else to do
+            logger.debug(f"Could not send local model delete response: {e}")
+
+    async def _send_model_hub_search_result(req_id_, source_, query_, family_):
+        """Answer a MODEL_HUB_SEARCH_REQUEST from a background task (RUX-B-08)."""
+        try:
+            result = await engine_state.model_hub.search(
+                source=source_, query=query_, family=family_)
+        except Exception as e:  # noqa: BLE001 — a failed catalogue call must not kill the connection; the loop staying alive is the point of the move
+            logger.warning(f"Model hub search raised: {e}")
+            return
+        try:
+            await ws.send_text(Event(
+                type=EventType.MODEL_HUB_SEARCH_RESPONSE,
+                request_id=req_id_,
+                payload=result,
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-search; nothing else to do
+            logger.debug(f"Could not send model hub search response: {e}")
+
+    async def _send_model_hub_detail_result(req_id_, source_, repo_id_):
+        """Answer a MODEL_HUB_DETAIL_REQUEST from a background task (RUX-B-08)."""
+        try:
+            result = await engine_state.model_hub.detail(
+                source=source_, repo_id=repo_id_)
+        except Exception as e:  # noqa: BLE001 — a failed catalogue call must not kill the connection; the loop staying alive is the point of the move
+            logger.warning(f"Model hub detail raised: {e}")
+            return
+        try:
+            await ws.send_text(Event(
+                type=EventType.MODEL_HUB_DETAIL_RESPONSE,
+                request_id=req_id_,
+                payload=result,
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-detail; nothing else to do
+            logger.debug(f"Could not send model hub detail response: {e}")
+
+    async def _send_model_hub_delete_result(req_id_, source_, model_id_):
+        """Answer a MODEL_HUB_DELETE_REQUEST from a background task (RUX-B-08)."""
+        try:
+            result = await engine_state.hub_downloads.delete(
+                source=source_, model_id=model_id_)
+        except Exception as e:  # noqa: BLE001 — a failed delete must not kill the connection; the loop staying alive is the point of the move
+            logger.warning(f"Model hub delete raised: {e}")
+            return
+        try:
+            await ws.send_text(Event(
+                type=EventType.MODEL_HUB_DELETE_RESPONSE,
+                request_id=req_id_,
+                payload=result,
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-delete; nothing else to do
+            logger.debug(f"Could not send model hub delete response: {e}")
+
+    async def _send_memory_export_result(req_id_):
+        """Answer a MEMORY_EXPORT_REQUEST off the loop (RUX-B-08).
+
+        backend.export() is synchronous and scales with memory size
+        (up to 100k facts + 100k episodes), so it runs on a worker
+        thread — the pattern BACKUP_CREATE already uses.
+        """
+        backend = backend_or_none(engine_state.user_config, context="memory export")
+        if backend is None:
+            payload = {"success": False, "error": "The configured memory backend is unavailable (see engine log)."}
+        else:
+            try:
+                payload = {"success": True, "export": await asyncio.to_thread(backend.export)}
+            except Exception as e:  # noqa: BLE001 — export failure must surface, not crash the handler
+                payload = {"success": False, "error": str(e)}
+        try:
+            await ws.send_text(Event(
+                type=EventType.MEMORY_EXPORT_RESPONSE,
+                request_id=req_id_,
+                payload=payload,
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-export; nothing else to do
+            logger.debug(f"Could not send memory export response: {e}")
+
+    async def _send_diagnostics_export_result(req_id_):
+        """Answer a DIAGNOSTICS_EXPORT_REQUEST off the loop (RUX-B-08).
+
+        build_diagnostics + the two store counts are synchronous
+        bulk work, so the whole payload build runs on a worker
+        thread — the pattern BACKUP_CREATE already uses.
+        """
+        def _build_payload():
+            try:
+                from aether_engine.diagnostics import build_diagnostics
+                from aether_engine.memory import episodic as _episodic
+                from aether_engine.memory import knowledge_graph as _kg
+
+                store = SecretStore()
+                with _kg._get_conn() as _conn:
+                    kg_count = _conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+                bundle = build_diagnostics(
+                    user_config=engine_state.user_config,
+                    health=engine_state.health_manager.get_all_statuses(),
+                    kg_count=kg_count,
+                    episodic_count=_episodic.embedding_stats().get("total", 0),
+                    audit_log_path=engine_state.audit_logger.log_path,
+                    providers=store.list_providers(),
+                )
+                return {"success": True, "bundle": bundle}
+            except Exception as e:  # noqa: BLE001 — diagnostics failure must surface, not crash the handler
+                return {"success": False, "error": str(e)}
+
+        payload = await asyncio.to_thread(_build_payload)
+        try:
+            await ws.send_text(Event(
+                type=EventType.DIAGNOSTICS_EXPORT_RESPONSE,
+                request_id=req_id_,
+                payload=payload,
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-export; nothing else to do
+            logger.debug(f"Could not send diagnostics export response: {e}")
+
+    async def _send_version_check_result(req_id_):
+        """Answer a VERSION_CHECK_REQUEST from a background task (RUX-B-08)."""
+        try:
+            import httpx
+
+            def _parse(v: str) -> tuple:
+                # E10-F09: SemVer precedence, not digit
+                # stripping. Build metadata (+...) never
+                # affects precedence; a prerelease precedes
+                # its release; prerelease identifiers compare
+                # numerically when numeric (numeric < alpha-
+                # numeric), lexically otherwise, and a
+                # shorter identifier list precedes a longer
+                # one it prefixes. An unparseable tag raises
+                # — the handler turns that into a failed
+                # check, not a successful "no update".
+                text = v.strip()
+                if text[:1] in ("v", "V"):
+                    text = text[1:]
+                core, _, _build = text.partition("+")
+                core, dash, prerelease = core.partition("-")
+                pieces = core.split(".")
+                if len(pieces) > 3 or not all(p.isdigit() for p in pieces):
+                    raise ValueError(f"not a semantic version: {v!r}")
+                nums = [int(p) for p in pieces] + [0] * (3 - len(pieces))
+                if not dash:
+                    return (*nums, 1, ())
+                pre_key = []
+                for ident in prerelease.split("."):
+                    if ident.isdigit():
+                        pre_key.append((0, int(ident), ""))
+                    elif ident:
+                        pre_key.append((1, 0, ident))
+                    else:
+                        raise ValueError(f"not a semantic version: {v!r}")
+                return (*nums, 0, tuple(pre_key))
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    "https://api.github.com/repos/ProxCGaming/Aether-OS/releases/latest",
+                    headers={"Accept": "application/vnd.github+json"},
+                )
+            if resp.status_code == 404:
+                payload = {"success": False, "error": "No releases have been published yet.",
+                           "current": APP_VERSION}
+            elif resp.status_code != 200:
+                payload = {"success": False, "error": f"GitHub answered {resp.status_code}.",
+                           "current": APP_VERSION}
+            else:
+                latest = str(resp.json().get("tag_name", "")).lstrip("v")
+                payload = {
+                    "success": True,
+                    "current": APP_VERSION,
+                    "latest": latest,
+                    "update_available": _parse(latest) > _parse(APP_VERSION),
+                }
+        except Exception as e:  # noqa: BLE001 — a failed check must surface, not crash the handler
+            payload = {"success": False, "error": str(e), "current": APP_VERSION}
+        try:
+            await ws.send_text(Event(
+                type=EventType.VERSION_CHECK_RESPONSE,
+                request_id=req_id_,
+                payload=payload,
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-check; nothing else to do
+            logger.debug(f"Could not send version check response: {e}")
+
+    # ------------------------------------------------------------------
+    # RUX-B-10: the plugin lifecycle, answered from background tasks.
+    #
+    # Install's tree copy ran synchronously in the loop on approval
+    # (scaling with plugin size); uninstall/toggle awaited an MCP
+    # disconnect per installed server (30 s default each) in the loop
+    # before their synchronous file work. Now the disconnects await
+    # in a task and the file work runs on worker threads. A
+    # per-plugin lock preserves the serial loop's ordering between
+    # lifecycle operations on the same plugin, as the MCP helpers'
+    # per-server lock does (RUX-B-04). Response shapes — including
+    # the failure payloads the renderer surfaces (E7-F05) — are
+    # exactly the inline handlers'.
+    plugin_lifecycle_locks: dict[str, asyncio.Lock] = {}
+
+    def _plugin_lifecycle_lock(name_: str) -> asyncio.Lock:
+        lock = plugin_lifecycle_locks.get(name_)
+        if lock is None:
+            lock = plugin_lifecycle_locks[name_] = asyncio.Lock()
+        return lock
+
+    async def _send_plugin_install_result(req_id_, data_):
+        """Answer a PLUGIN_APPROVAL_GRANTED from a background task (RUX-B-10)."""
+        plugin_name = (data_.get("manifest") or {}).get("name", "")
+        try:
+            async with _plugin_lifecycle_lock(plugin_name):
+                await asyncio.to_thread(engine_state.plugin_installer.install, data_)
+            engine_state.audit_logger.log_event("PLUGIN_INSTALLED", {"manifest": data_["manifest"]})
+            payload = {"success": True}
+        except Exception as e:  # noqa: BLE001 — handler boundary: any install failure is reported to the client in the response payload
+            payload = {"success": False, "error": str(e)}
+        try:
+            await ws.send_text(Event(
+                type=EventType.PLUGIN_INSTALL_RESPONSE,
+                request_id=req_id_,
+                payload=payload,
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-install; nothing else to do
+            logger.debug(f"Could not send plugin install response: {e}")
+
+    async def _disconnect_plugin_mcp_servers(name_):
+        """Disconnect a plugin's MCP servers (PLUGIN_UNINSTALL/TOGGLE).
+
+        Disconnect the plugin's MCP servers first, in this
+        (session-owner) task — remove_server_sync inside
+        uninstall()/toggle() cannot close a live session from a sync
+        caller (anyio cancel-scope rule, see registry.py).
+        """
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+        installed = engine_state.plugin_installer.get_all().get(name_, {})
+        for mcp_name in installed.get("installed_mcp", []):
+            await GLOBAL_MCP_REGISTRY.disconnect_server(mcp_name)
+
+    async def _send_plugin_uninstall_result(req_id_, name_):
+        """Answer a PLUGIN_UNINSTALL_REQUEST from a background task (RUX-B-10)."""
+        try:
+            async with _plugin_lifecycle_lock(name_ or ""):
+                await _disconnect_plugin_mcp_servers(name_)
+                await asyncio.to_thread(engine_state.plugin_installer.uninstall, name_)
+            payload = {"success": True, "name": name_}
+        except Exception as e:  # noqa: BLE001 — handler boundary: any uninstall failure is reported to the client in the response payload
+            payload = {"success": False, "error": str(e)}
+        try:
+            await ws.send_text(Event(
+                type=EventType.PLUGIN_UNINSTALL_RESPONSE,
+                request_id=req_id_,
+                payload=payload,
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-uninstall; nothing else to do
+            logger.debug(f"Could not send plugin uninstall response: {e}")
+
+    async def _send_plugin_toggle_result(req_id_, name_, enabled_):
+        """Answer a PLUGIN_TOGGLE_REQUEST from a background task (RUX-B-10)."""
+        try:
+            async with _plugin_lifecycle_lock(name_ or ""):
+                if not enabled_:
+                    # Mirrors the uninstall path (E7-F01): if a
+                    # disconnect fails, toggle() is never reached, so
+                    # the plugin stays enabled with its sessions and
+                    # skills untouched.
+                    await _disconnect_plugin_mcp_servers(name_)
+                await asyncio.to_thread(
+                    engine_state.plugin_installer.toggle, name_, enabled_)
+            payload = {"success": True, "name": name_, "enabled": enabled_}
+        except Exception as e:  # noqa: BLE001 — handler boundary: any toggle failure is reported to the client in the response payload
+            payload = {"success": False, "error": str(e)}
+        try:
+            await ws.send_text(Event(
+                type=EventType.PLUGIN_TOGGLE_RESPONSE,
+                request_id=req_id_,
+                payload=payload,
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-toggle; nothing else to do
+            logger.debug(f"Could not send plugin toggle response: {e}")
+
+    # ------------------------------------------------------------------
+    # RUX-B-09: the voice family, off the receive loop.
+    #
+    # Session start awaited opening the VAD/STT/TTS stages inline
+    # (first start loads the speech models); each dictation chunk /
+    # stop awaited that chunk's transcription inline. Session start
+    # now runs in a background task (serialised against other starts
+    # by a lock, since two starts would fight over voice_state).
+    # Dictation runs in tasks too, but CHAINED: each chunk's work
+    # waits for the previous chunk's task, so transcriptions are
+    # applied — and answered — in arrival order even though their
+    # durations vary.
+    # ------------------------------------------------------------------
+    voice_start_lock = asyncio.Lock()
+
+    async def _send_voice_session_start_result(req_id_, payload_):
+        """Answer a VOICE_SESSION_START_REQUEST from a background task (RUX-B-09)."""
+        async with voice_start_lock:
+            # Fail-closed start: an unavailable stage (missing
+            # local STT/TTS/VAD/transport) or an unconfigured
+            # chat model answers ok=False with the honest reason
+            # and opens nothing — no device, no model, no peer.
+            await _stop_voice_session()
+            voice_session_id = payload_.get("session_id")
+            if not voice_session_id:
+                voice_session_id, _binding = await _create_bound_session(
+                    "Voice conversation")
+            cfg = engine_state.user_config
+            voice_error: str | None = None
+            voice_pipeline = None
+            webrtc_config = None
+            try:
+                voice_provider = _create_provider_instance(
+                    cfg.default_provider, cfg.default_model, secret_store)
+            except (ProviderNotFoundError, SecretDecryptionError) as e:
+                voice_provider = None
+                voice_error = (
+                    f"voice unavailable: chat model {cfg.default_provider}/"
+                    f"{cfg.default_model} is not configured ({e})")
+            if voice_provider is not None:
+                from aether_engine.voice import VoiceUnavailableError
+                from aether_engine.voice.pipeline import (
+                    create_voice_pipeline,
+                    fast_chat_talker,
+                )
+                from aether_engine.voice.vad import EndpointerConfig
+
+                async def _persist_voice_user(text: str, _sid: str = voice_session_id) -> None:
+                    try:
+                        await asyncio.to_thread(
+                            session_store.add_message,
+                            _sid, "user", text)
+                    except Exception as e:  # noqa: BLE001 — best-effort persistence, as START_TASK: a save failure must not lose the turn
+                        logger.error(f"Failed to save voice user message: {e}")
+
+                async def _persist_voice_assistant(text: str, _sid: str = voice_session_id) -> None:
+                    try:
+                        await asyncio.to_thread(
+                            session_store.add_message,
+                            _sid, "assistant", text)
+                    except Exception as e:  # noqa: BLE001 — best-effort persistence, as task completion: a save failure must not lose the turn
+                        logger.error(f"Failed to save voice assistant message: {e}")
+
+                async def _voice_turn_error(message: str) -> None:
+                    await _emit_voice_event(Event(
+                        type=EventType.ERROR,
+                        payload={"message": f"Voice reply failed: {message}"},
+                    ))
+
+                async def _voice_should_escalate(text: str, _provider=voice_provider) -> bool:
+                    """E8-5.1b: the same E1-04 split the typed
+                    path uses — classify_intent decides; chat
+                    stays with the talker, work escalates to
+                    the supervisor graph."""
+                    try:
+                        intent = await classify_intent(text, provider=_provider)
+                    except Exception:  # a routing failure keeps the turn with the talker
+                        logger.debug("voice intent classification failed", exc_info=True)
+                        return False
+                    return not intent.is_chat
+
+                async def _voice_escalation_launch(text: str, _sid: str = voice_session_id, _provider=voice_provider) -> None:
+                    """Launch (never await) the background job:
+                    the task lane is a separate execution, so
+                    the talker stays free while it runs."""
+                    task = asyncio.ensure_future(
+                        _run_voice_background_task(text, _sid, _provider))
+                    background = voice_state.setdefault("background_tasks", set())
+                    background.add(task)
+                    task.add_done_callback(background.discard)
+
+                voice_pipeline, voice_error = create_voice_pipeline(
+                    session_id=voice_session_id,
+                    talker=fast_chat_talker(
+                        voice_provider, session_id=voice_session_id),
+                    emit=_emit_voice_event,
+                    on_user_final=_persist_voice_user,
+                    on_assistant_final=_persist_voice_assistant,
+                    on_turn_error=_voice_turn_error,
+                    escalation_classifier=_voice_should_escalate,
+                    on_escalation=_voice_escalation_launch,
+                    # H3: the speech config is read HERE, at
+                    # session start — a mid-session change is
+                    # picked up by the NEXT session only (P3(a)).
+                    stt_model=cfg.speech_stt_model,
+                    tts_voice=cfg.speech_tts_voice,
+                    endpointer_config=EndpointerConfig(
+                        speech_threshold=cfg.vad_threshold,
+                        silence_duration_ms=cfg.silence_duration_ms,
+                        smart_turn_sensitivity=cfg.smart_turn_sensitivity,
+                    ),
+                )
+                if voice_pipeline is not None:
+                    try:
+                        webrtc_config = await voice_pipeline.start()
+                    except VoiceUnavailableError as e:
+                        voice_error = str(e)
+                        voice_pipeline = None
+            if voice_pipeline is not None:
+                voice_state["pipeline"] = voice_pipeline
+                voice_state["task"] = asyncio.ensure_future(
+                    _run_voice_pipeline(voice_pipeline))
+
+                # F-12a: the engine's own ICE candidates trickle
+                # back to the renderer as VOICE_RTC_ICE pushes.
+                async def _push_rtc_ice(candidate, _sid=voice_session_id):
+                    await _emit_voice_event(Event(
+                        type=EventType.VOICE_RTC_ICE,
+                        payload={
+                            "session_id": _sid,
+                            "candidate": candidate,
+                        },
+                    ))
+
+                voice_pipeline.set_rtc_ice_listener(_push_rtc_ice)
+            try:
+                await ws.send_text(Event(
+                    type=EventType.VOICE_SESSION_START_RESPONSE,
+                    request_id=req_id_,
+                    payload={
+                        "ok": voice_pipeline is not None,
+                        "session_id": voice_session_id,
+                        "webrtc_config": webrtc_config,
+                        "error": voice_error,
+                    },
+                ).to_json())
+            except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-start; nothing else to do
+                logger.debug(f"Could not send voice session start response: {e}")
+
+    async def _send_dictation_chunk_result(req_id_, reason_, raw_b64_, sample_rate_, is_final_):
+        """Answer one DICTATION_CHUNK_REQUEST (RUX-B-09, chained by _enqueue_dictation)."""
+        if reason_ is not None:
+            payload = {"ok": False, "text": "", "is_final": False, "error": f"voice unavailable: {reason_}"}
+        else:
+            try:
+                audio_bytes = base64.b64decode(raw_b64_)
+                stt = await _open_dictation_stt()
+                text = await stt.transcribe(audio_bytes, sample_rate=sample_rate_)
+                payload = {"ok": True, "text": text, "is_final": is_final_, "error": None}
+            except Exception as e:  # noqa: BLE001
+                payload = {"ok": False, "text": "", "is_final": is_final_, "error": str(e)}
+        try:
+            await ws.send_text(Event(
+                type=EventType.DICTATION_CHUNK_RESPONSE,
+                request_id=req_id_,
+                payload=payload,
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-chunk; nothing else to do
+            logger.debug(f"Could not send dictation chunk response: {e}")
+
+    async def _send_dictation_stop_result(req_id_, raw_b64_, sample_rate_):
+        """Answer a DICTATION_STOP_REQUEST (RUX-B-09, chained by _enqueue_dictation)."""
+        text = ""
+        stop_error: str | None = None
+        if raw_b64_:
+            try:
+                stt = await _open_dictation_stt()
+                audio_bytes = base64.b64decode(raw_b64_)
+                text = await stt.transcribe(audio_bytes, sample_rate=sample_rate_)
+            except Exception as e:  # noqa: BLE001 — S4-M7: a failed final transcription must be distinguishable from silence
+                logger.warning(f"Dictation stop transcribe error: {e}")
+                stop_error = str(e)
+        try:
+            await ws.send_text(Event(
+                type=EventType.DICTATION_STOP_RESPONSE,
+                request_id=req_id_,
+                payload={"ok": stop_error is None, "text": text if stop_error is None else "", "error": stop_error},
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected at stop; nothing else to do
+            logger.debug(f"Could not send dictation stop response: {e}")
+
+    async def _send_voice_session_stop_result(req_id_):
+        """Answer a VOICE_SESSION_STOP_REQUEST (RUX-B-09, chained by _enqueue_voice_op)."""
+        await _stop_voice_session()
+        try:
+            await ws.send_text(Event(
+                type=EventType.VOICE_SESSION_STOP_RESPONSE,
+                request_id=req_id_,
+                payload={"ok": True},
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected at stop; nothing else to do
+            logger.debug(f"Could not send voice session stop response: {e}")
+
+    def _enqueue_voice_op(work_):
+        """Chain one voice start/stop operation after all prior ones.
+
+        Same shield-and-await construction as _enqueue_dictation:
+        operation order is arrival order, and a failed or cancelled
+        operation never strands the ones behind it.
+        """
+        nonlocal voice_op_tail
+        previous = voice_op_tail
+
+        async def _chained():
+            if previous is not None:
+                try:
+                    await asyncio.shield(previous)
+                except asyncio.CancelledError:
+                    if not previous.cancelled():
+                        raise
+                except Exception as e:  # noqa: BLE001 — a failed earlier operation is answered by its own link; later operations still run
+                    logger.debug(f"Earlier voice operation ended with an error before a chained operation: {e}")
+            await work_
+
+        voice_op_tail = asyncio.create_task(_chained())
+
+    def _enqueue_dictation(work_):
+        """Chain one dictation work coroutine after all prior ones.
+
+        The chain — not task scheduling — is what guarantees order:
+        each link shields and awaits the previous link before its
+        own transcription starts, so a fast chunk can never overtake
+        a slow earlier one. A cancelled/failed link never strands
+        the rest of the chain.
+        """
+        nonlocal dictation_tail
+        previous = dictation_tail
+
+        async def _chained():
+            if previous is not None:
+                try:
+                    await asyncio.shield(previous)
+                except asyncio.CancelledError:
+                    if not previous.cancelled():
+                        raise
+                except Exception as e:  # noqa: BLE001 — a failed earlier chunk is answered by its own link; later chunks still run
+                    logger.debug(f"Earlier dictation chunk ended with an error before a chained chunk: {e}")
+            await work_
+
+        dictation_tail = asyncio.create_task(_chained())
 
     # Epic 2, E2-10: install the web-search seam for this connection —
     # keys resolve through the encrypted secret store (provider name =
@@ -1820,6 +2511,425 @@ async def ws_tasks(ws: WebSocket):
             reset_usage_context(usage_token)
             end_serving_tracking(serving_token)
 
+    async def _start_task_message(msg_, req_id_, previous_start_):
+        """Run one START_TASK's pre-work off the receive loop (RUX-B-07).
+
+        Everything the START_TASK branch used to do inline before
+        task_runner existed — cancelling the previous runner and
+        waiting for it, committing a staged rewind, a /mcp: slash
+        run, provider construction, and the intent-classification
+        model call (12 s timeout) — now runs in this launch task.
+        The ordering those steps depend on is preserved two ways:
+        launches are chained (this launch shields and awaits the
+        previous launch before touching anything), and the steps
+        themselves stay in their original order inside the launch,
+        so the task pipeline — never the socket — absorbs the
+        waits. The task's own events keep their original order
+        because they all originate from this one launch.
+        """
+        nonlocal task_runner, task_session_id
+        msg = msg_
+        req_id = req_id_
+        if previous_start_ is not None:
+            try:
+                await asyncio.shield(previous_start_)
+            except asyncio.CancelledError:
+                if not previous_start_.cancelled():
+                    raise
+            except Exception as e:  # noqa: BLE001 — a failed earlier launch answered for itself; this launch still runs
+                logger.debug(f"Earlier task launch ended with an error before a chained launch: {e}")
+        if task_runner and not task_runner.done():
+            task_runner.cancel()
+            try:
+                await task_runner
+            except asyncio.CancelledError:
+                pass
+
+        prompt = msg.payload.get("prompt", "").strip() or "Say hello"
+        attachments = msg.payload.get("attachments") or []
+        cfg = engine_state.user_config
+        requested_model = msg.payload.get("model")
+        session_id = msg.payload.get("session_id")
+
+        if not session_id:
+            # Create new session if none provided. Implicit
+            # creation takes the SESSION_CREATE binding rule
+            # (slice 3): the active root at creation time, or
+            # unbound — via the one shared helper.
+            title = prompt[:30] + "..." if len(prompt) > 30 else prompt
+            session_id, session_binding = await _create_bound_session(title)
+            try:
+                await ws.send_text(Event(
+                    type=EventType.SESSION_CREATE_RESPONSE,
+                    request_id=req_id,
+                    payload={"session_id": session_id, "workspace": session_binding, "preserve_messages": True}
+                ).to_json())
+                await ws.send_text(Event(
+                    type=EventType.SESSION_LIST_RESPONSE,
+                    request_id=req_id,
+                    payload={"sessions": await asyncio.to_thread(session_store.list_sessions)}
+                ).to_json())
+            except Exception:  # best-effort notification: the session is already created; a failed send must not abort task start
+                logger.debug("Could not send session create/list events to client", exc_info=True)
+        else:
+            sess_info = await asyncio.to_thread(session_store.get_session, session_id)
+            if sess_info and sess_info.get("title") in ("New Conversation", "New Chat") and not sess_info.get("messages"):
+                title = prompt[:30] + "..." if len(prompt) > 30 else prompt
+                await asyncio.to_thread(session_store.update_session_title, session_id, title)
+                try:
+                    await ws.send_text(Event(
+                        type=EventType.SESSION_LIST_RESPONSE,
+                        request_id=req_id,
+                        payload={"sessions": await asyncio.to_thread(session_store.list_sessions)}
+                    ).to_json())
+                except Exception:  # best-effort notification: a failed send must not abort task start
+                    logger.debug("Could not send session list event to client", exc_info=True)
+        # Epic 8, E8-1.1b: a new message in a session with a
+        # staged rewind commits it — the undo window closes
+        # and the discarded steps are pruned now, before the
+        # new task builds on the rewound state.
+        await rewind_service.commit(session_id)
+
+        # Issue 007: ``/mcp:<server>:<prompt>`` runs a prompt
+        # template into the chat instead of starting a graph task.
+        # No arguments in the slash form (use the MCP tab for
+        # prompts with arguments). The slash text itself is not
+        # saved as a user message — only the prompt's messages are.
+        _mcp_slash = re.match(r"^/mcp:([A-Za-z0-9_.\-]{1,100}):([A-Za-z0-9_.\-]+)$", prompt)
+        if _mcp_slash:
+            _run = await _run_mcp_prompt_into_chat(
+                _mcp_slash.group(1), _mcp_slash.group(2), None, session_id
+            )
+            await ws.send_text(Event(
+                type=EventType.MCP_PROMPT_RUN_RESPONSE,
+                request_id=req_id,
+                payload={
+                    "success": _run["ok"], "name": _mcp_slash.group(1),
+                    "prompt": _mcp_slash.group(2),
+                    "messages": _run["messages"],
+                    "session_id": _run["session_id"], "error": _run["error"],
+                },
+            ).to_json())
+            return
+
+        try:
+            # The UI's client-generated id becomes the row id, so
+            # the rendered message and the stored message share
+            # one identity (edit-and-resend addresses the row).
+            await asyncio.to_thread(
+                session_store.add_message, session_id, "user", prompt,
+                None, msg.payload.get("message_id"), attachments)
+            await _register_message_attachments(
+                session_id, msg.payload.get("message_id"), attachments, ws)
+        except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not block the task
+            logger.error(f"Failed to save user message: {e}")
+
+        # E5-F04: "configured" is derived ONCE, here as
+        # everywhere (routing.startup.derive_configured_providers):
+        # stored secrets plus keyless custom providers whose
+        # saved configuration is complete. Deriving from
+        # secrets alone made an accepted keyless custom
+        # provider invisible to routing.
+        engine_state.configured_providers = derive_configured_providers(
+            cfg, secret_store, engine_state.model_registry)
+
+        decision: RoutingDecision = engine_state.routing_policy.select_route(
+            prompt=prompt,
+            configured_providers=engine_state.configured_providers,
+            health_manager=engine_state.health_manager,
+            user_default_provider=cfg.default_provider,
+            user_default_model=cfg.default_model,
+            requested_model=requested_model,
+            auxiliary_models=cfg.auxiliary_models,
+            images=attachments,
+        )
+
+        workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
+
+        # Epic 1, E1-14 config layers, computed for BOTH paths:
+        # the graph branch uses it for the task, and the Epic 5
+        # retry-factory snapshot below reads it unconditionally
+        # — when it lived only in the graph branch, every
+        # fast-chat task died here with an UnboundLocalError
+        # and the client waited forever for a reply.
+        # E5-F02: it is resolved BEFORE the provider is built,
+        # and the provider factory receives it — the per-call
+        # fallback enforcement point must be governed by the
+        # task's effective fallback policy (disable / chain),
+        # not by the globals alone.
+        from aether_engine.config_layers import effective_user_config
+
+        task_user_config = effective_user_config(
+            engine_state.user_config,
+            workspace_root=workspace_roots[0] if workspace_roots else None,
+            overlay=msg.payload.get("config_overlay"),
+        )
+
+        try:
+            provider_instance = _create_provider_instance(
+                decision.provider, decision.model, secret_store,
+                local_only=decision.local_only,
+                require_vision=bool(attachments),
+                user_config=task_user_config,
+            )
+        except ProviderNotFoundError as e:
+            if is_keyless_custom_provider(decision.provider, task_user_config):
+                # E5-F04: this provider is configured WITHOUT
+                # a key by design — a construction failure here
+                # is not a missing key, and the error must name
+                # the real cause instead of demanding a secret
+                # the server does not have.
+                error_text = (
+                    f"Provider {decision.provider} is configured without an API key "
+                    f"but could not be started: {e}. Check its base URL in Settings → Models."
+                )
+            else:
+                error_text = f"API key not found for {decision.provider}. Please add your key in Settings → Models."
+            await ws.send_text(Event(
+                type=EventType.TASK_FAILED,
+                request_id=req_id,
+                payload={
+                    "task_id": "none", "retriable": False, "state": TaskState.FAILED.value,
+                    "error": error_text,
+                },
+            ).to_json())
+            return
+        except SecretDecryptionError as e:
+            await ws.send_text(Event(
+                type=EventType.TASK_FAILED,
+                request_id=req_id,
+                payload={
+                    "task_id": "none", "retriable": False, "state": TaskState.FAILED.value,
+                    "error": f"Failed to decrypt API key: {e}. Please re-enter your key in Settings → Models.",
+                },
+            ).to_json())
+            return
+
+        slash_cmd_str = msg.payload.get("slash_command")
+        if not slash_cmd_str and prompt.startswith("/"):
+            slash_cmd_str = prompt.split(" ")[0]
+
+        forced_agent = None
+        active_skills = []
+
+        if slash_cmd_str:
+            from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+            from aether_engine.skills.slash_registry import (
+                GLOBAL_SLASH_REGISTRY,
+            )
+
+            resolved = GLOBAL_SLASH_REGISTRY.resolve(slash_cmd_str)
+
+            if resolved:
+                if resolved.type == "agent_route":
+                    forced_agent = resolved.target
+            else:
+                skill_manifest = GLOBAL_SKILL_MANAGER.resolve_slash_command(slash_cmd_str)
+                if skill_manifest:
+                    active_skills.append(skill_manifest.name)
+                    if skill_manifest.requirements.agents:
+                        forced_agent = skill_manifest.requirements.agents[0]
+
+        # Epic 1, E1-04: fast-chat split. Slash commands, skill
+        # invocations and forced agents always take the graph;
+        # everything else is classified — plain conversation
+        # streams straight from the resolved chat model with no
+        # supervisor round-trip, work goes to the graph as before.
+        intent = None
+        if not slash_cmd_str and not forced_agent and not active_skills:
+            # Finding M19: classification is a real model call
+            # made BEFORE the task pump sets the attribution
+            # context — scope it to the session so its ledger
+            # row is attributed instead of landing unattributed.
+            with usage_context(session_id=session_id):
+                intent = await classify_intent(prompt, provider=provider_instance)
+
+        if intent is not None and intent.is_chat:
+            history = await asyncio.to_thread(
+                load_session_history, session_id, prompt)
+            task_generator = run_fast_chat(
+                prompt,
+                provider_instance,
+                history,
+                request_id=req_id,
+                session_id=session_id,
+                attachments=attachments,
+                # S1-M8: fast chat reads attachment paths only
+                # inside sanctioned roots — the session
+                # attachments dir plus these granted roots.
+                workspace_roots=workspace_roots,
+            )
+        else:
+            # One central builder (PRD Q3) — task start, approval
+            # resume and tool list used to build registries
+            # independently and had already drifted apart.
+            from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
+            reqs = infer_task_requirements(prompt)
+            tools = build_tool_registry(
+                # E3-F02: the MCP risk overrides are the
+                # task's EFFECTIVE ones (global -> project ->
+                # per-task overlay, resolved above), exactly
+                # as the approval-resume path uses the resumed
+                # task's effective overrides (E1-F04) — not
+                # the current globals, which would discard a
+                # task-level tightening or loosening.
+                mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=task_user_config.mcp_tool_risk_overrides),
+                include_file_tools=reqs.wants_code or (requested_model is not None),
+            )
+
+            # Config layers were resolved above for both paths
+            # (E1-14); engine_state.user_config is never mutated.
+            task_generator = run_langgraph_task(
+                prompt=prompt,
+                provider=provider_instance,
+                tools=tools,
+                request_id=req_id,
+                approval_handler=None,
+                workspace_roots=workspace_roots,
+                disabled_nodes=engine_state.disabled_nodes,
+                session_id=session_id,
+                agent_models=task_user_config.agent_models,
+                agent_tools=task_user_config.agent_tools,
+                secret_store=secret_store,
+                user_config=task_user_config,
+                forced_agent=forced_agent,
+                active_skills=active_skills,
+                plan_mode=bool(msg.payload.get("plan_mode")),
+                attachments=attachments,
+                # N08: the originating user message id — media
+                # the task generates is registered against it
+                # so "jump to conversation" lands exactly.
+                message_id=msg.payload.get("message_id"),
+                # M17 residual: the decision's constraints
+                # travel into the graph run, whose internal
+                # provider constructions read them from the
+                # run config.
+                local_only=decision.local_only,
+                require_vision=bool(attachments),
+            )
+
+        # Epic 5, E5-02: task-level fallback factory (§6.4).
+        # Rebuilds THIS task — same path, same registry and
+        # config — on the top healthy fallback candidate,
+        # reusing the failed task's id so the client sees one
+        # task. execute_task_generator only calls it when the
+        # failure was retriable and no tool activity occurred.
+        # Snapshot the per-message values the factory needs
+        # (also keeps the closure from binding loop variables).
+        _rebuild = {
+            "prompt": prompt,
+            "use_fast": intent is not None and intent.is_chat,
+            "history": history if (intent is not None and intent.is_chat) else None,
+            "tools": None if (intent is not None and intent.is_chat) else tools,
+            "req_id": req_id,
+            "session_id": session_id,
+            "workspace_roots": workspace_roots,
+            "disabled_nodes": engine_state.disabled_nodes,
+            "agent_models": task_user_config.agent_models,
+            "agent_tools": task_user_config.agent_tools,
+            "user_config": task_user_config,
+            "forced_agent": forced_agent,
+            "active_skills": active_skills,
+            "plan_mode": bool(msg.payload.get("plan_mode")),
+            "attachments": attachments,
+            "message_id": msg.payload.get("message_id"),
+            # Finding M17: the routing decision's constraints
+            # travel with the snapshot so the retry factory
+            # re-checks them instead of re-routing freely.
+            "local_only": decision.local_only,
+            "has_images": bool(attachments),
+        }
+
+        async def _task_retry_factory(failed_provider, failed_model, failed_task_id, _ctx=_rebuild):
+            from aether_engine.routing.fallback import (
+                get_configured_fallback_candidates,
+            )
+
+            # E5-F02: the task's effective fallback policy
+            # governs this enforcement point too — the same
+            # authority function, fed the same effective
+            # config the per-call point was built with. A
+            # disabled fallback or an empty chain-derived
+            # list means no retry (return None), exactly as
+            # an exhausted candidate list always has.
+            candidates = get_configured_fallback_candidates(
+                failed_provider,
+                _ctx["user_config"],
+                configured_providers=engine_state.configured_providers,
+                health_manager=engine_state.health_manager,
+                registry=engine_state.model_registry,
+                local_only=_ctx["local_only"],
+                require_vision=_ctx["has_images"],
+            )
+            if not candidates:
+                return None
+            entry = candidates[0]
+            try:
+                fallback_instance = _create_provider_instance(
+                    entry.provider, entry.id, secret_store,
+                    local_only=_ctx["local_only"],
+                    require_vision=_ctx["has_images"],
+                    user_config=_ctx["user_config"],
+                )
+            except Exception:
+                # Provider construction can fail on config/key
+                # errors; then there is no fallback to offer.
+                logger.warning(f"Task fallback: could not build provider for {entry.provider}", exc_info=True)
+                return None
+            if _ctx["use_fast"]:
+                gen = run_fast_chat(
+                    _ctx["prompt"], fallback_instance, _ctx["history"],
+                    request_id=_ctx["req_id"], session_id=_ctx["session_id"],
+                    task_id=failed_task_id, attachments=_ctx.get("attachments"),
+                    workspace_roots=_ctx.get("workspace_roots"))
+            else:
+                gen = run_langgraph_task(
+                    prompt=_ctx["prompt"],
+                    provider=fallback_instance,
+                    tools=_ctx["tools"],
+                    request_id=_ctx["req_id"],
+                    approval_handler=None,
+                    workspace_roots=_ctx["workspace_roots"],
+                    disabled_nodes=_ctx["disabled_nodes"],
+                    session_id=_ctx["session_id"],
+                    agent_models=_ctx["agent_models"],
+                    agent_tools=_ctx["agent_tools"],
+                    secret_store=secret_store,
+                    user_config=_ctx["user_config"],
+                    forced_agent=_ctx["forced_agent"],
+                    active_skills=_ctx["active_skills"],
+                    plan_mode=_ctx["plan_mode"],
+                    task_id=failed_task_id,
+                    attachments=_ctx.get("attachments"),
+                    message_id=_ctx.get("message_id"),
+                    # M17 residual: as at task start, the
+                    # rebuilt run carries the constraints.
+                    local_only=_ctx["local_only"],
+                    require_vision=_ctx["has_images"],
+                )
+            return gen, entry.provider, entry.id
+
+        task_session_id = session_id
+        task_runner = asyncio.create_task(
+            execute_task_generator(
+                task_generator, decision.provider, decision.model, req_id,
+                session_id=session_id,
+                routing_reason=decision.reason,
+                routing_capabilities=decision.capabilities,
+                retry_factory=_task_retry_factory,
+                # Finding M17: on a local-only route, a failure
+                # with no lawful fallback must tell the user
+                # the local vision model is unavailable and
+                # that the image was NOT sent anywhere.
+                fallback_blocked_message=(
+                    f"The local vision model ({decision.provider}/{decision.model}) is unavailable, "
+                    "so the image was not processed. Because a local vision model is configured, "
+                    "Aether did not send the image to a cloud provider. Check that the local "
+                    "model is running, or pick a different vision model in Settings → Models."
+                ) if decision.local_only else None)
+        )
+
     try:
         while True:
             raw = await ws.receive_text()
@@ -1881,402 +2991,29 @@ async def ws_tasks(ws: WebSocket):
             # Task lifecycle events
             # -----------------------------------------------------------
             if msg.type == EventType.START_TASK:
-                if task_runner and not task_runner.done():
-                    task_runner.cancel()
-                    try:
-                        await task_runner
-                    except asyncio.CancelledError:
-                        pass
-
-                prompt = msg.payload.get("prompt", "").strip() or "Say hello"
-                attachments = msg.payload.get("attachments") or []
-                cfg = engine_state.user_config
-                requested_model = msg.payload.get("model")
-                session_id = msg.payload.get("session_id")
-                
-                if not session_id:
-                    # Create new session if none provided. Implicit
-                    # creation takes the SESSION_CREATE binding rule
-                    # (slice 3): the active root at creation time, or
-                    # unbound — via the one shared helper.
-                    title = prompt[:30] + "..." if len(prompt) > 30 else prompt
-                    session_id, session_binding = await _create_bound_session(title)
-                    try:
-                        await ws.send_text(Event(
-                            type=EventType.SESSION_CREATE_RESPONSE,
-                            request_id=req_id,
-                            payload={"session_id": session_id, "workspace": session_binding, "preserve_messages": True}
-                        ).to_json())
-                        await ws.send_text(Event(
-                            type=EventType.SESSION_LIST_RESPONSE,
-                            request_id=req_id,
-                            payload={"sessions": await asyncio.to_thread(session_store.list_sessions)}
-                        ).to_json())
-                    except Exception:  # best-effort notification: the session is already created; a failed send must not abort task start
-                        logger.debug("Could not send session create/list events to client", exc_info=True)
-                else:
-                    sess_info = await asyncio.to_thread(session_store.get_session, session_id)
-                    if sess_info and sess_info.get("title") in ("New Conversation", "New Chat") and not sess_info.get("messages"):
-                        title = prompt[:30] + "..." if len(prompt) > 30 else prompt
-                        await asyncio.to_thread(session_store.update_session_title, session_id, title)
-                        try:
-                            await ws.send_text(Event(
-                                type=EventType.SESSION_LIST_RESPONSE,
-                                request_id=req_id,
-                                payload={"sessions": await asyncio.to_thread(session_store.list_sessions)}
-                            ).to_json())
-                        except Exception:  # best-effort notification: a failed send must not abort task start
-                            logger.debug("Could not send session list event to client", exc_info=True)
-                # Epic 8, E8-1.1b: a new message in a session with a
-                # staged rewind commits it — the undo window closes
-                # and the discarded steps are pruned now, before the
-                # new task builds on the rewound state.
-                await rewind_service.commit(session_id)
-
-                # Issue 007: ``/mcp:<server>:<prompt>`` runs a prompt
-                # template into the chat instead of starting a graph task.
-                # No arguments in the slash form (use the MCP tab for
-                # prompts with arguments). The slash text itself is not
-                # saved as a user message — only the prompt's messages are.
-                _mcp_slash = re.match(r"^/mcp:([A-Za-z0-9_.\-]{1,100}):([A-Za-z0-9_.\-]+)$", prompt)
-                if _mcp_slash:
-                    _run = await _run_mcp_prompt_into_chat(
-                        _mcp_slash.group(1), _mcp_slash.group(2), None, session_id
-                    )
-                    await ws.send_text(Event(
-                        type=EventType.MCP_PROMPT_RUN_RESPONSE,
-                        request_id=req_id,
-                        payload={
-                            "success": _run["ok"], "name": _mcp_slash.group(1),
-                            "prompt": _mcp_slash.group(2),
-                            "messages": _run["messages"],
-                            "session_id": _run["session_id"], "error": _run["error"],
-                        },
-                    ).to_json())
-                    continue
-
-                try:
-                    # The UI's client-generated id becomes the row id, so
-                    # the rendered message and the stored message share
-                    # one identity (edit-and-resend addresses the row).
-                    await asyncio.to_thread(
-                        session_store.add_message, session_id, "user", prompt,
-                        None, msg.payload.get("message_id"), attachments)
-                    await _register_message_attachments(
-                        session_id, msg.payload.get("message_id"), attachments, ws)
-                except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not block the task
-                    logger.error(f"Failed to save user message: {e}")
-
-                # E5-F04: "configured" is derived ONCE, here as
-                # everywhere (routing.startup.derive_configured_providers):
-                # stored secrets plus keyless custom providers whose
-                # saved configuration is complete. Deriving from
-                # secrets alone made an accepted keyless custom
-                # provider invisible to routing.
-                engine_state.configured_providers = derive_configured_providers(
-                    cfg, secret_store, engine_state.model_registry)
-
-                decision: RoutingDecision = engine_state.routing_policy.select_route(
-                    prompt=prompt,
-                    configured_providers=engine_state.configured_providers,
-                    health_manager=engine_state.health_manager,
-                    user_default_provider=cfg.default_provider,
-                    user_default_model=cfg.default_model,
-                    requested_model=requested_model,
-                    auxiliary_models=cfg.auxiliary_models,
-                    images=attachments,
-                )
-
-                workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
-
-                # Epic 1, E1-14 config layers, computed for BOTH paths:
-                # the graph branch uses it for the task, and the Epic 5
-                # retry-factory snapshot below reads it unconditionally
-                # — when it lived only in the graph branch, every
-                # fast-chat task died here with an UnboundLocalError
-                # and the client waited forever for a reply.
-                # E5-F02: it is resolved BEFORE the provider is built,
-                # and the provider factory receives it — the per-call
-                # fallback enforcement point must be governed by the
-                # task's effective fallback policy (disable / chain),
-                # not by the globals alone.
-                from aether_engine.config_layers import effective_user_config
-
-                task_user_config = effective_user_config(
-                    engine_state.user_config,
-                    workspace_root=workspace_roots[0] if workspace_roots else None,
-                    overlay=msg.payload.get("config_overlay"),
-                )
-
-                try:
-                    provider_instance = _create_provider_instance(
-                        decision.provider, decision.model, secret_store,
-                        local_only=decision.local_only,
-                        require_vision=bool(attachments),
-                        user_config=task_user_config,
-                    )
-                except ProviderNotFoundError as e:
-                    if is_keyless_custom_provider(decision.provider, task_user_config):
-                        # E5-F04: this provider is configured WITHOUT
-                        # a key by design — a construction failure here
-                        # is not a missing key, and the error must name
-                        # the real cause instead of demanding a secret
-                        # the server does not have.
-                        error_text = (
-                            f"Provider {decision.provider} is configured without an API key "
-                            f"but could not be started: {e}. Check its base URL in Settings → Models."
-                        )
-                    else:
-                        error_text = f"API key not found for {decision.provider}. Please add your key in Settings → Models."
-                    await ws.send_text(Event(
-                        type=EventType.TASK_FAILED,
-                        request_id=req_id,
-                        payload={
-                            "task_id": "none", "retriable": False, "state": TaskState.FAILED.value,
-                            "error": error_text,
-                        },
-                    ).to_json())
-                    continue
-                except SecretDecryptionError as e:
-                    await ws.send_text(Event(
-                        type=EventType.TASK_FAILED,
-                        request_id=req_id,
-                        payload={
-                            "task_id": "none", "retriable": False, "state": TaskState.FAILED.value,
-                            "error": f"Failed to decrypt API key: {e}. Please re-enter your key in Settings → Models.",
-                        },
-                    ).to_json())
-                    continue
-
-                slash_cmd_str = msg.payload.get("slash_command")
-                if not slash_cmd_str and prompt.startswith("/"):
-                    slash_cmd_str = prompt.split(" ")[0]
-                
-                forced_agent = None
-                active_skills = []
-                
-                if slash_cmd_str:
-                    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-                    from aether_engine.skills.slash_registry import (
-                        GLOBAL_SLASH_REGISTRY,
-                    )
-                    
-                    resolved = GLOBAL_SLASH_REGISTRY.resolve(slash_cmd_str)
-                    
-                    if resolved:
-                        if resolved.type == "agent_route":
-                            forced_agent = resolved.target
-                    else:
-                        skill_manifest = GLOBAL_SKILL_MANAGER.resolve_slash_command(slash_cmd_str)
-                        if skill_manifest:
-                            active_skills.append(skill_manifest.name)
-                            if skill_manifest.requirements.agents:
-                                forced_agent = skill_manifest.requirements.agents[0]
-
-                # Epic 1, E1-04: fast-chat split. Slash commands, skill
-                # invocations and forced agents always take the graph;
-                # everything else is classified — plain conversation
-                # streams straight from the resolved chat model with no
-                # supervisor round-trip, work goes to the graph as before.
-                intent = None
-                if not slash_cmd_str and not forced_agent and not active_skills:
-                    # Finding M19: classification is a real model call
-                    # made BEFORE the task pump sets the attribution
-                    # context — scope it to the session so its ledger
-                    # row is attributed instead of landing unattributed.
-                    with usage_context(session_id=session_id):
-                        intent = await classify_intent(prompt, provider=provider_instance)
-
-                if intent is not None and intent.is_chat:
-                    history = await asyncio.to_thread(
-                        load_session_history, session_id, prompt)
-                    task_generator = run_fast_chat(
-                        prompt,
-                        provider_instance,
-                        history,
-                        request_id=req_id,
-                        session_id=session_id,
-                        attachments=attachments,
-                        # S1-M8: fast chat reads attachment paths only
-                        # inside sanctioned roots — the session
-                        # attachments dir plus these granted roots.
-                        workspace_roots=workspace_roots,
-                    )
-                else:
-                    # One central builder (PRD Q3) — task start, approval
-                    # resume and tool list used to build registries
-                    # independently and had already drifted apart.
-                    from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-
-                    reqs = infer_task_requirements(prompt)
-                    tools = build_tool_registry(
-                        # E3-F02: the MCP risk overrides are the
-                        # task's EFFECTIVE ones (global -> project ->
-                        # per-task overlay, resolved above), exactly
-                        # as the approval-resume path uses the resumed
-                        # task's effective overrides (E1-F04) — not
-                        # the current globals, which would discard a
-                        # task-level tightening or loosening.
-                        mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=task_user_config.mcp_tool_risk_overrides),
-                        include_file_tools=reqs.wants_code or (requested_model is not None),
-                    )
-
-                    # Config layers were resolved above for both paths
-                    # (E1-14); engine_state.user_config is never mutated.
-                    task_generator = run_langgraph_task(
-                        prompt=prompt,
-                        provider=provider_instance,
-                        tools=tools,
-                        request_id=req_id,
-                        approval_handler=None,
-                        workspace_roots=workspace_roots,
-                        disabled_nodes=engine_state.disabled_nodes,
-                        session_id=session_id,
-                        agent_models=task_user_config.agent_models,
-                        agent_tools=task_user_config.agent_tools,
-                        secret_store=secret_store,
-                        user_config=task_user_config,
-                        forced_agent=forced_agent,
-                        active_skills=active_skills,
-                        plan_mode=bool(msg.payload.get("plan_mode")),
-                        attachments=attachments,
-                        # N08: the originating user message id — media
-                        # the task generates is registered against it
-                        # so "jump to conversation" lands exactly.
-                        message_id=msg.payload.get("message_id"),
-                        # M17 residual: the decision's constraints
-                        # travel into the graph run, whose internal
-                        # provider constructions read them from the
-                        # run config.
-                        local_only=decision.local_only,
-                        require_vision=bool(attachments),
-                    )
-
-                # Epic 5, E5-02: task-level fallback factory (§6.4).
-                # Rebuilds THIS task — same path, same registry and
-                # config — on the top healthy fallback candidate,
-                # reusing the failed task's id so the client sees one
-                # task. execute_task_generator only calls it when the
-                # failure was retriable and no tool activity occurred.
-                # Snapshot the per-message values the factory needs
-                # (also keeps the closure from binding loop variables).
-                _rebuild = {
-                    "prompt": prompt,
-                    "use_fast": intent is not None and intent.is_chat,
-                    "history": history if (intent is not None and intent.is_chat) else None,
-                    "tools": None if (intent is not None and intent.is_chat) else tools,
-                    "req_id": req_id,
-                    "session_id": session_id,
-                    "workspace_roots": workspace_roots,
-                    "disabled_nodes": engine_state.disabled_nodes,
-                    "agent_models": task_user_config.agent_models,
-                    "agent_tools": task_user_config.agent_tools,
-                    "user_config": task_user_config,
-                    "forced_agent": forced_agent,
-                    "active_skills": active_skills,
-                    "plan_mode": bool(msg.payload.get("plan_mode")),
-                    "attachments": attachments,
-                    "message_id": msg.payload.get("message_id"),
-                    # Finding M17: the routing decision's constraints
-                    # travel with the snapshot so the retry factory
-                    # re-checks them instead of re-routing freely.
-                    "local_only": decision.local_only,
-                    "has_images": bool(attachments),
-                }
-
-                async def _task_retry_factory(failed_provider, failed_model, failed_task_id, _ctx=_rebuild):
-                    from aether_engine.routing.fallback import (
-                        get_configured_fallback_candidates,
-                    )
-
-                    # E5-F02: the task's effective fallback policy
-                    # governs this enforcement point too — the same
-                    # authority function, fed the same effective
-                    # config the per-call point was built with. A
-                    # disabled fallback or an empty chain-derived
-                    # list means no retry (return None), exactly as
-                    # an exhausted candidate list always has.
-                    candidates = get_configured_fallback_candidates(
-                        failed_provider,
-                        _ctx["user_config"],
-                        configured_providers=engine_state.configured_providers,
-                        health_manager=engine_state.health_manager,
-                        registry=engine_state.model_registry,
-                        local_only=_ctx["local_only"],
-                        require_vision=_ctx["has_images"],
-                    )
-                    if not candidates:
-                        return None
-                    entry = candidates[0]
-                    try:
-                        fallback_instance = _create_provider_instance(
-                            entry.provider, entry.id, secret_store,
-                            local_only=_ctx["local_only"],
-                            require_vision=_ctx["has_images"],
-                            user_config=_ctx["user_config"],
-                        )
-                    except Exception:
-                        # Provider construction can fail on config/key
-                        # errors; then there is no fallback to offer.
-                        logger.warning(f"Task fallback: could not build provider for {entry.provider}", exc_info=True)
-                        return None
-                    if _ctx["use_fast"]:
-                        gen = run_fast_chat(
-                            _ctx["prompt"], fallback_instance, _ctx["history"],
-                            request_id=_ctx["req_id"], session_id=_ctx["session_id"],
-                            task_id=failed_task_id, attachments=_ctx.get("attachments"),
-                            workspace_roots=_ctx.get("workspace_roots"))
-                    else:
-                        gen = run_langgraph_task(
-                            prompt=_ctx["prompt"],
-                            provider=fallback_instance,
-                            tools=_ctx["tools"],
-                            request_id=_ctx["req_id"],
-                            approval_handler=None,
-                            workspace_roots=_ctx["workspace_roots"],
-                            disabled_nodes=_ctx["disabled_nodes"],
-                            session_id=_ctx["session_id"],
-                            agent_models=_ctx["agent_models"],
-                            agent_tools=_ctx["agent_tools"],
-                            secret_store=secret_store,
-                            user_config=_ctx["user_config"],
-                            forced_agent=_ctx["forced_agent"],
-                            active_skills=_ctx["active_skills"],
-                            plan_mode=_ctx["plan_mode"],
-                            task_id=failed_task_id,
-                            attachments=_ctx.get("attachments"),
-                            message_id=_ctx.get("message_id"),
-                            # M17 residual: as at task start, the
-                            # rebuilt run carries the constraints.
-                            local_only=_ctx["local_only"],
-                            require_vision=_ctx["has_images"],
-                        )
-                    return gen, entry.provider, entry.id
-
-                task_session_id = session_id
-                task_runner = asyncio.create_task(
-                    execute_task_generator(
-                        task_generator, decision.provider, decision.model, req_id,
-                        session_id=session_id,
-                        routing_reason=decision.reason,
-                        routing_capabilities=decision.capabilities,
-                        retry_factory=_task_retry_factory,
-                        # Finding M17: on a local-only route, a failure
-                        # with no lawful fallback must tell the user
-                        # the local vision model is unavailable and
-                        # that the image was NOT sent anywhere.
-                        fallback_blocked_message=(
-                            f"The local vision model ({decision.provider}/{decision.model}) is unavailable, "
-                            "so the image was not processed. Because a local vision model is configured, "
-                            "Aether did not send the image to a cloud provider. Check that the local "
-                            "model is running, or pick a different vision model in Settings → Models."
-                        ) if decision.local_only else None)
-                )
+                # RUX-B-07: the pre-work runs in a launch task (see
+                # _start_task_message); the loop only chains it
+                # after the previous launch and moves on, so a slow
+                # classification / cancel-wait / slash run can no
+                # longer wedge every other message on the socket.
+                _previous_start = task_start_tail
+                task_start_tail = asyncio.create_task(
+                    _start_task_message(msg, req_id, _previous_start))
 
             elif msg.type == EventType.CANCEL_TASK:
+                # RUX-B-07: a task still in its launch pre-work is
+                # cancellable too — cancelling the launch prevents
+                # the runner from ever being created, which is the
+                # outcome the old serial loop produced by reading
+                # the cancel only after the (now-cancelled) start.
+                launch_pending = task_start_tail is not None and not task_start_tail.done()
+                if launch_pending:
+                    task_start_tail.cancel()
+                    logger.info("Cancellation requested for pending task launch.")
                 if task_runner and not task_runner.done():
                     task_runner.cancel()
                     logger.info("Cancellation requested for active task runner.")
+                if launch_pending or (task_runner and not task_runner.done()):
                     await ws.send_text(Event(
                         type=EventType.TASK_CANCELLED,
                         request_id=req_id,
@@ -2542,7 +3279,6 @@ async def ws_tasks(ws: WebSocket):
                 try:
                     if not isinstance(pname, str) or not pname.strip():
                         raise ValueError("Provider name is required.")
-                    discovery_error = None
                     is_custom_provider = (
                         pname == "custom_openai"
                         or pname.startswith("custom_")
@@ -2575,22 +3311,16 @@ async def ws_tasks(ws: WebSocket):
                             engine_state.model_registry.remove_provider_models("custom_openai")
                             engine_state.health_manager.remove_provider("custom_openai")
 
+                    # RUX-B-06: a key saved without a model list used
+                    # to discover inline here (≤10 s on the message
+                    # loop). The save itself — key, config, defaults —
+                    # is instant and answers now; discovery moves to
+                    # _complete_provider_save_discovery, which applies
+                    # the same results and pushes the refreshed list.
+                    deferred_discovery = bool(key and not models)
                     if key:
                         secret_store.save_provider(pname, key)
                         engine_state.health_manager.reset_provider(pname)
-                        if not models:
-                            # E5-F05: discover through the flavour
-                            # just saved above (already persisted to
-                            # custom_provider_types and config).
-                            disc = await fetch_available_models(
-                                pname, key, base_url=base_url,
-                                provider_flavor=custom_provider_flavor(
-                                    pname, engine_state.user_config))
-                            models = disc.models
-                            if disc.error is not None:
-                                discovery_error = disc.error.to_dict()
-                            elif disc.excluded:
-                                engine_state.user_config.provider_excluded_models[pname] = disc.excluded
                         if models:
                             engine_state.user_config.provider_models[pname] = models
                             engine_state.model_registry.update_provider_models(pname, models)
@@ -2606,22 +3336,30 @@ async def ws_tasks(ws: WebSocket):
                             engine_state.active_model = default_model
                     elif is_default and pname:
                         engine_state.user_config.default_provider = pname
-                        # F-10 residual: resolve the default through the
-                        # registry's curated priority, never from the raw
-                        # provider_models list's [0] — that list's order
-                        # is not priority and may be stale or
-                        # client-supplied (a pre-fix list with the 404
-                        # gemini-2.5-flash first would otherwise be
-                        # silently re-pinned as the default here).
-                        default_entry = engine_state.model_registry.get_default_model_for_provider(pname)
-                        resolved_default = default_entry.id if default_entry else ""
-                        if not resolved_default:
-                            cur_models = engine_state.user_config.provider_models.get(pname, [])
-                            resolved_default = cur_models[0] if cur_models else ""
-                        if resolved_default:
-                            engine_state.user_config.default_model = resolved_default
-                            engine_state.active_model = resolved_default
-                        engine_state.active_provider = pname
+                        if deferred_discovery:
+                            # The model choice waits for the deferred
+                            # discovery (same registry-priority
+                            # resolution, in _complete_provider_save_
+                            # discovery) — resolving now could only use
+                            # the stale pre-discovery list.
+                            engine_state.active_provider = pname
+                        else:
+                            # F-10 residual: resolve the default through the
+                            # registry's curated priority, never from the raw
+                            # provider_models list's [0] — that list's order
+                            # is not priority and may be stale or
+                            # client-supplied (a pre-fix list with the 404
+                            # gemini-2.5-flash first would otherwise be
+                            # silently re-pinned as the default here).
+                            default_entry = engine_state.model_registry.get_default_model_for_provider(pname)
+                            resolved_default = default_entry.id if default_entry else ""
+                            if not resolved_default:
+                                cur_models = engine_state.user_config.provider_models.get(pname, [])
+                                resolved_default = cur_models[0] if cur_models else ""
+                            if resolved_default:
+                                engine_state.user_config.default_model = resolved_default
+                                engine_state.active_model = resolved_default
+                            engine_state.active_provider = pname
 
                     save_config(engine_state.user_config)
                     engine_state.audit_logger.log_event("PROVIDER_SAVED", {"provider": pname})
@@ -2631,13 +3369,15 @@ async def ws_tasks(ws: WebSocket):
                         "models": engine_state.user_config.provider_models.get(pname, []),
                         "excluded_models": engine_state.user_config.provider_excluded_models.get(pname, []),
                     }
-                    if discovery_error is not None:
-                        save_payload["discovery_error"] = discovery_error
                     await ws.send_text(Event(
                         type=EventType.PROVIDER_SAVE_RESPONSE,
                         request_id=req_id,
                         payload=save_payload,
                     ).to_json())
+                    if deferred_discovery:
+                        asyncio.create_task(_complete_provider_save_discovery(
+                            req_id, pname, key, base_url,
+                            bool(is_default and not default_model)))
                 except Exception as e:  # noqa: BLE001 — handler boundary: any save failure is reported to the client in the response payload
                     await ws.send_text(Event(
                         type=EventType.PROVIDER_SAVE_RESPONSE,
@@ -3525,7 +4265,10 @@ async def ws_tasks(ws: WebSocket):
                 # tool uses) so transcript and semantic matches reach
                 # the UI. An empty query is an honest empty result —
                 # recall is never invoked with nothing to search for.
-                from aether_engine.tools.media_recall import search_media_entries
+                # Off the message loop (see _send_media_search_result):
+                # the recall embeds the query and can take seconds
+                # (RUX-B-08). The payload parsing stays here — it is
+                # instant and defines the request the task runs.
                 search_query = str(msg.payload.get("query") or "").strip()
                 search_collection = msg.payload.get("collection", "all")
                 if search_collection not in ("all", "user", "generated"):
@@ -3534,26 +4277,8 @@ async def ws_tasks(ws: WebSocket):
                     search_limit = int(msg.payload.get("limit") or 20)
                 except (TypeError, ValueError):
                     search_limit = 20
-                if search_query:
-                    recall = await search_media_entries(
-                        search_query,
-                        limit=search_limit,
-                        collection=search_collection,
-                    )
-                    search_results = recall["results"]
-                    search_degraded = bool(recall["degraded"])
-                else:
-                    search_results = []
-                    search_degraded = False
-                await ws.send_text(Event(
-                    type=EventType.MEDIA_SEARCH_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "query": search_query,
-                        "media": search_results,
-                        "degraded": search_degraded,
-                    },
-                ).to_json())
+                asyncio.create_task(_send_media_search_result(
+                    req_id, search_query, search_collection, search_limit))
 
             elif msg.type == EventType.MEDIA_DELETE_REQUEST:
                 from aether_engine.media.store import get_media_store
@@ -3588,12 +4313,9 @@ async def ws_tasks(ws: WebSocket):
             # Local Models (Ollama) & Task Download Events
             # -----------------------------------------------------------
             elif msg.type == EventType.LOCAL_MODEL_LIST_REQUEST:
-                models = await engine_state.ollama_manager.list_models()
-                await ws.send_text(Event(
-                    type=EventType.LOCAL_MODEL_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"models": models},
-                ).to_json())
+                # Off the message loop (see _send_local_model_list_result):
+                # the daemon call can take seconds (RUX-B-08).
+                asyncio.create_task(_send_local_model_list_result(req_id))
 
             elif msg.type == EventType.LOCAL_MODEL_DOWNLOAD_START:
                 model_name = msg.payload.get("model", "") or msg.payload.get("repo_id", "")
@@ -3621,39 +4343,30 @@ async def ws_tasks(ws: WebSocket):
                     logger.info(f"Download cancelled for model: {cancel_model}")
 
             elif msg.type == EventType.LOCAL_MODEL_DELETE_REQUEST:
-                model_name = msg.payload.get("model", "")
-                deleted = await engine_state.ollama_manager.delete_model(model_name)
-                await ws.send_text(Event(
-                    type=EventType.LOCAL_MODEL_DELETE_RESPONSE,
-                    request_id=req_id,
-                    payload={"model": model_name, "deleted": deleted},
-                ).to_json())
+                # Off the message loop (see _send_local_model_delete_result):
+                # the daemon call can take seconds (RUX-B-08).
+                asyncio.create_task(_send_local_model_delete_result(
+                    req_id, msg.payload.get("model", "")))
 
             # -----------------------------------------------------------
             # Model Hub catalogue layer (H1, read-only)
             # -----------------------------------------------------------
             elif msg.type == EventType.MODEL_HUB_SEARCH_REQUEST:
-                result = await engine_state.model_hub.search(
-                    source=msg.payload.get("source", "hf"),
-                    query=msg.payload.get("query", "") or "",
-                    family=msg.payload.get("family"),
-                )
-                await ws.send_text(Event(
-                    type=EventType.MODEL_HUB_SEARCH_RESPONSE,
-                    request_id=req_id,
-                    payload=result,
-                ).to_json())
+                # Off the message loop (see _send_model_hub_search_result):
+                # the catalogue call is live HTTP (RUX-B-08).
+                asyncio.create_task(_send_model_hub_search_result(
+                    req_id,
+                    msg.payload.get("source", "hf"),
+                    msg.payload.get("query", "") or "",
+                    msg.payload.get("family")))
 
             elif msg.type == EventType.MODEL_HUB_DETAIL_REQUEST:
-                result = await engine_state.model_hub.detail(
-                    source=msg.payload.get("source", "hf"),
-                    repo_id=msg.payload.get("id", "") or "",
-                )
-                await ws.send_text(Event(
-                    type=EventType.MODEL_HUB_DETAIL_RESPONSE,
-                    request_id=req_id,
-                    payload=result,
-                ).to_json())
+                # Off the message loop (see _send_model_hub_detail_result):
+                # the catalogue call is live HTTP (RUX-B-08).
+                asyncio.create_task(_send_model_hub_detail_result(
+                    req_id,
+                    msg.payload.get("source", "hf"),
+                    msg.payload.get("id", "") or ""))
 
             # -----------------------------------------------------------
             # Model Hub downloads (H2): begin/run split — the RESPONSE
@@ -3713,15 +4426,13 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
 
             elif msg.type == EventType.MODEL_HUB_DELETE_REQUEST:
-                result = await engine_state.hub_downloads.delete(
-                    source=msg.payload.get("source", "hf"),
-                    model_id=msg.payload.get("id", "") or "",
-                )
-                await ws.send_text(Event(
-                    type=EventType.MODEL_HUB_DELETE_RESPONSE,
-                    request_id=req_id,
-                    payload=result,
-                ).to_json())
+                # Off the message loop (see _send_model_hub_delete_result):
+                # the delete verifies against the daemon and removes
+                # the repo tree (RUX-B-08).
+                asyncio.create_task(_send_model_hub_delete_result(
+                    req_id,
+                    msg.payload.get("source", "hf"),
+                    msg.payload.get("id", "") or ""))
 
             # -----------------------------------------------------------
             # Capabilities Check Scheduler Events
@@ -4345,22 +5056,14 @@ async def ws_tasks(ws: WebSocket):
                     ).to_json())
 
             elif msg.type == EventType.PLUGIN_APPROVAL_GRANTED:
+                # Off the message loop (see _send_plugin_install_
+                # result): the install copy is synchronous and
+                # scales with plugin size (RUX-B-10). The pending
+                # entry is still popped here, in the loop, so a
+                # duplicate grant can never install twice.
                 data = pending_plugin_installs.pop(req_id, None)
                 if data:
-                    try:
-                        engine_state.plugin_installer.install(data)
-                        engine_state.audit_logger.log_event("PLUGIN_INSTALLED", {"manifest": data["manifest"]})
-                        await ws.send_text(Event(
-                            type=EventType.PLUGIN_INSTALL_RESPONSE,
-                            request_id=req_id,
-                            payload={"success": True},
-                        ).to_json())
-                    except Exception as e:  # noqa: BLE001 — handler boundary: any install failure is reported to the client in the response payload
-                        await ws.send_text(Event(
-                            type=EventType.PLUGIN_INSTALL_RESPONSE,
-                            request_id=req_id,
-                            payload={"success": False, "error": str(e)},
-                        ).to_json())
+                    asyncio.create_task(_send_plugin_install_result(req_id, data))
 
             elif msg.type == EventType.PLUGIN_APPROVAL_REJECTED:
                 pending_plugin_installs.pop(req_id, None)
@@ -4371,59 +5074,19 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
 
             elif msg.type == EventType.PLUGIN_UNINSTALL_REQUEST:
-                name = msg.payload.get("name")
-                try:
-                    # Disconnect the plugin's MCP servers first, in this
-                    # (session-owner) task — remove_server_sync inside
-                    # uninstall() cannot close a live session from a sync
-                    # caller (anyio cancel-scope rule, see registry.py).
-                    from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                    installed = engine_state.plugin_installer.get_all().get(name, {})
-                    for mcp_name in installed.get("installed_mcp", []):
-                        await GLOBAL_MCP_REGISTRY.disconnect_server(mcp_name)
-                    engine_state.plugin_installer.uninstall(name)
-                    await ws.send_text(Event(
-                        type=EventType.PLUGIN_UNINSTALL_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": True, "name": name},
-                    ).to_json())
-                except Exception as e:  # noqa: BLE001 — handler boundary: any uninstall failure is reported to the client in the response payload
-                    await ws.send_text(Event(
-                        type=EventType.PLUGIN_UNINSTALL_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": False, "error": str(e)},
-                    ).to_json())
+                # Off the message loop (see _send_plugin_uninstall_
+                # result): the MCP disconnects await at the server
+                # timeout and the file work is synchronous (RUX-B-10).
+                asyncio.create_task(_send_plugin_uninstall_result(
+                    req_id, msg.payload.get("name")))
                     
             elif msg.type == EventType.PLUGIN_TOGGLE_REQUEST:
-                name = msg.payload.get("name")
-                enabled = msg.payload.get("enabled", True)
-                try:
-                    if not enabled:
-                        # Disconnect the plugin's MCP servers first, in
-                        # this (session-owner) task — remove_server_sync
-                        # inside toggle() cannot close a live session
-                        # from a sync caller (anyio cancel-scope rule,
-                        # see registry.py). Mirrors the
-                        # PLUGIN_UNINSTALL_REQUEST branch above (E7-F01):
-                        # if a disconnect fails, toggle() is never
-                        # reached, so the plugin stays enabled with its
-                        # sessions and skills untouched.
-                        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                        installed = engine_state.plugin_installer.get_all().get(name, {})
-                        for mcp_name in installed.get("installed_mcp", []):
-                            await GLOBAL_MCP_REGISTRY.disconnect_server(mcp_name)
-                    engine_state.plugin_installer.toggle(name, enabled)
-                    await ws.send_text(Event(
-                        type=EventType.PLUGIN_TOGGLE_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": True, "name": name, "enabled": enabled},
-                    ).to_json())
-                except Exception as e:  # noqa: BLE001 — handler boundary: any toggle failure is reported to the client in the response payload
-                    await ws.send_text(Event(
-                        type=EventType.PLUGIN_TOGGLE_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": False, "error": str(e)},
-                    ).to_json())
+                # Off the message loop (see _send_plugin_toggle_
+                # result): a disable awaits the MCP disconnects at
+                # the server timeout before its synchronous file
+                # work (RUX-B-10).
+                asyncio.create_task(_send_plugin_toggle_result(
+                    req_id, msg.payload.get("name"), msg.payload.get("enabled", True)))
 
             elif msg.type == EventType.MEMORY_EPISODES_REQUEST:
                 # Epic 4, E4-01/E4-04: through the facade; the payload
@@ -4623,19 +5286,10 @@ async def ws_tasks(ws: WebSocket):
             elif msg.type == EventType.MEMORY_EXPORT_REQUEST:
                 # Epic 4, E4-03: the full memory as JSON (facts incl.
                 # superseded history + episodes) for the UI to save.
-                backend = backend_or_none(engine_state.user_config, context="memory export")
-                if backend is None:
-                    payload = {"success": False, "error": "The configured memory backend is unavailable (see engine log)."}
-                else:
-                    try:
-                        payload = {"success": True, "export": backend.export()}
-                    except Exception as e:  # noqa: BLE001 — export failure must surface, not crash the handler
-                        payload = {"success": False, "error": str(e)}
-                await ws.send_text(Event(
-                    type=EventType.MEMORY_EXPORT_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
+                # Off the message loop (see _send_memory_export_result):
+                # the export is synchronous and scales with memory
+                # size, so it runs on a worker thread (RUX-B-08).
+                asyncio.create_task(_send_memory_export_result(req_id))
 
             elif msg.type == EventType.BACKUP_CREATE_REQUEST:
                 # Epic 10, E10-03: snapshot ~/.aether into a zip under
@@ -4694,96 +5348,18 @@ async def ws_tasks(ws: WebSocket):
             elif msg.type == EventType.DIAGNOSTICS_EXPORT_REQUEST:
                 # Epic 10, E10-04: redacted bundle — config scrubbed by
                 # the audit redactor, memory as counts only.
-                try:
-                    from aether_engine.diagnostics import build_diagnostics
-                    from aether_engine.memory import episodic as _episodic
-                    from aether_engine.memory import knowledge_graph as _kg
-
-                    store = SecretStore()
-                    with _kg._get_conn() as _conn:
-                        kg_count = _conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
-                    bundle = build_diagnostics(
-                        user_config=engine_state.user_config,
-                        health=engine_state.health_manager.get_all_statuses(),
-                        kg_count=kg_count,
-                        episodic_count=_episodic.embedding_stats().get("total", 0),
-                        audit_log_path=engine_state.audit_logger.log_path,
-                        providers=store.list_providers(),
-                    )
-                    payload = {"success": True, "bundle": bundle}
-                except Exception as e:  # noqa: BLE001 — diagnostics failure must surface, not crash the handler
-                    payload = {"success": False, "error": str(e)}
-                await ws.send_text(Event(
-                    type=EventType.DIAGNOSTICS_EXPORT_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
+                # Off the message loop (see _send_diagnostics_export_
+                # result): the bundle build is synchronous bulk work,
+                # so it runs on a worker thread (RUX-B-08).
+                asyncio.create_task(_send_diagnostics_export_result(req_id))
 
             elif msg.type == EventType.VERSION_CHECK_REQUEST:
                 # Epic 10, E10-05: report-only update check against the
                 # project's GitHub releases. Nothing downloads or
                 # installs — the user decides.
-                try:
-                    import httpx
-
-                    def _parse(v: str) -> tuple:
-                        # E10-F09: SemVer precedence, not digit
-                        # stripping. Build metadata (+...) never
-                        # affects precedence; a prerelease precedes
-                        # its release; prerelease identifiers compare
-                        # numerically when numeric (numeric < alpha-
-                        # numeric), lexically otherwise, and a
-                        # shorter identifier list precedes a longer
-                        # one it prefixes. An unparseable tag raises
-                        # — the handler turns that into a failed
-                        # check, not a successful "no update".
-                        text = v.strip()
-                        if text[:1] in ("v", "V"):
-                            text = text[1:]
-                        core, _, _build = text.partition("+")
-                        core, dash, prerelease = core.partition("-")
-                        pieces = core.split(".")
-                        if len(pieces) > 3 or not all(p.isdigit() for p in pieces):
-                            raise ValueError(f"not a semantic version: {v!r}")
-                        nums = [int(p) for p in pieces] + [0] * (3 - len(pieces))
-                        if not dash:
-                            return (*nums, 1, ())
-                        pre_key = []
-                        for ident in prerelease.split("."):
-                            if ident.isdigit():
-                                pre_key.append((0, int(ident), ""))
-                            elif ident:
-                                pre_key.append((1, 0, ident))
-                            else:
-                                raise ValueError(f"not a semantic version: {v!r}")
-                        return (*nums, 0, tuple(pre_key))
-
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        resp = await client.get(
-                            "https://api.github.com/repos/ProxCGaming/Aether-OS/releases/latest",
-                            headers={"Accept": "application/vnd.github+json"},
-                        )
-                    if resp.status_code == 404:
-                        payload = {"success": False, "error": "No releases have been published yet.",
-                                   "current": APP_VERSION}
-                    elif resp.status_code != 200:
-                        payload = {"success": False, "error": f"GitHub answered {resp.status_code}.",
-                                   "current": APP_VERSION}
-                    else:
-                        latest = str(resp.json().get("tag_name", "")).lstrip("v")
-                        payload = {
-                            "success": True,
-                            "current": APP_VERSION,
-                            "latest": latest,
-                            "update_available": _parse(latest) > _parse(APP_VERSION),
-                        }
-                except Exception as e:  # noqa: BLE001 — a failed check must surface, not crash the handler
-                    payload = {"success": False, "error": str(e), "current": APP_VERSION}
-                await ws.send_text(Event(
-                    type=EventType.VERSION_CHECK_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
+                # Off the message loop (see _send_version_check_result):
+                # the check is live HTTP with a 10 s timeout (RUX-B-08).
+                asyncio.create_task(_send_version_check_result(req_id))
 
             elif msg.type == EventType.SKILL_LIST_REQUEST:
                 from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
@@ -5229,141 +5805,19 @@ async def ws_tasks(ws: WebSocket):
             # Voice session (Epic 8, E8-5.1a)
             # -----------------------------------------------------------
             elif msg.type == EventType.VOICE_SESSION_START_REQUEST:
-                # Fail-closed start: an unavailable stage (missing
-                # local STT/TTS/VAD/transport) or an unconfigured
-                # chat model answers ok=False with the honest reason
-                # and opens nothing — no device, no model, no peer.
-                await _stop_voice_session()
-                voice_session_id = msg.payload.get("session_id")
-                if not voice_session_id:
-                    voice_session_id, _binding = await _create_bound_session(
-                        "Voice conversation")
-                cfg = engine_state.user_config
-                voice_error: str | None = None
-                voice_pipeline = None
-                webrtc_config = None
-                try:
-                    voice_provider = _create_provider_instance(
-                        cfg.default_provider, cfg.default_model, secret_store)
-                except (ProviderNotFoundError, SecretDecryptionError) as e:
-                    voice_provider = None
-                    voice_error = (
-                        f"voice unavailable: chat model {cfg.default_provider}/"
-                        f"{cfg.default_model} is not configured ({e})")
-                if voice_provider is not None:
-                    from aether_engine.voice import VoiceUnavailableError
-                    from aether_engine.voice.pipeline import (
-                        create_voice_pipeline,
-                        fast_chat_talker,
-                    )
-                    from aether_engine.voice.vad import EndpointerConfig
-
-                    async def _persist_voice_user(text: str, _sid: str = voice_session_id) -> None:
-                        try:
-                            await asyncio.to_thread(
-                                session_store.add_message,
-                                _sid, "user", text)
-                        except Exception as e:  # noqa: BLE001 — best-effort persistence, as START_TASK: a save failure must not lose the turn
-                            logger.error(f"Failed to save voice user message: {e}")
-
-                    async def _persist_voice_assistant(text: str, _sid: str = voice_session_id) -> None:
-                        try:
-                            await asyncio.to_thread(
-                                session_store.add_message,
-                                _sid, "assistant", text)
-                        except Exception as e:  # noqa: BLE001 — best-effort persistence, as task completion: a save failure must not lose the turn
-                            logger.error(f"Failed to save voice assistant message: {e}")
-
-                    async def _voice_turn_error(message: str) -> None:
-                        await _emit_voice_event(Event(
-                            type=EventType.ERROR,
-                            payload={"message": f"Voice reply failed: {message}"},
-                        ))
-
-                    async def _voice_should_escalate(text: str, _provider=voice_provider) -> bool:
-                        """E8-5.1b: the same E1-04 split the typed
-                        path uses — classify_intent decides; chat
-                        stays with the talker, work escalates to
-                        the supervisor graph."""
-                        try:
-                            intent = await classify_intent(text, provider=_provider)
-                        except Exception:  # a routing failure keeps the turn with the talker
-                            logger.debug("voice intent classification failed", exc_info=True)
-                            return False
-                        return not intent.is_chat
-
-                    async def _voice_escalation_launch(text: str, _sid: str = voice_session_id, _provider=voice_provider) -> None:
-                        """Launch (never await) the background job:
-                        the task lane is a separate execution, so
-                        the talker stays free while it runs."""
-                        task = asyncio.ensure_future(
-                            _run_voice_background_task(text, _sid, _provider))
-                        background = voice_state.setdefault("background_tasks", set())
-                        background.add(task)
-                        task.add_done_callback(background.discard)
-
-                    voice_pipeline, voice_error = create_voice_pipeline(
-                        session_id=voice_session_id,
-                        talker=fast_chat_talker(
-                            voice_provider, session_id=voice_session_id),
-                        emit=_emit_voice_event,
-                        on_user_final=_persist_voice_user,
-                        on_assistant_final=_persist_voice_assistant,
-                        on_turn_error=_voice_turn_error,
-                        escalation_classifier=_voice_should_escalate,
-                        on_escalation=_voice_escalation_launch,
-                        # H3: the speech config is read HERE, at
-                        # session start — a mid-session change is
-                        # picked up by the NEXT session only (P3(a)).
-                        stt_model=cfg.speech_stt_model,
-                        tts_voice=cfg.speech_tts_voice,
-                        endpointer_config=EndpointerConfig(
-                            speech_threshold=cfg.vad_threshold,
-                            silence_duration_ms=cfg.silence_duration_ms,
-                            smart_turn_sensitivity=cfg.smart_turn_sensitivity,
-                        ),
-                    )
-                    if voice_pipeline is not None:
-                        try:
-                            webrtc_config = await voice_pipeline.start()
-                        except VoiceUnavailableError as e:
-                            voice_error = str(e)
-                            voice_pipeline = None
-                if voice_pipeline is not None:
-                    voice_state["pipeline"] = voice_pipeline
-                    voice_state["task"] = asyncio.ensure_future(
-                        _run_voice_pipeline(voice_pipeline))
-
-                    # F-12a: the engine's own ICE candidates trickle
-                    # back to the renderer as VOICE_RTC_ICE pushes.
-                    async def _push_rtc_ice(candidate, _sid=voice_session_id):
-                        await _emit_voice_event(Event(
-                            type=EventType.VOICE_RTC_ICE,
-                            payload={
-                                "session_id": _sid,
-                                "candidate": candidate,
-                            },
-                        ))
-
-                    voice_pipeline.set_rtc_ice_listener(_push_rtc_ice)
-                await ws.send_text(Event(
-                    type=EventType.VOICE_SESSION_START_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "ok": voice_pipeline is not None,
-                        "session_id": voice_session_id,
-                        "webrtc_config": webrtc_config,
-                        "error": voice_error,
-                    },
-                ).to_json())
+                # Off the receive loop (see _send_voice_session_
+                # start_result): opening the stages can load the
+                # speech models and take seconds (RUX-B-09). The
+                # start is chained with session stops (and other
+                # starts) so their relative order is preserved.
+                _enqueue_voice_op(_send_voice_session_start_result(
+                    req_id, dict(msg.payload)))
 
             elif msg.type == EventType.VOICE_SESSION_STOP_REQUEST:
-                await _stop_voice_session()
-                await ws.send_text(Event(
-                    type=EventType.VOICE_SESSION_STOP_RESPONSE,
-                    request_id=req_id,
-                    payload={"ok": True},
-                ).to_json())
+                # Chained with session starts (see _enqueue_voice_op):
+                # a stop sent while a start is still opening lands
+                # after it, never before it (RUX-B-09).
+                _enqueue_voice_op(_send_voice_session_stop_result(req_id))
 
             elif msg.type == EventType.VOICE_PLAYBACK_PROGRESS:
                 # N09: the renderer's playback report for the live
@@ -5460,52 +5914,29 @@ async def ws_tasks(ws: WebSocket):
                     ).to_json())
 
             elif msg.type == EventType.DICTATION_CHUNK_REQUEST:
-                stt = _dictation_stt()
-                reason = stt.unavailable_reason()
-                if reason is not None:
-                    await ws.send_text(Event(
-                        type=EventType.DICTATION_CHUNK_RESPONSE,
-                        request_id=req_id,
-                        payload={"ok": False, "text": "", "is_final": False, "error": f"voice unavailable: {reason}"},
-                    ).to_json())
-                else:
-                    raw_b64 = msg.payload.get("audio") or ""
-                    sample_rate = int(msg.payload.get("sample_rate") or 16000)
-                    is_final = bool(msg.payload.get("is_final", False))
-                    try:
-                        audio_bytes = base64.b64decode(raw_b64)
-                        stt = await _open_dictation_stt()
-                        text = await stt.transcribe(audio_bytes, sample_rate=sample_rate)
-                        await ws.send_text(Event(
-                            type=EventType.DICTATION_CHUNK_RESPONSE,
-                            request_id=req_id,
-                            payload={"ok": True, "text": text, "is_final": is_final, "error": None},
-                        ).to_json())
-                    except Exception as e:  # noqa: BLE001
-                        await ws.send_text(Event(
-                            type=EventType.DICTATION_CHUNK_RESPONSE,
-                            request_id=req_id,
-                            payload={"ok": False, "text": "", "is_final": is_final, "error": str(e)},
-                        ).to_json())
+                # Off the receive loop, but chained in arrival
+                # order (see _enqueue_dictation): each chunk's
+                # transcription can take seconds, and a later chunk
+                # must never be applied before an earlier one
+                # (RUX-B-09). The engine snapshot + availability
+                # check stay here, at receipt, as before.
+                _dictation_engine = _dictation_stt()
+                _enqueue_dictation(_send_dictation_chunk_result(
+                    req_id,
+                    _dictation_engine.unavailable_reason(),
+                    msg.payload.get("audio") or "",
+                    int(msg.payload.get("sample_rate") or 16000),
+                    bool(msg.payload.get("is_final", False))))
 
             elif msg.type == EventType.DICTATION_STOP_REQUEST:
-                raw_b64 = msg.payload.get("audio")
-                sample_rate = int(msg.payload.get("sample_rate") or 16000)
-                text = ""
-                stop_error: str | None = None
-                if raw_b64:
-                    try:
-                        stt = await _open_dictation_stt()
-                        audio_bytes = base64.b64decode(raw_b64)
-                        text = await stt.transcribe(audio_bytes, sample_rate=sample_rate)
-                    except Exception as e:  # noqa: BLE001 — S4-M7: a failed final transcription must be distinguishable from silence
-                        logger.warning(f"Dictation stop transcribe error: {e}")
-                        stop_error = str(e)
-                await ws.send_text(Event(
-                    type=EventType.DICTATION_STOP_RESPONSE,
-                    request_id=req_id,
-                    payload={"ok": stop_error is None, "text": text if stop_error is None else "", "error": stop_error},
-                ).to_json())
+                # The final transcription joins the same chain as
+                # the chunks (see _enqueue_dictation), so the stop
+                # response can never overtake a chunk response
+                # (RUX-B-09).
+                _enqueue_dictation(_send_dictation_stop_result(
+                    req_id,
+                    msg.payload.get("audio"),
+                    int(msg.payload.get("sample_rate") or 16000)))
 
             elif msg.type == EventType.READ_ALOUD_START_REQUEST:
                 await _stop_read_aloud()
@@ -5571,6 +6002,8 @@ async def ws_tasks(ws: WebSocket):
     except WebSocketDisconnect:
         logger.info(f"Client disconnected from {ip}:{port}")
         _unsubscribe_media_events()
+        if task_start_tail and not task_start_tail.done():
+            task_start_tail.cancel()
         if task_runner and not task_runner.done():
             task_runner.cancel()
         await _stop_voice_session()
@@ -5581,6 +6014,8 @@ async def ws_tasks(ws: WebSocket):
     except Exception as e:  # noqa: BLE001 — top-level socket boundary: any session failure is logged and the task is cancelled, never propagated
         logger.error(f"WebSocket session error: {e}")
         _unsubscribe_media_events()
+        if task_start_tail and not task_start_tail.done():
+            task_start_tail.cancel()
         if task_runner and not task_runner.done():
             task_runner.cancel()
         await _stop_voice_session()

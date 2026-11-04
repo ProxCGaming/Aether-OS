@@ -563,7 +563,11 @@ class ModelHubDownloads:
                                f"Face cache — nothing to delete.",
                 }
             try:
-                shutil.rmtree(repo_dir)
+                # RUX-B-08: the tree removal is synchronous bulk
+                # work inside an async delete — run it on a worker
+                # thread so a large cached repo cannot stall the
+                # caller's event loop.
+                await asyncio.to_thread(shutil.rmtree, repo_dir)
             except OSError as e:
                 return {
                     "success": False,
