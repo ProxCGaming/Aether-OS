@@ -44,6 +44,15 @@ const FAMILY_LABELS = {
 
 const SOURCE_LABELS = { hf: 'Hugging Face', ollama: 'Ollama' };
 
+// Daemon-typed model kinds (engine /api/show capabilities): what a
+// downloaded model is FOR, as opposed to the hub family taxonomy.
+const TYPE_LABELS = {
+  chat: 'Chat',
+  embedding: 'Embedding',
+  both: 'Chat + Embedding',
+  unknown: 'Type unknown',
+};
+
 const RUNNABILITY_BADGES = {
   'in-app': { label: 'In-app', color: '#34d399', bg: 'rgba(16, 185, 129, 0.15)', border: 'rgba(16, 185, 129, 0.3)' },
   ollama: { label: 'Via Ollama', color: '#f5b544', bg: 'rgba(245, 181, 52, 0.12)', border: 'rgba(245, 181, 52, 0.35)' },
@@ -87,7 +96,7 @@ const downloadButtonStyle = {
   justifyContent: 'center', alignItems: 'center', gap: '8px', transition: 'all 0.2s',
 };
 
-export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages = [], defaultProvider = '', defaultModel = '' }) {
+export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages = [], defaultProvider = '', defaultModel = '', currentEmbedder = '' }) {
   const [source, setSource] = useState('hf');
   const [searchQuery, setSearchQuery] = useState('');
   const [family, setFamily] = useState('all');
@@ -110,6 +119,14 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
   // MODEL_DEFAULT_CHANGED broadcasts.
   const [activeDefault, setActiveDefault] = useState({ provider: defaultProvider, model: defaultModel });
 
+  // The engine's configured embedder (UserConfig.embedding_model,
+  // seeded by SettingsPanel from the applied config) and the
+  // in-flight "Use as embedder" switch, confirmed by the engine's
+  // WORKSPACE_INDEX_CONFIG_RESPONSE before the row claims it.
+  const [activeEmbedder, setActiveEmbedder] = useState(currentEmbedder);
+  const [embedderSwitchPending, setEmbedderSwitchPending] = useState('');
+  const embedderRequestRef = useRef('');
+
   // request_id -> one-shot response handler for the hub pairs.
   const pendingRef = useRef(new Map());
   // rowKey -> engine download keys, learned from
@@ -121,6 +138,15 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
   useEffect(() => {
     setActiveDefault({ provider: defaultProvider, model: defaultModel });
   }, [defaultProvider, defaultModel]);
+
+  // Re-seed the active embedder when the applied config's value
+  // lands/changes (render-time adjustment, React's documented
+  // pattern for prop-derived state).
+  const [embedderSeed, setEmbedderSeed] = useState(currentEmbedder);
+  if (currentEmbedder !== embedderSeed) {
+    setEmbedderSeed(currentEmbedder);
+    setActiveEmbedder(currentEmbedder);
+  }
 
   // RUX-A-19: every send in this tab used to route through one of
   // two readyState-gated helpers whose discarded/null result every
@@ -177,6 +203,10 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
   const pendingCancelFor = useCallback((engineKey) => pendingHubEntry(
     'LOCAL_MODEL_DOWNLOAD_CANCEL',
     (p) => p.model === engineKey
+  ), [pendingHubEntry]);
+  const pendingEmbedderFor = useCallback((row) => pendingHubEntry(
+    'WORKSPACE_INDEX_CONFIG_REQUEST',
+    (p) => p.embedder === row.id
   ), [pendingHubEntry]);
 
   const refreshDownloaded = useCallback(() => {
@@ -246,6 +276,14 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
           }));
         } else if (data.type === 'MODEL_DEFAULT_CHANGED') {
           setActiveDefault({ provider: payload.provider || '', model: payload.model || '' });
+        } else if (data.type === 'WORKSPACE_INDEX_CONFIG_RESPONSE') {
+          // The embedder switch is confirmed only now — the row
+          // must not claim "Embedder" from the click alone.
+          if (payload.ok && embedderRequestRef.current) {
+            setActiveEmbedder(embedderRequestRef.current);
+          }
+          embedderRequestRef.current = '';
+          setEmbedderSwitchPending('');
         } else if (data.type === 'TASK_COMPLETED' && payload.model) {
           clearProgress(payload.model);
           refreshDownloaded();
@@ -343,6 +381,24 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
   // and the MODEL_DEFAULT_CHANGED broadcast confirms it for real.
   const handleSetActive = (modelName) => {
     sendAction('MODEL_SET_DEFAULT', { provider: 'ollama', model: modelName });
+  };
+
+  // Set a downloaded embedding model as THE embedder (episodic
+  // memory + workspace index share it) through the engine's
+  // existing embedder config flow — the same
+  // WORKSPACE_INDEX_CONFIG_REQUEST the Workspace Indexing panel's
+  // picker sends: it persists UserConfig.embedding_model and
+  // invalidates vectors stamped by the old embedder. The click
+  // only starts the switch; the response marks it active.
+  const handleUseAsEmbedder = (modelName) => {
+    embedderRequestRef.current = modelName;
+    const disposition = sendAction('WORKSPACE_INDEX_CONFIG_REQUEST', { embedder: modelName });
+    if (disposition !== 'queued') {
+      setEmbedderSwitchPending(modelName);
+    }
+    // Queued: no local pending flag — the button derives "Embedder
+    // queued" from the real queue (pendingMessages), and the
+    // flushed request's response confirms the switch for real.
   };
 
   // ---- detail ----------------------------------------------------
@@ -578,6 +634,14 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
     // RUX-A-19: queued states for this row, from the real queue.
     const setActiveQueued = Boolean(pendingSetActiveFor(row));
     const deleteQueued = Boolean(pendingDeleteFor(row));
+    // Embedder eligibility: the daemon said this model can embed
+    // (type), or the hub family already classes it as an embedding
+    // model. The active one is the engine's configured embedder.
+    const canEmbed = row.source === 'ollama'
+      && (row.type === 'embedding' || row.type === 'both' || row.family === 'embedding');
+    const isEmbedder = canEmbed && activeEmbedder === row.id;
+    const embedderQueued = Boolean(pendingEmbedderFor(row));
+    const embedderPending = embedderSwitchPending === row.id;
     return (
       <div
         key={rowKey(row)}
@@ -589,12 +653,38 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
             <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary, #fff)' }}>{row.name}</span>
             <span style={chipStyle}>{SOURCE_LABELS[row.source] || row.source}</span>
             <span style={chipStyle}>{FAMILY_LABELS[row.family] || 'Other'}</span>
+            {row.type && (
+              <span data-testid={`downloaded-type-${rowKey(row)}`} style={{ ...chipStyle, color: row.type === 'embedding' || row.type === 'both' ? '#93c5fd' : chipStyle.color }}>
+                {TYPE_LABELS[row.type] || row.type}
+              </span>
+            )}
+            {row.params && <span style={chipStyle}>{row.params} Params</span>}
+            {row.quant && <span style={chipStyle}>{row.quant}</span>}
             {sizeText && <span style={{ fontSize: '12px', color: 'var(--text-secondary, #9090a0)' }}>{sizeText}</span>}
           </div>
           {row.path && (
             <div style={{ fontSize: '11px', color: 'var(--text-secondary, #9090a0)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '4px' }} title={row.path}>{row.path}</div>
           )}
         </div>
+        {canEmbed && (
+          isEmbedder ? (
+            <button disabled data-testid={`embedder-active-${rowKey(row)}`} title="Currently the embedding model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(59, 130, 246, 0.15)', color: '#93c5fd', border: '1px solid rgba(59, 130, 246, 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+              Embedder
+            </button>
+          ) : embedderQueued ? (
+            <button disabled data-testid={`embedder-queued-${rowKey(row)}`} title="Embedder switch queued — will apply when the engine reconnects" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(251, 191, 36, 0.12)', color: '#fbbf24', border: '1px solid rgba(251, 191, 36, 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+              Embedder Queued
+            </button>
+          ) : embedderPending ? (
+            <button disabled data-testid={`embedder-pending-${rowKey(row)}`} title="Waiting for the engine to confirm the embedder switch" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(255,255,255,0.06)', color: 'var(--text-secondary, #9090a0)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+              Setting…
+            </button>
+          ) : (
+            <button onClick={() => handleUseAsEmbedder(row.id)} data-testid={`use-as-embedder-${rowKey(row)}`} title="Use this model for memory + workspace embeddings" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(59, 130, 246, 0.15)', color: '#93c5fd', border: '1px solid rgba(59, 130, 246, 0.35)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+              Use as Embedder
+            </button>
+          )
+        )}
         {row.source === 'ollama' && (
           isActive ? (
             <button disabled title="Currently the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>

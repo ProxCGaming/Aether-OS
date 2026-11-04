@@ -276,6 +276,27 @@ export default function MemoryManagement() {
                   {episodesMeta.embedding_stats.last_failure.error ? ` — ${episodesMeta.embedding_stats.last_failure.error}` : ''}
                 </div>
               )}
+              {(() => {
+                // The engine's startup embedder verdict: when the
+                // embedder is unavailable, say so HERE, where the
+                // user sees embedding health — embeddings silently
+                // never happening read as "memory is broken".
+                const embedderStatus = episodesMeta.embedding_stats?.embedder_status;
+                if (!embedderStatus || (embedderStatus.state !== 'ollama_off' && embedderStatus.state !== 'pull_failed')) return null;
+                const reason = embedderStatus.state === 'ollama_off'
+                  ? "Ollama isn't running"
+                  : 'the model could not be downloaded';
+                return (
+                  <div
+                    data-testid="embedder-unavailable-note"
+                    style={{ color: '#fbbf24', background: 'rgba(251, 191, 36, 0.08)', border: '1px solid rgba(251, 191, 36, 0.25)', borderRadius: '8px', padding: '8px 12px', marginTop: '8px', fontSize: '13px', lineHeight: '1.5' }}
+                  >
+                    ⚠ Embedder unavailable — {reason}
+                    {embedderStatus.model ? ` (model: ${embedderStatus.model})` : ''}.
+                    Memory search is paused; nothing is lost — your episodes are stored and will be embedded once the embedder is available.
+                  </div>
+                );
+              })()}
             </div>
           )}
           <div style={{ display: 'flex', gap: '24px', height: '600px' }}>

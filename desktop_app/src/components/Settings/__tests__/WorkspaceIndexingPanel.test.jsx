@@ -178,6 +178,43 @@ describe('WorkspaceIndexingPanel Component', () => {
     expect(resumeMsg.payload.pause).toBe(false);
   });
 
+  test('embedder picker is fed from downloaded embedding models', async () => {
+    const { wsRef, simulateMessage } = makeWsRef();
+    render(<WorkspaceIndexingPanel wsRef={wsRef} initialWorkspace={mockWorkspace} />);
+
+    // The panel asks the engine for the local model list on mount.
+    const sent = wsRef.current.send.mock.calls.map((c) => JSON.parse(c[0]));
+    expect(sent.some((m) => m.type === 'LOCAL_MODEL_LIST_REQUEST')).toBe(true);
+
+    act(() => {
+      simulateMessage({
+        type: 'WORKSPACE_INDEX_STATUS_RESPONSE',
+        payload: mockStatusPayload,
+      });
+    });
+    act(() => {
+      simulateMessage({
+        type: 'LOCAL_MODEL_LIST_RESPONSE',
+        payload: {
+          models: [
+            { name: 'nomic-embed-text:latest', downloaded: true, type: 'embedding' },
+            { name: 'llama3:8b', downloaded: true, type: 'chat' },
+            { name: 'qwen3-embedding:4b', downloaded: false, type: 'embedding' },
+          ],
+        },
+      });
+    });
+
+    const embedderSelect = screen.getByLabelText(/Embedding Model/i);
+    const optionLabels = Array.from(embedderSelect.querySelectorAll('option')).map((o) => o.textContent);
+    // Built-ins remain, the downloaded embedding model joins them,
+    // chat models and not-downloaded models do not.
+    expect(optionLabels.some((t) => t.includes('qwen3-embedding:0.6b'))).toBe(true);
+    expect(optionLabels.some((t) => t.includes('nomic-embed-text:latest'))).toBe(true);
+    expect(optionLabels.some((t) => t.includes('llama3:8b'))).toBe(false);
+    expect(embedderSelect.querySelectorAll('option').length).toBe(3);
+  });
+
   test('embedder switch displays warning modal before wipe and does not send config on cancel', async () => {
     const { wsRef, simulateMessage } = makeWsRef();
     render(<WorkspaceIndexingPanel wsRef={wsRef} initialWorkspace={mockWorkspace} />);

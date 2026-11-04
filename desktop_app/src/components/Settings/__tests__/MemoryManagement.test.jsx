@@ -522,4 +522,62 @@ describe('MemoryManagement Component', () => {
       expect(screen.getByText(/TimeoutError/)).toBeInTheDocument();
     });
   });
+
+  test('shows the embedder-unavailable note when the startup verdict says ollama_off', async () => {
+    render(<MemoryManagement />);
+
+    act(() => {
+      simulateMessage({
+        type: 'MEMORY_EPISODES_RESPONSE',
+        payload: {
+          episodes: [],
+          backend: 'native',
+          embedding_stats: {
+            episodes: 5,
+            embedded: 0,
+            pending: 5,
+            model: 'ollama/qwen3-embedding:0.6b',
+            last_failure: null,
+            embedder_status: { model: 'qwen3-embedding:0.6b', state: 'ollama_off', detail: 'Ollama is not running' }
+          }
+        }
+      });
+    });
+
+    await waitFor(() => {
+      const note = screen.getByTestId('embedder-unavailable-note');
+      expect(note).toBeInTheDocument();
+      expect(note.textContent).toMatch(/Embedder unavailable/);
+      expect(note.textContent).toMatch(/Ollama isn't running/);
+      expect(note.textContent).toMatch(/qwen3-embedding:0\.6b/);
+      expect(note.textContent).toMatch(/nothing is lost/i);
+    });
+  });
+
+  test('no embedder note when the embedder is ready', async () => {
+    render(<MemoryManagement />);
+
+    act(() => {
+      simulateMessage({
+        type: 'MEMORY_EPISODES_RESPONSE',
+        payload: {
+          episodes: [],
+          backend: 'native',
+          embedding_stats: {
+            episodes: 5,
+            embedded: 5,
+            pending: 0,
+            model: 'ollama/qwen3-embedding:0.6b',
+            last_failure: null,
+            embedder_status: { model: 'qwen3-embedding:0.6b', state: 'ready', detail: '' }
+          }
+        }
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Embeddings: 5\/5 embedded/)).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('embedder-unavailable-note')).not.toBeInTheDocument();
+  });
 });
