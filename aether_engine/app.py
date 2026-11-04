@@ -69,6 +69,42 @@ async def _discover_startup_models():
         logger.warning(f"Startup model discovery failed: {e}")
 
 
+async def _ensure_embedder_then_backfill():
+    """Embedder lifecycle gate for the startup episodic backfill.
+
+    The backfill embeds through the configured embedder, a local
+    Ollama model — and until now nothing checked that the model (or
+    Ollama itself) exists before the backfill paid the 30s embedding
+    timeout against a dead endpoint (the owner's PC: Ollama off,
+    ~30s burned at every launch, embeddings silently absent).
+    ensure_embedder decides in ~2s when Ollama is off, pulls the
+    model when the daemon is up but the model is missing, and the
+    verdict is recorded in episodic's embedder status (surfaced to
+    the Memory settings via embedding_stats). An unavailable
+    embedder skips this launch's backfill with ONE clear warning
+    instead of a queue of timed-out attempts, and arms the
+    embedding circuit breaker so per-chat attempts fail fast too.
+    """
+    from aether_engine.memory import episodic
+    from aether_engine.models.local_models import ensure_embedder
+
+    try:
+        model = episodic.resolve_embedder(engine_state.user_config)
+        status = await ensure_embedder(engine_state.ollama_manager, model)
+    except Exception as e:  # noqa: BLE001 — startup boundary: the gate is best-effort; a failure here must not lose the backfill's own failure reporting or surface as an unretrieved task exception
+        logger.warning(f"Embedder ensure failed to run: {e}")
+        await episodic.backfill_episodic_embeddings(limit=200)
+        return
+    if status["state"] in ("ollama_off", "pull_failed"):
+        episodic.note_embedder_unavailable(status)
+        logger.warning(
+            f"Embedder unavailable ({status['state']}): episodic backfill "
+            f"skipped this launch — model {model}: {status['detail']}")
+        return
+    episodic.set_embedder_status(status)
+    await episodic.backfill_episodic_embeddings(limit=200)
+
+
 async def lifespan(_app: FastAPI):
     global _startup_discovery_task
     # Epic 10, E10-04: unhandled exceptions land in ~/.aether/logs/crash.log.
@@ -120,14 +156,17 @@ async def lifespan(_app: FastAPI):
     # the embedding model was unavailable. Detached and bounded —
     # startup never waits on it, and failures are audit-logged by
     # the episodic store itself. Native backend only: external
-    # backends own their embedding story.
+    # backends own their embedding story. The task now runs the
+    # embedder lifecycle gate first (_ensure_embedder_then_backfill):
+    # the configured embedder is verified — and pulled if Ollama is
+    # up but the model missing — before any embedding is attempted,
+    # and an unavailable embedder skips the backfill for this launch
+    # instead of burning the 30s embedding timeout per attempt.
     try:
         if (engine_state.user_config.memory_backend or "native") == "native":
             import asyncio
 
-            from aether_engine.memory.episodic import backfill_episodic_embeddings
-
-            asyncio.create_task(backfill_episodic_embeddings(limit=200))
+            asyncio.create_task(_ensure_embedder_then_backfill())
     except Exception as e:  # noqa: BLE001 — startup boundary: backfill is best-effort and must never block engine startup
         logger.warning(f"Episodic embedding backfill failed to start: {e}")
 

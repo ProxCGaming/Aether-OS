@@ -142,11 +142,14 @@ async def test_tokenless_query_degrades_to_no_match(isolated_episodic):
 @pytest.fixture
 def closed_breaker():
     previous = episodic._embed_unavailable_until
+    previous_suspect = episodic._embed_endpoint_suspect
     episodic._embed_unavailable_until = 0.0
+    episodic._embed_endpoint_suspect = False
     try:
         yield
     finally:
         episodic._embed_unavailable_until = previous
+        episodic._embed_endpoint_suspect = previous_suspect
 
 
 def _real_timeout_exceptions():

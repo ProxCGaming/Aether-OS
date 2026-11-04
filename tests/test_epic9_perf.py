@@ -22,7 +22,10 @@ from aether_engine.memory import episodic
 
 @pytest.fixture(autouse=True)
 def _closed_breaker():
-    with patch("aether_engine.memory.episodic._embed_unavailable_until", 0.0):
+    # The fail-fast probe's suspect flag is breaker-adjacent process
+    # state; it gets the same isolation as the cooldown stamp.
+    with patch("aether_engine.memory.episodic._embed_unavailable_until", 0.0), \
+            patch("aether_engine.memory.episodic._embed_endpoint_suspect", False):
         yield
 
 

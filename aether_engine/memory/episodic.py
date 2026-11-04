@@ -378,12 +378,57 @@ _BREAKER_ERROR_NAMES = frozenset({
 })
 
 
+def _is_connection_class_error(error: Exception) -> bool:
+    """Whether ``error`` is a connection/timeout-class failure —
+    the breaker's tripping predicate, factored out so the fail-fast
+    probe below judges by exactly the same rule."""
+    return isinstance(error, (ConnectionError, TimeoutError)) or any(
+        cls.__name__ in _BREAKER_ERROR_NAMES for cls in type(error).__mro__
+    )
+
+
 def _trip_embed_breaker(error: Exception) -> None:
     global _embed_unavailable_until
-    if isinstance(error, (ConnectionError, TimeoutError)) or any(
-        cls.__name__ in _BREAKER_ERROR_NAMES for cls in type(error).__mro__
-    ):
+    if _is_connection_class_error(error):
         _embed_unavailable_until = time.monotonic() + _EMBED_BREAKER_COOLDOWN_S
+
+
+# Fail-fast connect bound. The breaker stops REPEAT attempts, but
+# the first attempt after each cooldown against a still-dead
+# endpoint used to pay the full 30s wait_for again: connection
+# refused is fast, but a firewalled endpoint (the owner's Windows
+# PC: Defender silently drops the SYN) blackholes the connect and
+# only the 30s bound ends it. LiteLLM cannot bound the connect
+# phase for the Ollama provider — a split httpx.Timeout passed as
+# its ``timeout`` kwarg is ignored on that path (measured: with a
+# hung endpoint the call was still running at 40s despite
+# connect=2/read=5, and only an outer wait_for ended it). So once an
+# attempt has actually failed connection-class in this process the
+# endpoint is "suspect", and later attempts first probe the TCP
+# connect with a 2s bound: probe failure re-trips the breaker and
+# fails the attempt in ~2s; probe success hands over to the normal
+# call, whose 30s budget still covers a live-but-slow daemon (cold
+# model load). A success clears the suspicion.
+_EMBED_CONNECT_PROBE_SECONDS = 2.0
+_embed_endpoint_suspect = False
+
+
+async def _probe_embed_endpoint() -> bool:
+    """TCP-connect probe of the local Ollama endpoint, bounded at
+    _EMBED_CONNECT_PROBE_SECONDS. True when something accepts."""
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", 11434),
+            timeout=_EMBED_CONNECT_PROBE_SECONDS,
+        )
+    except Exception:  # noqa: BLE001 — any connect failure means unreachable; the caller reports it as a connection failure
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except Exception:  # noqa: BLE001, S110 — the probe already has its answer; close errors are noise
+        pass
+    return True
 
 
 async def _embed_text(text: str, task_id: str | None = None,
@@ -404,7 +449,7 @@ async def _embed_text(text: str, task_id: str | None = None,
     ``config`` kwarg serves the public embed_text wrapper, whose
     callers (the prose indexer) may carry an explicit override.
     """
-    global _embed_unavailable_until
+    global _embed_unavailable_until, _embed_endpoint_suspect
     if _embed_breaker_open():
         # Degraded mode (Epic 9): the endpoint recently proved
         # unreachable; skip the doomed attempt. Not audit-logged per
@@ -412,6 +457,21 @@ async def _embed_text(text: str, task_id: str | None = None,
         logger.debug("Embedding skipped: endpoint in circuit-breaker cooldown")
         return None
     model = litellm_embedding_model(config)
+    # Fail-fast probe (see _EMBED_CONNECT_PROBE_SECONDS): the
+    # endpoint failed connection-class earlier in this process, so
+    # bound the reconnect at 2s instead of letting a dead endpoint
+    # cost the full 30s embedding budget per attempt.
+    if (
+        _embed_endpoint_suspect
+        and model.startswith("ollama/")
+        and not await _probe_embed_endpoint()
+    ):
+        error = ConnectionError(
+            "embedding endpoint 127.0.0.1:11434 unreachable "
+            "(connect probe timed out / refused)")
+        _trip_embed_breaker(error)
+        _log_embedding_failure(error, task_id, context, model=model)
+        return None
     litellm = _load_litellm()  # Epic 9: deferred import, bound locally
     try:
         response = await asyncio.wait_for(
@@ -428,13 +488,17 @@ async def _embed_text(text: str, task_id: str | None = None,
             timeout=EMBEDDING_TIMEOUT_SECONDS
         )
         _embed_unavailable_until = 0.0
+        _embed_endpoint_suspect = False
         _record_embedding_usage(response, model)
         return response.data[0]["embedding"]
     except TimeoutError as e:
+        _embed_endpoint_suspect = True
         _trip_embed_breaker(e)
         _log_embedding_failure(e, task_id, context, model=model)
         return None
     except Exception as e:  # noqa: BLE001 — embedding is best-effort: any failure means "not embedded", never a raised error
+        if _is_connection_class_error(e):
+            _embed_endpoint_suspect = True
         _trip_embed_breaker(e)
         _log_embedding_failure(e, task_id, context, model=model)
         return None
@@ -520,6 +584,46 @@ def _log_embedding_failure(error: Exception, task_id: str | None,
 
 _LAST_EMBEDDING_FAILURE: dict[str, Any] | None = None
 
+# Embedder lifecycle status, recorded by the startup ensure pass
+# (aether_engine.models.local_models.ensure_embedder, wired in
+# app.py) and surfaced through embedding_stats() so the Memory
+# settings can tell the user the truth — "Ollama isn't running" —
+# instead of embeddings silently never happening. Before any ensure
+# pass runs (tests, non-startup importers) the state is "unknown".
+_EMBEDDER_STATUS: dict[str, Any] = {
+    "model": DEFAULT_EMBEDDER, "state": "unknown", "detail": "",
+}
+
+
+def set_embedder_status(status: dict[str, Any]) -> None:
+    """Record the embedder lifecycle verdict (ensure_embedder's
+    return value: {state, model, detail})."""
+    global _EMBEDDER_STATUS
+    _EMBEDDER_STATUS = {
+        "model": str(status.get("model") or DEFAULT_EMBEDDER),
+        "state": str(status.get("state") or "unknown"),
+        "detail": str(status.get("detail") or ""),
+    }
+
+
+def embedder_status() -> dict[str, Any]:
+    """The last recorded embedder lifecycle status (a copy)."""
+    return dict(_EMBEDDER_STATUS)
+
+
+def note_embedder_unavailable(status: dict[str, Any]) -> None:
+    """Record an unavailable embedder AND make embedding attempts
+    fail fast for the rest of the cooldown: the breaker trips on a
+    synthetic connection failure and the endpoint is marked suspect,
+    so per-chat attempts skip (breaker) or probe at 2s (after the
+    cooldown) instead of paying the 30s timeout against an endpoint
+    startup already proved dead."""
+    global _embed_endpoint_suspect
+    set_embedder_status(status)
+    _embed_endpoint_suspect = True
+    _trip_embed_breaker(ConnectionError(
+        f"embedder unavailable at startup: {status.get('state')}"))
+
 
 def embedding_stats() -> dict[str, Any]:
     """Epic 4, E4-04: embedding health for Diagnostics — how many
@@ -548,6 +652,11 @@ def embedding_stats() -> dict[str, Any]:
         # identical to EMBEDDING_MODEL under the default config.
         "model": litellm_embedding_model(),
         "last_failure": _LAST_EMBEDDING_FAILURE,
+        # Embedder lifecycle verdict from the startup ensure pass —
+        # the Memory settings read this to say "Ollama isn't
+        # running" out loud instead of leaving embeddings silently
+        # absent.
+        "embedder_status": embedder_status(),
     }
 
 def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:

@@ -358,6 +358,7 @@ class TestEmbeddingRecords:
 
         monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
         monkeypatch.setattr(episodic, "_embed_unavailable_until", 0.0)
+        monkeypatch.setattr(episodic, "_embed_endpoint_suspect", False)
 
         vector = await episodic._embed_text(
             "a red bicycle", config=UserConfig())
@@ -386,6 +387,7 @@ class TestEmbeddingRecords:
 
         monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
         monkeypatch.setattr(episodic, "_embed_unavailable_until", 0.0)
+        monkeypatch.setattr(episodic, "_embed_endpoint_suspect", False)
 
         vector = await episodic._embed_text(
             "a red bicycle", config=UserConfig())

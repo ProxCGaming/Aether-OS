@@ -45,6 +45,9 @@ def isolated_dbs(tmp_path):
         # Epic 9: the embedding circuit breaker is process state; each
         # simulated-failure test starts from a closed breaker.
         patch("aether_engine.memory.episodic._embed_unavailable_until", 0.0),
+        # The fail-fast probe's suspect flag is breaker-adjacent
+        # process state; same isolation.
+        patch("aether_engine.memory.episodic._embed_endpoint_suspect", False),
         patch("aether_engine.memory.episodic._audit_logger.log_event") as mock_log,
     ):
         yield test_db, test_emb_db, mock_log
@@ -180,6 +183,7 @@ async def test_embed_text_timeout_is_30_seconds():
         # Epic 9: an earlier failure test may have tripped the
         # embedding circuit breaker; this test needs a closed one.
         patch("aether_engine.memory.episodic._embed_unavailable_until", 0.0),
+        patch("aether_engine.memory.episodic._embed_endpoint_suspect", False),
         patch("aether_engine.memory.episodic.asyncio.wait_for", new=fake_wait_for),
     ):
         result = await _embed_text("hello")
