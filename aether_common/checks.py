@@ -10,6 +10,7 @@ cannot drift; only the process execution differs between them.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -46,7 +47,7 @@ def detect_checks(root: Path, commands: dict | None = None) -> list[dict]:
             "kind": "ruff",
             "argv": [ruff, "check", "."] if ruff else [sys.executable, "-m", "ruff", "check", "."],
         })
-        has_tests = (root / "tests").is_dir() or any(root.rglob("test_*.py"))
+        has_tests = (root / "tests").is_dir() or _has_test_files(root)
         if has_tests:
             checks.append({
                 "name": "pytest",
@@ -71,6 +72,34 @@ def detect_checks(root: Path, commands: dict | None = None) -> list[dict]:
             if isinstance(override, (list, tuple)) and override:
                 check["argv"] = [str(part) for part in override]
     return checks
+
+
+#: Directories the test-file probe never descends into (E8-15):
+#: vendored trees and tool caches can hold thousands of files —
+#: including other projects' test_*.py files, which are not this
+#: repo's tests — and walking them on every detect_checks() call
+#: made detection cost proportional to the biggest vendored tree.
+_PRUNED_WALK_DIRS = frozenset({
+    ".git", ".venv", "venv", "node_modules", "__pycache__",
+    ".tox", ".mypy_cache",
+})
+
+
+def _has_test_files(root: Path) -> bool:
+    """True when a real ``test_*.py`` exists under ``root``.
+
+    Bounded walk (E8-15): prunes vendored/cache directories and
+    dot-directories, and stops at the first match instead of
+    enumerating the whole tree the way ``Path.rglob`` did.
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        if any(name.startswith("test_") and name.endswith(".py")
+               for name in filenames):
+            return True
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _PRUNED_WALK_DIRS and not d.startswith(".")]
+    return False
 
 
 def _count(pattern: str, text: str) -> int:
