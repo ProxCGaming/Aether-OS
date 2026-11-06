@@ -79,24 +79,48 @@ export default function ProviderSettings({ providers = [], health = {}, provider
             setValidationMsg(prev => ({ ...prev, [provider]: data.payload.error || data.payload.message || 'Validation failed' }));
           }
         } else if (data.type === 'PROVIDER_SAVE_RESPONSE') {
-          const provider = data.payload.provider;
-          // The save was clicked under the form's own key (the real
-          // provider name, or 'custom_openai' for a custom save whose
-          // response carries the generated name) — clear both.
-          clearSaveTracking(provider);
-          clearSaveTracking('custom_openai');
-          const isCustomSave = provider.startsWith('custom_');
-          const discErr = data.payload.discovery_error;
-          const discErrText = discErr
-            ? ` Model list failed (${discErr.code ? 'HTTP ' + discErr.code : 'no response'}): ${discErr.message}`
-            : '';
-          if (data.payload.success) {
-            setValidationState(prev => ({ ...prev, [provider]: 'success', ...(isCustomSave ? { custom_openai: 'success' } : {}) }));
-            setValidationMsg(prev => ({ ...prev, [provider]: 'Saved!' + discErrText, ...(isCustomSave ? { custom_openai: 'Saved!' + discErrText } : {}) }));
-            setTimeout(() => setValidationState(prev => ({ ...prev, [provider]: null, ...(isCustomSave ? { custom_openai: null } : {}) })), 3000);
-          } else {
-            setValidationState(prev => ({ ...prev, [provider]: 'error', ...(isCustomSave ? { custom_openai: 'error' } : {}) }));
-            setValidationMsg(prev => ({ ...prev, [provider]: data.payload.error || 'Failed to save', ...(isCustomSave ? { custom_openai: data.payload.error || 'Failed to save' } : {}) }));
+          // D2-25: `provider` is the field this branch correlates
+          // on — validate it before use. A reply without one used
+          // to throw on startsWith inside the handler, the catch-all
+          // swallowed it, and the form's save tracking stayed stuck
+          // until the 35 s timer. When exactly one save is in
+          // flight the reply can only belong to it; with none or
+          // several in flight nothing is misattributed and the
+          // timer remains the backstop.
+          let provider = data.payload.provider;
+          if (typeof provider !== 'string' || !provider) {
+            const inFlight = Object.keys(savingRef.current).filter((name) => savingRef.current[name]);
+            provider = inFlight.length === 1 ? inFlight[0] : null;
+          }
+          if (provider) {
+            // The save was clicked under the form's own key (the real
+            // provider name, or 'custom_openai' for a custom save whose
+            // response carries the generated name) — clear both.
+            clearSaveTracking(provider);
+            clearSaveTracking('custom_openai');
+            const isCustomSave = provider.startsWith('custom_');
+            const discErr = data.payload.discovery_error;
+            const discErrText = discErr
+              ? ` Model list failed (${discErr.code ? 'HTTP ' + discErr.code : 'no response'}): ${discErr.message}`
+              : '';
+            if (data.payload.success) {
+              setValidationState(prev => ({ ...prev, [provider]: 'success', ...(isCustomSave ? { custom_openai: 'success' } : {}) }));
+              setValidationMsg(prev => ({ ...prev, [provider]: 'Saved!' + discErrText, ...(isCustomSave ? { custom_openai: 'Saved!' + discErrText } : {}) }));
+              setTimeout(() => setValidationState(prev => ({ ...prev, [provider]: null, ...(isCustomSave ? { custom_openai: null } : {}) })), 3000);
+              // D2-27: the key now lives in the engine's secret
+              // store — the typed plaintext does not need to sit in
+              // renderer state for the rest of the mount.
+              setKeys(prev => {
+                if (!(provider in prev) && !(isCustomSave && 'custom_openai' in prev)) return prev;
+                const next = { ...prev };
+                delete next[provider];
+                if (isCustomSave) delete next.custom_openai;
+                return next;
+              });
+            } else {
+              setValidationState(prev => ({ ...prev, [provider]: 'error', ...(isCustomSave ? { custom_openai: 'error' } : {}) }));
+              setValidationMsg(prev => ({ ...prev, [provider]: data.payload.error || 'Failed to save', ...(isCustomSave ? { custom_openai: data.payload.error || 'Failed to save' } : {}) }));
+            }
           }
         }
       } catch (e) {

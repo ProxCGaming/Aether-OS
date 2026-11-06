@@ -101,8 +101,11 @@ describe('BrowserPolicyPanel (E8-6.2)', () => {
   });
 
   test('a rejected SET keeps the displayed policy and shows the error', () => {
+    // D2-03: the vehicle is the deletes select — payments no
+    // longer offers a changeable mode from this panel. The
+    // rejection mechanism under test is unchanged.
     const { simulateMessage } = renderPanel();
-    fireEvent.change(screen.getByTestId('browser-policy-mode-payments'), {
+    fireEvent.change(screen.getByTestId('browser-policy-mode-deletes'), {
       target: { value: 'allow_freely' },
     });
     act(() => {
@@ -111,7 +114,7 @@ describe('BrowserPolicyPanel (E8-6.2)', () => {
         payload: { success: false, policy: PRESET, error: 'Unknown mode.' },
       });
     });
-    expect(screen.getByTestId('browser-policy-mode-payments')).toHaveValue('always_confirm');
+    expect(screen.getByTestId('browser-policy-mode-deletes')).toHaveValue('always_confirm');
     expect(screen.getByText('Unknown mode.')).toBeInTheDocument();
   });
 });

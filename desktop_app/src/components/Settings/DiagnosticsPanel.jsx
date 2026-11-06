@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Download, Box } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 import Dropdown from '../../Dropdown';
@@ -30,6 +30,21 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
   const [agents, setAgents] = useState([]);
   const [tools, setTools] = useState([]);
   const [providers, setProviders] = useState([]);
+  // D2-02: the last AGENT_UPDATE refusal, shown in the Agents view
+  // until the next update is confirmed.
+  const [agentUpdateError, setAgentUpdateError] = useState('');
+  // D2-02: per-agent field values as they were BEFORE the first
+  // still-unconfirmed optimistic update. The engine's
+  // AGENT_UPDATE_RESPONSE carries no echoed values, so a refusal
+  // can only roll back to a snapshot taken at send time.
+  const pendingAgentUpdatesRef = useRef({});
+  const rememberAgentSnapshot = (agent, fields) => {
+    const entry = pendingAgentUpdatesRef.current[agent.id] || {};
+    fields.forEach((field) => {
+      if (!(field in entry)) entry[field] = agent[field];
+    });
+    pendingAgentUpdatesRef.current[agent.id] = entry;
+  };
 
   useEffect(() => {
     if (activeMenu === 'MCP') {
@@ -39,6 +54,12 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
     } else if (activeMenu === 'Agents') {
       sendMessage('AGENT_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
       sendMessage('TOOL_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+      // D2-01: the per-agent model picker is built from the
+      // provider list, which used to reach this panel only if a
+      // broadcast happened to pass while it was mounted — socket
+      // messages are live-only, with no replay for a panel opened
+      // later. Request it on mount like every other list here.
+      sendMessage('PROVIDER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
     }
   }, [activeMenu, sendMessage]);
 
@@ -154,6 +175,24 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
           }
         } else if (data.type === 'TOOL_LIST_RESPONSE') {
           setTools(data.payload.tools || []);
+        } else if (data.type === 'AGENT_UPDATE_RESPONSE') {
+          // D2-02: the engine refuses with success:false (unknown
+          // agent, malformed model, unknown provider, save
+          // failure). The optimistic value must not survive a
+          // refusal: restore the send-time snapshot for the fields
+          // still unconfirmed and name the refusal.
+          const agentId = data.payload.agent_id;
+          if (data.payload.success) {
+            delete pendingAgentUpdatesRef.current[agentId];
+            setAgentUpdateError('');
+          } else {
+            const prior = pendingAgentUpdatesRef.current[agentId];
+            if (prior) {
+              setAgents(prev => prev.map(a => (a.id === agentId ? { ...a, ...prior } : a)));
+              delete pendingAgentUpdatesRef.current[agentId];
+            }
+            setAgentUpdateError(`Agent update refused: ${data.payload.error || 'the engine rejected the change.'}`);
+          }
         } else if (data.type === 'SESSION_LIST_RESPONSE') {
           // just to silently ignore or handle if needed
         }
@@ -312,6 +351,15 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
                       }
                     });
                     setNewMcpServer(resetForm);
+                  } else {
+                    // D2-18: the chain used to end here — a form
+                    // with a name but neither transport (or no name
+                    // at all) produced no request, no message and
+                    // no reset, so the button looked dead. Say what
+                    // is missing; the form stays for fixing.
+                    setMcpTestResult(newMcpServer.name.trim()
+                      ? 'Add a command (local server) or a URL (remote server) — a name alone is not enough; nothing was sent.'
+                      : 'Give the server a name, plus a command (local server) or a URL (remote server) — nothing was sent.');
                   }
                 }}
                 style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '12px 24px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, alignSelf: 'flex-start' }}
@@ -563,7 +611,13 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
         <div style={{ color: '#f0f0f5' }}>
           <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Agents (LangGraph Nodes)</h2>
           <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Assign specialized models to individual agent nodes in the Aether execution graph.</p>
-          
+
+          {agentUpdateError && (
+            <div data-testid="agent-update-error" style={{ color: '#f87171', fontSize: '13px', marginBottom: '16px' }}>
+              {agentUpdateError}
+            </div>
+          )}
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
              {agents.map(agent => (
                <div key={agent.id} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(124, 58, 237, 0.2)', borderRadius: '16px', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -596,9 +650,10 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
                    </div>
                  </div>
                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
-                   <Dropdown 
+                   <Dropdown
                      value={agent.model || 'inherit'}
                      onChange={(val) => {
+                       rememberAgentSnapshot(agent, ['model']);
                        setAgents(prev => prev.map(a => a.id === agent.id ? { ...a, model: val } : a));
                        sendMessage('AGENT_UPDATE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { agent_id: agent.id, model: val } });
                      }}
@@ -628,12 +683,13 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
                                 onChange={(e) => {
                                   const checked = e.target.checked;
                                   const currentTools = agent.tools || tools.map(tool => tool.function.name);
-                                  const nextTools = checked 
+                                  const nextTools = checked
                                     ? [...currentTools, t.function.name]
                                     : currentTools.filter(name => name !== t.function.name);
-                                    
+
+                                  rememberAgentSnapshot(agent, ['tools']);
                                   setAgents(prev => prev.map(a => a.id === agent.id ? { ...a, tools: nextTools } : a));
-                                  
+
                                   sendMessage('AGENT_UPDATE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { agent_id: agent.id, tools: nextTools } });
                                 }}
                                 style={{ accentColor: '#7c3aed', transform: 'scale(0.8)' }}

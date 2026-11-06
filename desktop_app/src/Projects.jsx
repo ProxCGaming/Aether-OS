@@ -3,7 +3,7 @@ import { FolderPlus, Folder, Trash2, Search } from 'lucide-react';
 import './chat.css';
 import LoadStateRow from './components/Settings/LoadStateRow';
 
-export default function Projects({ wsRef, isConnected = null }) {
+export default function Projects({ wsRef, isConnected = null, reconnectCount = 0 }) {
   const [workspaces, setWorkspaces] = useState([]);
   // RUX-C-08: the workspace list is a load state until the first
   // WORKSPACE_LIST_RESPONSE lands — "No workspaces added" before
@@ -96,7 +96,11 @@ export default function Projects({ wsRef, isConnected = null }) {
     return () => {
       if (wsRef.current) wsRef.current.removeEventListener('message', handleMessage);
     };
-  }, [wsRef]);
+    // D2-09: reconnectCount (the socket layer's recovery counter)
+    // is a dep — a list response lost across a disconnect is
+    // re-fetched on reconnect instead of leaving the surface stale
+    // for the whole session (the Speech/Usage RUX-A-17 pattern).
+  }, [wsRef, reconnectCount]);
 
   const handleAddWorkspace = async () => {
     // Real folder picker via Electron IPC

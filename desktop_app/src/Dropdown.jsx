@@ -180,6 +180,11 @@ export default function Dropdown({
                           key={item.value}
                           type="button"
                           onClick={() => {
+                            // D2-19: grouped items honour `disabled`
+                            // exactly like the flat path below — the
+                            // two paths must not disagree on the
+                            // component's contract.
+                            if (item.disabled) return;
                             onChange(item.value);
                             setIsOpen(false);
                           }}
@@ -190,20 +195,22 @@ export default function Dropdown({
                             background: isSelected ? 'rgba(var(--accent-rgb), 0.2)' : 'transparent',
                             border: 'none',
                             borderRadius: '6px',
-                            color: isSelected ? '#a78bfa' : '#e2e8f0',
+                            color: isSelected ? '#a78bfa' : (item.disabled ? '#505060' : '#e2e8f0'),
                             fontSize: '13px',
-                            cursor: 'pointer',
+                            cursor: item.disabled ? 'not-allowed' : 'pointer',
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'space-between',
-                            transition: 'background 0.2s'
+                            transition: 'background 0.2s',
+                            opacity: item.disabled ? 0.6 : 1
                           }}
                           onMouseEnter={e => {
-                            if (!isSelected) e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+                            if (!isSelected && !item.disabled) e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
                           }}
                           onMouseLeave={e => {
                             if (!isSelected) e.currentTarget.style.background = 'transparent';
                           }}
+                          disabled={item.disabled}
                         >
                           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.label}</span>
                           {isSelected && <Check size={14} color="#a78bfa" />}

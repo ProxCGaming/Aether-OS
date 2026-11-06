@@ -145,6 +145,16 @@ class BrowserPolicy:
     def mode_for(self, category: str) -> str:
         if category not in CATEGORIES:
             return MODE_ALWAYS_CONFIRM
+        if category == CATEGORY_PAYMENTS:
+            # D2-03: payments always confirm individually — the
+            # panel's own stated rule ("Payments are always
+            # confirmed individually — envelopes never cover
+            # payments"). A stored mode for this category (a legacy
+            # ``allow_freely``, a hand-edited config) is never
+            # honoured: the resolved mode is always_confirm, so
+            # every consumer of the resolved mode — the gate, the
+            # reported policy — sees the posture that is in force.
+            return MODE_ALWAYS_CONFIRM
         return self.categories.get(category, MODE_ALWAYS_CONFIRM)
 
     def to_dict(self) -> dict[str, Any]:
@@ -903,6 +913,11 @@ def evaluate_browser_action(
         return GateDecision("allow", "free", action)
     if action.category == CATEGORY_UNKNOWN:
         return GateDecision("confirm", "unclassified", action)
+    if action.category == CATEGORY_PAYMENTS:
+        # D2-03: re-asserted at the gate itself, not only in
+        # mode_for — payments confirm individually no matter what
+        # mode was stored or how the policy object was built.
+        return GateDecision("confirm", "always_confirm", action)
     mode = policy.mode_for(action.category)
     if mode == MODE_ALLOW_FREELY:
         return GateDecision("allow", "allow_freely", action)
@@ -914,8 +929,8 @@ def evaluate_browser_action(
         if envelope is not None:
             return GateDecision("allow", "envelope", action, envelope=envelope)
         return GateDecision("confirm", "envelope_not_covering", action)
-    # always_confirm — and allow_with_envelope for payments, which
-    # envelopes never cover: payments confirm individually.
+    # always_confirm — or allow_with_envelope with no covering
+    # envelope left to spend (handled above): confirm.
     return GateDecision("confirm", "always_confirm", action)
 
 

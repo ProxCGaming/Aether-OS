@@ -66,8 +66,8 @@ describe('BrowserPolicyPanel load states (RUX-C-02)', () => {
         vault_autofill: true,
         envelopes_enabled: false,
         categories: {
-          payments: 'allow_freely',
-          sends_publishes: 'always_confirm',
+          payments: 'always_confirm',
+          sends_publishes: 'allow_freely',
           deletes: 'always_confirm',
           account_changes: 'always_confirm',
         },
@@ -75,12 +75,15 @@ describe('BrowserPolicyPanel load states (RUX-C-02)', () => {
     });
     expect(screen.queryByTestId('browser-policy-load-state')).not.toBeInTheDocument();
     // Every value differs from the preset somewhere: preset is
-    // enabled=true / envelopes=true / autofill=false / payments
-    // always_confirm — the reply must be what renders.
+    // enabled=true / envelopes=true / autofill=false / sends
+    // always_confirm — the reply must be what renders. (D2-03:
+    // the category value rides on sends_publishes — a current
+    // engine clamps payments to always_confirm in its reply, so
+    // payments can no longer be the differing value.)
     expect(screen.getByTestId('browser-policy-enabled')).not.toBeChecked();
     expect(screen.getByTestId('browser-policy-envelopes')).not.toBeChecked();
     expect(screen.getByTestId('browser-policy-vault-autofill')).toBeChecked();
-    expect(screen.getByTestId('browser-policy-mode-payments')).toHaveValue('allow_freely');
+    expect(screen.getByTestId('browser-policy-mode-sends_publishes')).toHaveValue('allow_freely');
   });
 
   test('a failed GET is an error state, never the preset', () => {

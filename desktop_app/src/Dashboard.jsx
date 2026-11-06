@@ -3,7 +3,7 @@ import { Activity, Cpu, Database, HardDrive, HeartPulse, Network, Zap } from 'lu
 import './chat.css';
 import { useSlowLoad, DEFAULT_SLOW_TEXT } from './components/Settings/LoadStateRow';
 
-export default function Dashboard({ status = 'Initializing', activeTasks = 0, pluginCount = null, memoryMb = null, providerHealth = null, providerHealthLoaded = null, wsRef = null, onStartWorkflow }) {
+export default function Dashboard({ status = 'Initializing', activeTasks = 0, pluginCount = null, memoryMb = null, providerHealth = null, providerHealthLoaded = null, wsRef = null, reconnectCount = 0, onStartWorkflow }) {
   // RUX-C-14: a metric the engine has not answered yet is unknown
   // ('—'), never 0. Provider health counts as answered when App
   // says a snapshot arrived, or — for standalone callers — when a
@@ -52,7 +52,11 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
     return () => {
       if (wsRef.current) wsRef.current.removeEventListener('message', handleMessage);
     };
-  }, [wsRef]);
+    // D2-09: reconnectCount (the socket layer's recovery counter)
+    // is a dep — a response lost across a disconnect is re-fetched
+    // on reconnect instead of leaving the card stale for the whole
+    // session (the Speech/Usage panels' RUX-A-17 pattern).
+  }, [wsRef, reconnectCount]);
   const healthEntries = Object.entries(providerHealth || {});
   const healthCounts = healthEntries.reduce((acc, [, h]) => {
     const key = h && h.status ? h.status : 'unknown';

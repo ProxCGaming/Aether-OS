@@ -42,6 +42,23 @@ const MODES = [
   { value: 'allow_freely', label: 'Allow freely' },
 ];
 
+// D2-03: payments are always confirmed individually (the note on
+// the category above is the spec, and the engine clamps the
+// category the same way). The payments select therefore offers
+// only Always confirm — offering "Allow freely" here sold a mode
+// the panel itself promises can never apply, and the envelope
+// mode is equally inert for payments (envelopes never cover them).
+const modesForCategory = (categoryId) => (categoryId === 'payments'
+  ? MODES.filter((mode) => mode.value === 'always_confirm')
+  : MODES);
+
+// The mode a category's select displays: for payments that is
+// always_confirm regardless of any legacy stored value, matching
+// the posture the engine actually enforces.
+const displayedMode = (policy, categoryId) => (categoryId === 'payments'
+  ? 'always_confirm'
+  : policy.categories[categoryId] || 'always_confirm');
+
 const PRESET = {
   enabled: true,
   vault_autofill: false,
@@ -161,8 +178,12 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
   };
 
   const setMode = (category, mode) => {
-    setPolicy((prev) => ({ ...prev, categories: { ...prev.categories, [category]: mode } }));
-    sendEvent('BROWSER_POLICY_SET_REQUEST', { categories: { [category]: mode } });
+    // D2-03: a waivable payments mode is never sent — the select
+    // cannot produce one, and this keeps it that way if the
+    // control set changes.
+    const effectiveMode = category === 'payments' ? 'always_confirm' : mode;
+    setPolicy((prev) => ({ ...prev, categories: { ...prev.categories, [category]: effectiveMode } }));
+    sendEvent('BROWSER_POLICY_SET_REQUEST', { categories: { [category]: effectiveMode } });
   };
 
   return (
@@ -285,11 +306,11 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
               </div>
               <select
                 data-testid={`browser-policy-mode-${category.id}`}
-                value={policy.categories[category.id] || 'always_confirm'}
+                value={displayedMode(policy, category.id)}
                 onChange={(e) => setMode(category.id, e.target.value)}
                 style={selectStyle}
               >
-                {MODES.map((mode) => (
+                {modesForCategory(category.id).map((mode) => (
                   <option key={mode.value} value={mode.value}>
                     {mode.label}
                   </option>

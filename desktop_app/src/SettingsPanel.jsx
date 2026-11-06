@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock, Scissors, Globe, CircleDollarSign, Mic, Info } from 'lucide-react';
 import Dropdown from './Dropdown';
 // E6-F14: the About section's version is read from the desktop
@@ -23,12 +23,10 @@ import SpeechSettingsPanel from './components/Settings/SpeechSettingsPanel';
 import PathRulesPanel from './components/Settings/PathRulesPanel';
 import ProjectConfigPanel from './components/Settings/ProjectConfigPanel';
 
-export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages = [], reconnectCount = 0, providers = [], providersLoaded = false, isConnected = null, providerHealth = {}, localModels = [], activeSession = null, dailyBudget = null, budgetAlert = null, initialMenu = null, onInitialMenuConsumed = null }) {
+export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages = [], reconnectCount = 0, providers = [], providersLoaded = false, isConnected = null, providerHealth = {}, activeSession = null, dailyBudget = null, budgetAlert = null, initialMenu = null, onInitialMenuConsumed = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
   const [modelTab, setModelTab] = useState('cloud'); // 'cloud' or 'local'
-  const [validationState, setValidationState] = useState({}); // { provider: 'testing' | 'saving' | 'success' | 'error' }
-  const [validationMsg, setValidationMsg] = useState({});
-  
+
   const [tools, setTools] = useState([]);
   // Epic 2: approval mode ('ask' | 'write', from TOOL_LIST_RESPONSE) and
   // the remembered scoped-approval grants (E2-09 approval cache).
@@ -59,12 +57,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   const [restoreStatus, setRestoreStatus] = useState('');
   const [versionCheck, setVersionCheck] = useState('');
   const [approvalGrants, setApprovalGrants] = useState([]);
-  const [mcpServers, setMcpServers] = useState({});
-  const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '' });
 
-  const [plugins, setPlugins] = useState([]);
-  const [newPluginSource, setNewPluginSource] = useState('');
-  
   const [skills, setSkills] = useState([]);
   
   // Advanced Config State
@@ -77,6 +70,18 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   // layer state for the Advanced editor.
   const [engineConfig, setEngineConfig] = useState(null);
   const [configUpdateError, setConfigUpdateError] = useState('');
+  // D2-05: a CONFIG_GET that fails (or never carries a config) is
+  // a load ERROR on the config-gated tabs — distinct from a refused
+  // UPDATE above — so they stop presenting "Loading…" forever.
+  const [configLoadError, setConfigLoadError] = useState('');
+  // D2-06: the refusal surface for this panel's optimistic
+  // selectors (approval mode, reasoning effort, auxiliary model):
+  // on a refusal the control rolls back to the last confirmed
+  // value (the refs below) and the error renders in the tab where
+  // the change was made.
+  const [controlRefusal, setControlRefusal] = useState('');
+  const confirmedApprovalModeRef = useRef('ask');
+  const confirmedFallbackRef = useRef({ disable: false, chain: '' });
   const [projectLayer, setProjectLayer] = useState({
     workspaceRoot: '', content: '', exists: false,
     forbiddenKeys: [], warning: '', status: '',
@@ -86,6 +91,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   // live in ./snipHotkey (mirror of electron/snipShortcut.cjs).
   const [snipHotkey, setSnipHotkey] = useState(() => defaultSnipHotkey());
   const [snipHotkeyError, setSnipHotkeyError] = useState('');
+  // D2-21: the hotkey the main process last CONFIRMED (or the
+  // config last reported) — applySnipHotkey compares against it so
+  // an unchanged blur registers and persists nothing.
+  const snipAppliedRef = useRef(snipHotkey);
 
   // Apply a snip hotkey through the main process first; only a
   // registration the main process confirms is persisted to the
@@ -94,6 +103,14 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   // a hotkey that does not work is never saved.
   const applySnipHotkey = async (requested) => {
     const hotkey = (requested || '').trim() || defaultSnipHotkey();
+    // D2-21: the field applies on every blur, including a
+    // tab-through that changed nothing — an unchanged value has
+    // nothing to register and nothing to persist.
+    if (hotkey === snipAppliedRef.current) {
+      setSnipHotkey(hotkey);
+      setSnipHotkeyError('');
+      return true;
+    }
     let actual = hotkey;
     let ok = true;
     if (window.electronAPI?.registerSnipShortcut) {
@@ -108,14 +125,23 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         }
       } catch (e) {
         ok = false;
-        actual = snipHotkey;
+        actual = snipAppliedRef.current;
       }
+    } else {
+      // D2-21: without the main-process bridge there is no
+      // confirmation, so per the rule above ("only a registration
+      // the main process confirms is persisted") the apply fails:
+      // the previous hotkey stays and the failure is shown — the
+      // new value is never saved on spec.
+      ok = false;
+      actual = snipAppliedRef.current;
     }
     if (!ok) {
       setSnipHotkey(actual);
       setSnipHotkeyError(`Could not set "${hotkey}" — it may be invalid or already used by another app. "${actual}" is still your snip hotkey.`);
       return false;
     }
+    snipAppliedRef.current = hotkey;
     setSnipHotkey(hotkey);
     setSnipHotkeyError('');
     // RUX-A-12: persisting the hotkey engine-side is a user action —
@@ -132,20 +158,28 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   // Voice Tuning State (E8-5.2)
   const [vadThreshold, setVadThreshold] = useState(0.5);
   const [silenceDurationMs, setSilenceDurationMs] = useState(700);
-  
+  // D2-08: the last slider value actually committed (sent, or
+  // applied from a config reply). A drag updates only the local
+  // state; the commit handlers below send once, on release, when
+  // the value differs from this.
+  const vadCommittedRef = useRef(0.5);
+  const silenceCommittedRef = useRef(700);
+
   // A5: State for Reasoning Effort and Node model override
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem('reasoning_effort') || 'standard');
-  const [agents, setAgents] = useState([]);
+  const confirmedEffortRef = useRef(reasoningEffort);
   // Phase 9, B1: per-task auxiliary model overrides, task -> "provider:::model" (absent = auto)
   const [auxModels, setAuxModels] = useState({});
+  const confirmedAuxModelsRef = useRef({});
 
-  const [memoryTab, setMemoryTab] = useState('episodic');
-  const [episodes, setEpisodes] = useState([]);
-  const [facts, setFacts] = useState([]);
-  
   const [capabilityHistory, setCapabilityHistory] = useState([]);
   const [capabilityStatus, setCapabilityStatus] = useState(null);
   const [isDiagnosticsRunning, setIsDiagnosticsRunning] = useState(false);
+  // D2-07: a diagnostics run's failure surface (no-answer timeout
+  // or a result-less reply) and its 35 s no-answer timer — the
+  // same rule ProviderSettings' save/test paths carry.
+  const [diagnosticsError, setDiagnosticsError] = useState('');
+  const diagnosticsTimerRef = useRef(null);
 
   // E6-F05: the handed-off panels report edits as partial config
   // objects; they go out through the one CONFIG_UPDATE flow.
@@ -165,6 +199,43 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         request_id: Date.now().toString(),
         payload: { config: partial }
       }));
+    }
+  };
+
+  // D2-05: the config-gated tabs' retry — clear the load error
+  // and ask again (the fetch effect's reconnect/menu paths retry
+  // the same request on their own schedule).
+  const retryConfigLoad = () => {
+    setConfigLoadError('');
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({
+        type: 'CONFIG_GET_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+    }
+  };
+
+  // D2-08: slider commits — fired on release (pointer up, key up,
+  // blur), never per drag tick, and only when the value actually
+  // moved from the last committed one.
+  const commitVadThreshold = () => {
+    if (vadCommittedRef.current === vadThreshold) return;
+    vadCommittedRef.current = vadThreshold;
+    sendSettingsAction('CONFIG_UPDATE_REQUEST', { config: { vad_threshold: vadThreshold } });
+  };
+  const commitSilenceDuration = () => {
+    if (silenceCommittedRef.current === silenceDurationMs) return;
+    silenceCommittedRef.current = silenceDurationMs;
+    sendSettingsAction('CONFIG_UPDATE_REQUEST', { config: { silence_duration_ms: silenceDurationMs } });
+  };
+
+  // D2-07: the diagnostics run's no-answer timer bookkeeping.
+  const clearDiagnosticsTimer = () => {
+    if (diagnosticsTimerRef.current) {
+      clearTimeout(diagnosticsTimerRef.current);
+      diagnosticsTimerRef.current = null;
     }
   };
 
@@ -263,6 +334,9 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     // APPROVAL_MODE_SET_RESPONSE confirms (or the next TOOL_LIST_RESPONSE
     // corrects) it. E6-F15: sent unconditionally (facade queues it
     // while offline) like every other settings edit.
+    // D2-06: on a refusal the response branch rolls back to the
+    // confirmed mode and names the error (controlRefusal).
+    setControlRefusal('');
     setApprovalMode(mode);
     if (wsRef.current) {
       wsRef.current.send(JSON.stringify({
@@ -308,6 +382,24 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     setAnswered(prev => (prev[key] ? prev : { ...prev, [key]: true }));
   };
 
+  // D2-20: an armed reset must not stay armed — a stray second
+  // click long after arming (and forgetting) would execute it.
+  // The arm expires after 10 s, and leaving the tab disarms it.
+  useEffect(() => {
+    if (!resetArmed) return undefined;
+    const id = setTimeout(() => setResetArmed(false), 10000);
+    return () => clearTimeout(id);
+  }, [resetArmed]);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setResetArmed(false);
+  }, [activeMenu]);
+
+  // D2-07: never leave a diagnostics no-answer timer behind.
+  useEffect(() => () => {
+    if (diagnosticsTimerRef.current) clearTimeout(diagnosticsTimerRef.current);
+  }, []);
+
   useEffect(() => {
     if (!wsRef.current) return;
 
@@ -321,67 +413,80 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
       // applied payload, and a successful apply clears any refusal.
       setEngineConfig(config);
       setConfigUpdateError('');
+      // D2-05: an applied config also clears a previous load error.
+      setConfigLoadError('');
       setDisableFallbacks(config.disable_fallbacks || false);
       setFallbackChain((config.fallback_chain || []).join(', '));
+      // D2-06: the applied payload is the confirmed state the
+      // optimistic Advanced controls roll back to on a refusal.
+      confirmedFallbackRef.current = {
+        disable: config.disable_fallbacks || false,
+        chain: (config.fallback_chain || []).join(', '),
+      };
       if (config.snip_hotkey) {
         const resolvedSnip = resolveSnipHotkey(config.snip_hotkey);
         setSnipHotkey(resolvedSnip.accelerator);
+        // D2-21: config is the main process's registration source —
+        // what it reports is the applied hotkey.
+        snipAppliedRef.current = resolvedSnip.accelerator;
         if (resolvedSnip.storedInvalid) {
           setSnipHotkeyError(`Your saved snip hotkey "${config.snip_hotkey}" is not a valid shortcut, so the default (${resolvedSnip.accelerator}) is being used.`);
         }
       }
       if (config.vad_threshold !== undefined && config.vad_threshold !== null) {
         setVadThreshold(config.vad_threshold);
+        // D2-08: an applied value is by definition committed.
+        vadCommittedRef.current = config.vad_threshold;
       }
       if (config.silence_duration_ms !== undefined && config.silence_duration_ms !== null) {
         setSilenceDurationMs(config.silence_duration_ms);
+        silenceCommittedRef.current = config.silence_duration_ms;
       }
       if (config.approval_binding_mode) {
         setApprovalBindingMode(config.approval_binding_mode);
       }
       // Phase 9, B1/B2: engine-persisted auxiliary models and reasoning effort.
       setAuxModels(config.auxiliary_models || {});
+      // D2-06: the applied overrides are the confirmed rollback base.
+      confirmedAuxModelsRef.current = config.auxiliary_models || {};
       const serverEffort = config.reasoning_effort;
       if (serverEffort) {
         setReasoningEffort(serverEffort);
         localStorage.setItem('reasoning_effort', serverEffort);
+        confirmedEffortRef.current = serverEffort;
       }
     };
 
     const handleMessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'PROVIDER_VALIDATE_RESPONSE' || data.type === 'SETTINGS_PROVIDER_VALIDATE_RESULT') {
-          const provider = data.payload.provider;
-          if (data.payload.success) {
-            setValidationState(prev => ({ ...prev, [provider]: 'success' }));
-            setValidationMsg(prev => ({ ...prev, [provider]: 'Test Successful' }));
-            // Auto-clear success message after 3 seconds
-            setTimeout(() => setValidationState(prev => ({ ...prev, [provider]: null })), 3000);
-          } else {
-            setValidationState(prev => ({ ...prev, [provider]: 'error' }));
-            setValidationMsg(prev => ({ ...prev, [provider]: data.payload.error || data.payload.message || 'Validation failed' }));
-          }
-        } else if (data.type === 'PROVIDER_SAVE_RESPONSE') {
-          const provider = data.payload.provider;
-          const isCustomSave = provider.startsWith('custom_');
-          if (data.payload.success) {
-            setValidationState(prev => ({ ...prev, [provider]: 'success', ...(isCustomSave ? { custom_openai: 'success' } : {}) }));
-            setValidationMsg(prev => ({ ...prev, [provider]: 'Saved!', ...(isCustomSave ? { custom_openai: 'Saved!' } : {}) }));
-            setTimeout(() => setValidationState(prev => ({ ...prev, [provider]: null, ...(isCustomSave ? { custom_openai: null } : {}) })), 3000);
-          } else {
-            setValidationState(prev => ({ ...prev, [provider]: 'error', ...(isCustomSave ? { custom_openai: 'error' } : {}) }));
-            setValidationMsg(prev => ({ ...prev, [provider]: data.payload.error || 'Failed to save', ...(isCustomSave ? { custom_openai: data.payload.error || 'Failed to save' } : {}) }));
-          }
-        } else if (data.type === 'TOOL_LIST_RESPONSE') {
+        // D2-04: the PROVIDER_VALIDATE / PROVIDER_SAVE branches
+        // that used to sit here wrote only this panel's fossil
+        // validation state — ProviderSettings owns those replies
+        // (and renders them) since the panels were extracted.
+        if (data.type === 'TOOL_LIST_RESPONSE') {
           setTools(data.payload.tools || []);
           markAnswered('tools');
           if (data.payload.approval_mode) {
             setApprovalMode(data.payload.approval_mode);
+            confirmedApprovalModeRef.current = data.payload.approval_mode;
           }
         } else if (data.type === 'APPROVAL_MODE_SET_RESPONSE') {
-          if (data.payload.success && data.payload.mode) {
-            setApprovalMode(data.payload.mode);
+          if (data.payload.success) {
+            if (data.payload.mode) {
+              setApprovalMode(data.payload.mode);
+              confirmedApprovalModeRef.current = data.payload.mode;
+            }
+            setControlRefusal('');
+          } else {
+            // D2-06: a refusal restores the confirmed mode — the
+            // payload carries the engine's current mode even on
+            // failure; the last confirmed value is the backstop —
+            // and the error renders in the Tools tab.
+            const confirmedMode = data.payload.mode || confirmedApprovalModeRef.current;
+            setApprovalMode(confirmedMode);
+            confirmedApprovalModeRef.current = confirmedMode;
+            setControlRefusal(data.payload.error || 'The approval mode change was refused.');
           }
         } else if (data.type === 'APPROVAL_GRANTS_RESPONSE') {
           setApprovalGrants(data.payload.grants || []);
@@ -396,21 +501,11 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
           if (data.payload.success) {
             setTools(prev => prev.map(t => t.function.name === data.payload.tool_name ? { ...t, policy: data.payload.policy } : t));
           }
-        } else if (data.type === 'AGENT_LIST_RESPONSE') {
-          setAgents(data.payload.agents || []);
-        } else if (data.type === 'AGENT_UPDATE_RESPONSE') {
-          // Can optionally show a toast here
-        } else if (data.type === 'MCP_SERVER_LIST_RESPONSE') {
-          setMcpServers(data.payload.servers || {});
-        } else if (data.type === 'MCP_SERVER_ADD_RESPONSE' || data.type === 'MCP_SERVER_REMOVE_RESPONSE') {
-          if (data.payload.success) {
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: 'MCP_SERVER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
-            }
-          }
-        } else if (data.type === 'PLUGIN_LIST_RESPONSE') {
-          const p = data.payload.plugins;
-          setPlugins(Array.isArray(p) ? p : Object.values(p || {}));
+        // D2-04: the AGENT_LIST / AGENT_UPDATE / MCP list +
+        // add-remove / PLUGIN_LIST branches that used to sit here
+        // fed only fossil state (or, for agent updates, an empty
+        // comment) — DiagnosticsPanel owns those replies now; its
+        // AGENT_UPDATE branch is the live refusal surface (D2-02).
         } else if (data.type === 'WORKSPACE_LIST_RESPONSE') {
           // E6-F14: feeds the About section's local-guide entry point.
           // Lane C grouped S4: the reply is also the About section's
@@ -442,18 +537,23 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               : data.type === 'PLUGIN_TOGGLE_RESPONSE' ? 'Toggle' : 'Install';
             setPluginActionResult(`${verb}${data.payload.name ? ` ${data.payload.name}` : ''} failed: ${data.payload.error}`);
           }
-        } else if (data.type === 'MEMORY_EPISODES_RESPONSE' || data.type === 'MEMORY_EPISODE_DELETE_RESPONSE') {
-          setEpisodes(data.payload.episodes || []);
-        } else if (data.type === 'MEMORY_EPISODES_CLEAR_RESPONSE') {
-          setEpisodes([]);
-        } else if (data.type === 'MEMORY_GRAPH_RESPONSE' || data.type === 'MEMORY_FACT_DELETE_RESPONSE' || data.type === 'MEMORY_ENTITY_DELETE_RESPONSE') {
-          setFacts(data.payload.facts || []);
-        } else if (data.type === 'MEMORY_GRAPH_CLEAR_RESPONSE') {
-          setFacts([]);
+        // D2-04: the MEMORY_* branches that used to sit here fed
+        // only fossil episodes/facts state — MemoryManagement owns
+        // those replies since the panels were extracted.
         } else if (data.type === 'ENVIRONMENT_DIAGNOSTIC_RESPONSE') {
-          setCapabilityStatus(data.payload.summary);
-          setCapabilityHistory(data.payload.history || []);
+          // D2-07: any reply resolves the run (and its no-answer
+          // timer). A reply without a summary object is a failure
+          // shape — surface it instead of letting an undefined
+          // summary render as a silent "Status Unknown".
+          clearDiagnosticsTimer();
           setIsDiagnosticsRunning(false);
+          if (!data.payload || !data.payload.summary || typeof data.payload.summary !== 'object') {
+            setDiagnosticsError('The diagnostics run returned no result — the engine may be busy or offline. Try again.');
+          } else {
+            setDiagnosticsError('');
+            setCapabilityStatus(data.payload.summary);
+            setCapabilityHistory(data.payload.history || []);
+          }
         } else if (data.type === 'CONFIG_RESET_RESPONSE') {
           setResetArmed(false);
           if (data.payload && data.payload.success === false) {
@@ -519,13 +619,27 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               : `You're on the latest version (${data.payload.current}).`)
             : `Couldn't check for updates: ${data.payload.error}`);
         } else if (data.type === 'CONFIG_GET_RESPONSE' || data.type === 'CONFIG_UPDATE_RESPONSE') {
-          if (data.type === 'CONFIG_UPDATE_RESPONSE' && data.payload.success === false) {
-            // E6-F05: a refused strict-field write carries no config
-            // — surface the error to the handed-off panels instead
-            // of applying anything.
-            setConfigUpdateError(data.payload.error || 'The update was rejected.');
+          if (data.payload.success === false) {
+            if (data.type === 'CONFIG_UPDATE_RESPONSE') {
+              // E6-F05: a refused strict-field write carries no config
+              // — surface the error to the handed-off panels instead
+              // of applying anything.
+              setConfigUpdateError(data.payload.error || 'The update was rejected.');
+              // D2-06: the Advanced tab's own controls are
+              // optimistic; a refused update restores the last
+              // applied fallback settings instead of leaving the
+              // refused values on screen.
+              setDisableFallbacks(confirmedFallbackRef.current.disable);
+              setFallbackChain(confirmedFallbackRef.current.chain);
+            } else {
+              // D2-05: a failed config LOAD is an error state on
+              // the config-gated tabs — not an endless "Loading…".
+              setConfigLoadError(data.payload.error || 'Your saved settings could not be loaded.');
+            }
           } else if (data.payload.config) {
             applyConfigValues(data.payload.config);
+          } else if (data.type === 'CONFIG_GET_RESPONSE' && data.payload.error) {
+            setConfigLoadError(data.payload.error);
           }
         } else if (data.type === 'PROJECT_CONFIG_GET_RESPONSE') {
           // RUX-C-11: success or refusal, this reply IS the project
@@ -569,12 +683,31 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
           }
         } else if (data.type === 'AUXILIARY_MODEL_SET_RESPONSE') {
           if (data.payload.success) {
-            setAuxModels(data.payload.auxiliary_models || {});
+            const appliedAux = data.payload.auxiliary_models || {};
+            setAuxModels(appliedAux);
+            confirmedAuxModelsRef.current = appliedAux;
+            setControlRefusal('');
+          } else {
+            // D2-06: a refusal restores the confirmed overrides
+            // and surfaces the engine's own error text.
+            setAuxModels({ ...confirmedAuxModelsRef.current });
+            setControlRefusal(data.payload.error || 'The auxiliary model change was refused.');
           }
         } else if (data.type === 'REASONING_EFFORT_SET_RESPONSE') {
-          if (data.payload.success && data.payload.effort) {
-            setReasoningEffort(data.payload.effort);
-            localStorage.setItem('reasoning_effort', data.payload.effort);
+          if (data.payload.success) {
+            if (data.payload.effort) {
+              setReasoningEffort(data.payload.effort);
+              localStorage.setItem('reasoning_effort', data.payload.effort);
+              confirmedEffortRef.current = data.payload.effort;
+            }
+            setControlRefusal('');
+          } else {
+            // D2-06: a refusal restores the confirmed effort in
+            // the control AND in localStorage, which the optimistic
+            // onChange had already overwritten.
+            setReasoningEffort(confirmedEffortRef.current);
+            localStorage.setItem('reasoning_effort', confirmedEffortRef.current);
+            setControlRefusal(data.payload.error || 'The reasoning effort change was refused.');
           }
         }
       } catch (e) {
@@ -641,12 +774,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         payload: {}
       }));
     } else if (activeMenu === 'Agents' && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'AGENT_LIST_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: {}
-      }));
+      // D2-04: no AGENT_LIST_REQUEST from here — DiagnosticsPanel
+      // (rendered above the orchestration controls on this menu)
+      // requests the agent list itself; this panel's send was a
+      // pre-extraction duplicate feeding fossil state.
       // Also fetch tools for the agent tool selector
       wsRef.current.send(JSON.stringify({
         type: 'TOOL_LIST_REQUEST',
@@ -662,20 +793,9 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         request_id: Date.now().toString(),
         payload: {}
       }));
-    } else if (activeMenu === 'MCP' && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'MCP_SERVER_LIST_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: {}
-      }));
-    } else if (activeMenu === 'Plugins' && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'PLUGIN_LIST_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: {}
-      }));
+      // D2-04: the MCP / Plugins branches that used to sit here
+      // re-requested lists DiagnosticsPanel fetches itself on
+      // those menus — pre-extraction duplicates, removed.
     } else if (activeMenu === 'Skills' && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'SKILL_LIST_REQUEST',
@@ -683,19 +803,9 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         request_id: Date.now().toString(),
         payload: {}
       }));
-    } else if (activeMenu === 'Memory' && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'MEMORY_EPISODES_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: {}
-      }));
-      wsRef.current.send(JSON.stringify({
-        type: 'MEMORY_GRAPH_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: {}
-      }));
+      // D2-04: the Memory branch that used to sit here sent
+      // MEMORY_EPISODES_REQUEST + MEMORY_GRAPH_REQUEST for fossil
+      // state — MemoryManagement fetches both itself on mount.
     } else if ((activeMenu === 'Advanced' || activeMenu === 'Models' || activeMenu === 'Voice') && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'CONFIG_GET_REQUEST',
@@ -871,13 +981,19 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                  {!answered.config && (
                    <div style={{ marginBottom: '24px' }}>
                      <LoadStateRow
-                       loadState="loading"
+                       loadState={configLoadError ? 'error' : 'loading'}
                        isConnected={isConnected}
                        testId="models-config-load-state"
                        variant="plain"
                        loadingText="Loading your saved model settings…"
                        offlineText="Waiting for the engine — your saved model settings will appear here once it connects."
+                       errorText={configLoadError || 'Your saved model settings could not be loaded.'}
                      />
+                     {configLoadError && (
+                       <button type="button" onClick={retryConfigLoad} style={{ marginTop: '8px', background: 'transparent', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
+                         Retry
+                       </button>
+                     )}
                    </div>
                  )}
                  <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', marginBottom: '24px' }}>
@@ -921,6 +1037,9 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                            // Phase 9, B2: persist engine-side so it actually affects model calls.
                            // E6-F15: sent unconditionally — the facade
                            // queues it while offline (see sendConfigUpdate).
+                           // D2-06: a refusal rolls this (and
+                           // localStorage) back to the confirmed effort.
+                           setControlRefusal('');
                            setReasoningEffort(val);
                            localStorage.setItem('reasoning_effort', val);
                            if (wsRef.current) {
@@ -943,6 +1062,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                    </div>
                  </div>
 
+                 {controlRefusal && (
+                   <div style={{ color: '#f87171', fontSize: '13px', marginTop: '16px' }}>{controlRefusal}</div>
+                 )}
+
                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '32px', marginBottom: '16px' }}>
                    <h3 style={{ fontSize: '18px', fontWeight: 500, margin: 0 }}>⚙ Auxiliary models</h3>
                    <button
@@ -950,6 +1073,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                      onClick={() => {
                        // Phase 9, B1: clear every override back to the main model.
                        // E6-F15: sent unconditionally (facade queues offline).
+                       setControlRefusal('');
                        setAuxModels({});
                        if (wsRef.current) {
                          wsRef.current.send(JSON.stringify({
@@ -986,6 +1110,8 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                             onChange={(val) => {
                               const [provider, model] = val.split(':::');
                               // Phase 9, B1: optimistic update; engine confirms via AUXILIARY_MODEL_SET_RESPONSE.
+                              // D2-06: a refusal rolls back to the confirmed overrides.
+                              setControlRefusal('');
                               setAuxModels(prev => {
                                 const next = { ...prev };
                                 if (!model || model === 'auto') delete next[task.id];
@@ -1040,7 +1166,6 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                  wsRef={wsRef}
                  safeSend={safeSend}
                  pendingMessages={pendingMessages}
-                 localModels={localModels}
                  // Phase 10.3 C2: the active model lives on the providers
                  // array (the provider flagged is_default); LocalModelsTab
                  // needs it to show which downloaded model is Active.
@@ -1063,14 +1188,22 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                 lands they would present factory defaults as the
                 saved configuration, so the section says so. */}
             {!answered.config && (
-              <LoadStateRow
-                loadState="loading"
-                isConnected={isConnected}
-                testId="agents-config-load-state"
-                variant="plain"
-                loadingText="Loading your saved agent settings…"
-                offlineText="Waiting for the engine — your saved agent settings will appear here once it connects."
-              />
+              <div>
+                <LoadStateRow
+                  loadState={configLoadError ? 'error' : 'loading'}
+                  isConnected={isConnected}
+                  testId="agents-config-load-state"
+                  variant="plain"
+                  loadingText="Loading your saved agent settings…"
+                  offlineText="Waiting for the engine — your saved agent settings will appear here once it connects."
+                  errorText={configLoadError || 'Your saved agent settings could not be loaded.'}
+                />
+                {configLoadError && (
+                  <button type="button" onClick={retryConfigLoad} style={{ marginTop: '8px', background: 'transparent', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
+                    Retry
+                  </button>
+                )}
+              </div>
             )}
             <OrchestrationPanel config={engineConfig} configError={configUpdateError} onConfigUpdate={sendConfigUpdate} configReady={!!answered.config} />
           </div>
@@ -1100,6 +1233,17 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                     const disposition = sendSettingsAction('ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST', {});
                     if (disposition !== 'queued') {
                       setIsDiagnosticsRunning(true);
+                      setDiagnosticsError('');
+                      // D2-07: the codebase's 35 s no-answer rule
+                      // (ProviderSettings' save/test paths) — a run
+                      // whose response never arrives must resolve,
+                      // not spin for the life of the mount.
+                      clearDiagnosticsTimer();
+                      diagnosticsTimerRef.current = setTimeout(() => {
+                        diagnosticsTimerRef.current = null;
+                        setIsDiagnosticsRunning(false);
+                        setDiagnosticsError('No answer from the engine in 35s — the run may only be queued, or the engine may be busy or offline. Try again.');
+                      }, 35000);
                     }
                   }}
                   disabled={isDiagnosticsRunning || diagnosticsQueued}
@@ -1134,6 +1278,12 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               {diagnosticsQueued && (
                 <div data-testid="diagnostics-run-queued" style={{ fontSize: '13px', color: '#fbbf24', marginBottom: '16px' }}>
                   Diagnostics run queued — will run when the engine reconnects.
+                </div>
+              )}
+
+              {diagnosticsError && (
+                <div data-testid="diagnostics-run-error" style={{ fontSize: '13px', color: '#f87171', marginBottom: '16px' }}>
+                  {diagnosticsError}
                 </div>
               )}
               
@@ -1197,6 +1347,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                 />
               </div>
             </div>
+
+            {controlRefusal && (
+              <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '12px' }}>{controlRefusal}</div>
+            )}
 
             <div data-testid="approval-binding" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', marginBottom: '12px' }}>
               <h4 style={{ fontSize: '15px', fontWeight: 500 }}>Approval binding</h4>
@@ -1670,7 +1824,14 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '16px', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Network size={18} style={{ color: '#a78bfa' }} /> Model Routing & Fallbacks
               </h3>
-              
+
+              {/* D2-06: this tab's own config writes report their
+                  refusal HERE — the error used to be passed only to
+                  panels on other tabs. */}
+              {configUpdateError && (
+                <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '16px' }}>{configUpdateError}</div>
+              )}
+
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
                 <div>
                   <div style={{ fontWeight: 500, fontSize: '14px', marginBottom: '4px' }}>Disable Fallback System</div>
@@ -1877,13 +2038,19 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             {!answered.config && (
               <div style={{ marginBottom: '24px' }}>
                 <LoadStateRow
-                  loadState="loading"
+                  loadState={configLoadError ? 'error' : 'loading'}
                   isConnected={isConnected}
                   testId="voice-config-load-state"
                   variant="plain"
                   loadingText="Loading your saved voice settings…"
                   offlineText="Waiting for the engine — your saved voice settings will appear here once it connects."
+                  errorText={configLoadError || 'Your saved voice settings could not be loaded.'}
                 />
+                {configLoadError && (
+                  <button type="button" onClick={retryConfigLoad} style={{ marginTop: '8px', background: 'transparent', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
+                    Retry
+                  </button>
+                )}
               </div>
             )}
 
@@ -1921,18 +2088,22 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                   disabled={!answered.config}
                   value={vadThreshold}
                   onChange={(e) => {
-                    const val = parseFloat(e.target.value);
-                    // RUX-A-15: optimistic like the E6-F15 Advanced
-                    // controls — the slider shows the user's intent,
-                    // and the edit goes through safeSend so it QUEUES
-                    // while offline instead of being discarded by the
-                    // guard this used to carry (the displayed value
-                    // then silently snapped back on the next config
-                    // reply). The queued note under the slider names
-                    // the pending value until the reply lands.
-                    setVadThreshold(val);
-                    sendSettingsAction('CONFIG_UPDATE_REQUEST', { config: { vad_threshold: val } });
+                    // D2-08: a drag is dozens of ticks — local
+                    // state follows the pointer, but the config
+                    // write commits ONCE on release (see
+                    // commitVadThreshold), so the engine is not
+                    // written per tick and its per-tick echo cannot
+                    // move the slider under the user's pointer
+                    // mid-drag. The RUX-A-15 delivery discipline is
+                    // preserved at commit time: through
+                    // sendSettingsAction the edit QUEUES while
+                    // offline, and the queued note under the slider
+                    // names the pending value until the reply lands.
+                    setVadThreshold(parseFloat(e.target.value));
                   }}
+                  onPointerUp={commitVadThreshold}
+                  onKeyUp={commitVadThreshold}
+                  onBlur={commitVadThreshold}
                   style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
                 />
                 {pendingConfigValue('vad_threshold') !== undefined && (
@@ -1964,13 +2135,14 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                   disabled={!answered.config}
                   value={silenceDurationMs}
                   onChange={(e) => {
-                    const val = parseInt(e.target.value, 10);
-                    // RUX-A-15: same conversion as the VAD slider
-                    // above — optimistic display, safeSend delivery,
-                    // queued note below while the edit is pending.
-                    setSilenceDurationMs(val);
-                    sendSettingsAction('CONFIG_UPDATE_REQUEST', { config: { silence_duration_ms: val } });
+                    // D2-08: same commit-on-release conversion as
+                    // the VAD slider above — display follows the
+                    // drag; the write lands once, on release.
+                    setSilenceDurationMs(parseInt(e.target.value, 10));
                   }}
+                  onPointerUp={commitSilenceDuration}
+                  onKeyUp={commitSilenceDuration}
+                  onBlur={commitSilenceDuration}
                   style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
                 />
                 {pendingConfigValue('silence_duration_ms') !== undefined && (

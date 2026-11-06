@@ -590,11 +590,15 @@ class TestGateEvaluation:
             policy, _pay_action(), task_id="t1", session_running=True)
         assert decision.verdict == "confirm"
 
-    def test_payment_proceeds_only_when_the_owner_allows_freely(self):
+    def test_payment_confirms_even_when_the_owner_allows_freely(self):
+        # D2-03 (supersedes the pre-fix contract this test used to
+        # pin): the panel's rule — "payments are always confirmed
+        # individually" — is the spec, so a stored allow_freely for
+        # payments is clamped and the payment still confirms.
         policy = _policy(categories={"payments": "allow_freely"})
         decision = evaluate_browser_action(
             policy, _pay_action(), task_id="t1", session_running=True)
-        assert decision.verdict == "allow"
+        assert decision.verdict == "confirm"
 
     def test_unknown_action_confirms_under_every_mode(self):
         action = classify("browser_click", {"selector": "#mystery-btn"},

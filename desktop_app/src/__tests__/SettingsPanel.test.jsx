@@ -279,6 +279,8 @@ describe('SettingsPanel Voice Tuning (E8-5.2)', () => {
 
     fireEvent.change(vadSlider, { target: { value: '0.35' } });
     expect(screen.getByTestId('vad-threshold-value')).toHaveTextContent('0.35');
+    // D2-08: the write commits on release now, not per drag tick.
+    fireEvent.pointerUp(vadSlider);
 
     const sent = wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
     const update = sent.find(m => m.type === 'CONFIG_UPDATE_REQUEST' && m.payload?.config?.vad_threshold !== undefined);
@@ -295,6 +297,8 @@ describe('SettingsPanel Voice Tuning (E8-5.2)', () => {
 
     fireEvent.change(silenceSlider, { target: { value: '450' } });
     expect(screen.getByTestId('silence-duration-value')).toHaveTextContent('450 ms');
+    // D2-08: the write commits on release now, not per drag tick.
+    fireEvent.pointerUp(silenceSlider);
 
     const sent = wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
     const update = sent.find(m => m.type === 'CONFIG_UPDATE_REQUEST' && m.payload?.config?.silence_duration_ms !== undefined);

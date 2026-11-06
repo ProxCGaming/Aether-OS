@@ -231,6 +231,9 @@ describe('Settings safeSend conversions (Wave 2 slice 3a)', () => {
     fireEvent.click(screen.getByText('Voice Tuning'));
     const slider = screen.getByTestId('vad-threshold-slider');
     fireEvent.change(slider, { target: { value: '0.7' } });
+    // D2-08: the write commits on release now, not per drag tick —
+    // the release is what queues the one offline edit.
+    fireEvent.pointerUp(slider);
 
     // The slider keeps the user's intent on display (E6-F15
     // optimistic pattern) and the edit is in the real queue — not

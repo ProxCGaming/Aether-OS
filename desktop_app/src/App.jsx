@@ -3506,7 +3506,7 @@ function AppContent() {
                  />
                </div>
             )}
-            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} providerHealth={providerHealth} providerHealthLoaded={providerHealthLoaded} wsRef={wsRef} onStartWorkflow={() => setActiveTab('Chat')} />}
+            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} providerHealth={providerHealth} providerHealthLoaded={providerHealthLoaded} wsRef={wsRef} reconnectCount={reconnectCount} onStartWorkflow={() => setActiveTab('Chat')} />}
             {activeTab === 'Artifacts' && (
               <GlobalArtifactsView
                 wsRef={wsRef}
@@ -3519,7 +3519,7 @@ function AppContent() {
                 onNavigateToMedia={handleNavigateToMediaSession}
               />
             )}
-            {activeTab === 'Projects' && <Projects wsRef={wsRef} isConnected={isConnected} />}
+            {activeTab === 'Projects' && <Projects wsRef={wsRef} isConnected={isConnected} reconnectCount={reconnectCount} />}
             {activeTab !== 'Settings' && activeTab !== 'Dashboard' && activeTab !== 'Artifacts' && activeTab !== 'Projects' && (
                <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: '#9090a0' }}>
                  <h2>{activeTab} view coming soon.</h2>
