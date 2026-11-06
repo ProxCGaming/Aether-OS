@@ -42,11 +42,28 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 LOCKFILE_NAME = "skills.lock.json"
 LOCKFILE_VERSION = 1
+
+# N-03: a skill name becomes a filesystem path at install time
+# (``skills_root / name`` and the staging dir beside it), so a bare
+# ``str`` is a traversal primitive: a crafted lockfile/manifest with
+# ``name="../../victim"`` made install rmtree an arbitrary directory
+# and write attacker content outside the skills root. The rule is
+# the one plugins adopted for the same reason (plugins/manifest.py
+# SAFE_NAME_RE): a safe name is exactly one path segment — no
+# separators, no leading dot (so ``.`` / ``..`` can never match),
+# no empty string.
+SAFE_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def is_safe_skill_name(name: object) -> bool:
+    """True when *name* is safe to join into a filesystem path."""
+    return isinstance(name, str) and bool(SAFE_SKILL_NAME_RE.match(name))
 
 
 class SkillLockError(Exception):
@@ -110,6 +127,13 @@ def load_lockfile(path: Path) -> dict[str, SkillPin]:
 
 
 def _parse_pin(path: Path, name: str, entry: object) -> SkillPin:
+    if not is_safe_skill_name(name):
+        raise SkillLockError(
+            f"lockfile {path}: pin name {name!r} is not a safe skill "
+            "name (a single path segment: letters, digits, '.', '_' "
+            "or '-', not starting with '.'); a name is joined into "
+            "filesystem paths at install time, so anything else is "
+            "refused, never sanitised")
     if not isinstance(entry, dict):
         raise SkillLockError(
             f"lockfile {path}: pin for {name!r} is not an object")

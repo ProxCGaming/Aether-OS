@@ -151,6 +151,7 @@ def _discover(roots: list[str]) -> list[tuple[Path, str, str]]:
         root_path = Path(root)
         if not root_path.is_dir():
             continue
+        resolved_root = root_path.resolve()
         ignore = _Gitignore(root_path)
         prefix = f"{root_path.name}/" if multi else ""
         for dirpath, dirnames, filenames in os.walk(root_path):
@@ -170,6 +171,15 @@ def _discover(roots: list[str]) -> list[tuple[Path, str, str]]:
                 if ignore.matches(rel, is_dir=False):
                     continue
                 abspath = Path(dirpath) / name
+                # Containment (N-08), the prose indexer's F-04
+                # doctrine: os.walk never descends a symlinked
+                # directory, but a symlinked FILE is yielded here —
+                # and stat()/read_bytes() both follow it. Resolve
+                # BEFORE stat, so an escaping link is skipped without
+                # its target's size or content ever being touched;
+                # a link resolving inside the root maps normally.
+                if not abspath.resolve().is_relative_to(resolved_root):
+                    continue
                 try:
                     if abspath.stat().st_size > _MAX_FILE_BYTES:
                         continue

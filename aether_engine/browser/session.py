@@ -306,6 +306,18 @@ async def validate_navigation_url(
             )
 
 
+# N-09: explicit Playwright timeouts, in milliseconds. Playwright's
+# default ACTION timeout is 0 — disabled — so click/fill/inner_text
+# on a missing or obscured selector waited forever; goto relied on
+# an implicit default. The values mirror Playwright's own 30s
+# navigation default: generous for slow pages, finite for wedged
+# ones. (input_value below keeps its tighter 5s: reading a field
+# that is not there should fail fast.) The registry's per-tool
+# ``timeout_s`` bounds the whole call above this layer.
+NAVIGATION_TIMEOUT_MS = 30_000
+ACTION_TIMEOUT_MS = 30_000
+
+
 class PlaywrightDriver:
     """Thin async wrapper over a Playwright persistent context.
 
@@ -349,19 +361,20 @@ class PlaywrightDriver:
         return cls(playwright, context, page)
 
     async def goto(self, url: str) -> None:
-        await self._page.goto(url)
+        await self._page.goto(url, timeout=NAVIGATION_TIMEOUT_MS)
 
     async def click(self, selector: str) -> None:
-        await self._page.click(selector)
+        await self._page.click(selector, timeout=ACTION_TIMEOUT_MS)
 
     async def fill(self, selector: str, text: str) -> None:
-        await self._page.fill(selector, text)
+        await self._page.fill(selector, text, timeout=ACTION_TIMEOUT_MS)
 
     async def input_value(self, selector: str) -> str:
         return str(await self._page.input_value(selector, timeout=5000))
 
     async def extract_text(self, selector: str | None = None) -> str:
-        return await self._page.inner_text(selector or "body")
+        return await self._page.inner_text(
+            selector or "body", timeout=ACTION_TIMEOUT_MS)
 
     async def current_url(self) -> str:
         return str(self._page.url)

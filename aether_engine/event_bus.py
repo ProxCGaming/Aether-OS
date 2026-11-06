@@ -4,6 +4,15 @@ from typing import Any
 
 logger = logging.getLogger("aether_engine.event_bus")
 
+# N-34: subscriber queues are bounded at this size (the executor
+# creates its queues with it). Events are small and the consumer
+# drains continuously, so a queue that reaches the bound belongs to
+# a stalled or dead consumer — publish() then DROPS the event (and
+# logs) rather than blocking the publisher or growing memory for
+# the life of the run. Publishers are graph nodes: they must never
+# be backpressured into a stall by a consumer that may be gone.
+EVENT_QUEUE_MAXSIZE = 1000
+
 class EventBus:
     """
     A lightweight async pub-sub singleton.
@@ -43,6 +52,15 @@ class EventBus:
             for queue in self._subscribers[task_id]:
                 try:
                     queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    # N-34: the drop policy for a bounded queue whose
+                    # consumer has stalled or died — the event is
+                    # dropped, the publisher never blocks, and the
+                    # loss is on the record.
+                    logger.warning(
+                        "Event bus: dropping event for task %s — "
+                        "subscriber queue is full (consumer stalled "
+                        "or gone)", task_id)
                 except Exception as e:  # noqa: BLE001 — one bad subscriber queue must not break publishing to the rest
                     logger.error(f"Failed to publish event to queue for task {task_id}: {e}")
 

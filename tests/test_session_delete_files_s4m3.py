@@ -10,6 +10,16 @@ There is no existing cheap SESSION_DELETE round-trip harness in the
 suite (no test exercises SESSION_DELETE_REQUEST), so this is covered
 at the store level and at the ``_remove_session_attachments`` helper
 level.
+
+Wave 2 correction (finding N-18): the store-level half of S4-M3 as
+originally landed overshot — ``delete_by_session`` unlinked EVERY
+item's file unconditionally, but the media store is an in-place
+reference index whose rows point at the user's own originals, so a
+session delete destroyed files the index merely referenced. The
+contract is now the one ``delete_media`` already had: rows are
+removed by default, files are unlinked only on the explicit
+``delete_underlying_files=True`` opt-in. The attachments-directory
+half of S4-M3 (below) is unchanged: those are engine-owned copies.
 """
 from pathlib import Path
 
@@ -17,6 +27,10 @@ from aether_engine.media.store import MediaStore
 
 
 def test_delete_by_session_unlinks_files_and_tolerates_missing(tmp_path):
+    # N-18 corrected contract: the unlink half of S4-M3 now happens
+    # only under the explicit opt-in (see module docstring above);
+    # the plain call's file-preserving default is pinned by
+    # tests/test_wave2_media_session_delete.py.
     store = MediaStore(db_path=tmp_path / "media.db")
 
     present = tmp_path / "present.png"
@@ -42,7 +56,8 @@ def test_delete_by_session_unlinks_files_and_tolerates_missing(tmp_path):
     # Second item's file is already gone before the cascade runs.
     missing.unlink()
 
-    deleted = store.delete_by_session("sess-s4m3")
+    deleted = store.delete_by_session(
+        "sess-s4m3", delete_underlying_files=True)
 
     assert deleted == 2
     _items, total = store.list_media(session_id="sess-s4m3")

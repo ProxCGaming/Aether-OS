@@ -58,6 +58,22 @@ MCP_PROMPT_MAX_CHARS = 20000
 # milliseconds once cancelled; the grace is only a backstop.
 MCP_TOOL_CALL_CANCEL_GRACE_SECONDS = 5
 
+# N-15 (S2): page cap for one paginated list call. Every page is
+# individually bounded by the session read timeout, but the CHAIN was
+# not: a buggy/malicious server minting fresh cursors forever looped
+# discovery without limit. 100 pages is far beyond any real server's
+# tool/resource/prompt inventory; a repeated cursor (a cycle) is
+# refused even sooner — it is proof of no forward progress.
+MCP_LIST_MAX_PAGES = 100
+
+# N-16 (S2): bound on waiting for an in-flight connect to signal
+# readiness. The connect steps themselves are bounded (initialize by
+# the server config timeout, listing by the read timeout + the page
+# cap), so this is only the backstop against an owner task that dies
+# or wedges without ever setting its ready event — no caller may
+# hang indefinitely on another task's connect.
+MCP_CONNECT_READY_TIMEOUT_SECONDS = 120
+
 # E3-F05: stdio resource governance. Stdio servers are spawned through
 # stdio_launcher.py, which applies worker-equivalent caps before the
 # server's code runs (POSIX: rlimits via exec; Windows: a supervising
@@ -336,19 +352,41 @@ async def _list_all_pages(session: Any, method_name: str, items_attr: str) -> li
     the UI. The first page is requested exactly as discovery always
     was (no arguments); only continuation pages pass a cursor, so a
     single-page server sees the call shape it always did.
+
+    The chain is bounded (N-15): at most ``MCP_LIST_MAX_PAGES``
+    pages, and a repeated cursor raises — a server that cannot make
+    forward progress must fail the list, not spin it forever.
     """
     method = getattr(session, method_name)
     items: list = []
     cursor: str | None = None
+    seen_cursors: set[str] = set()
+    pages = 0
     while True:
         if cursor is None:
             result = await method()
         else:
             result = await method(params=PaginatedRequestParams(cursor=cursor))
+        pages += 1
         items.extend(getattr(result, items_attr))
         cursor = getattr(result, "nextCursor", None)
         if not cursor:
             return items
+        # N-15: the chain itself is bounded — a server minting fresh
+        # cursors forever stops at the page cap, and a cursor that
+        # repeats (a cycle) is refused on sight: following it again
+        # can only re-walk pages already seen.
+        if cursor in seen_cursors:
+            raise ValueError(
+                f"MCP {method_name} pagination cycled: cursor "
+                f"{cursor!r} was returned twice; refusing to follow "
+                "the list any further")
+        seen_cursors.add(cursor)
+        if pages >= MCP_LIST_MAX_PAGES:
+            raise ValueError(
+                f"MCP {method_name} pagination exceeded "
+                f"{MCP_LIST_MAX_PAGES} pages; refusing to follow the "
+                "list any further")
 
 
 def _capability_absent(session: Any, field: str) -> bool:
@@ -418,6 +456,15 @@ class MCPClientManager:
         # cleanly nor survive its owner — it is simply orphaned.
         self._owner_tasks: dict[str, asyncio.Task] = {}
         self._close_events: dict[str, asyncio.Event] = {}
+        # N-16: the in-flight connect's outcome, shared with callers
+        # that arrive while it is still running. connect_owned stores
+        # the creating call's ready event + result dict here so a
+        # concurrent caller waits for (and reports) the REAL outcome
+        # instead of declaring success for a session that does not
+        # exist yet. Entries are popped by the owner task's finally,
+        # identity-checked like the owner/close registrations.
+        self._connect_ready: dict[str, asyncio.Event] = {}
+        self._connect_results: dict[str, dict[str, Any]] = {}
 
     # -- status ---------------------------------------------------------
     def get_status(self, name: str) -> dict[str, Any]:
@@ -675,9 +722,53 @@ class MCPClientManager:
             await self._drop_dead_session(name)
         owner = self._owner_tasks.get(name)
         if owner is not None and not owner.done():
-            return {"ok": True, "error": None}
+            # N-16: a connect is already in flight in its owner task.
+            # The old code returned {"ok": True} here unconditionally
+            # — success for a session that did not exist yet (and
+            # might never): the registry went on to refresh tools
+            # against a missing session. Wait (bounded) for the
+            # in-flight connect's own outcome and report THAT.
+            ready_evt = self._connect_ready.get(name)
+            if ready_evt is not None:
+                # Capture the result dict itself, not just the event:
+                # the owner fills it in before setting ready, and its
+                # finally may pop the registry entry before this
+                # caller is scheduled again — the object stays valid.
+                # (An explicit None check: the dict is still EMPTY —
+                # falsy — at capture time, so ``or {}`` would capture
+                # a throwaway dict the owner never updates.)
+                shared = self._connect_results.get(name)
+                if shared is None:
+                    shared = {}
+                try:
+                    await asyncio.wait_for(
+                        ready_evt.wait(),
+                        timeout=MCP_CONNECT_READY_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"MCP connect for '{name}' did not finish "
+                            f"within {MCP_CONNECT_READY_TIMEOUT_SECONDS:.0f}s"),
+                    }
+                if shared.get("ok"):
+                    return {"ok": True, "error": None}
+                return {
+                    "ok": False,
+                    "error": shared.get("error") or "MCP connection was cancelled",
+                }
+            # An owner with no connect state is parked on a live
+            # session (its connect settled before this call) or is
+            # mid-teardown: only a live session is a success.
+            if name in self._sessions and (
+                    self.get_status(name)["status"] == "connected"):
+                return {"ok": True, "error": None}
+            return {"ok": False,
+                    "error": f"MCP server '{name}' is not connected"}
         ready = asyncio.Event()
         result: dict[str, Any] = {}
+        self._connect_ready[name] = ready
+        self._connect_results[name] = result
 
         async def _owner() -> None:
             close = asyncio.Event()
@@ -719,10 +810,29 @@ class MCPClientManager:
                     self._owner_tasks.pop(name, None)
                 if self._close_events.get(name) is close:
                     self._close_events.pop(name, None)
+                if self._connect_ready.get(name) is ready:
+                    self._connect_ready.pop(name, None)
+                if self._connect_results.get(name) is result:
+                    self._connect_results.pop(name, None)
 
         task = asyncio.create_task(_owner())
         self._owner_tasks[name] = task
-        await ready.wait()
+        try:
+            # N-16: bounded — an owner that dies or wedges without
+            # setting ready must fail this caller, not hang it. The
+            # owner attempt itself is left running (a concurrent
+            # caller may be waiting on the same outcome, and the
+            # connect may still land); disconnect() remains the way
+            # to stop it.
+            await asyncio.wait_for(
+                ready.wait(), timeout=MCP_CONNECT_READY_TIMEOUT_SECONDS)
+        except TimeoutError:
+            return {
+                "ok": False,
+                "error": (
+                    f"MCP connect for '{name}' did not signal readiness "
+                    f"within {MCP_CONNECT_READY_TIMEOUT_SECONDS:.0f}s"),
+            }
         if not result.get("ok"):
             self._owner_tasks.pop(name, None)
             self._close_events.pop(name, None)

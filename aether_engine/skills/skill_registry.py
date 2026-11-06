@@ -35,6 +35,7 @@ from pathlib import Path
 from aether_engine.skills.lockfile import (
     SkillPin,
     hash_skill_dir,
+    is_safe_skill_name,
     load_lockfile,
     save_lockfile,
 )
@@ -60,8 +61,24 @@ class InstallOutcome:
     detail: str
 
 
+def _unsafe_name_outcome(name: str) -> InstallOutcome:
+    return InstallOutcome(
+        name, False, "refused",
+        f"refusing skill name {name!r}: a skill name must be a "
+        "single path segment (letters, digits, '.', '_' or '-', not "
+        "starting with '.') — it is joined into filesystem paths at "
+        "install time, so a name carrying separators or '..' is a "
+        "traversal attempt, never a skill")
+
+
 def pin_status(pin: SkillPin, skills_root: Path) -> str:
     """Truthful state of one pin against the install target."""
+    if not is_safe_skill_name(pin.name):
+        # N-03: never resolve an unsafe name against the filesystem —
+        # ``skills_root / "../victim"`` would report on a directory
+        # outside the root. An unsafe pin cannot be installed, so it
+        # is missing by definition.
+        return STATUS_MISSING
     target = skills_root / pin.name
     if not target.is_dir():
         return STATUS_MISSING
@@ -99,6 +116,14 @@ def _materialise(
     SkillSourceError (refusal) when the target holds different
     content — it is left exactly as found.
     """
+    if not is_safe_skill_name(name):
+        # N-03: the last fence before the path joins below — both
+        # ``target`` and ``staging`` are built from the raw name, and
+        # the staging branch rmtree()s what it finds there.
+        raise SkillSourceError(
+            f"refusing to install skill {name!r}: the name is not a "
+            "single safe path segment, so it cannot be joined into "
+            "the skills root")
     target = skills_root / name
     if target.exists():
         if target.is_dir() and hash_skill_dir(target) == expected_hash:
@@ -143,6 +168,8 @@ def install_pin(
     lockfile_dir: Path | None = None,
 ) -> InstallOutcome:
     """Materialise one existing pin (the reproducible replay path)."""
+    if not is_safe_skill_name(pin.name):
+        return _unsafe_name_outcome(pin.name)
     try:
         source = open_source(pin.source_type, pin.source, base_dir=lockfile_dir)
         source_dir = source.fetch(pin.name, pin.skill_path)
@@ -199,6 +226,8 @@ def install_named(
     already in place), so the lockfile never claims content the disk
     does not hold.
     """
+    if not is_safe_skill_name(name):
+        return _unsafe_name_outcome(name)
     try:
         source_dir = source.fetch(name, skill_path)
     except SkillSourceError as exc:

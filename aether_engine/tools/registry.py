@@ -363,6 +363,28 @@ async def _run_sync_tool(tool: Tool, kwargs: dict[str, Any]) -> Any:
         ) from exc
 
 
+async def _run_coro_tool(tool: Tool, kwargs: dict[str, Any]) -> Any:
+    """Run a coroutine ``execute_fn`` under the tool's ``timeout_s`` (N-09).
+
+    The async counterpart of :func:`_run_sync_tool`: coroutine tools
+    (MCP, browser, READ_ONLY async natives) used to be awaited
+    directly, so ``timeout_s`` bounded only synchronous tools and a
+    hung async tool hung the task forever. On timeout ``wait_for``
+    cancels the coroutine — a coroutine, unlike a thread, can
+    actually be stopped — and the caller sees the same
+    ToolExecutionError shape the sync path raises.
+    """
+    try:
+        return await asyncio.wait_for(
+            tool.execute_fn(**kwargs),
+            timeout=tool.timeout_s,
+        )
+    except TimeoutError as exc:
+        raise ToolExecutionError(
+            f"Tool '{tool.name}' timed out after {tool.timeout_s}s."
+        ) from exc
+
+
 class ToolRegistry:
     """Registry holding tool definitions and handling on-demand asynchronous tool executions."""
 
@@ -639,7 +661,7 @@ class ToolRegistry:
                 # cannot adopt it. Policy, pre-flight and hooks above
                 # apply to both, unchanged.
                 if inspect.iscoroutinefunction(tool.execute_fn):
-                    result = await tool.execute_fn(**call_args)
+                    result = await _run_coro_tool(tool, call_args)
                 else:
                     result = await _run_sync_tool(tool, call_args)
                 if isinstance(result, str) and len(result) > tool.max_output_chars:
@@ -664,7 +686,8 @@ class ToolRegistry:
                     task_classes=task_classes,
                 )
             elif inspect.iscoroutinefunction(tool.execute_fn):
-                result = await tool.execute_fn(**_call_kwargs(tool, call_args, workspace_roots, path_rules))
+                result = await _run_coro_tool(
+                    tool, _call_kwargs(tool, call_args, workspace_roots, path_rules))
             else:
                 result = await _run_sync_tool(
                     tool, _call_kwargs(tool, call_args, workspace_roots, path_rules))

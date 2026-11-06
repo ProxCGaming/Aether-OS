@@ -184,8 +184,22 @@ def _find_files_fn(
             if candidate in seen:
                 continue
             seen.add(candidate)
-            if _glob_match(pattern, candidate.relative_to(base).as_posix()):
-                found.append(_display_path(candidate, base, single))
+            if not _glob_match(pattern, candidate.relative_to(base).as_posix()):
+                continue
+            # N-39: the same discovered-path fence _search_text_fn
+            # applies (E2-F03). Policy judged only the call's
+            # starting path; a glob match the walk DISCOVERED was
+            # never judged, so a symlinked file pointing outside the
+            # workspace — or a file under a sensitive-floor prefix —
+            # must not even have its NAME reported. Containment is
+            # judged on the RESOLVED path against the (resolved)
+            # base, exactly as the sibling tool judges it.
+            resolved = candidate.resolve()
+            if not resolved.is_relative_to(base):
+                continue
+            if is_sensitive_floor_path(resolved):
+                continue
+            found.append(_display_path(candidate, base, single))
     found.sort()
     if not found:
         return f"No files matched pattern '{pattern}'."

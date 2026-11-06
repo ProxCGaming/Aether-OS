@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import time
 import uuid
@@ -36,7 +37,7 @@ from aether_common.contracts import (
 )
 from aether_engine.artifacts.store import get_artifact_store
 from aether_engine.config import UserConfig
-from aether_engine.event_bus import event_bus
+from aether_engine.event_bus import EVENT_QUEUE_MAXSIZE, event_bus
 from aether_engine.langgraph.checkpointer import DEFAULT_CHECKPOINT_DB
 from aether_engine.langgraph.compaction import (
     compact_history,
@@ -63,6 +64,43 @@ from aether_engine.rewind import manifest as rewind_manifest
 from aether_engine.tools.registry import ToolRegistry
 
 logger = logging.getLogger("aether_engine.langgraph.executor")
+
+# N-06: idle bound for the graph consumer loop. Every producer that
+# feeds the event queue is itself bounded — provider streams by
+# their idle timeout (120s), tools by their ``timeout_s``, MCP calls
+# by their per-call timeout — so a run that produces NOTHING for
+# this long is wedged, not working: the consumer raises TimeoutError
+# and the task FAILS visibly instead of hanging forever with the UI
+# waiting on a run that will never speak again. It is an idle bound,
+# not a total deadline: a run that keeps producing events may take
+# as long as it takes.
+GRAPH_EVENT_IDLE_TIMEOUT_SECONDS = 1800.0
+
+# N-06: grace for a cancelled graph runner to finish unwinding
+# while the consumer's teardown awaits it — the N-02 discipline
+# (cf. MCP_TOOL_CALL_CANCEL_GRACE_SECONDS). A well-behaved runner
+# stops in milliseconds; the grace only bounds how long teardown
+# waits on one that doesn't.
+_RUNNER_SHUTDOWN_GRACE_SECONDS = 5.0
+
+
+async def _reap_runner(task: asyncio.Task) -> None:
+    """Observe a cancelled graph runner to completion (N-06).
+
+    Fallback for the teardown paths where the consumer's finally
+    cannot await the runner itself (notably GeneratorExit teardown,
+    where a suspending await is forbidden): the runner's outcome is
+    still retrieved — never left as an unobserved task that keeps
+    executing after unsubscribe or dies with an unretrieved error.
+    """
+    with contextlib.suppress(asyncio.CancelledError):
+        try:
+            await task
+        except Exception:
+            # Retrieval only: the run's own error was already
+            # forwarded to the consumer as graph_error.
+            logger.debug("Graph runner ended with an error during reap",
+                         exc_info=True)
 
 # ---------------------------------------------------------------------------
 # Epic 8, E8-1.1a: rewind manifest recording. As a graph task runs, each
@@ -613,7 +651,10 @@ async def run_langgraph_task(
             record_thought(ev)
             return ev
 
-        event_queue = asyncio.Queue()
+        # N-34: bounded — the bus drops (and logs) when this fills,
+        # and the runner's puts backpressure instead of accumulating
+        # events in memory behind a stalled consumer.
+        event_queue = asyncio.Queue(maxsize=EVENT_QUEUE_MAXSIZE)
         event_bus.subscribe(task_id, event_queue)
 
         # Steering (Epic 1, E1-07): steers for this session are drained
@@ -678,7 +719,13 @@ async def run_langgraph_task(
 
         try:
             while True:
-                item = await event_queue.get()
+                # N-06: idle-bounded — see
+                # GRAPH_EVENT_IDLE_TIMEOUT_SECONDS. A TimeoutError
+                # here lands in the except below and is reported as
+                # TASK_FAILED, like any other graph failure.
+                item = await asyncio.wait_for(
+                    event_queue.get(),
+                    timeout=GRAPH_EVENT_IDLE_TIMEOUT_SECONDS)
                 if isinstance(item, Event):
                     if item.type == EventType.TOOL_ACTIVITY:
                         payload = item.payload
@@ -1054,7 +1101,42 @@ async def run_langgraph_task(
             )
         finally:
             event_bus.unsubscribe(task_id, event_queue)
+            # N-06: cancel the runner AND await its wind-down. The
+            # old code only cancelled: an abandoned run's runner kept
+            # executing provider/tool work after unsubscribe, and its
+            # outcome was never retrieved. The wait is shielded and
+            # graced (a stubborn runner cannot hold teardown hostage);
+            # where even that await is impossible, _reap_runner
+            # observes the runner instead — it is never left running
+            # unobserved either way.
             runner_task.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(runner_task),
+                    timeout=_RUNNER_SHUTDOWN_GRACE_SECONDS)
+            except TimeoutError:
+                logger.warning(
+                    "Graph runner for task %s did not stop within "
+                    "%.0fs of cancellation",
+                    task_id, _RUNNER_SHUTDOWN_GRACE_SECONDS)
+            except asyncio.CancelledError:
+                # Our own cancellation arrived during the wait: hand
+                # the still-finishing runner to the reaper, then let
+                # our cancellation proceed — unless the CancelledError
+                # is the runner's own surfacing through the shield,
+                # which is the expected end of a cancelled runner.
+                if not runner_task.done():
+                    asyncio.ensure_future(_reap_runner(runner_task))
+                if not runner_task.cancelled():
+                    raise
+            except RuntimeError:
+                # GeneratorExit (aclose) teardown: a suspending await
+                # is forbidden there, so the reap below is the only
+                # observation this path can make — the cancellation
+                # above has still been delivered.
+                pass
+            if not runner_task.done():
+                asyncio.ensure_future(_reap_runner(runner_task))
 
 async def resume_langgraph_task(
     thread_id: str,
@@ -1134,7 +1216,7 @@ async def resume_langgraph_task(
             # SCRATCHPAD; this path never subscribed, so anything a
             # resumed specialist thought or rendered simply vanished.
             # _consume_segment merges the bus queue into each segment.
-            bus_queue = asyncio.Queue()
+            bus_queue = asyncio.Queue(maxsize=EVENT_QUEUE_MAXSIZE)
             event_bus.subscribe(task_id, bus_queue)
             # E1-F04: fill any run configuration the caller did not
             # supply from the snapshot the run checkpointed with its
@@ -1230,7 +1312,8 @@ async def resume_langgraph_task(
                     # keep the translation below, unchanged. A graph
                     # failure re-raises at the point the merge reaches
                     # it, exactly where a direct astream raise landed.
-                    merged: asyncio.Queue = asyncio.Queue()
+                    merged: asyncio.Queue = asyncio.Queue(
+                        maxsize=EVENT_QUEUE_MAXSIZE)
 
                     async def _pump_graph():
                         stream = graph.astream(

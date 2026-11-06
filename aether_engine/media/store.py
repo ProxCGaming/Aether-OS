@@ -657,12 +657,27 @@ class MediaStore:
 
         return True, file_deleted
 
-    def delete_by_session(self, session_id: str) -> int:
+    def delete_by_session(
+        self, session_id: str, delete_underlying_files: bool = False
+    ) -> int:
         """Delete all media entries belonging to a session.
 
-        S4-M3: also unlinks each item's file from disk (best-effort,
-        via ``_unlink_media_file``) — previously only the DB rows were
-        removed and the session's files were orphaned on disk.
+        Only the index rows are removed by default. This store is an
+        in-place reference index (module docstring): an item's
+        ``file_path`` is the user's own file at its real location,
+        so unlinking it here would destroy the original — the exact
+        harm ``delete_media`` guards with its own
+        ``delete_underlying_file=False`` default. Callers that own
+        the files (generated-media cleanup) opt in explicitly with
+        ``delete_underlying_files=True``; the unlinks are then
+        best-effort, via ``_unlink_media_file``.
+
+        (N-18: the S4-M3 behaviour this replaces unlinked every file
+        unconditionally, so a session delete destroyed user
+        originals the index merely pointed at. Session-owned upload
+        copies are unaffected by the change of default: the
+        SESSION_DELETE cascade removes ``~/.aether/attachments/
+        <session_id>/`` separately, via ``_remove_session_attachments``.)
         """
         self.init_db()
         with self._get_conn() as conn:
@@ -673,9 +688,10 @@ class MediaStore:
                 conn.execute("DELETE FROM media_embeddings WHERE media_id = ?", (mid,))
                 conn.execute("DELETE FROM media_items WHERE id = ?", (mid,))
             conn.commit()
-        for _mid, file_path in pairs:
-            if file_path:
-                _unlink_media_file(file_path)
+        if delete_underlying_files:
+            for _mid, file_path in pairs:
+                if file_path:
+                    _unlink_media_file(file_path)
         return len(pairs)
 
 

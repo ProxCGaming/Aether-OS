@@ -49,8 +49,14 @@ logger = logging.getLogger("aether_engine.plugins.installer")
 # *who* may install remains the user's explicit approval in the Phase 10.1
 # A1 flow (``pending_plugin_installs``), which shows the manifest before
 # ``install()`` runs. Directory sources are local folders the user pointed
-# at directly, so no hash check applies to them — but name / file_path
-# validation does (via the manifest validators).
+# at directly; name / file_path validation applies to them (via the
+# manifest validators), and since N-29 they are gated in
+# ``_validate_dir_source``: symlinks are refused unconditionally (the
+# copy dereferences them, which would import content from outside the
+# folder the user pointed at), and when a directory's manifest DOES
+# declare a ``files`` map the full allowlist/hash gate applies to it
+# exactly as for a zip. Only a manifest with no files map — the
+# local-dev shape — installs on name/path validation alone.
 #
 # On any refusal the install raises ``ValueError`` before touching the
 # target directory (an existing installed version is left untouched) and,
@@ -62,6 +68,21 @@ logger = logging.getLogger("aether_engine.plugins.installer")
 # ``aether_engine/state.py`` for the production path to emit these events.
 
 _MANIFEST_MEMBER = "manifest.json"
+
+# N-17: zip size governance. The manifest's hash/allowlist checks
+# cannot stop a zip bomb — the attacker authors a self-consistent
+# manifest — so sizes are gated on the central directory's DECLARED
+# uncompressed sizes, before any member is decompressed, and again
+# by byte accounting during extraction (defence in depth). A plugin
+# package is code, markdown and small assets; these caps sit far
+# above any legitimate package and far below a disk/RAM threat.
+PLUGIN_ZIP_MAX_MEMBERS = 4096
+PLUGIN_ZIP_MAX_MEMBER_BYTES = 64 * 1024 * 1024
+PLUGIN_ZIP_MAX_TOTAL_BYTES = 256 * 1024 * 1024
+
+# Extraction streams members in chunks of this size; a member is
+# never held whole in memory by the extractor.
+_EXTRACT_CHUNK_BYTES = 256 * 1024
 
 
 def _read_mcp_config_file(source: Path, file_path: str) -> dict:
@@ -96,6 +117,15 @@ def _read_mcp_config_file(source: Path, file_path: str) -> dict:
         try:
             with zipfile.ZipFile(source, "r") as z:
                 try:
+                    # N-17: same size gate as every other pre-validation
+                    # read — a config member is small JSON by nature.
+                    if z.getinfo(file_path).file_size > (
+                            PLUGIN_ZIP_MAX_MEMBER_BYTES):
+                        raise ValueError(
+                            f"MCP server config file '{file_path}' declares "
+                            f"over {PLUGIN_ZIP_MAX_MEMBER_BYTES} uncompressed "
+                            "bytes."
+                        )
                     raw = z.read(file_path)
                 except KeyError:
                     raise ValueError(
@@ -511,6 +541,31 @@ class PluginInstaller:
                          manifest.name, src)
         with zf:
             infos = zf.infolist()
+            # N-17: size governance comes FIRST, judged on the
+            # central directory's declared uncompressed sizes — a
+            # bomb is refused before a single member is read into
+            # memory, however honest its hashes are.
+            if len(infos) > PLUGIN_ZIP_MAX_MEMBERS:
+                self._refuse(
+                    f"Zip declares {len(infos)} members, over the "
+                    f"{PLUGIN_ZIP_MAX_MEMBERS}-member limit",
+                    manifest.name, src)
+            declared_total = 0
+            for info in infos:
+                if self._is_dir_entry(info):
+                    continue
+                if info.file_size > PLUGIN_ZIP_MAX_MEMBER_BYTES:
+                    self._refuse(
+                        f"Zip member {info.filename!r} declares "
+                        f"{info.file_size} uncompressed bytes, over "
+                        f"the {PLUGIN_ZIP_MAX_MEMBER_BYTES}-byte "
+                        "per-member limit", manifest.name, src)
+                declared_total += info.file_size
+                if declared_total > PLUGIN_ZIP_MAX_TOTAL_BYTES:
+                    self._refuse(
+                        f"Zip members declare over "
+                        f"{PLUGIN_ZIP_MAX_TOTAL_BYTES} uncompressed "
+                        "bytes in total", manifest.name, src)
             names = [i.filename for i in infos]
             if _MANIFEST_MEMBER not in names:
                 self._refuse("manifest.json must be at the archive root",
@@ -566,6 +621,77 @@ class PluginInstaller:
                     f"Manifest declares files missing from the archive: "
                     f"{sorted(missing)}", manifest.name, src)
 
+    def _validate_dir_source(self, source: Path, manifest: PluginManifest) -> None:
+        """Validate a directory plugin source BEFORE anything is copied.
+
+        N-29: directory installs used to copy the tree with
+        ``copytree``/``copy2`` unchecked, and both dereference
+        symlinks — so undeclared files and content from OUTSIDE the
+        folder (a symlinked ``~/.ssh`` file) entered the installed
+        tree, none of it shown on the approval card. Two gates now
+        apply, mirroring the zip path as far as a folder allows:
+
+        1. No symlinks anywhere in the tree, and no non-regular
+           files (a fifo would block the copy; a device is not
+           package content). Refused, never followed — unconditionally,
+           whatever the manifest declares.
+        2. When the manifest declares a ``files`` map, the zip
+           allowlist applies in full: every regular file on disk must
+           be declared with a matching SHA-256 and every declared
+           file must be present. ``manifest.json`` is exempt, exactly
+           as in the zip flow (the trust anchor cannot hash itself).
+
+        A manifest with NO files map is the documented local-dev
+        shape (see the header trust model): gate 1 still applies;
+        the hash gate has nothing to judge against.
+        """
+        src = str(source)
+        on_disk: dict[str, Path] = {}
+        for dirpath, dirnames, filenames in os.walk(source):
+            for entry_name in (*dirnames, *filenames):
+                entry = Path(dirpath) / entry_name
+                if entry.is_symlink():
+                    self._refuse(
+                        f"Directory plugin source contains a symlink: "
+                        f"{entry.relative_to(source).as_posix()!r} — "
+                        "directory installs never follow symlinks, so "
+                        "content outside the folder the user pointed "
+                        "at cannot enter the installed plugin",
+                        manifest.name, src)
+            for entry_name in filenames:
+                entry = Path(dirpath) / entry_name
+                if not entry.is_file():
+                    self._refuse(
+                        f"Directory plugin source contains a "
+                        f"non-regular file: "
+                        f"{entry.relative_to(source).as_posix()!r}",
+                        manifest.name, src)
+                rel = entry.relative_to(source).as_posix()
+                if rel != _MANIFEST_MEMBER:
+                    on_disk[rel] = entry
+        if not manifest.files:
+            return
+        declared = set(manifest.files)
+        undeclared = sorted(set(on_disk) - declared)
+        if undeclared:
+            self._refuse(
+                f"Directory plugin file {undeclared[0]!r} is not "
+                "declared in the manifest files map",
+                manifest.name, src)
+        missing = sorted(declared - set(on_disk))
+        if missing:
+            self._refuse(
+                f"Manifest declares files missing from the "
+                f"directory: {missing}", manifest.name, src)
+        for rel, entry in sorted(on_disk.items()):
+            actual = hashlib.sha256(entry.read_bytes()).hexdigest()
+            expected = manifest.files[rel]
+            if not hmac.compare_digest(actual, expected):
+                self._refuse(
+                    f"SHA-256 mismatch for directory plugin file "
+                    f"{rel!r}: manifest declares {expected}, directory "
+                    f"has {actual}", manifest.name, src)
+
     @staticmethod
     def _safe_extract(source: Path, target_dir: Path) -> None:
         """Extract a previously validated zip, member by member.
@@ -575,6 +701,7 @@ class PluginInstaller:
         members were already validated, so this must never fire).
         """
         target_root = target_dir.resolve()
+        total_written = 0
         with zipfile.ZipFile(source, "r") as z:
             for info in z.infolist():
                 member = info.filename
@@ -585,7 +712,31 @@ class PluginInstaller:
                     raise ValueError(
                         f"Refusing to extract {member!r}: escapes target directory")
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(z.read(member))
+                # N-17: stream the member out in chunks under a byte
+                # budget instead of materialising it whole — the
+                # extractor enforces the same caps validation judged
+                # from the directory, so a lying directory entry (or
+                # a caller that skipped validation) still cannot
+                # expand without limit.
+                member_written = 0
+                with z.open(info) as src_f, dest.open("wb") as out:
+                    while True:
+                        chunk = src_f.read(_EXTRACT_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        member_written += len(chunk)
+                        total_written += len(chunk)
+                        if member_written > PLUGIN_ZIP_MAX_MEMBER_BYTES:
+                            raise ValueError(
+                                f"Refusing to extract {member!r}: exceeds "
+                                f"the {PLUGIN_ZIP_MAX_MEMBER_BYTES}-byte "
+                                "per-member limit")
+                        if total_written > PLUGIN_ZIP_MAX_TOTAL_BYTES:
+                            raise ValueError(
+                                "Refusing to extract: archive exceeds "
+                                f"the {PLUGIN_ZIP_MAX_TOTAL_BYTES}-byte "
+                                "total limit")
+                        out.write(chunk)
 
     @staticmethod
     def _contained_path(base: Path, relative: str, what: str) -> Path:
@@ -612,6 +763,17 @@ class PluginInstaller:
                 # The manifest is the trust anchor: it must be at the root.
                 if _MANIFEST_MEMBER not in z.namelist():
                     raise ValueError("Invalid plugin package: manifest.json not found")
+                # N-17: this read happens BEFORE archive validation,
+                # so the manifest member itself is size-gated on its
+                # declared uncompressed size — a bomb must not be
+                # able to OOM the prepare step through the one member
+                # every flow has to read.
+                if z.getinfo(_MANIFEST_MEMBER).file_size > (
+                        PLUGIN_ZIP_MAX_MEMBER_BYTES):
+                    raise ValueError(
+                        "Invalid plugin package: manifest.json declares "
+                        f"over {PLUGIN_ZIP_MAX_MEMBER_BYTES} uncompressed "
+                        "bytes")
                 import json
                 manifest_data = json.loads(z.read(_MANIFEST_MEMBER).decode())
         elif src_path.is_dir():
@@ -631,6 +793,10 @@ class PluginInstaller:
             # approve it. install() re-validates (authoritative, before
             # extraction) in case the prepare data was tampered with.
             self._validate_zip_archive(src_path, manifest)
+        elif src_path.is_dir():
+            # N-29: the same fail-fast for directory sources, before
+            # the approval step; install() re-validates authoritatively.
+            self._validate_dir_source(src_path, manifest)
         # Issue 008: fail fast, before the approval step — a manifest
         # whose MCP servers do not validate is rejected here with the
         # named error, not after the user approves the install.
@@ -654,6 +820,11 @@ class PluginInstaller:
         # untouched and writes nothing anywhere.
         if source.is_file() and source.suffix == ".zip":
             self._validate_zip_archive(source, manifest)
+        elif source.is_dir():
+            # N-29: directory sources get their gate at the same
+            # authoritative point — symlinks refused, and the files
+            # map enforced when the manifest declares one.
+            self._validate_dir_source(source, manifest)
         # Issue 008: validate FIRST, before any mutation — before the
         # backup move, before any file is copied, before any server is
         # added. A bad manifest fails here with the named error and the

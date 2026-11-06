@@ -57,7 +57,18 @@ def _verify_citation(root: str, rel_path: str, line_start: int,
     file's own text is what gets cited. A vanished file reports
     (False, "") so the caller drops the stale hit.
     """
-    path = Path(root) / rel_path
+    # N-41: rel_path comes from the index, not the caller — a
+    # poisoned or stale entry must not steer the read outside the
+    # workspace. An absolute rel_path would discard the root
+    # entirely and ".." escapes it lexically, so containment is
+    # judged on the RESOLVED path against the RESOLVED root (the
+    # fence every sibling tool applies). An escaping entry is
+    # treated exactly like a vanished file: (False, ""), the hit
+    # is dropped, and nothing outside is ever read.
+    resolved_root = Path(root).resolve()
+    path = (resolved_root / rel_path).resolve()
+    if not path.is_relative_to(resolved_root):
+        return False, ""
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
