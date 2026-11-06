@@ -1,31 +1,35 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { User, Key, Cpu, Settings as SettingsIcon, Activity, Download, Network, Box, Layers, Plug, Database, Sliders, CheckCircle2, Wrench, Server, Trash2, Lock, Scissors, Globe, CircleDollarSign, Mic, Info } from 'lucide-react';
-import Dropdown from './Dropdown';
-// E6-F14: the About section's version is read from the desktop
-// package manifest — one of the three mirrors of the engine's
-// APP_VERSION (aether_engine/version.py), pinned equal to it by the
-// epic-10 hardening tests. Never a hardcoded copy in this file.
-import appPackage from '../package.json';
-import { resolveSnipHotkey, defaultSnipHotkey } from './snipHotkey';
-import LocalModelsTab from './LocalModelsTab';
+import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info } from 'lucide-react';
 import './chat.css';
+import { resolveSnipHotkey, defaultSnipHotkey } from './snipHotkey';
 import ProviderSettings from './components/Settings/ProviderSettings';
 import MemoryManagement from './components/Settings/MemoryManagement';
 import DiagnosticsPanel from './components/Settings/DiagnosticsPanel';
-import LogsPanel from './components/Settings/LogsPanel';
 import WorkspaceIndexingPanel from './components/Settings/WorkspaceIndexingPanel';
 import BrowserPolicyPanel from './components/Settings/BrowserPolicyPanel';
 import UsageSettingsPanel from './components/Settings/UsageSettingsPanel';
 import VaultPanel from './components/Settings/VaultPanel';
 import OrchestrationPanel from './components/Settings/OrchestrationPanel';
 import LoadStateRow from './components/Settings/LoadStateRow';
-import SpeechSettingsPanel from './components/Settings/SpeechSettingsPanel';
-import PathRulesPanel from './components/Settings/PathRulesPanel';
-import ProjectConfigPanel from './components/Settings/ProjectConfigPanel';
+import ModelsPanel from './components/Settings/ModelsPanel';
+import CapabilitiesPanel from './components/Settings/CapabilitiesPanel';
+import ToolsPanel from './components/Settings/ToolsPanel';
+import SkillsPanel from './components/Settings/SkillsPanel';
+import AdvancedPanel from './components/Settings/AdvancedPanel';
+import AboutPanel from './components/Settings/AboutPanel';
+import VoicePanel from './components/Settings/VoicePanel';
+
+// Wave 5 (Annex C row 7): this file is the Settings shell —
+// sidebar navigation, the one socket message handler, the
+// shared config state and the sends. The tab bodies live in
+// components/Settings/ as controlled panels (ModelsPanel,
+// CapabilitiesPanel, ToolsPanel, SkillsPanel, AdvancedPanel,
+// AboutPanel, VoicePanel, alongside the panels extracted
+// earlier); the Agents menu stays a composition of
+// DiagnosticsPanel + OrchestrationPanel here.
 
 export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages = [], reconnectCount = 0, providers = [], providersLoaded = false, isConnected = null, providerHealth = {}, activeSession = null, dailyBudget = null, budgetAlert = null, initialMenu = null, onInitialMenuConsumed = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
-  const [modelTab, setModelTab] = useState('cloud'); // 'cloud' or 'local'
 
   const [tools, setTools] = useState([]);
   // Epic 2: approval mode ('ask' | 'write', from TOOL_LIST_RESPONSE) and
@@ -49,7 +53,6 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   // E6-F14: workspace roots for the About section's local-guide
   // entry point (from WORKSPACE_LIST_RESPONSE).
   const [aboutWorkspaces, setAboutWorkspaces] = useState([]);
-  const [guideStatus, setGuideStatus] = useState('');
   // Epic 10: backup / restore + update check (Advanced tab).
   const [backupStatus, setBackupStatus] = useState('');
   const [includeSecrets, setIncludeSecrets] = useState(false);
@@ -327,6 +330,194 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         payload: { workspace_root: projectLayer.workspaceRoot, content }
       }));
     }
+  };
+
+  // Wave 5 (Annex C row 7): the sends behind the extracted tab
+  // panels' controls — the panels are controlled components, so
+  // the sends live here beside the state they update and reach
+  // the panels as named handlers.
+  const handleModelDefaultChange = (val) => {
+    const [provider, model] = val.split(':::');
+    if (provider && model) sendModelDefault(provider, model);
+  };
+
+  const handleReasoningEffortChange = (val) => {
+    // Phase 9, B2: persist engine-side so it actually affects model calls.
+    // E6-F15: sent unconditionally — the facade
+    // queues it while offline (see sendConfigUpdate).
+    // D2-06: a refusal rolls this (and
+    // localStorage) back to the confirmed effort.
+    setControlRefusal('');
+    setReasoningEffort(val);
+    localStorage.setItem('reasoning_effort', val);
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({
+        type: 'REASONING_EFFORT_SET_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { effort: val }
+      }));
+    }
+  };
+
+  const handleAuxModelChange = (taskId, val) => {
+    const [provider, model] = val.split(':::');
+    // Phase 9, B1: optimistic update; engine confirms via AUXILIARY_MODEL_SET_RESPONSE.
+    // D2-06: a refusal rolls back to the confirmed overrides.
+    setControlRefusal('');
+    setAuxModels(prev => {
+      const next = { ...prev };
+      if (!model || model === 'auto') delete next[taskId];
+      else next[taskId] = val;
+      return next;
+    });
+    // E6-F15: sent unconditionally (facade queues offline).
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({
+        type: 'AUXILIARY_MODEL_SET_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { task: taskId, provider, model: model || 'auto' }
+      }));
+    }
+  };
+
+  const handleAuxResetAll = () => {
+    // Phase 9, B1: clear every override back to the main model.
+    // E6-F15: sent unconditionally (facade queues offline).
+    setControlRefusal('');
+    setAuxModels({});
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({
+        type: 'AUXILIARY_MODEL_SET_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { task: 'vision', provider: '', model: 'auto' }
+      }));
+    }
+  };
+
+  const handleRunDiagnostics = () => {
+    if (isDiagnosticsRunning || diagnosticsQueued) return;
+    // RUX-A-13: through sendSettingsAction the run
+    // QUEUES while the engine is unreachable instead
+    // of being discarded by the readyState guard it
+    // used to sit behind. The running state arms only
+    // for a live send; a queued run is inert with its
+    // own note (derived from the real queue above)
+    // until the flush + response land the result.
+    const disposition = sendSettingsAction('ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST', {});
+    if (disposition !== 'queued') {
+      setIsDiagnosticsRunning(true);
+      setDiagnosticsError('');
+      // D2-07: the codebase's 35 s no-answer rule
+      // (ProviderSettings' save/test paths) — a run
+      // whose response never arrives must resolve,
+      // not spin for the life of the mount.
+      clearDiagnosticsTimer();
+      diagnosticsTimerRef.current = setTimeout(() => {
+        diagnosticsTimerRef.current = null;
+        setIsDiagnosticsRunning(false);
+        setDiagnosticsError('No answer from the engine in 35s — the run may only be queued, or the engine may be busy or offline. Try again.');
+      }, 35000);
+    }
+  };
+
+  const handleLogsExportBundle = () => {
+    // Same request + queued honesty as the Advanced
+    // tab's export button; the response handler merges
+    // the desktop half into the bundle before download.
+    const disposition = sendSettingsAction('DIAGNOSTICS_EXPORT_REQUEST', {});
+    if (disposition === 'queued') {
+      setVersionCheck('Diagnostics export queued — the file will download when the engine reconnects.');
+    }
+    return disposition;
+  };
+
+  const handleToolPolicyChange = (toolName, policy) => {
+    sendSettingsAction('TOOL_POLICY_SET_REQUEST', { tool_name: toolName, policy });
+  };
+
+  const handleSkillToggle = (skill) => {
+    // RUX-A-14: through safeSend the toggle
+    // QUEUES while the engine is unreachable
+    // instead of being discarded by the guard
+    // this used to carry (the click visibly did
+    // nothing). The label stays driven by the
+    // engine's list — no fake state — and the
+    // pending note beside the button carries the
+    // honesty until the refreshed list lands.
+    sendSettingsAction('SKILL_TOGGLE_REQUEST', { name: skill.name, enabled: skill.enabled === false });
+  };
+
+  const handleResetClick = () => {
+    if (!resetArmed) { setResetArmed(true); return; }
+    // E6-F15: sent unconditionally — a reset confirmed
+    // while offline is queued by the facade and lands
+    // on reconnect, not dropped.
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({ type: 'CONFIG_RESET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
+    }
+  };
+
+  const handleCreateBackup = () => {
+    // RUX-A-13: through sendSettingsAction the
+    // request QUEUES while the engine is unreachable
+    // instead of being discarded after the status was
+    // already armed — 'Creating backup…' used to sit
+    // on screen forever offline. A queued backup says
+    // so; the BACKUP_CREATE_RESPONSE overwrites the
+    // status with the real outcome when it lands.
+    const disposition = sendSettingsAction('BACKUP_CREATE_REQUEST', { include_secrets: includeSecrets });
+    setBackupStatus(disposition === 'queued'
+      ? 'Backup queued — will run when the engine reconnects.'
+      : 'Creating backup…');
+  };
+
+  const handleRestoreBackup = () => {
+    if (!restorePath.trim()) { setRestoreStatus('Enter the path to a backup zip first.'); return; }
+    // RUX-A-13: same honest-status treatment as
+    // backup create — queue instead of discard, and
+    // never leave 'Restoring…' armed for a restore
+    // that has not started.
+    const disposition = sendSettingsAction('BACKUP_RESTORE_REQUEST', { path: restorePath.trim() });
+    setRestoreStatus(disposition === 'queued'
+      ? 'Restore queued — will run when the engine reconnects.'
+      : 'Restoring…');
+  };
+
+  const handleCheckUpdates = () => {
+    // RUX-A-13: queue instead of discard; 'Checking…'
+    // only for a check that is actually running.
+    const disposition = sendSettingsAction('VERSION_CHECK_REQUEST', {});
+    setVersionCheck(disposition === 'queued'
+      ? 'Update check queued — will run when the engine reconnects.'
+      : 'Checking…');
+  };
+
+  const handleExportDiagnostics = () => {
+    // RUX-A-13: the export used to be discarded in
+    // complete silence (no state at all). Queued, it
+    // says where it is; sent, the response produces
+    // the download + confirmation as before.
+    const disposition = sendSettingsAction('DIAGNOSTICS_EXPORT_REQUEST', {});
+    if (disposition === 'queued') {
+      setVersionCheck('Diagnostics export queued — the file will download when the engine reconnects.');
+    }
+  };
+
+  const handleDisableFallbacksChange = (val) => {
+    setDisableFallbacks(val);
+    // E6-F15: through the one CONFIG_UPDATE flow,
+    // unconditionally (facade queues offline).
+    sendConfigUpdate({ disable_fallbacks: val });
+  };
+
+  const handleFallbackChainCommit = () => {
+    // E6-F15: through the one CONFIG_UPDATE flow,
+    // unconditionally (facade queues offline).
+    const parsedChain = fallbackChain.split(',').map(s => s.trim()).filter(Boolean);
+    sendConfigUpdate({ fallback_chain: parsedChain });
   };
 
   const handleApprovalModeChange = (mode) => {
@@ -954,230 +1145,29 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         )}
 
         {activeMenu === 'Models' && (
-          <div style={{ color: '#f0f0f5' }}>
-            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Models & Tasks</h2>
-            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Assign default models globally, or route specific tasks to specialized models.</p>
-            
-            {/* Toggle Switch */}
-            <div style={{ display: 'flex', background: 'rgba(255,255,255,0.05)', padding: '4px', borderRadius: '12px', marginBottom: '24px', width: 'fit-content' }}>
-               <button 
-                  onClick={() => setModelTab('cloud')}
-                  style={{ background: modelTab === 'cloud' ? 'rgba(124,58,237,0.4)' : 'transparent', color: '#fff', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
-                  Cloud Models
-               </button>
-               <button 
-                  onClick={() => setModelTab('local')}
-                  style={{ background: modelTab === 'local' ? 'rgba(124,58,237,0.4)' : 'transparent', color: '#fff', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
-                  Local Models
-               </button>
-            </div>
-
-            {modelTab === 'cloud' && (
-               <>
-                 {/* RUX-C-01: config-driven controls on this tab
-                     (reasoning effort, auxiliary models, speech)
-                     show engine defaults until the first config
-                     answer lands — the tab says so until then. */}
-                 {!answered.config && (
-                   <div style={{ marginBottom: '24px' }}>
-                     <LoadStateRow
-                       loadState={configLoadError ? 'error' : 'loading'}
-                       isConnected={isConnected}
-                       testId="models-config-load-state"
-                       variant="plain"
-                       loadingText="Loading your saved model settings…"
-                       offlineText="Waiting for the engine — your saved model settings will appear here once it connects."
-                       errorText={configLoadError || 'Your saved model settings could not be loaded.'}
-                     />
-                     {configLoadError && (
-                       <button type="button" onClick={retryConfigLoad} style={{ marginTop: '8px', background: 'transparent', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
-                         Retry
-                       </button>
-                     )}
-                   </div>
-                 )}
-                 <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', marginBottom: '24px' }}>
-                   <div style={{ display: 'flex', gap: '24px' }}>
-                     <div style={{ flex: 1 }}>
-                       <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Global Default Model</h3>
-                       <div style={{ opacity: modelSwitchQueued ? 0.55 : 1, pointerEvents: modelSwitchQueued ? 'none' : 'auto' }}>
-                       <Dropdown
-                         value={
-                           (Array.isArray(providers) ? providers : []).find(p => p.is_default)
-                             ? `${(Array.isArray(providers) ? providers : []).find(p => p.is_default).name}:::${(Array.isArray(providers) ? providers : []).find(p => p.is_default).default_model}`
-                             : ''
-                         }
-                         onChange={(val) => {
-                           const [provider, model] = val.split(':::');
-                           if (provider && model) sendModelDefault(provider, model);
-                         }}
-                         options={
-                           (Array.isArray(providers) ? providers : [])
-                             .filter(p => p.has_key && p.models && p.models.length > 0)
-                             .map(p => ({
-                               group: p.display_name || p.name,
-                               items: p.models.map(m => ({ value: `${p.name}:::${m}`, label: m }))
-                             }))
-                         }
-                         placeholder="Select a default model..."
-                         style={{ width: '100%' }}
-                       />
-                       </div>
-                       {modelSwitchQueued && (
-                         <div style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
-                           Model switch{pendingModelSwitch.payload && pendingModelSwitch.payload.model ? ` to ${pendingModelSwitch.payload.model}` : ''} queued — will apply when the engine reconnects.
-                         </div>
-                       )}
-                     </div>
-                     <div style={{ width: '200px' }}>
-                       <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Reasoning Effort</h3>
-                       <Dropdown 
-                         value={reasoningEffort}
-                         onChange={(val) => {
-                           // Phase 9, B2: persist engine-side so it actually affects model calls.
-                           // E6-F15: sent unconditionally — the facade
-                           // queues it while offline (see sendConfigUpdate).
-                           // D2-06: a refusal rolls this (and
-                           // localStorage) back to the confirmed effort.
-                           setControlRefusal('');
-                           setReasoningEffort(val);
-                           localStorage.setItem('reasoning_effort', val);
-                           if (wsRef.current) {
-                             wsRef.current.send(JSON.stringify({
-                               type: 'REASONING_EFFORT_SET_REQUEST',
-                               schema_version: 1,
-                               request_id: Date.now().toString(),
-                               payload: { effort: val }
-                             }));
-                           }
-                         }}
-                         options={[
-                           { value: 'standard', label: 'Standard' },
-                           { value: 'medium', label: 'Medium' },
-                           { value: 'high', label: 'Deep Thinking' }
-                         ]}
-                         style={{ width: '100%' }}
-                       />
-                     </div>
-                   </div>
-                 </div>
-
-                 {controlRefusal && (
-                   <div style={{ color: '#f87171', fontSize: '13px', marginTop: '16px' }}>{controlRefusal}</div>
-                 )}
-
-                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '32px', marginBottom: '16px' }}>
-                   <h3 style={{ fontSize: '18px', fontWeight: 500, margin: 0 }}>⚙ Auxiliary models</h3>
-                   <button
-                     style={{ background: 'transparent', color: '#a78bfa', border: 'none', fontSize: '13px', cursor: 'pointer' }}
-                     onClick={() => {
-                       // Phase 9, B1: clear every override back to the main model.
-                       // E6-F15: sent unconditionally (facade queues offline).
-                       setControlRefusal('');
-                       setAuxModels({});
-                       if (wsRef.current) {
-                         wsRef.current.send(JSON.stringify({
-                           type: 'AUXILIARY_MODEL_SET_REQUEST',
-                           schema_version: 1,
-                           request_id: Date.now().toString(),
-                           payload: { task: 'vision', provider: '', model: 'auto' }
-                         }));
-                       }
-                     }}
-                   >Reset all to main</button>
-                 </div>
-                 <p style={{ color: '#9090a0', fontSize: '13px', marginBottom: '16px' }}>Helper tasks run on the main model by default. Assign a dedicated model to any task to override.</p>
-                 
-                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                   {[
-                     // Phase 9, B1 (UI honesty): only tasks with a real engine seam are
-                     // shown. Vision overrides are honored by the routing policy; the
-                     // other helper tasks have no engine call site yet, so no control
-                     // is rendered for them instead of a placebo dropdown.
-                     { id: 'vision', name: 'Vision', desc: 'Image analysis' },
-                   ].map(task => (
-                     <div key={task.id} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <h4 style={{ fontSize: '14px', fontWeight: 600, margin: 0 }}>{task.name}</h4>
-                            <span style={{ fontSize: '11px', color: '#9090a0' }}>{task.desc}</span>
-                          </div>
-                          <p style={{ fontSize: '12px', color: '#a78bfa', marginTop: '4px', fontFamily: 'monospace' }}>{auxModels[task.id] ? auxModels[task.id].split(':::')[1] || auxModels[task.id] : 'auto · use main model'}</p>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <Dropdown 
-                            value={auxModels[task.id] || 'auto'}
-                            onChange={(val) => {
-                              const [provider, model] = val.split(':::');
-                              // Phase 9, B1: optimistic update; engine confirms via AUXILIARY_MODEL_SET_RESPONSE.
-                              // D2-06: a refusal rolls back to the confirmed overrides.
-                              setControlRefusal('');
-                              setAuxModels(prev => {
-                                const next = { ...prev };
-                                if (!model || model === 'auto') delete next[task.id];
-                                else next[task.id] = val;
-                                return next;
-                              });
-                              // E6-F15: sent unconditionally (facade queues offline).
-                              if (wsRef.current) {
-                                wsRef.current.send(JSON.stringify({
-                                  type: 'AUXILIARY_MODEL_SET_REQUEST',
-                                  schema_version: 1,
-                                  request_id: Date.now().toString(),
-                                  payload: { task: task.id, provider, model: model || 'auto' }
-                                }));
-                              }
-                            }}
-                            options={[
-                              { value: 'auto', label: 'Use main model' },
-                              ...(Array.isArray(providers) ? providers : [])
-                                .filter(p => p.has_key && p.models && p.models.length > 0)
-                                .map(p => ({
-                                  group: p.display_name || p.name,
-                                  items: p.models.map(m => ({ value: `${p.name}:::${m}`, label: m }))
-                                }))
-                            ]}
-                            style={{ width: '180px' }}
-                            align="right"
-                          />
-                        </div>
-                     </div>
-                   ))}
-                 </div>
-
-                 {/* Model Hub H5: the Speech card — speech model,
-                     voice and transcription model, controlled from
-                     the applied config like every handed-off surface
-                     (E6-F05) and written through sendConfigUpdate. */}
-                 <SpeechSettingsPanel
-                   config={engineConfig}
-                   configError={configUpdateError}
-                   onConfigUpdate={sendConfigUpdate}
-                   pendingMessages={pendingMessages}
-                   reconnectCount={reconnectCount}
-                   configReady={!!answered.config}
-                   wsRef={wsRef}
-                 />
-               </>
-            )}
-
-            {modelTab === 'local' && (
-               <LocalModelsTab
-                 wsRef={wsRef}
-                 safeSend={safeSend}
-                 pendingMessages={pendingMessages}
-                 // Phase 10.3 C2: the active model lives on the providers
-                 // array (the provider flagged is_default); LocalModelsTab
-                 // needs it to show which downloaded model is Active.
-                 defaultProvider={(Array.isArray(providers) ? providers : []).find(p => p.is_default)?.name || ''}
-                 defaultModel={(Array.isArray(providers) ? providers : []).find(p => p.is_default)?.default_model || ''}
-                 // The configured embedder lives on the applied
-                 // config; the tab marks that downloaded row as the
-                 // active Embedder.
-                 currentEmbedder={engineConfig?.embedding_model || ''}
-               />
-            )}
-          </div>
+          <ModelsPanel
+            providers={providers}
+            wsRef={wsRef}
+            safeSend={safeSend}
+            pendingMessages={pendingMessages}
+            reconnectCount={reconnectCount}
+            isConnected={isConnected}
+            configAnswered={!!answered.config}
+            configLoadError={configLoadError}
+            onRetryConfigLoad={retryConfigLoad}
+            modelSwitchQueued={modelSwitchQueued}
+            pendingModelSwitch={pendingModelSwitch}
+            onModelDefaultChange={handleModelDefaultChange}
+            reasoningEffort={reasoningEffort}
+            onReasoningEffortChange={handleReasoningEffortChange}
+            controlRefusal={controlRefusal}
+            auxModels={auxModels}
+            onAuxModelChange={handleAuxModelChange}
+            onAuxResetAll={handleAuxResetAll}
+            engineConfig={engineConfig}
+            configUpdateError={configUpdateError}
+            onConfigUpdate={sendConfigUpdate}
+          />
         )}
 
         {activeMenu === 'Agents' && (
@@ -1210,352 +1200,40 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         )}
 
         {activeMenu === 'Capabilities' && (
-          <div style={{ color: '#f0f0f5' }}>
-            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Engine Capabilities</h2>
-            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Monitor the health and capabilities of the Aether execution environment.</p>
-            
-            <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '24px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: capabilityStatus && capabilityStatus.failed_count === 0 ? '#10b981' : (capabilityStatus && capabilityStatus.failed_count > 0 ? '#ef4444' : '#6b7280'), boxShadow: capabilityStatus && capabilityStatus.failed_count === 0 ? '0 0 10px rgba(16,185,129,0.5)' : 'none' }}></div>
-                  <h3 style={{ fontSize: '16px' }}>{capabilityStatus ? (capabilityStatus.failed_count === 0 ? 'System Healthy' : `${capabilityStatus.failed_count} Issues Detected`) : 'Status Unknown'}</h3>
-                </div>
-                <button
-                  onClick={() => {
-                    if (isDiagnosticsRunning || diagnosticsQueued) return;
-                    // RUX-A-13: through sendSettingsAction the run
-                    // QUEUES while the engine is unreachable instead
-                    // of being discarded by the readyState guard it
-                    // used to sit behind. The running state arms only
-                    // for a live send; a queued run is inert with its
-                    // own note (derived from the real queue above)
-                    // until the flush + response land the result.
-                    const disposition = sendSettingsAction('ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST', {});
-                    if (disposition !== 'queued') {
-                      setIsDiagnosticsRunning(true);
-                      setDiagnosticsError('');
-                      // D2-07: the codebase's 35 s no-answer rule
-                      // (ProviderSettings' save/test paths) — a run
-                      // whose response never arrives must resolve,
-                      // not spin for the life of the mount.
-                      clearDiagnosticsTimer();
-                      diagnosticsTimerRef.current = setTimeout(() => {
-                        diagnosticsTimerRef.current = null;
-                        setIsDiagnosticsRunning(false);
-                        setDiagnosticsError('No answer from the engine in 35s — the run may only be queued, or the engine may be busy or offline. Try again.');
-                      }, 35000);
-                    }
-                  }}
-                  disabled={isDiagnosticsRunning || diagnosticsQueued}
-                  style={{ 
-                    background: isDiagnosticsRunning ? 'rgba(124, 58, 237, 0.2)' : 'transparent', 
-                    color: isDiagnosticsRunning ? '#a78bfa' : '#7c3aed', 
-                    border: '1px solid rgba(124, 58, 237, 0.5)', 
-                    padding: '8px 16px', 
-                    borderRadius: '8px', 
-                    cursor: isDiagnosticsRunning ? 'wait' : 'pointer',
-                    transition: 'all 0.2s ease',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px'
-                  }}>
-                  {isDiagnosticsRunning ? (
-                    <>
-                      <svg style={{ width: '16px', height: '16px', animation: 'spin 1s linear infinite' }} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle style={{ opacity: 0.25 }} cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path style={{ opacity: 0.75 }} fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      Testing...
-                    </>
-                  ) : diagnosticsQueued ? (
-                    'Run Queued'
-                  ) : (
-                    'Run Diagnostics Now'
-                  )}
-                </button>
-              </div>
-
-              {diagnosticsQueued && (
-                <div data-testid="diagnostics-run-queued" style={{ fontSize: '13px', color: '#fbbf24', marginBottom: '16px' }}>
-                  Diagnostics run queued — will run when the engine reconnects.
-                </div>
-              )}
-
-              {diagnosticsError && (
-                <div data-testid="diagnostics-run-error" style={{ fontSize: '13px', color: '#f87171', marginBottom: '16px' }}>
-                  {diagnosticsError}
-                </div>
-              )}
-              
-              <div style={{ background: 'rgba(0,0,0,0.5)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', padding: '16px', fontFamily: 'monospace', fontSize: '13px', color: '#10b981', height: '200px', overflowY: 'auto' }} className="chat-scroll">
-                {capabilityHistory.length === 0 ? (
-                  <div style={{ color: '#9090a0', marginBottom: '8px' }}>[System] Ready to run diagnostics. Click the button above.</div>
-                ) : (
-                  capabilityHistory.map((log, idx) => (
-                    <div key={idx} style={{ color: log.status === 'OK' || log.status === 'RUNNING' ? '#10b981' : (log.status === 'WARN' ? '#fbbf24' : '#ef4444') }}>
-                      [{new Date(log.timestamp * 1000).toLocaleTimeString()}] {log.target_name}: {log.status} {log.details ? `(${log.details})` : ''}
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* Unified logging (5 Nov 2026): the Logs & Diagnostics
-                cards (status / viewer / controls) live below the
-                diagnostics-run card, which is unchanged. */}
-            <LogsPanel
-              isConnected={isConnected}
-              sendSettingsAction={sendSettingsAction}
-              onExportBundle={() => {
-                // Same request + queued honesty as the Advanced
-                // tab's export button; the response handler merges
-                // the desktop half into the bundle before download.
-                const disposition = sendSettingsAction('DIAGNOSTICS_EXPORT_REQUEST', {});
-                if (disposition === 'queued') {
-                  setVersionCheck('Diagnostics export queued — the file will download when the engine reconnects.');
-                }
-                return disposition;
-              }}
-            />
-          </div>
+          <CapabilitiesPanel
+            capabilityStatus={capabilityStatus}
+            capabilityHistory={capabilityHistory}
+            isDiagnosticsRunning={isDiagnosticsRunning}
+            diagnosticsQueued={diagnosticsQueued}
+            diagnosticsError={diagnosticsError}
+            onRunDiagnostics={handleRunDiagnostics}
+            isConnected={isConnected}
+            sendSettingsAction={sendSettingsAction}
+            onExportBundle={handleLogsExportBundle}
+          />
         )}
 
         { activeMenu === 'Tools' && (
-          <div style={{ color: '#f0f0f5' }}>
-            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Tools Sandbox</h2>
-            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Configure auto-approval policies for built-in tools.</p>
-
-            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <div>
-                <h4 style={{ fontSize: '15px', fontWeight: 500 }}>Approval mode</h4>
-                <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>
-                  {approvalMode === 'write'
-                    ? 'Write tools run without asking. Execute and destructive tools still require approval.'
-                    : 'Every non-read-only tool asks for approval before it runs.'}
-                </p>
-              </div>
-              <div>
-                <Dropdown
-                  value={approvalMode}
-                  onChange={handleApprovalModeChange}
-                  options={[
-                    { value: 'ask', label: 'Ask for approval' },
-                    { value: 'write', label: 'Auto-approve writes' }
-                  ]}
-                  style={{ width: '220px' }}
-                  align="right"
-                />
-              </div>
-            </div>
-
-            {controlRefusal && (
-              <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '12px' }}>{controlRefusal}</div>
-            )}
-
-            <div data-testid="approval-binding" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', marginBottom: '12px' }}>
-              <h4 style={{ fontSize: '15px', fontWeight: 500 }}>Approval binding</h4>
-              <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px', marginBottom: '12px' }}>
-                Hooks can rewrite a tool call after you approve it. Choose what your approval covers.
-              </p>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <label style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', cursor: 'pointer' }}>
-                  <input
-                    type="radio"
-                    name="approval-binding-mode"
-                    value="rebind"
-                    checked={approvalBindingMode === 'rebind'}
-                    onChange={() => handleApprovalBindingChange('rebind')}
-                    style={{ marginTop: '3px', accentColor: '#7c3aed', cursor: 'pointer' }}
-                  />
-                  <span>
-                    <span style={{ fontSize: '14px', fontWeight: 500, display: 'block' }}>Rebind approval to final arguments (strict)</span>
-                    <span style={{ fontSize: '13px', color: '#9090a0', display: 'block', marginTop: '2px' }}>If a hook changes a call you approved and the changed call needs approval, you are asked again on the final version.</span>
-                  </span>
-                </label>
-                <label style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', cursor: 'pointer' }}>
-                  <input
-                    type="radio"
-                    name="approval-binding-mode"
-                    value="carry"
-                    checked={approvalBindingMode === 'carry'}
-                    onChange={() => handleApprovalBindingChange('carry')}
-                    style={{ marginTop: '3px', accentColor: '#7c3aed', cursor: 'pointer' }}
-                  />
-                  <span>
-                    <span style={{ fontSize: '14px', fontWeight: 500, display: 'block' }}>Carry my approval to rewritten arguments</span>
-                    <span style={{ fontSize: '13px', color: '#9090a0', display: 'block', marginTop: '2px' }}>Your approval of the original call also covers hook-rewritten versions, unless the rewrite is denied.</span>
-                  </span>
-                </label>
-              </div>
-            </div>
-
-            <div data-testid="approval-grants" style={{ marginBottom: '24px' }}>
-              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '4px' }}>Approval grants</h3>
-              <p style={{ fontSize: '13px', color: '#9090a0', marginBottom: '12px' }}>Files and folders you approved with &quot;remember&quot; — matching tool calls run without asking until you revoke the grant. A grant covers any tool at or below its risk ceiling under the path; the tool named on each grant is the one it was created from.</p>
-              {!answered.grants && approvalGrants.length === 0 ? (
-                <LoadStateRow
-                  loadState="loading"
-                  isConnected={isConnected}
-                  testId="approval-grants-load-state"
-                  loadingText="Loading approval grants…"
-                  offlineText="Waiting for the engine — remembered approval grants will appear here once it connects."
-                  style={{ padding: '16px' }}
-                />
-              ) : approvalGrants.length === 0 ? (
-                <div style={{ color: '#9090a0', fontSize: '14px', padding: '16px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
-                  No approval grants remembered.
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {approvalGrants.map(grant => (
-                    <div key={grant.id} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
-                        <span style={{ fontFamily: 'monospace', fontSize: '13px' }}>{grant.prefix}</span>
-                        <span style={{ fontSize: '11px', background: 'rgba(59, 130, 246, 0.2)', color: '#93c5fd', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px' }}>up to {grant.ceiling}</span>
-                        {grant.tool_name && (
-                          <span style={{ fontSize: '11px', color: '#9090a0', marginLeft: '8px' }}>originating tool: {grant.tool_name}</span>
-                        )}
-                      </div>
-                      {pendingGrantRevokeFor(grant.id) ? (
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <button
-                            disabled
-                            style={{ padding: '6px 12px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.08)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.2)', cursor: 'default', fontSize: '12px', fontWeight: 500, opacity: 0.55 }}
-                          >
-                            Revoke queued
-                          </button>
-                          <span style={{ fontSize: '11px', color: '#fbbf24' }}>will apply when the engine reconnects</span>
-                        </span>
-                      ) : (
-                        <button
-                          onClick={() => handleRevokeGrant(grant.id)}
-                          style={{ padding: '6px 12px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.15)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.35)', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}
-                        >
-                          Revoke
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* RUX-C-06: the path-rules editor is config-driven —
-                before the config answer it showed "No path rules."
-                for a config that simply had not loaded yet. */}
-            {!answered.config ? (
-              <LoadStateRow
-                loadState="loading"
-                isConnected={isConnected}
-                testId="path-rules-load-state"
-                loadingText="Loading path rules…"
-                offlineText="Waiting for the engine — your path rules will appear here once it connects."
-              />
-            ) : (
-              <PathRulesPanel rules={engineConfig ? engineConfig.path_rules : undefined} configError={configUpdateError} onConfigUpdate={sendConfigUpdate} />
-            )}
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {!answered.tools && tools.length === 0 ? (
-                <LoadStateRow
-                  loadState="loading"
-                  isConnected={isConnected}
-                  testId="tools-load-state"
-                  loadingText="Loading tools…"
-                  offlineText="Waiting for the engine — registered tools will appear here once it connects."
-                />
-              ) : tools.length === 0 ? (
-                <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
-                  No tools registered.
-                </div>
-              ) : (
-                tools.map(tool => {
-                  const isWrite = tool.risk === 'write';
-                  const isDestructive = tool.risk === 'destructive';
-                  const isExecute = tool.risk === 'execute';
-                  
-                  let badge = null;
-                  if (isWrite) {
-                    badge = <span style={{ fontSize: '11px', background: 'rgba(245, 158, 11, 0.2)', color: '#fbbf24', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px' }}>Write</span>;
-                  } else if (isDestructive || isExecute) {
-                    badge = <span style={{ fontSize: '11px', background: 'rgba(239, 68, 68, 0.2)', color: '#f87171', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><Lock size={10} /> Risky</span>;
-                  }
-
-                  // Phase 10.3 C2: the old 'default' option is gone. It was
-                  // un-sendable — the handler returned early on it, and no
-                  // engine message exists to clear a stored override (TOOL_POLICY_SET_REQUEST only stores;
-                  // policy_is_default means "no entry in tool_policies", and
-                  // there is no reset event in the contracts). So the
-                  // dropdown now lists only the three policies it can
-                  // actually send, and when the tool is at its default the
-                  // dropdown shows the *effective* policy the engine
-                  // resolves for it, with a note that no override is set.
-                  const effectivePolicyValue =
-                    tool.effective_policy === 'allow' ? 'Always Allow'
-                    : tool.effective_policy === 'deny' ? 'Deny'
-                    : 'Require Approval';
-
-                  const options = [
-                    { value: 'Always Allow', label: 'Always Allow', disabled: !tool.always_allow_permitted },
-                    { value: 'Require Approval', label: 'Require Approval' },
-                    { value: 'Deny', label: 'Deny' }
-                  ];
-
-                  return (
-                    <div key={tool.function.name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div>
-                        <h4 style={{ fontSize: '15px', fontWeight: 500, display: 'flex', alignItems: 'center' }}>
-                          {tool.function.name}
-                          {badge}
-                        </h4>
-                        <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>{tool.function.description}</p>
-                        {tool.policy_is_default && (
-                           <p style={{ fontSize: '11px', color: '#9090a0', marginTop: '4px' }}>Default policy — no override set. Pick one to override it.</p>
-                        )}
-                        {!tool.always_allow_permitted && (
-                           <p style={{ fontSize: '11px', color: '#fbbf24', marginTop: '4px' }}>Always Allow is disabled for risky tools.</p>
-                        )}
-                      </div>
-                      <div>
-                        {(() => {
-                          // RUX-A-10: the dropdown is controlled from
-                          // the engine's tool list, so a discarded
-                          // change snapped back with no explanation —
-                          // and a user could believe a tool restricted
-                          // when it was not. Through safeSend the pick
-                          // QUEUES while offline; while THIS tool's
-                          // change is queued its dropdown is inert and
-                          // names the pending policy, and the reply
-                          // drives the control when it lands.
-                          const pendingPolicy = pendingToolPolicyFor(tool.function.name);
-                          return (
-                            <>
-                              <div style={{ opacity: pendingPolicy ? 0.55 : 1, pointerEvents: pendingPolicy ? 'none' : 'auto' }}>
-                                <Dropdown
-                                  value={tool.policy_is_default ? effectivePolicyValue : tool.policy}
-                                  onChange={(val) => {
-                                    sendSettingsAction('TOOL_POLICY_SET_REQUEST', { tool_name: tool.function.name, policy: val });
-                                  }}
-                                  options={options}
-                                  style={{ width: '220px' }}
-                                  align="right"
-                                />
-                              </div>
-                              {pendingPolicy && (
-                                <div style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px', width: '220px' }}>
-                                  Policy change to {pendingPolicy.payload.policy} queued — will apply when the engine reconnects.
-                                </div>
-                              )}
-                            </>
-                          );
-                        })()}
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
+          <ToolsPanel
+            approvalMode={approvalMode}
+            handleApprovalModeChange={handleApprovalModeChange}
+            controlRefusal={controlRefusal}
+            approvalBindingMode={approvalBindingMode}
+            handleApprovalBindingChange={handleApprovalBindingChange}
+            approvalGrants={approvalGrants}
+            grantsAnswered={!!answered.grants}
+            isConnected={isConnected}
+            pendingGrantRevokeFor={pendingGrantRevokeFor}
+            handleRevokeGrant={handleRevokeGrant}
+            configAnswered={!!answered.config}
+            engineConfig={engineConfig}
+            configUpdateError={configUpdateError}
+            onConfigUpdate={sendConfigUpdate}
+            tools={tools}
+            toolsAnswered={!!answered.tools}
+            pendingToolPolicyFor={pendingToolPolicyFor}
+            onToolPolicyChange={handleToolPolicyChange}
+          />
         )}
 
         {activeMenu === 'MCP' && (
@@ -1574,82 +1252,13 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         )}
 
         {activeMenu === 'Skills' && (
-          <div style={{ color: '#f0f0f5' }}>
-            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Skills</h2>
-            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>
-              Dynamic behaviors, prompts, and tool requirements loaded from `.agents/skills`. Trigger these in chat with slash commands.
-            </p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {!answered.skills && skills.length === 0 ? (
-                <LoadStateRow
-                  loadState="loading"
-                  isConnected={isConnected}
-                  testId="skills-load-state"
-                  loadingText="Loading skills…"
-                  offlineText="Waiting for the engine — skills from your workspace will appear here once it connects."
-                />
-              ) : skills.length === 0 ? (
-                <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
-                  No skills found in workspace. Create a skill in <code>.agents/skills/</code>.
-                </div>
-              ) : (
-                skills.map(skill => (
-                  <div key={skill.name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
-                      <div>
-                        <h4 style={{ fontSize: '15px', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          {skill.name}
-                          <span style={{ fontSize: '11px', background: 'rgba(255,255,255,0.1)', padding: '2px 6px', borderRadius: '4px' }}>{skill.source}</span>
-                        </h4>
-                        <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>
-                          {skill.description}
-                        </p>
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                      {skill.slash_commands?.map(cmd => (
-                        <span key={cmd} style={{ fontSize: '12px', background: 'rgba(59, 130, 246, 0.2)', color: '#60a5fa', padding: '4px 8px', borderRadius: '6px' }}>
-                          {cmd}
-                        </span>
-                      ))}
-                      {skill.required_tools?.length > 0 && (
-                        <span style={{ fontSize: '12px', background: 'rgba(251, 191, 36, 0.15)', color: '#fbbf24', padding: '4px 8px', borderRadius: '6px' }}>
-                          {skill.required_tools.length} Tools Required
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <button
-                        onClick={() => {
-                          // RUX-A-14: through safeSend the toggle
-                          // QUEUES while the engine is unreachable
-                          // instead of being discarded by the guard
-                          // this used to carry (the click visibly did
-                          // nothing). The label stays driven by the
-                          // engine's list — no fake state — and the
-                          // pending note below carries the honesty
-                          // until the refreshed list lands.
-                          sendSettingsAction('SKILL_TOGGLE_REQUEST', { name: skill.name, enabled: skill.enabled === false });
-                        }}
-                        disabled={Boolean(pendingSkillToggleFor(skill.name))}
-                        style={{ background: skill.enabled === false ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.12)', color: skill.enabled === false ? '#10b981' : '#f87171', border: '1px solid rgba(255,255,255,0.12)', padding: '6px 14px', borderRadius: '8px', cursor: pendingSkillToggleFor(skill.name) ? 'default' : 'pointer', fontSize: '12px', opacity: pendingSkillToggleFor(skill.name) ? 0.55 : 1 }}
-                      >
-                        {skill.enabled === false ? 'Enable skill' : 'Disable skill'}
-                      </button>
-                      {pendingSkillToggleFor(skill.name) && (
-                        <span style={{ fontSize: '12px', color: '#fbbf24' }}>
-                          {pendingSkillToggleFor(skill.name).payload.enabled ? 'Enable' : 'Disable'} queued — will apply when the engine reconnects
-                        </span>
-                      )}
-                      {skill.enabled === false && (
-                        <span style={{ fontSize: '12px', color: '#9090a0' }}>Disabled — hidden from agents</span>
-                      )}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
+          <SkillsPanel
+            skills={skills}
+            skillsAnswered={!!answered.skills}
+            isConnected={isConnected}
+            pendingSkillToggleFor={pendingSkillToggleFor}
+            onSkillToggle={handleSkillToggle}
+          />
         )}
 
         {activeMenu === 'Memory' && (
@@ -1673,486 +1282,65 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         )}
 
         {activeMenu === 'Advanced' && (
-          <div style={{ color: '#f0f0f5', display: 'flex', flexDirection: 'column', gap: '24px' }}>
-            <div>
-              <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Advanced Settings</h2>
-              <p style={{ color: '#9090a0', fontSize: '14px' }}>System configurations and developer options.</p>
-            </div>
-
-            {/* RUX-C-01: the routing/fallback controls and the
-                project layer below are config-driven — until the
-                first config answer lands, the section says its
-                saved values are still loading. */}
-            {!answered.config && (
-              <LoadStateRow
-                loadState="loading"
-                isConnected={isConnected}
-                testId="advanced-config-load-state"
-                variant="plain"
-                loadingText="Loading your saved settings…"
-                offlineText="Waiting for the engine — your saved settings will appear here once it connects."
-              />
-            )}
-
-            <div style={{ background: 'rgba(239,68,68,0.05)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: '12px', padding: '24px' }}>
-              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Reset all settings</h3>
-              <p style={{ color: '#9090a0', fontSize: '13px', margin: '0 0 16px 0' }}>
-                Restores every engine setting to its default and saves immediately. Your API keys (held in the
-                encrypted secret store), your files, and your memory are NOT touched.
-              </p>
-              {resetError && (
-                <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '12px' }}>Reset failed: {resetError}</div>
-              )}
-              {resetDone ? (
-                <div style={{ color: '#10b981', fontSize: '13px' }}>Settings were reset to defaults.</div>
-              ) : (
-                <button
-                  onClick={() => {
-                    if (!resetArmed) { setResetArmed(true); return; }
-                    // E6-F15: sent unconditionally — a reset confirmed
-                    // while offline is queued by the facade and lands
-                    // on reconnect, not dropped.
-                    if (wsRef.current) {
-                      wsRef.current.send(JSON.stringify({ type: 'CONFIG_RESET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
-                    }
-                  }}
-                  style={{ background: resetArmed ? '#ef4444' : 'rgba(239,68,68,0.15)', color: resetArmed ? '#fff' : '#f87171', border: '1px solid rgba(239,68,68,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
-                >
-                  {resetArmed ? 'Click again to confirm reset' : 'Reset all settings'}
-                </button>
-              )}
-            </div>
-            
-            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>
-              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Backup & restore</h3>
-              <p style={{ color: '#9090a0', fontSize: '13px', margin: '0 0 16px 0' }}>
-                A backup snapshots your settings, memory, sessions and skills into one zip in your workspace's
-                AetherBackups folder. API keys stay out unless you include the (encrypted) secret store.
-                Restoring replaces those files on disk — restart Aether afterwards for it to take effect.
-              </p>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
-                <button
-                  onClick={() => {
-                    // RUX-A-13: through sendSettingsAction the
-                    // request QUEUES while the engine is unreachable
-                    // instead of being discarded after the status was
-                    // already armed — 'Creating backup…' used to sit
-                    // on screen forever offline. A queued backup says
-                    // so; the BACKUP_CREATE_RESPONSE overwrites the
-                    // status with the real outcome when it lands.
-                    const disposition = sendSettingsAction('BACKUP_CREATE_REQUEST', { include_secrets: includeSecrets });
-                    setBackupStatus(disposition === 'queued'
-                      ? 'Backup queued — will run when the engine reconnects.'
-                      : 'Creating backup…');
-                  }}
-                  style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
-                >
-                  Create backup
-                </button>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#c0c0cc', cursor: 'pointer' }}>
-                  <input type="checkbox" checked={includeSecrets} onChange={(e) => setIncludeSecrets(e.target.checked)} />
-                  Include encrypted secret store
-                </label>
-              </div>
-              {backupStatus && <div style={{ fontSize: '13px', color: '#a0a0b0', marginBottom: '16px', wordBreak: 'break-all' }}>{backupStatus}</div>}
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                <input
-                  value={restorePath}
-                  onChange={(e) => setRestorePath(e.target.value)}
-                  placeholder="Path to a backup zip…"
-                  aria-label="Backup zip path"
-                  style={{ flex: 1, minWidth: '220px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', padding: '9px 12px', color: '#f0f0f5', fontSize: '13px' }}
-                />
-                <button
-                  onClick={() => {
-                    if (!restorePath.trim()) { setRestoreStatus('Enter the path to a backup zip first.'); return; }
-                    // RUX-A-13: same honest-status treatment as
-                    // backup create — queue instead of discard, and
-                    // never leave 'Restoring…' armed for a restore
-                    // that has not started.
-                    const disposition = sendSettingsAction('BACKUP_RESTORE_REQUEST', { path: restorePath.trim() });
-                    setRestoreStatus(disposition === 'queued'
-                      ? 'Restore queued — will run when the engine reconnects.'
-                      : 'Restoring…');
-                  }}
-                  style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
-                >
-                  Restore
-                </button>
-              </div>
-              {restoreStatus && <div style={{ fontSize: '13px', color: '#a0a0b0', marginTop: '12px' }}>{restoreStatus}</div>}
-              <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', marginTop: '20px', paddingTop: '16px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-                <button
-                  onClick={() => {
-                    // RUX-A-13: queue instead of discard; 'Checking…'
-                    // only for a check that is actually running.
-                    const disposition = sendSettingsAction('VERSION_CHECK_REQUEST', {});
-                    setVersionCheck(disposition === 'queued'
-                      ? 'Update check queued — will run when the engine reconnects.'
-                      : 'Checking…');
-                  }}
-                  style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
-                >
-                  Check for updates
-                </button>
-                <button
-                  onClick={() => {
-                    // RUX-A-13: the export used to be discarded in
-                    // complete silence (no state at all). Queued, it
-                    // says where it is; sent, the response produces
-                    // the download + confirmation as before.
-                    const disposition = sendSettingsAction('DIAGNOSTICS_EXPORT_REQUEST', {});
-                    if (disposition === 'queued') {
-                      setVersionCheck('Diagnostics export queued — the file will download when the engine reconnects.');
-                    }
-                  }}
-                  style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
-                >
-                  Export diagnostics
-                </button>
-                <button
-                  onClick={() => { if (window.electronAPI && window.electronAPI.openLogsFolder) window.electronAPI.openLogsFolder(); }}
-                  style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
-                >
-                  Open logs folder
-                </button>
-                {versionCheck && <span style={{ fontSize: '13px', color: '#a0a0b0' }}>{versionCheck}</span>}
-              </div>
-            </div>
-
-            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>
-              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '16px', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Network size={18} style={{ color: '#a78bfa' }} /> Model Routing & Fallbacks
-              </h3>
-
-              {/* D2-06: this tab's own config writes report their
-                  refusal HERE — the error used to be passed only to
-                  panels on other tabs. */}
-              {configUpdateError && (
-                <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '16px' }}>{configUpdateError}</div>
-              )}
-
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
-                <div>
-                  <div style={{ fontWeight: 500, fontSize: '14px', marginBottom: '4px' }}>Disable Fallback System</div>
-                  <div style={{ fontSize: '12px', color: '#9090a0' }}>Prevent the system from automatically trying alternative models when the current one fails.</div>
-                </div>
-                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={disableFallbacks}
-                    onChange={(e) => {
-                      const val = e.target.checked;
-                      setDisableFallbacks(val);
-                      // E6-F15: through the one CONFIG_UPDATE flow,
-                      // unconditionally (facade queues offline).
-                      sendConfigUpdate({ disable_fallbacks: val });
-                    }}
-                    style={{ accentColor: '#7c3aed', width: '18px', height: '18px' }}
-                  />
-                </label>
-              </div>
-
-              {!disableFallbacks && (
-                <div>
-                  <div style={{ fontWeight: 500, fontSize: '14px', marginBottom: '8px' }}>Fallback Provider Chain (Optional)</div>
-                  <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
-                    Comma-separated list of providers to try in order (e.g., <code>openrouter, groq, google_gemini</code>). Leave empty for automatic selection.
-                  </div>
-                  <input
-                    type="text"
-                    value={fallbackChain}
-                    onChange={(e) => setFallbackChain(e.target.value)}
-                    onBlur={() => {
-                      // E6-F15: through the one CONFIG_UPDATE flow,
-                      // unconditionally (facade queues offline).
-                      const parsedChain = fallbackChain.split(',').map(s => s.trim()).filter(Boolean);
-                      sendConfigUpdate({ fallback_chain: parsedChain });
-                    }}
-                    placeholder="E.g. openrouter, groq, anthropic"
-                    style={{
-                      width: '100%',
-                      background: 'rgba(0,0,0,0.2)',
-                      border: '1px solid rgba(255,255,255,0.1)',
-                      borderRadius: '6px',
-                      padding: '10px 12px',
-                      color: '#fff',
-                      fontSize: '13px'
-                    }}
-                  />
-                </div>
-              )}
-            </div>
-
-            <ProjectConfigPanel
-              configReady={!!answered.projectConfig}
-              workspaceRoot={projectLayer.workspaceRoot}
-              content={projectLayer.content}
-              exists={projectLayer.exists}
-              forbiddenKeys={projectLayer.forbiddenKeys}
-              warning={projectLayer.warning}
-              status={projectLayer.status}
-              onSave={handleProjectLayerSave}
-            />
-
-            <div style={{
-              background: 'rgba(255,255,255,0.02)',
-              border: '1px solid rgba(255,255,255,0.06)',
-              borderRadius: '8px',
-              padding: '16px',
-              marginTop: '16px'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                <Scissors size={16} color="#7c3aed" />
-                <div style={{ fontWeight: 500, fontSize: '14px' }}>Screen Snip Hotkey</div>
-              </div>
-              <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
-                Accelerator to trigger screen region snipping (e.g., <code>Ctrl+Alt+S</code>). Applies as soon as you leave the field — no restart needed.
-              </div>
-              <div data-testid="snip-hotkey-note" style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
-                This shortcut is global: it works system-wide while Aether is running, so it can override the same keys in other apps.
-              </div>
-              <input
-                type="text"
-                value={snipHotkey}
-                data-testid="snip-hotkey-input"
-                onChange={(e) => setSnipHotkey(e.target.value)}
-                onBlur={() => { void applySnipHotkey(snipHotkey); }}
-                placeholder={defaultSnipHotkey()}
-                style={{
-                  width: '100%',
-                  background: 'rgba(0,0,0,0.2)',
-                  border: '1px solid rgba(255,255,255,0.1)',
-                  borderRadius: '6px',
-                  padding: '10px 12px',
-                  color: '#fff',
-                  fontSize: '13px'
-                }}
-              />
-              {snipHotkeyError && (
-                <div data-testid="snip-hotkey-error" style={{ fontSize: '12px', color: '#f87171', marginTop: '8px' }}>
-                  {snipHotkeyError}
-                </div>
-              )}
-              {pendingConfigValue('snip_hotkey') !== undefined && (
-                <div data-testid="snip-hotkey-queued" style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
-                  Snip hotkey change to {pendingConfigValue('snip_hotkey')} queued — will be saved when the engine reconnects.
-                </div>
-              )}
-              <button
-                type="button"
-                data-testid="snip-hotkey-reset"
-                onClick={() => { void applySnipHotkey(defaultSnipHotkey()); }}
-                style={{
-                  marginTop: '12px',
-                  background: 'rgba(255,255,255,0.06)',
-                  border: '1px solid rgba(255,255,255,0.1)',
-                  borderRadius: '6px',
-                  padding: '8px 12px',
-                  color: '#fff',
-                  fontSize: '12px',
-                  cursor: 'pointer'
-                }}
-              >
-                Reset to default ({defaultSnipHotkey()})
-              </button>
-            </div>
-          </div>
+          <AdvancedPanel
+            configAnswered={!!answered.config}
+            isConnected={isConnected}
+            resetArmed={resetArmed}
+            resetDone={resetDone}
+            resetError={resetError}
+            onResetClick={handleResetClick}
+            includeSecrets={includeSecrets}
+            onIncludeSecretsChange={setIncludeSecrets}
+            backupStatus={backupStatus}
+            onCreateBackup={handleCreateBackup}
+            restorePath={restorePath}
+            onRestorePathChange={setRestorePath}
+            restoreStatus={restoreStatus}
+            onRestoreBackup={handleRestoreBackup}
+            versionCheck={versionCheck}
+            onCheckUpdates={handleCheckUpdates}
+            onExportDiagnostics={handleExportDiagnostics}
+            configUpdateError={configUpdateError}
+            disableFallbacks={disableFallbacks}
+            onDisableFallbacksChange={handleDisableFallbacksChange}
+            fallbackChain={fallbackChain}
+            onFallbackChainChange={setFallbackChain}
+            onFallbackChainCommit={handleFallbackChainCommit}
+            projectConfigReady={!!answered.projectConfig}
+            projectLayer={projectLayer}
+            onProjectLayerSave={handleProjectLayerSave}
+            snipHotkey={snipHotkey}
+            onSnipHotkeyChange={setSnipHotkey}
+            onSnipHotkeyBlur={() => { void applySnipHotkey(snipHotkey); }}
+            onSnipHotkeyReset={() => { void applySnipHotkey(defaultSnipHotkey()); }}
+            snipHotkeyError={snipHotkeyError}
+            pendingSnipValue={pendingConfigValue('snip_hotkey')}
+          />
         )}
 
         {activeMenu === 'About' && (
-          <div style={{ color: '#f0f0f5' }}>
-            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>About Aether-OS</h2>
-            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>
-              A local-first desktop agent: a Python engine with a persistent memory, driven from this shell.
-            </p>
-
-            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px', marginBottom: '20px' }}>
-              {/* E6-F14: the version comes from the package manifest
-                  (the APP_VERSION mirror), never a literal here. */}
-              <div style={{ fontSize: '15px', fontWeight: 500, marginBottom: '4px' }}>Aether-OS</div>
-              <div style={{ fontSize: '13px', color: '#9090a0' }}>Version {appPackage.version}</div>
-            </div>
-
-            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>
-              <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Local documentation</h3>
-              <p style={{ color: '#9090a0', fontSize: '13px', margin: '0 0 16px 0' }}>
-                The system guide ships with the project (docs/AETHER_SYSTEM_GUIDE.md) and opens with your
-                default Markdown reader — nothing is fetched from the network.
-              </p>
-              {!answered.workspaces ? (
-                <LoadStateRow
-                  loadState="loading"
-                  isConnected={isConnected}
-                  testId="about-workspaces-load-state"
-                  variant="plain"
-                  loadingText="Loading your workspaces…"
-                  offlineText="Waiting for the engine — your workspaces will appear here once it connects."
-                />
-              ) : aboutWorkspaces.length === 0 ? (
-                <div style={{ fontSize: '13px', color: '#9090a0' }}>
-                  Add a workspace that contains the Aether-OS project and the guide can be opened from here.
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {aboutWorkspaces.map((root) => (
-                    <div key={root.path} style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-                      <button
-                        onClick={async () => {
-                          // The shell's open-path seam (as the canvas's
-                          // "Open externally" uses): a failure comes
-                          // back as the shell's error string and is
-                          // shown, never swallowed.
-                          if (!window.electronAPI?.openPath) {
-                            setGuideStatus('Opening local files is not available in this shell.');
-                            return;
-                          }
-                          const err = await window.electronAPI.openPath(`${root.path}/docs/AETHER_SYSTEM_GUIDE.md`);
-                          setGuideStatus(err ? `Could not open the guide: ${err}` : '');
-                        }}
-                        style={{ background: 'rgba(124,58,237,0.15)', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
-                      >
-                        Open the system guide
-                      </button>
-                      <span style={{ fontSize: '12px', color: '#9090a0', fontFamily: 'monospace' }}>{root.path}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {guideStatus && <div style={{ fontSize: '13px', color: '#f87171', marginTop: '12px' }}>{guideStatus}</div>}
-            </div>
-          </div>
+          <AboutPanel
+            workspaces={aboutWorkspaces}
+            workspacesAnswered={!!answered.workspaces}
+            isConnected={isConnected}
+          />
         )}
 
         {activeMenu === 'Voice' && (
-          <div style={{ color: '#f0f0f5' }}>
-            <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Voice Tuning</h2>
-            <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>
-              Fine-tune speech detection and endpointing thresholds. Changes take effect on the next voice session.
-            </p>
-
-            {/* RUX-C-01: the sliders below are config-driven — until
-                the first config answer lands they hold local
-                defaults, and the section says so rather than letting
-                0.50 / 700 ms pose as the saved values. */}
-            {!answered.config && (
-              <div style={{ marginBottom: '24px' }}>
-                <LoadStateRow
-                  loadState={configLoadError ? 'error' : 'loading'}
-                  isConnected={isConnected}
-                  testId="voice-config-load-state"
-                  variant="plain"
-                  loadingText="Loading your saved voice settings…"
-                  offlineText="Waiting for the engine — your saved voice settings will appear here once it connects."
-                  errorText={configLoadError || 'Your saved voice settings could not be loaded.'}
-                />
-                {configLoadError && (
-                  <button type="button" onClick={retryConfigLoad} style={{ marginTop: '8px', background: 'transparent', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
-                    Retry
-                  </button>
-                )}
-              </div>
-            )}
-
-            <div style={{
-              background: 'rgba(255,255,255,0.02)',
-              border: '1px solid rgba(255,255,255,0.05)',
-              borderRadius: '12px',
-              padding: '24px',
-              marginBottom: '20px'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-                <Sliders size={18} style={{ color: '#a78bfa' }} />
-                <h3 style={{ fontSize: '16px', fontWeight: 500, color: '#fff', margin: 0 }}>Endpointing Thresholds</h3>
-              </div>
-
-              <div style={{ marginBottom: '24px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                  <label htmlFor="vad-threshold-slider" style={{ fontWeight: 500, fontSize: '14px', color: '#fff' }}>
-                    VAD Speech Threshold
-                  </label>
-                  <span data-testid="vad-threshold-value" style={{ fontSize: '13px', color: '#a78bfa', fontWeight: 600 }}>
-                    {vadThreshold.toFixed(2)}
-                  </span>
-                </div>
-                <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '10px' }}>
-                  Confidence threshold for Silero VAD to register voice activity (default: 0.50). Higher values reduce false triggers from background noise; lower values catch softer speech.
-                </div>
-                <input
-                  id="vad-threshold-slider"
-                  data-testid="vad-threshold-slider"
-                  type="range"
-                  min="0.1"
-                  max="0.9"
-                  step="0.05"
-                  disabled={!answered.config}
-                  value={vadThreshold}
-                  onChange={(e) => {
-                    // D2-08: a drag is dozens of ticks — local
-                    // state follows the pointer, but the config
-                    // write commits ONCE on release (see
-                    // commitVadThreshold), so the engine is not
-                    // written per tick and its per-tick echo cannot
-                    // move the slider under the user's pointer
-                    // mid-drag. The RUX-A-15 delivery discipline is
-                    // preserved at commit time: through
-                    // sendSettingsAction the edit QUEUES while
-                    // offline, and the queued note under the slider
-                    // names the pending value until the reply lands.
-                    setVadThreshold(parseFloat(e.target.value));
-                  }}
-                  onPointerUp={commitVadThreshold}
-                  onKeyUp={commitVadThreshold}
-                  onBlur={commitVadThreshold}
-                  style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
-                />
-                {pendingConfigValue('vad_threshold') !== undefined && (
-                  <div data-testid="vad-threshold-queued" style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
-                    VAD threshold change to {Number(pendingConfigValue('vad_threshold')).toFixed(2)} queued — will apply when the engine reconnects.
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                  <label htmlFor="silence-duration-slider" style={{ fontWeight: 500, fontSize: '14px', color: '#fff' }}>
-                    Silence Duration
-                  </label>
-                  <span data-testid="silence-duration-value" style={{ fontSize: '13px', color: '#a78bfa', fontWeight: 600 }}>
-                    {silenceDurationMs} ms
-                  </span>
-                </div>
-                <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '10px' }}>
-                  Trailing silence window required before the turn is marked complete (default: 700 ms). Lower values produce faster turn-taking; higher values allow natural pauses while speaking.
-                </div>
-                <input
-                  id="silence-duration-slider"
-                  data-testid="silence-duration-slider"
-                  type="range"
-                  min="200"
-                  max="2000"
-                  step="50"
-                  disabled={!answered.config}
-                  value={silenceDurationMs}
-                  onChange={(e) => {
-                    // D2-08: same commit-on-release conversion as
-                    // the VAD slider above — display follows the
-                    // drag; the write lands once, on release.
-                    setSilenceDurationMs(parseInt(e.target.value, 10));
-                  }}
-                  onPointerUp={commitSilenceDuration}
-                  onKeyUp={commitSilenceDuration}
-                  onBlur={commitSilenceDuration}
-                  style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
-                />
-                {pendingConfigValue('silence_duration_ms') !== undefined && (
-                  <div data-testid="silence-duration-queued" style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
-                    Silence duration change to {pendingConfigValue('silence_duration_ms')} ms queued — will apply when the engine reconnects.
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
+          <VoicePanel
+            configAnswered={!!answered.config}
+            configLoadError={configLoadError}
+            isConnected={isConnected}
+            onRetryConfigLoad={retryConfigLoad}
+            vadThreshold={vadThreshold}
+            setVadThreshold={setVadThreshold}
+            commitVadThreshold={commitVadThreshold}
+            pendingVadValue={pendingConfigValue('vad_threshold')}
+            silenceDurationMs={silenceDurationMs}
+            setSilenceDurationMs={setSilenceDurationMs}
+            commitSilenceDuration={commitSilenceDuration}
+            pendingSilenceValue={pendingConfigValue('silence_duration_ms')}
+          />
         )}
       </div>
     </div>
