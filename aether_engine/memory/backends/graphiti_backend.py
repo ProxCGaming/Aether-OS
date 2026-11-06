@@ -42,11 +42,31 @@ class _LoopThread:
     def __init__(self):
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
+        self._closed = False
         self._thread.start()
 
     def run(self, coro, timeout: float = 60.0):
+        if self._closed or self._loop.is_closed():
+            if hasattr(coro, "close"):
+                coro.close()
+            raise RuntimeError("Graphiti's event-loop thread is closed")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=timeout)
+
+    def close(self):
+        """Stop the loop and reap its thread. Safe to call repeatedly."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._thread.is_alive():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            if threading.current_thread() is not self._thread:
+                self._thread.join()
+        if not self._loop.is_closed():
+            self._loop.close()
+
+    # ``shutdown`` is the lifecycle name used by surrounding services.
+    shutdown = close
 
 
 class GraphitiMemoryBackend(MemoryBackend):
@@ -76,6 +96,12 @@ class GraphitiMemoryBackend(MemoryBackend):
                 raise MemoryBackendUnavailable(f"Graphiti could not initialise: {e}") from e
         self._g = graphiti
         self._loop = loop_thread or _LoopThread()
+
+    def close(self):
+        """Release the adapter's dedicated event-loop thread."""
+        self._loop.close()
+
+    shutdown = close
 
     # -- writes ---------------------------------------------------------
     async def record_episode(self, task_id, user_prompt, task_summary, tags, outcome, thinking_log=None):

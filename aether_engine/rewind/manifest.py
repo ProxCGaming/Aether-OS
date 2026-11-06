@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from aether_engine.memory import session_store
+from aether_engine.rewind.boundary import step_boundary
 
 logger = logging.getLogger("aether_engine.rewind.manifest")
 
@@ -158,15 +159,10 @@ def _cut_message_ids(
 ) -> list[str | None]:
     """The message each point's retained history ends at (inclusive).
 
-    Mirrors the cut the rewind/fork services apply, computed from
-    the session's stored messages — the authoritative record: the
-    task begins at the session's last user row, so step 0 ends at
-    the message before it (None when the task is the session's only
-    content), an intermediate point ends at the task's opening
-    message (its response belongs to later steps), and the final
-    point ends at the session's last message. Anchors are None when
-    the transcript cannot anchor the task (no messages / no user
-    row) — unknown, never invented.
+    Delegates to the shared step-boundary rule, computed from the
+    session's stored messages — the authoritative record. Anchors
+    are None when the transcript cannot anchor the task (no messages
+    / no user row) — unknown, never invented.
     """
     if not entries:
         return []
@@ -177,29 +173,17 @@ def _cut_message_ids(
         if "session_messages" not in tables:
             return [None] * len(entries)
         rows = conn.execute(
-            "SELECT id, role FROM session_messages WHERE session_id = ? "
-            "ORDER BY rowid ASC",
+            "SELECT rowid, id, role FROM session_messages "
+            "WHERE session_id = ? ORDER BY rowid ASC",
             (session_id,),
         ).fetchall()
     if not rows:
         return [None] * len(entries)
-    start_pos = None
-    for pos, row in enumerate(rows):
-        if row["role"] == "user":
-            start_pos = pos
-    if start_pos is None:
-        return [None] * len(entries)
     final_step = entries[-1]["step_index"]
-    cuts: list[str | None] = []
-    for entry in entries:
-        step = entry["step_index"]
-        if step == 0:
-            cuts.append(rows[start_pos - 1]["id"] if start_pos > 0 else None)
-        elif step < final_step:
-            cuts.append(rows[start_pos]["id"])
-        else:
-            cuts.append(rows[-1]["id"])
-    return cuts
+    return [
+        step_boundary(rows, entry["step_index"], final_step).cut_message_id
+        for entry in entries
+    ]
 
 
 def get_entries(session_id: str, task_id: str) -> list[dict[str, Any]]:

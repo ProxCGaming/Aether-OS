@@ -203,24 +203,6 @@ def init_embeddings_db() -> None:
         _record_schema_version(conn, "episodic_embeddings", EMBEDDINGS_SCHEMA_VERSION)
         conn.commit()
 
-def _store_embedding_row(task_id: str, embedding: list[float]) -> None:
-    """Write one embedding row stamped with its model identity (N02).
-
-    The stamp is the ambient resolved embedder — the same resolution
-    ``_embed_text`` just used, since episodic's call sites deliberately
-    do not thread a config (see its docstring). Recall only ever
-    scores rows whose stamp matches the active embedder and whose
-    dimension matches the query vector exactly.
-    """
-    with _get_conn(EMBEDDINGS_DB_PATH) as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO episodic_embeddings"
-            " (task_id, embedding, model, dimension) VALUES (?, ?, ?, ?)",
-            (task_id, encode_embedding(embedding),
-             resolve_embedder(), len(embedding)),
-        )
-        conn.commit()
-
 def _episodic_db_file() -> str:
     """The file the episodic store's own connections actually serve.
 

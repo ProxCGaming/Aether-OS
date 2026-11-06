@@ -78,6 +78,20 @@ class Mem0MemoryBackend(MemoryBackend):
         # two scopes (E4-F05). Every fact-side operation must honour it.
         return (item.get("metadata") or {}).get("aether_type") == "episode"
 
+    def _resolve_fact(self, fact_id: Any) -> dict | None:
+        """The stored fact for ``fact_id``, or None.
+
+        None covers both a missing id and an id owned by an episode:
+        by-id fact mutations must neither invent success for a record
+        that does not exist nor cross the episode-marker boundary.
+        """
+        if not fact_id:
+            return None
+        for item in self._results(self._m.get_all(user_id=_USER_ID)):
+            if item.get("id") == fact_id:
+                return None if self._is_episode(item) else item
+        return None
+
     # -- writes -------------------------------------------------------
     async def record_episode(self, task_id, user_prompt, task_summary, tags, outcome, thinking_log=None):
         body = f"Task: {user_prompt}\nOutcome: {outcome}"
@@ -155,10 +169,14 @@ class Mem0MemoryBackend(MemoryBackend):
 
     # -- management -----------------------------------------------------
     def delete_fact(self, fact_id):
+        if self._resolve_fact(fact_id) is None:
+            return False
         self._m.delete(fact_id)
         return True
 
     def update_fact(self, fact_id, new_text):
+        if self._resolve_fact(fact_id) is None:
+            return False
         self._m.update(fact_id, new_text)
         return True
 

@@ -107,6 +107,12 @@ class MemoryBackend:
         backend has no embedding store of its own to report on."""
         return None
 
+    def close(self) -> None:
+        """Release backend-owned resources. Most backends own none."""
+
+    def shutdown(self) -> None:
+        self.close()
+
 
 class NativeMemoryBackend(MemoryBackend):
     """The production default: delegates 1:1 to the native stores."""
@@ -247,6 +253,28 @@ def get_memory_backend(user_config=None, *, backend_name: str | None = None) -> 
         )
     _BACKEND_CACHE[name] = backend
     return backend
+
+
+def close_memory_backend(backend_name: str | None = None) -> bool:
+    """Close and evict one cached backend, or all of them.
+
+    Returns True when at least one cached backend was closed. A
+    closed backend is removed first so a concurrent resolver cannot
+    receive an instance whose resources are being released; the next
+    ``get_memory_backend`` call constructs a fresh one.
+    """
+    if backend_name is not None:
+        names = [str(backend_name).strip().lower()]
+    else:
+        names = list(_BACKEND_CACHE)
+    closed = False
+    for name in names:
+        backend = _BACKEND_CACHE.pop(name, None)
+        if backend is None:
+            continue
+        backend.close()
+        closed = True
+    return closed
 
 
 def backend_or_none(user_config=None, *, context: str = "memory call",

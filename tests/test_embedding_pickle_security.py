@@ -136,7 +136,8 @@ async def test_episodic_embedding_round_trips_in_new_format(isolated_episodic):
     # orphan state the E4-F04 init-time reconciliation removes; the
     # codec assertions below are unaffected by the seeding order.)
     _insert_episode_row("t-rt", "zebra handling field guide")
-    episodic._store_embedding_row("t-rt", vec)
+    assert episodic._store_embedding_row_if_current(
+        "t-rt", vec, "zebra handling field guide") is True
 
     blob = _raw_embedding_blob(isolated_episodic, "t-rt")
     assert not blob.startswith(b"\x80")  # not a pickle stream

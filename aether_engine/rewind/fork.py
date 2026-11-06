@@ -47,6 +47,7 @@ from typing import Any
 
 from aether_engine.memory import session_store
 from aether_engine.rewind import manifest as rewind_manifest
+from aether_engine.rewind.boundary import step_boundary
 from aether_engine.rewind.service import _checkpoint_db_path, _read_checkpoint_rows
 
 logger = logging.getLogger("aether_engine.rewind.fork")
@@ -65,11 +66,21 @@ def _refusal(source_session_id: Any, message: str) -> dict[str, Any]:
     }
 
 
-def _message_rows(session_id: str) -> list[sqlite3.Row]:
-    """(rowid, id, role) for the session's messages, in stored order."""
+def _get_conn() -> sqlite3.Connection:
+    """Open the session store with its standard pragma discipline."""
     path = Path(session_store.DB_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
+
+
+def _message_rows(session_id: str) -> list[sqlite3.Row]:
+    """(rowid, id, role) for the session's messages, in stored order."""
+    conn = _get_conn()
     try:
         return conn.execute(
             "SELECT rowid, id, role FROM session_messages "
@@ -88,26 +99,17 @@ def _step_cut_message_id(
     Returns (cut_message_id, is_empty): is_empty marks the step-0
     fork of a session whose last task is its only content (history
     ends before the first row). An error string is returned when
-    the transcript cannot anchor the task. Mirrors the kept prefix
-    of service._message_cut_rowids: the task begins at the session's
-    last user row.
+    the transcript cannot anchor the task. The kept prefix comes
+    from the shared step-boundary rule: the task begins at the
+    session's last user row.
     """
     rows = _message_rows(session_id)
     if not rows:
         return "The session has no messages to fork."
-    start_pos = None
-    for pos, row in enumerate(rows):
-        if row["role"] == "user":
-            start_pos = pos
-    if start_pos is None:
+    boundary = step_boundary(rows, step_index, final_step)
+    if not boundary.anchored:
         return "The session has no task boundary to fork from."
-    if step_index == 0:
-        if start_pos == 0:
-            return (None, True)
-        return (rows[start_pos - 1]["id"], False)
-    if step_index < final_step:
-        return (rows[start_pos]["id"], False)
-    return (rows[-1]["id"], False)
+    return (boundary.cut_message_id, boundary.is_empty)
 
 
 def _plan_checkpoint_copy(

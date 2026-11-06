@@ -158,6 +158,25 @@ class JsonFileStore:
                 return True
             return False
 
+    def delete_many(self, namespace: tuple, keys: list[str]) -> int:
+        """Delete several items with at most one store rewrite.
+
+        Namespace clears are bulk operations: applying the one-item
+        delete in a loop would serialise and replace the whole store
+        once per item. The caller supplies the keys to remove (usually
+        from a preceding search), so items added after that snapshot
+        are not swept up by the clear.
+        """
+        with self._lock:
+            self._ensure_writable()
+            deleted = 0
+            for key in keys:
+                if self._items.pop(self._ns_key(namespace, key), None) is not None:
+                    deleted += 1
+            if deleted:
+                self._save()
+            return deleted
+
     def search(self, namespace: tuple, query: str | None = None, limit: int = 10) -> list:
         with self._lock:
             self._attempt_reload()
@@ -304,13 +323,13 @@ class LangMemMemoryBackend(MemoryBackend):
         return self._store.delete(_EPISODES_NS, task_id)
 
     def clear_facts(self):
-        for item in self._store.search(_FACTS_NS, limit=100_000):
-            self._store.delete(_FACTS_NS, item.key)
+        keys = [item.key for item in self._store.search(_FACTS_NS, limit=100_000)]
+        self._store.delete_many(_FACTS_NS, keys)
         return True
 
     def clear_episodes(self):
-        for item in self._store.search(_EPISODES_NS, limit=100_000):
-            self._store.delete(_EPISODES_NS, item.key)
+        keys = [item.key for item in self._store.search(_EPISODES_NS, limit=100_000)]
+        self._store.delete_many(_EPISODES_NS, keys)
         return True
 
     def export(self):

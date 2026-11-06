@@ -78,6 +78,7 @@ from typing import Any
 
 from aether_engine.memory import session_store
 from aether_engine.rewind import manifest as rewind_manifest
+from aether_engine.rewind.boundary import step_boundary
 
 logger = logging.getLogger("aether_engine.rewind.service")
 
@@ -426,30 +427,18 @@ def _message_cut_rowids(
 ) -> list[int]:
     """Rowids of session_messages the rewind discards.
 
-    Mirrors the UI's structural mapping (E8-1.1a): the task begins
-    at the session's last user row. Step 0 discards from that row
-    on; an intermediate point discards what follows it (the task's
-    response — intermediate steps live in checkpoints, not rows);
-    the final point discards nothing.
+    Delegates to the shared step-boundary rule (E8-1.1a): the task
+    begins at the session's last user row. Step 0 discards from that
+    row on; an intermediate point discards what follows it (the
+    task's response — intermediate steps live in checkpoints, not
+    rows); the final point discards nothing.
     """
     rows = conn.execute(
-        "SELECT rowid, role FROM session_messages WHERE session_id = ? "
+        "SELECT rowid, id, role FROM session_messages WHERE session_id = ? "
         "ORDER BY rowid ASC",
         (session_id,),
     ).fetchall()
-    if not rows:
-        return []
-    start_rowid = None
-    for row in rows:
-        if row["role"] == "user":
-            start_rowid = row["rowid"]
-    if start_rowid is None:
-        return []
-    if target_step == 0:
-        return [row["rowid"] for row in rows if row["rowid"] >= start_rowid]
-    if target_step < final_step:
-        return [row["rowid"] for row in rows if row["rowid"] > start_rowid]
-    return []
+    return list(step_boundary(rows, target_step, final_step).discarded_rowids)
 
 
 def _record_staging_intent(

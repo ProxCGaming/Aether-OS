@@ -347,10 +347,69 @@ def _rewrite_attachment_paths(
     on this machine (E4-05). Such references are re-rooted under the
     new session's attachments directory by storage name — the location
     the file occupies once it exists in this session's storage.
+
+    Same-basename staged files are disambiguated by their
+    archive-relative origin path: a recorded path ending in
+    ``a/report.txt`` reconnects to that staged member, not merely to
+    the first member called ``report.txt``. A bare basename is used
+    only when it identifies one staged file; duplicate bare
+    references to a colliding basename are paired with the distinct
+    staged origins in archive order rather than all collapsing onto
+    the first file.
     """
-    by_name: dict[str, str] = {}
-    for rel_path in staged:
-        by_name.setdefault(Path(rel_path).name, rel_path)
+
+    def _normalise_path(value: Any) -> str:
+        return str(value or "").replace("\\", "/").strip("/")
+
+    staged_paths = [
+        rel_path for rel_path in (
+            _normalise_path(rel_path) for rel_path in staged
+        ) if rel_path
+    ]
+    by_basename: dict[str, list[str]] = {}
+    for rel_path in staged_paths:
+        by_basename.setdefault(Path(rel_path).name, []).append(rel_path)
+    claimed_paths: set[str] = set()
+
+    def _staged_match(att: dict[str, Any]) -> str | None:
+        recorded = _normalise_path(att.get("path"))
+        name = _normalise_path(att.get("name"))
+
+        # The full archive-relative suffix is the strongest identity:
+        # it preserves the origin directory that distinguishes two
+        # files with the same basename. Longest candidates win when
+        # one staged path is a suffix of another.
+        for candidate in sorted(staged_paths, key=len, reverse=True):
+            if recorded == candidate or recorded.endswith("/" + candidate):
+                claimed_paths.add(candidate)
+                return candidate
+            if name == candidate or name.endswith("/" + candidate):
+                claimed_paths.add(candidate)
+                return candidate
+
+        # A name or basename identifies a staged file only if it is
+        # unique. Collisions fall through to the pairing below.
+        for token in (name, recorded):
+            base = Path(token).name if token else ""
+            candidates = by_basename.get(base, [])
+            if len(candidates) == 1:
+                claimed_paths.add(candidates[0])
+                return candidates[0]
+
+        # Duplicate bare references to a colliding basename have no
+        # stronger identity in the archive. Pair them with distinct
+        # staged origins instead of silently cross-wiring every one
+        # to the first staged file.
+        for token in (name, recorded):
+            base = Path(token).name if token else ""
+            candidates = by_basename.get(base, [])
+            if len(candidates) > 1:
+                for candidate in candidates:
+                    if candidate not in claimed_paths:
+                        claimed_paths.add(candidate)
+                        return candidate
+                return candidates[0]
+        return None
 
     rewritten = copy.deepcopy(session_data)
     messages = rewritten.get("messages")
@@ -365,20 +424,7 @@ def _rewrite_attachment_paths(
         for att in attachments:
             if not isinstance(att, dict) or not att.get("path"):
                 continue
-            rel_path: str | None = None
-            name = att.get("name")
-            if name and str(name) in by_name:
-                rel_path = by_name[str(name)]
-            else:
-                base = Path(str(att["path"])).name
-                if base in by_name:
-                    rel_path = by_name[base]
-            if rel_path is None:
-                recorded = str(att["path"]).replace("\\", "/")
-                for candidate in staged:
-                    if recorded.endswith("/" + candidate):
-                        rel_path = candidate
-                        break
+            rel_path = _staged_match(att)
             if rel_path is not None:
                 att["path"] = str(final_dir / rel_path)
             else:
