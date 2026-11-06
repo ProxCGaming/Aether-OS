@@ -359,8 +359,56 @@ class SkillManager:
         keyword_hits = sum(1 for kw in manifest.trigger.keywords if kw.lower() in lower)
         return keyword_hits / len(manifest.trigger.keywords)
     
+    @staticmethod
+    def _estimate_tokens(content: str) -> int:
+        """Approximate token count using the codebase's 4-chars/token rule."""
+        return (len(content) + 3) // 4
+
+    def _apply_injection_token_cap(self, skill_name: str, content: str) -> str:
+        """Bound *content* to an explicitly declared injection cap.
+
+        ``SkillInjection.max_tokens`` is an opt-in contract on the
+        manifest: the Pydantic default (2000) is intentionally not
+        treated as an explicit declaration, so skills that do not
+        declare the field keep their established unbounded behaviour.
+        Explicit caps use the same approximate token estimate as the
+        repo-map budget. A cap of zero (or less) admits no content.
+        """
+        manifest = self._index.get(skill_name)
+        if manifest is None:
+            return content
+        injection = manifest.injection
+        if "max_tokens" not in injection.model_fields_set:
+            return content
+
+        max_tokens = injection.max_tokens
+        if max_tokens <= 0:
+            return ""
+        if self._estimate_tokens(content) <= max_tokens:
+            return content
+
+        max_chars = max_tokens * 4
+        marker = "\n\n[Skill content truncated at its declared max_tokens limit.]"
+        if len(marker) < max_chars:
+            truncated = content[: max_chars - len(marker)].rstrip() + marker
+        else:
+            truncated = content[:max_chars]
+        logger.warning(
+            "Skill %s content truncated to its declared max_tokens limit "
+            "(%s tokens; original estimate %s tokens).",
+            skill_name,
+            max_tokens,
+            self._estimate_tokens(content),
+        )
+        return truncated
+
     def load_skill_content(self, skill_name: str) -> str:
-        """Load the full SKILL.md content (on-demand, cached)."""
+        """Load SKILL.md content (on-demand, cached).
+
+        Content is returned whole unless the skill's manifest
+        explicitly declares ``injection.max_tokens``, in which case
+        the injected body is bounded to that cap.
+        """
         if skill_name in self._content_cache:
             return self._content_cache[skill_name]
             
@@ -393,7 +441,8 @@ class SkillManager:
                     break
             if end_idx != -1:
                 content = "\n".join(lines[end_idx+1:]).strip()
-                
+
+        content = self._apply_injection_token_cap(skill_name, content)
         self._content_cache[skill_name] = content
         return content
     

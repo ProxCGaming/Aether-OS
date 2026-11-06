@@ -80,6 +80,50 @@ def _build_worker_env(worker_token: str) -> dict[str, str]:
     return env
 
 
+# Short escalation windows used when a worker call is cancelled or
+# times out. Termination is attempted first; a worker that ignores it
+# is killed after the terminate grace, and the kill itself is awaited
+# only for the kill grace so cleanup cannot become a second hang.
+WORKER_TERMINATE_GRACE_SECONDS = 1.0
+WORKER_KILL_GRACE_SECONDS = 1.0
+
+
+async def _stop_worker_process(proc) -> None:
+    """Stop *proc*, escalating from terminate to kill.
+
+    Both stages are bounded and the process is awaited after a kill,
+    so callers can clean up a subprocess without trusting it to honour
+    termination -- and without cleanup itself hanging indefinitely.
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(
+            proc.wait(), timeout=WORKER_TERMINATE_GRACE_SECONDS
+        )
+        return
+    except TimeoutError:
+        pass
+
+    if proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=WORKER_KILL_GRACE_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "Worker process %s did not exit after kill; abandoning reap",
+            getattr(proc, "pid", "unknown"),
+        )
+
+
 # Default task-class resource profiles (mirrors UserConfig defaults).
 _DEFAULT_TASK_CLASSES: dict[str, dict[str, int]] = {
     "instant": {"time_cap_seconds": 10, "memory_cap_mb": 512},
@@ -236,14 +280,7 @@ async def execute_tool_in_worker(
             proc.communicate(input=payload.encode("utf-8")), timeout=time_cap
         )
     except TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        try:
-            await proc.communicate()
-        except Exception:  # noqa: BLE001, S110 — best-effort reap of an already-killed worker during cleanup
-            pass
+        await _stop_worker_process(proc)
         wall_clock = time.time() - start_time
         reason = f"worker exceeded {time_cap}s wall-clock cap (task_class={task_class})"
         logger.error(f"Worker timeout for '{tool_name}': {reason}")
@@ -256,6 +293,16 @@ async def execute_tool_in_worker(
                 "wall_clock_seconds": round(wall_clock, 2),
             })
         raise RuntimeError(f"Worker timed out after {time_cap}s (task_class={task_class}): killed")
+    except asyncio.CancelledError:
+        # Caller cancellation is not a worker failure, but it must not
+        # orphan the subprocess: the awaiting task was the worker's
+        # only wall-clock supervisor. Shield the bounded cleanup so it
+        # runs to completion, then let the cancellation propagate.
+        await asyncio.shield(_stop_worker_process(proc))
+        logger.warning(
+            "Worker execution for '%s' cancelled; subprocess stopped", tool_name
+        )
+        raise
     except Exception as e:  # noqa: BLE001 — worker failures are reported via the audit log and a result dict, never raised
         logger.error(f"Worker process error: {e}")
         if audit_logger:

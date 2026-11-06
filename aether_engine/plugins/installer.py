@@ -223,20 +223,52 @@ class PluginInstaller:
         self.plugins_dir = plugins_dir
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
         self.registry_file = self.plugins_dir / "registry.json"
+        self._registry_load_error: str | None = None
         self._registry: dict[str, Any] = self._load_registry()
         self.pending_installs: dict[str, dict] = {}
         self._audit_logger = audit_logger
 
+    @property
+    def registry_load_error(self) -> str | None:
+        """Error from loading the on-disk registry, or None if it loaded."""
+        return self._registry_load_error
+
+    def _record_registry_load_error(self, detail: str) -> None:
+        self._registry_load_error = (
+            f"Plugin registry file {self.registry_file} is corrupt and "
+            f"was not loaded: {detail}"
+        )
+        try:
+            backup = self.registry_file.with_name(self.registry_file.name + ".bak")
+            shutil.copyfile(self.registry_file, backup)
+            self._registry_load_error += f" A backup was saved to {backup}."
+        except OSError:
+            pass
+        logger.error(self._registry_load_error)
+
     def _load_registry(self) -> dict[str, Any]:
-        if self.registry_file.exists():
-            import json
-            try:
-                return json.loads(self.registry_file.read_text())
-            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-                return {}
-        return {}
+        if not self.registry_file.exists():
+            return {}
+        try:
+            raw = json.loads(self.registry_file.read_bytes())
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+            self._record_registry_load_error(str(e))
+            return {}
+        if not isinstance(raw, dict):
+            self._record_registry_load_error("top level must be an object")
+            return {}
+        return raw
 
     def _save_registry(self):
+        if self._registry_load_error is not None:
+            # The registry on disk is corrupt and was refused at load.
+            # Saving the empty in-memory registry would permanently
+            # destroy the ownership/claim records it contains.
+            raise ValueError(
+                "Plugin registry file is corrupt and was not loaded; fix "
+                "or delete it (a .bak backup was saved) before saving "
+                "plugin changes."
+            )
         import json
         # Atomic write (temp file + os.replace in the same directory):
         # a failed save leaves the previous registry file fully intact,

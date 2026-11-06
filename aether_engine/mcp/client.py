@@ -786,6 +786,15 @@ class MCPClientManager:
                 )
                 self._owner_tasks.pop(name, None)
                 self._close_events.pop(name, None)
+                # The abandoned owner can no longer be trusted to close
+                # or serve this session. Drop every registration so the
+                # manager cannot report it connected or route new calls
+                # to it; the stack itself is left with its owner task
+                # because closing it from here would violate the anyio
+                # cancel-scope ownership rule above.
+                self._stacks.pop(name, None)
+                self._sessions.pop(name, None)
+                self._configs.pop(name, None)
                 self._set_status(name, "disconnected", error=None)
             except asyncio.CancelledError as e:
                 if _is_genuine_cancellation(e):
