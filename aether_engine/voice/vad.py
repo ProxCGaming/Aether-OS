@@ -394,6 +394,13 @@ class SileroVad:
         self._session = None
         self._state = None
         self._context = None
+        # E7-08: real samples accumulate here until a full
+        # 512-sample window exists — the model is only ever fed
+        # true windows of the actual stream, never a frame
+        # zero-padded up to size. Until the first window
+        # completes, probability() reports _last_probability.
+        self._pending_pcm = b""
+        self._last_probability = 0.0
 
     def unavailable_reason(self) -> str | None:
         if importlib.util.find_spec("onnxruntime") is None:
@@ -434,12 +441,18 @@ class SileroVad:
         # Silero's recurrent state: [2, 1, 128], zeroed per session.
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
         self._context = None
+        # A freshly loaded model starts a fresh stream: no
+        # carried-over samples or probability (E7-08).
+        self._pending_pcm = b""
+        self._last_probability = 0.0
         return session
 
     async def close(self) -> None:
         self._session = None
         self._state = None
         self._context = None
+        self._pending_pcm = b""
+        self._last_probability = 0.0
 
     async def probability(self, frame: bytes, sample_rate: int) -> float:
         if self._session is None:
@@ -447,11 +460,34 @@ class SileroVad:
         return await asyncio.to_thread(self._infer, frame, sample_rate)
 
     def _infer(self, frame: bytes, sample_rate: int) -> float:
+        # E7-08: accumulate the real stream and run one inference
+        # per complete 512-sample window. The production
+        # transport delivers ~20 ms frames (320 samples): the old
+        # shape zero-padded each one to 512 and advanced the
+        # recurrent state and context on that synthetic audio, so
+        # probabilities were computed on up to 37.5% silence that
+        # was never spoken. A frame that does not complete a
+        # window runs no inference and reports the last computed
+        # probability; the endpointer still credits the frame's
+        # true duration, so endpoint timing is unchanged.
+        data = self._pending_pcm + frame
+        n_windows = (len(data) // 2) // SILERO_FRAME_SAMPLES
+        if n_windows == 0:
+            self._pending_pcm = data
+            return self._last_probability
+        samples = (
+            self._np.frombuffer(
+                data[:len(data) // 2 * 2], dtype=self._np.int16)
+            .astype(self._np.float32) / 32768.0)
+        for index in range(n_windows):
+            window = samples[
+                index * SILERO_FRAME_SAMPLES:(index + 1) * SILERO_FRAME_SAMPLES]
+            self._last_probability = self._run_window(window, sample_rate)
+        self._pending_pcm = data[n_windows * SILERO_FRAME_SAMPLES * 2:]
+        return self._last_probability
+
+    def _run_window(self, samples, sample_rate: int) -> float:
         np = self._np
-        samples = np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0
-        if len(samples) < SILERO_FRAME_SAMPLES:
-            samples = np.pad(samples, (0, SILERO_FRAME_SAMPLES - len(samples)))
-        samples = samples[:SILERO_FRAME_SAMPLES]
         # The bundled Silero model (v5, via silero-vad 6.x) is a
         # streaming model: each inference must be prefixed with a
         # context window — the last 64 samples of the previous

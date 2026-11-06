@@ -253,7 +253,16 @@ class WebRtcVoiceTransport:
         if track.kind != "audio":
             logger.debug(f"voice RTC: ignoring {track.kind} track")
             return
+        # A second audio track replaces the first (a
+        # renegotiation): retire its pump (N-32). The old shape
+        # overwrote the task reference unconditionally, so the
+        # first pump leaked past close() — which cancels only
+        # the latest — and its end-of-stream sentinel could end
+        # frames() while the new track was still live.
+        previous = self._pump_task
         self._pump_task = asyncio.ensure_future(self._pump(track))
+        if previous is not None and not previous.done():
+            previous.cancel()
 
     def _on_connection_state_change(self) -> None:
         state = self.connection_state
@@ -317,12 +326,18 @@ class WebRtcVoiceTransport:
         except Exception:  # MediaStreamError et al: the track is over
             logger.debug("voice RTC track pump ended", exc_info=True)
         finally:
-            try:
-                for out in resampler.resample(None):  # flush the tail
-                    self._push(out.to_ndarray().tobytes())
-            except Exception:  # a dead resampler has nothing to flush
-                logger.debug("voice RTC resampler flush failed", exc_info=True)
-            self._push(_END)
+            # Only the live pump may flush its tail and end the
+            # stream (N-32): a pump retired by a replacement track
+            # must not push its _END into a stream its successor
+            # owns. (close() still ends frames() itself, via
+            # _end_stream, after cancelling the live pump.)
+            if self._pump_task is asyncio.current_task():
+                try:
+                    for out in resampler.resample(None):  # flush the tail
+                        self._push(out.to_ndarray().tobytes())
+                except Exception:  # a dead resampler has nothing to flush
+                    logger.debug("voice RTC resampler flush failed", exc_info=True)
+                self._push(_END)
 
     def _push(self, item) -> None:
         if self._frames.full():

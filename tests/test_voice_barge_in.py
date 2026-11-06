@@ -147,6 +147,25 @@ class ThreeChunkTts(FakeTts):
         yield b"AUD3:" + text.encode()
 
 
+class BargeAwareStt(FakeStt):
+    """STT whose text follows the conversation, not call order:
+    the first utterance's text until the barge-in lands, the
+    interrupting utterance's text afterwards. Wave 2 (E7-07):
+    partial transcription is asynchronous, so how many partial
+    calls precede a final is timing-dependent and a positional
+    script can no longer align texts to utterances."""
+
+    def __init__(self, emitter):
+        super().__init__([])
+        self._emitter = emitter
+
+    async def transcribe(self, audio, *, sample_rate):
+        self.calls.append(len(audio))
+        if self._emitter.of_type(EventType.VOICE_BARGE_IN):
+            return "never mind"
+        return "the red bicycle"
+
+
 class FakeClassifier:
     """verdicts maps final transcript -> bool (escalate) or an
     Exception instance to raise."""
@@ -223,10 +242,13 @@ class TestBargeIn:
         # in that window, so chunk 4 must never be emitted and
         # sentence 2 contributes only its first half of words.
         emitter = ChunkDelayEmitter(delay_after_audio_count=3)
-        stt = FakeStt([
-            "the red", "the red bicycle", "the red bicycle",
-            "never mind", "never mind", "never mind",
-        ])
+        # Wave 2 (E7-07): the STT is keyed to the conversation
+        # (see BargeAwareStt) rather than a positional script —
+        # partial calls no longer run inline, so their count
+        # before a final is timing-dependent. This test's
+        # subject is the barge-in accounting, not partial
+        # sequencing.
+        stt = BargeAwareStt(emitter)
         talker = ScriptedTalker([
             (["One two three four. ", "Five six seven eight. ",
               "Nine ten eleven twelve."], None),

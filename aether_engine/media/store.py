@@ -321,10 +321,21 @@ class MediaStore:
             params.append(session_id)
 
         if query and query.strip():
-            q_like = f"%{query.strip()}%"
+            # E7-12: the query is user text, not a pattern —
+            # escape the LIKE metacharacters so "%" or "a_b"
+            # search literally instead of silently matching
+            # every row (the knowledge-graph S1-N2 shape).
+            escaped = (
+                query.strip()
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            q_like = f"%{escaped}%"
             where_clauses.append(
-                "(file_path LIKE ? OR summary_text LIKE ? OR user_notes LIKE ? "
-                "OR tags_json LIKE ? OR transcript_text LIKE ?)"
+                "(file_path LIKE ? ESCAPE '\\' OR summary_text LIKE ? ESCAPE '\\' "
+                "OR user_notes LIKE ? ESCAPE '\\' OR tags_json LIKE ? ESCAPE '\\' "
+                "OR transcript_text LIKE ? ESCAPE '\\')"
             )
             params.extend([q_like, q_like, q_like, q_like, q_like])
 

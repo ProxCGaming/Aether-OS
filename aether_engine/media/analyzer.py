@@ -48,7 +48,7 @@ import logging
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -85,21 +85,30 @@ class NoAudioStreamError(AudioExtractionError):
     """The video has no audio stream to transcribe."""
 
 
-def extract_audio_pcm(
-    file_path: str | Path,
-    sample_rate: int = AUDIO_SAMPLE_RATE,
-) -> bytes:
-    """Extract a video's audio track as raw PCM16 mono samples.
+# E7-03: extraction is windowed. PCM16 mono at 16 kHz is
+# 32,000 B/s of media, so materialising a whole track as one
+# bytes costs ~346 MB for a 3-hour video (and ~1.15 GB for 10
+# hours) held in RAM by a background task that is supposed to
+# be fail-soft. One window is ~3.8 MB however long the video
+# runs, and the transcript stage transcribes window by window,
+# so the peak never grows with duration.
+_AUDIO_CHUNK_SECONDS = 120.0
 
-    Raises FileNotFoundError when ffmpeg itself is missing (the
-    caller maps that to an honest ``unavailable``), and
-    AudioExtractionError / NoAudioStreamError for a file ffmpeg
-    cannot read or that carries no audio.
-    """
+
+def _extract_audio_window(
+    file_path: str | Path,
+    sample_rate: int,
+    start_s: float,
+    duration_s: float,
+) -> bytes:
+    """One bounded slice of a video's audio track: raw PCM16
+    mono for ``[start_s, start_s + duration_s)``. Empty bytes
+    when nothing is there (past the end of the track)."""
     try:
         proc = subprocess.run(
             [
                 "ffmpeg", "-y", "-v", "error",
+                "-ss", f"{start_s:.3f}", "-t", f"{duration_s:.3f}",
                 "-i", str(file_path),
                 "-vn", "-ac", "1", "-ar", str(sample_rate),
                 "-f", "s16le", "pipe:1",
@@ -112,9 +121,40 @@ def extract_audio_pcm(
         stderr = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
         raise AudioExtractionError(
             f"ffmpeg audio extraction failed: {stderr[:200]}")
-    if not proc.stdout:
-        raise NoAudioStreamError("video has no extractable audio stream")
-    return proc.stdout
+    return proc.stdout or b""
+
+
+def iter_audio_pcm_chunks(
+    file_path: str | Path,
+    sample_rate: int = AUDIO_SAMPLE_RATE,
+    chunk_seconds: float | None = None,
+) -> Iterator[bytes]:
+    """Yield a video's audio track as bounded PCM16 mono chunks.
+
+    Raises FileNotFoundError when ffmpeg itself is missing (the
+    caller maps that to an honest ``unavailable``), and
+    AudioExtractionError / NoAudioStreamError for a file ffmpeg
+    cannot read or that carries no audio. Each chunk is at most
+    ``chunk_seconds`` of audio (default
+    ``_AUDIO_CHUNK_SECONDS``); the whole track is never held
+    in memory.
+    """
+    if chunk_seconds is None:
+        chunk_seconds = _AUDIO_CHUNK_SECONDS
+    full_bytes = int(chunk_seconds * sample_rate) * 2
+    start_s = 0.0
+    while True:
+        chunk = _extract_audio_window(
+            file_path, sample_rate, start_s, chunk_seconds)
+        if not chunk:
+            if start_s == 0.0:
+                raise NoAudioStreamError(
+                    "video has no extractable audio stream")
+            return
+        yield chunk
+        if len(chunk) < full_bytes:
+            return
+        start_s += chunk_seconds
 
 
 # ----------------------------------------------------------------------
@@ -548,6 +588,15 @@ class MediaAnalyzer:
         self._config = config
         self._stt_engine = stt_engine
         self._stt_opened = False
+        # E7-20: one analysis per item at a time (analyze_item
+        # serialises on these). The scheduler wrapper dedupes
+        # its own triggers, but a startup backfill() pass and an
+        # arrival-triggered direct call could otherwise analyse
+        # the same item concurrently — two vision calls, two
+        # embedding writes, last writer wins on status. Locks
+        # live for the analyzer's lifetime, bounded by the
+        # library's item count like the store itself.
+        self._item_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def vision_provider(self) -> Any:
@@ -594,7 +643,18 @@ class MediaAnalyzer:
         Never raises for analysis failures: the item is marked
         ``failed`` with the error in its probe metadata and the
         (still usable) item is returned.
+
+        Concurrent calls for the SAME item serialise on a
+        per-item lock (E7-20) instead of racing; calls for
+        different items still run in parallel.
         """
+        lock = self._item_locks.get(media_id)
+        if lock is None:
+            lock = self._item_locks[media_id] = asyncio.Lock()
+        async with lock:
+            return await self._analyze_item(media_id)
+
+    async def _analyze_item(self, media_id: str) -> dict[str, Any] | None:
         item = self.store.get_media(media_id)
         if item is None:
             return None
@@ -737,26 +797,38 @@ class MediaAnalyzer:
             return None, "failed", str(e) or repr(e)
         if reason:
             return None, "unavailable", str(reason)
+        # E7-03: extract and transcribe window by window, so a
+        # long video's peak memory is one bounded chunk, not the
+        # whole track. The failure mapping is unchanged: missing
+        # ffmpeg is ``unavailable``, no audio is ``no_audio``,
+        # extraction/STT errors are ``failed``, and an STT stage
+        # that cannot run is ``unavailable``.
+        texts: list[str] = []
         try:
-            pcm = await asyncio.to_thread(extract_audio_pcm, item["file_path"])
-        except FileNotFoundError:
-            return None, "unavailable", "ffmpeg is not installed"
-        except NoAudioStreamError:
-            return None, "no_audio", None
-        except AudioExtractionError as e:
-            return None, "failed", str(e)
-        except Exception as e:  # noqa: BLE001 — extraction must not sink analysis
-            return None, "failed", str(e) or repr(e)
-        try:
-            if not self._stt_opened:
-                await engine.open()
-                self._stt_opened = True
-            text = await engine.transcribe(pcm, sample_rate=AUDIO_SAMPLE_RATE)
+            chunks = iter_audio_pcm_chunks(item["file_path"])
+            while True:
+                try:
+                    chunk = await asyncio.to_thread(next, chunks, None)
+                except FileNotFoundError:
+                    return None, "unavailable", "ffmpeg is not installed"
+                except NoAudioStreamError:
+                    return None, "no_audio", None
+                except AudioExtractionError as e:
+                    return None, "failed", str(e)
+                if chunk is None:
+                    break
+                if not self._stt_opened:
+                    await engine.open()
+                    self._stt_opened = True
+                part = await engine.transcribe(
+                    chunk, sample_rate=AUDIO_SAMPLE_RATE)
+                if part and part.strip():
+                    texts.append(part.strip())
         except VoiceUnavailableError as e:
             return None, "unavailable", str(e)
-        except Exception as e:  # noqa: BLE001 — STT failure is a state, not a crash
+        except Exception as e:  # noqa: BLE001 — the stage is a recorded state, never a crash
             return None, "failed", str(e) or repr(e)
-        return str(text or ""), "done", None
+        return " ".join(texts), "done", None
 
     async def transcribe_item(self, media_id: str) -> dict[str, Any] | None:
         """Transcribe one already-analysed video (the backfill unit).

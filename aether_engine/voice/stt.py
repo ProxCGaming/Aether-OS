@@ -49,6 +49,16 @@ WHISPER_MODEL_SIZES = frozenset({
 # extra path segments.
 _HF_REPO_ID_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 
+# One transcription await is bounded (E7-19): a wedged
+# faster-whisper call (corrupt model, driver stall) must fail
+# the turn, not hang it forever. 120 s is far beyond a healthy
+# transcription of the longest utterance (the endpointer caps
+# one at 30 s of audio) or one media-transcript window — a
+# backstop, not a budget. Expiry raises TimeoutError; the
+# worker thread itself cannot be killed and finishes (or
+# stays wedged) off the turn's path.
+_TRANSCRIBE_TIMEOUT_S = 120.0
+
 
 def is_supported_stt_model(value: object) -> bool:
     """Whether *value* may be stored as a speech STT model (H3).
@@ -140,7 +150,9 @@ class FasterWhisperStt:
     async def transcribe(self, audio: bytes, *, sample_rate: int) -> str:
         if self._model is None:
             raise VoiceUnavailableError("faster-whisper STT used before open()")
-        return await asyncio.to_thread(self._transcribe_sync, audio, sample_rate)
+        return await asyncio.wait_for(
+            asyncio.to_thread(self._transcribe_sync, audio, sample_rate),
+            timeout=_TRANSCRIBE_TIMEOUT_S)
 
     def _transcribe_sync(self, audio: bytes, sample_rate: int) -> str:
         wav = io.BytesIO(pcm16_to_wav(audio, sample_rate))

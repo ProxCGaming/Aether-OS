@@ -233,8 +233,22 @@ class ArtifactStore:
                 params.append(kind)
 
             if search:
-                clauses.append("(title LIKE ? OR file_path LIKE ? OR session_id LIKE ? OR task_id LIKE ?)")
-                term = f"%{search}%"
+                # E7-12: the search text is user text, not a
+                # pattern — escape the LIKE metacharacters so
+                # "%" or "a_b" search literally instead of
+                # silently matching every row (the
+                # knowledge-graph S1-N2 shape).
+                escaped = (
+                    search
+                    .replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_")
+                )
+                clauses.append(
+                    "(title LIKE ? ESCAPE '\\' OR file_path LIKE ? ESCAPE '\\' "
+                    "OR session_id LIKE ? ESCAPE '\\' OR task_id LIKE ? ESCAPE '\\')"
+                )
+                term = f"%{escaped}%"
                 params.extend([term, term, term, term])
 
             where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""

@@ -17,6 +17,7 @@ import io
 import logging
 import re
 import struct
+import threading
 import wave
 from collections.abc import AsyncIterator
 from typing import Protocol
@@ -27,6 +28,18 @@ logger = logging.getLogger("aether_engine.voice.tts")
 
 DEFAULT_VOICE = "af_heart"
 KOKORO_SAMPLE_RATE = 24000
+
+# The synthesis producer runs on a worker thread (Kokoro is
+# blocking) and hands chunks over through this queue (E7-13).
+# The queue is bounded: on a barge-in the consumer is gone, and
+# an unbounded queue let the orphaned thread synthesise the
+# whole interrupted sentence into memory nobody drained. Eight
+# chunks is well ahead of playback and far short of a hoard.
+_TTS_QUEUE_MAXSIZE = 8
+
+# How long the producer thread waits on a full queue before
+# re-checking whether its consumer has gone.
+_TTS_PUT_POLL_S = 0.05
 
 # Kokoro voice ids are ``<family>_<name>``: a two-letter
 # language/gender prefix (a=American, b=British, e=Spanish,
@@ -118,17 +131,45 @@ class KokoroTts:
         if self._pipeline is None:
             raise VoiceUnavailableError("Kokoro TTS used before open()")
         loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_TTS_QUEUE_MAXSIZE)
+        # E7-13: cancelling the to_thread future cannot stop a
+        # running thread, so the producer's lifetime is governed
+        # by this flag instead: the generator's finally sets it,
+        # and a producer blocked on the bounded queue (or between
+        # chunks) notices and stops synthesising.
+        stop = threading.Event()
+
+        def _deliver(item) -> bool:
+            """Queue one item from the producer thread. Blocks
+            while the bounded queue is full; returns False —
+            dropping the item — once the consumer has gone or
+            the loop has closed, so delivery never raises into
+            the thread (the old call_soon_threadsafe shape could
+            raise RuntimeError on a closed loop)."""
+            if stop.is_set():
+                return False
+            try:
+                put = asyncio.run_coroutine_threadsafe(queue.put(item), loop)
+            except RuntimeError:  # the loop is already closed
+                return False
+            while not stop.is_set():
+                try:
+                    put.result(timeout=_TTS_PUT_POLL_S)
+                    return True
+                except TimeoutError:
+                    continue
+            put.cancel()
+            return False
 
         def _produce() -> None:
             try:
                 for _gs, _ps, audio in self._pipeline(text, voice=voice):
-                    chunk = float_pcm_to_wav(audio)
-                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                    if not _deliver(float_pcm_to_wav(audio)):
+                        return
             except Exception as e:  # noqa: BLE001 — surfaced to the consumer below, not swallowed
-                loop.call_soon_threadsafe(queue.put_nowait, e)
+                _deliver(e)
             finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)
+                _deliver(None)
 
         producer = asyncio.ensure_future(asyncio.to_thread(_produce))
         try:
@@ -140,4 +181,5 @@ class KokoroTts:
                     raise item
                 yield item
         finally:
+            stop.set()
             producer.cancel()

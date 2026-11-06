@@ -93,6 +93,14 @@ DEFAULT_ESCALATION_ACK = (
     "and let you know when it's done."
 )
 
+#: How long speak_announcement waits for a quiet moment before
+#: giving up (E7-06). The wait used to be unbounded: a user who
+#: kept talking, or output activity that never settled, held the
+#: caller's task forever. A minute is far past any real reply or
+#: speech bout; past it the announcement is dropped — its text
+#: already stands in chat as the task's own message.
+_ANNOUNCEMENT_QUIET_TIMEOUT_S = 60.0
+
 _SENTENCE_BOUNDARY = re.compile(r"[.!?…]+[\"'”’)\]]*\s+")
 _WORD = re.compile(r"\S+")
 
@@ -240,6 +248,12 @@ class VoicePipeline:
         self._pending_partial_done = False
         self._turn_active = False
         self._turn_task: asyncio.Task | None = None
+        # E7-07: partial transcription runs as its own task off
+        # the frame loop (see _emit_partial); _partial_queued is
+        # the coalescing flag for requests that arrive while one
+        # is already in flight.
+        self._partial_task: asyncio.Task | None = None
+        self._partial_queued = False
         self._announcing = False
         # N10: the identity of the announcement currently speaking
         # (None for reply turns), so a barge-in landing mid-
@@ -533,6 +547,11 @@ class VoicePipeline:
             # free for barge-in detection); never orphan one.
             if self._turn_task is not None and not self._turn_task.done():
                 self._turn_task.cancel()
+            # Partials too (E7-07): the transcription task works
+            # off this loop's utterance buffer, so it must not
+            # outlive the loop either.
+            if self._partial_task is not None and not self._partial_task.done():
+                self._partial_task.cancel()
             self._turn_active = False
 
     async def _consume_frame(self, data: bytes) -> None:
@@ -636,32 +655,69 @@ class VoicePipeline:
             await self._emit_partial()
 
     async def _emit_partial(self) -> None:
+        """Schedule a provisional transcription of the growing
+        utterance WITHOUT blocking frame intake (E7-07).
+
+        The frame loop only schedules; the transcription itself
+        runs in ``_run_partial``. While one is in flight, further
+        requests coalesce into a single re-run over the freshest
+        buffer. A slow STT (seconds on CPU) can therefore delay
+        partials but never stall intake — on the old inline shape
+        the bounded RTC frame queue overflowed during every slow
+        partial and silently dropped the user's speech."""
         if not self._utterance:
             return
-        try:
-            text = await self._stt.transcribe(
-                bytes(self._utterance), sample_rate=self._sample_rate)
-        except Exception:  # a partial is provisional: never kill the loop
-            logger.debug("voice partial transcription failed", exc_info=True)
+        if self._partial_task is not None and not self._partial_task.done():
+            self._partial_queued = True
             return
-        text = (text or "").strip()
-        if text and text != self._last_partial_text:
-            self._last_partial_text = text
-            # S4-M16 (Smart Turn): feed the partial into the main
-            # endpointer so its turn-completion policy can bend the
-            # trailing-silence window for this utterance. The
-            # barge-in endpointer is intentionally NOT fed — it
-            # never observes transcripts and stays silence-only.
-            self._endpointer.observe_transcript(text)
-            await self._emit(Event(
-                type=EventType.VOICE_PARTIAL_TRANSCRIPT,
-                payload={
-                    "session_id": self.session_id,
-                    "speaker": "user",
-                    "text": text,
-                    "is_final": False,
-                },
-            ))
+        self._partial_task = asyncio.ensure_future(self._run_partial())
+
+    async def _run_partial(self) -> None:
+        try:
+            while True:
+                self._partial_queued = False
+                snapshot = bytes(self._utterance)
+                if not snapshot:
+                    return
+                try:
+                    text = await self._stt.transcribe(
+                        snapshot, sample_rate=self._sample_rate)
+                except Exception:  # a partial is provisional: never kill the loop
+                    logger.debug(
+                        "voice partial transcription failed", exc_info=True)
+                    return
+                text = (text or "").strip()
+                # The utterance this snapshot belonged to may have
+                # ended (or a new one begun) while transcription
+                # ran: publish only when the live buffer still
+                # extends the snapshot, so a stale partial never
+                # resurrects a finished turn's text.
+                if (
+                    text
+                    and text != self._last_partial_text
+                    and self._utterance.startswith(snapshot)
+                ):
+                    self._last_partial_text = text
+                    # S4-M16 (Smart Turn): feed the partial into the main
+                    # endpointer so its turn-completion policy can bend the
+                    # trailing-silence window for this utterance. The
+                    # barge-in endpointer is intentionally NOT fed — it
+                    # never observes transcripts and stays silence-only.
+                    self._endpointer.observe_transcript(text)
+                    await self._emit(Event(
+                        type=EventType.VOICE_PARTIAL_TRANSCRIPT,
+                        payload={
+                            "session_id": self.session_id,
+                            "speaker": "user",
+                            "text": text,
+                            "is_final": False,
+                        },
+                    ))
+                if not self._partial_queued:
+                    return
+        finally:
+            if self._partial_task is asyncio.current_task():
+                self._partial_task = None
 
     async def _finish_utterance(self) -> None:
         audio = bytes(self._utterance)
@@ -765,7 +821,10 @@ class VoicePipeline:
         Never commits to history: the task machinery already
         persisted the summary as the task's own message. Returns
         False when the session is not live — the summary still
-        stands in chat either way.
+        stands in chat either way — and likewise when no quiet
+        moment arrives within ``_ANNOUNCEMENT_QUIET_TIMEOUT_S``
+        (E7-06): the wait is a courtesy, never an open-ended hold
+        on the caller's task.
 
         N10: ``announcement_id``/``kind`` tag every emitted chunk
         as this announcement (never as a talker reply), and
@@ -776,11 +835,14 @@ class VoicePipeline:
         text = (text or "").strip()
         if not text or not self._started or self._stopping:
             return False
+        quiet_deadline = time.monotonic() + _ANNOUNCEMENT_QUIET_TIMEOUT_S
         while not self._stopping and (
             self._output_active
             or self._endpointer.in_speech
             or self._barge_endpointer.in_speech
         ):
+            if time.monotonic() >= quiet_deadline:
+                return False
             await asyncio.sleep(0.005)
         if self._stopping or not self._started:
             return False
