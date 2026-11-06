@@ -43,6 +43,13 @@ permissions:
 jobs:
   build-windows:
     name: Build installer (Windows NSIS)
+    # NOTE (5 Nov 2026): desktop_app/package.json sets
+    # win.signExecutable=false — the builds are unsigned, and the
+    # per-file signing pass over the bundled Python payload cost
+    # minutes while applying nothing. WHEN a code-signing
+    # certificate is added (CSC_LINK secret), flip signExecutable
+    # back to true in the same change, or the release will silently
+    # ship unsigned.
     runs-on: windows-latest
     defaults:
       run:
