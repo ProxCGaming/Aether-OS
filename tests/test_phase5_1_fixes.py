@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 
@@ -67,11 +68,85 @@ class TestFix2SandboxEnforcement(unittest.TestCase):
             )
             self.assertTrue(result.is_valid, f"write_file inside workspace should pass, got: {result.error}")
 
-    def test_risky_tools_set_matches_graph(self):
-        """Verify execute_tool.py's RISKY_TOOLS matches graph.py's RISKY_TOOLS."""
-        from aether_engine.langgraph.graph import RISKY_TOOLS as graph_risky
-        from aether_engine.langgraph.nodes.execute_tool import RISKY_TOOLS as node_risky
-        self.assertEqual(graph_risky, node_risky)
+    # ── B-06 rewrite (Wave 0) ──────────────────────────────────────
+    # The old test here compared a RISKY_TOOLS constant between
+    # graph.py and execute_tool.py; that symbol no longer exists in
+    # either module — the risky-tools concept moved into the tool
+    # registry's risk tiers (ToolRisk). These tests pin the CURRENT
+    # contract: the tier the registry assigns to representative
+    # built-in tools, and the enforcement consequence those tiers
+    # drive through ToolRegistry.execute (the real policy pipeline).
+
+    # name -> the tier the registry must assign it.
+    EXPECTED_RISK_TIERS: ClassVar[dict[str, str]] = {
+        "get_current_time": "read_only",
+        "search_web": "read_only",
+        "write_file": "write",
+        "edit_file": "write",
+        "create_directory": "write",
+        "delete_file": "destructive",
+        "execute_shell": "execute",
+    }
+
+    def test_registry_assigns_expected_risk_tiers(self):
+        """Representative built-ins carry the risk tier their behaviour warrants."""
+        from aether_engine.tools.registry import ToolRisk, build_tool_registry
+
+        registry = build_tool_registry()
+        for name, tier in self.EXPECTED_RISK_TIERS.items():
+            tool = registry.get_tool(name)
+            self.assertEqual(
+                tool.risk, ToolRisk(tier),
+                f"{name} should be tier {tier!r}, registry says {tool.risk.value!r}",
+            )
+        # Plan mode offers exactly the READ_ONLY set (registry
+        # .read_only_names): read-only representatives are in,
+        # anything that writes, executes or destroys is out.
+        read_only = registry.read_only_names()
+        self.assertIn("get_current_time", read_only)
+        self.assertIn("search_web", read_only)
+        for name in ("write_file", "delete_file", "execute_shell"):
+            self.assertNotIn(name, read_only)
+
+    def test_risk_tiers_drive_approval_enforcement(self):
+        """Through the real pipeline: READ_ONLY runs unapproved; WRITE and
+        DESTRUCTIVE tools are refused until approved — and nothing runs."""
+        import asyncio
+
+        from aether_engine.tools.registry import ToolExecutionError, build_tool_registry
+
+        class _NullAudit:
+            def log_event(self, *args, **kwargs):
+                pass
+
+        registry = build_tool_registry()
+
+        async def _run():
+            # READ_ONLY: no approval needed, executes in-process.
+            result = await registry.execute(
+                "get_current_time", {}, audit_logger=_NullAudit())
+            self.assertIsInstance(result, str)
+            self.assertTrue(result)
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                target = os.path.join(tmpdir, "victim.txt")
+                Path(target).write_text("precious", encoding="utf-8")
+                # DESTRUCTIVE without approval: refused, file untouched.
+                with self.assertRaises(ToolExecutionError) as ctx:
+                    await registry.execute(
+                        "delete_file", {"path": target}, audit_logger=_NullAudit())
+                self.assertIn("requires approval", str(ctx.exception))
+                self.assertTrue(Path(target).exists())
+                # WRITE without approval: refused, nothing created.
+                new_file = os.path.join(tmpdir, "new.txt")
+                with self.assertRaises(ToolExecutionError) as ctx:
+                    await registry.execute(
+                        "write_file", {"path": new_file, "content": "x"},
+                        audit_logger=_NullAudit())
+                self.assertIn("requires approval", str(ctx.exception))
+                self.assertFalse(Path(new_file).exists())
+
+        asyncio.run(_run())
 
     def test_sandbox_module_exists(self):
         """Verify the shared sandbox module exists and is importable."""
