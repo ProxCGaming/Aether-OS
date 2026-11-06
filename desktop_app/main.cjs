@@ -25,6 +25,9 @@ const WebSocket = require('ws');
 const { createWindowStateStore, ensureVisibleOnDisplays } = require('./electron/windowState.cjs');
 const { createEngineLifecycle } = require('./electron/engineLifecycle.cjs');
 const { createReconnectGuard } = require('./electron/wsReconnect.cjs');
+const { createEngineSocket } = require('./electron/engineSocket.cjs');
+const { createLogIpc } = require('./electron/logIpc.cjs');
+const { createIpcDialogs } = require('./electron/ipcDialogs.cjs');
 const http = require('http');
 const { spawn: spawnChildProcess } = require('child_process');
 const { shouldNotify, notificationContent } = require('./electron/notify.cjs');
@@ -109,28 +112,30 @@ function mainError(...args) {
   try { getAppLog().error('main', formatLogArgs(args)); } catch { /* logging never breaks the app */ }
 }
 
-// The paths the log IPC reads. app.log + engine.log live in
-// <userData>/logs (the lifecycle's file); crash-electron.log is
-// the shell crash log from the block at the top of this file,
-// next to the engine's own logs in ~/.aether/logs.
-function appLogFilePath() {
-  return getAppLog().filePath();
-}
-
-function engineLogFilePath() {
-  return path.join(app.getPath('userData'), 'logs', 'engine.log');
-}
-
-function crashElectronLogPath() {
-  return path.join(os.homedir(), '.aether', 'logs', 'crash-electron.log');
-}
-
-function logInventory() {
-  return [
-    logFileStat(fs, appLogFilePath(), 'app.log'),
-    logFileStat(fs, engineLogFilePath(), 'engine.log'),
-    logFileStat(fs, crashElectronLogPath(), 'crash-electron.log'),
-  ].filter(Boolean);
+// Wave 5 (Annex C row 12): the log IPC actions live in
+// electron/logIpc.cjs — the Settings → Diagnostics log viewer /
+// bundle export bodies, the append-ui-log sink, and the log
+// paths + inventory only those actions read. Lazily created
+// like the engine lifecycle; the channel registrations and the
+// S3-M3 sender guard stay in this file (see the IPC section).
+let logIpc = null;
+function getLogIpc() {
+  if (!logIpc) {
+    logIpc = createLogIpc({
+      fs,
+      path,
+      os,
+      app,
+      platform: process.platform,
+      getAppLog,
+      mainLog,
+      readLogTail,
+      logFileStat,
+      scrubSecrets,
+      shellOpenPath: (dir) => require('electron').shell.openPath(dir),
+    });
+  }
+  return logIpc;
 }
 
 // S3-M2: shell hardening — electron/securityPolicy.cjs owns every
@@ -195,7 +200,6 @@ app.on('web-contents-created', (_event, contents) => {
 
 let mainWindow = null;
 let floatingChatWindow = null;
-let wsClient = null;
 let tray = null;
 let windowStateStore = null;
 let saveBoundsTimer = null;
@@ -353,8 +357,8 @@ function getToken() {
 // (electron/wsReconnect.cjs). The old shape — a bare
 // setTimeout(connectEngine, 3000) in the close handler — never
 // stored or cleared the handle, so a superseded socket's close
-// could schedule a competing reconnect and a pending timer could
-// fire after quit had begun.
+// could schedule a competing reconnect and a pending timer
+// could fire after quit had begun.
 const reconnectGuard = createReconnectGuard({ reconnect: () => connectEngine() });
 let reconnectGeneration = 0;
 
@@ -362,80 +366,38 @@ function scheduleEngineReconnect() {
   reconnectGuard.schedule(reconnectGeneration);
 }
 
+// Wave 5 (Annex C row 12): the engine-socket relay lives in
+// electron/engineSocket.cjs — the connection lifecycle and the
+// _ws_status broadcasts, driving the guard above. Main wires
+// it with the pieces that stay here: the token read (getToken,
+// above), the renderer fan-out (broadcastEngineMessage,
+// below), the E6-01 notification side effect
+// (notifyEngineMessage, below), the tokenless-engine warning,
+// and the authenticated socket construction — Phase 10.2 B1:
+// the token is sent ONLY as an Authorization header. It must
+// never appear in the URL query string (URLs land in logs,
+// history and error reports). The token stays in the main
+// process: the renderer never holds it — main owns this socket
+// and forwards messages to the renderer via the
+// 'engine-message' IPC channel.
+const wsUrl = 'ws://127.0.0.1:8000/ws/tasks';
+const engineSocket = createEngineSocket({
+  createSocket: (token) => new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${token}` } }),
+  getToken,
+  broadcast: broadcastEngineMessage,
+  onMessage: notifyEngineMessage,
+  log: (...args) => mainLog(...args),
+  error: (...args) => mainError(...args),
+  openState: WebSocket.OPEN,
+  nextGeneration: () => {
+    reconnectGeneration = reconnectGuard.nextGeneration();
+  },
+  scheduleReconnect: scheduleEngineReconnect,
+  onTokenMissing: () => mainWarn('No engine token is available yet; will retry.'),
+});
+
 function connectEngine() {
-  // Phase 10.2 B1: the token is sent ONLY as an Authorization header.
-  // It must never appear in the URL query string (URLs land in logs,
-  // history and error reports). The token stays in the main process:
-  // the renderer never holds it — main owns this socket and forwards
-  // messages to the renderer via the 'engine-message' IPC channel.
-  const token = getToken();
-  const wsUrl = 'ws://127.0.0.1:8000/ws/tasks';
-
-  // Beginning a (re)connect supersedes every earlier socket and
-  // clears any pending reconnect timer.
-  reconnectGeneration = reconnectGuard.nextGeneration();
-
-  if (wsClient) {
-    wsClient.close();
-  }
-
-  if (!token) {
-    // D4-09: the engine REQUIRES registration of its token —
-    // a legacy engine without one refuses tokenless sockets with
-    // 1008, so opening one only bought a guaranteed reject + close
-    // + retry cycle. Do not open a socket we know will be refused;
-    // wait for the token (it lands when the engine finishes
-    // starting) and retry on the guard's schedule.
-    wsClient = null;
-    mainWarn('No engine token is available yet; will retry.');
-    scheduleEngineReconnect();
-    return;
-  }
-
-  const socket = new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${token}` } });
-  wsClient = socket;
-
-  socket.on('open', () => {
-    mainLog('Main process connected to Engine WebSocket.');
-    broadcastEngineMessage({ type: '_ws_status', status: 'connected' });
-  });
-
-  socket.on('message', (data) => {
-    const msgStr = data.toString();
-    broadcastEngineMessage(msgStr);
-    // Epic 6, E6-01: OS notifications for task completion /
-    // approval-needed, only when the user is not looking at the app
-    // (decision logic in electron/notify.cjs, unit-tested).
-    try {
-      const visible = !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
-      const focused = !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused());
-      if (shouldNotify(msgStr, { windowVisible: visible, windowFocused: focused }) && Notification.isSupported()) {
-        const content = notificationContent(msgStr);
-        if (content) {
-          const note = new Notification(content);
-          note.on('click', showMainWindow);
-          note.show();
-        }
-      }
-    } catch {
-      // Notifications are best-effort; never break message flow.
-    }
-  });
-
-  socket.on('close', (code, reason) => {
-    const reasonText = reason ? reason.toString() : '';
-    mainLog(`Engine WebSocket closed (code=${code}, reason=${reasonText || 'none'}).`);
-    // D4-09: a superseded socket's close is stale news — it must
-    // not tell the renderer the (new) connection dropped, and it
-    // must not schedule a reconnect of its own.
-    if (wsClient !== socket) return;
-    broadcastEngineMessage({ type: '_ws_status', status: 'disconnected' });
-    scheduleEngineReconnect();
-  });
-
-  socket.on('error', (err) => {
-    mainError('WebSocket error:', err);
-  });
+  engineSocket.connect();
 }
 
 function broadcastEngineMessage(msg) {
@@ -445,6 +407,27 @@ function broadcastEngineMessage(msg) {
   }
   if (floatingChatWindow && !floatingChatWindow.isDestroyed()) {
     floatingChatWindow.webContents.send('engine-message', msgData);
+  }
+}
+
+// Epic 6, E6-01: OS notifications for task completion /
+// approval-needed, only when the user is not looking at the app
+// (decision logic in electron/notify.cjs, unit-tested). Runs as
+// the engine socket's onMessage side effect, after the fan-out.
+function notifyEngineMessage(msgStr) {
+  try {
+    const visible = !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
+    const focused = !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused());
+    if (shouldNotify(msgStr, { windowVisible: visible, windowFocused: focused }) && Notification.isSupported()) {
+      const content = notificationContent(msgStr);
+      if (content) {
+        const note = new Notification(content);
+        note.on('click', showMainWindow);
+        note.show();
+      }
+    }
+  } catch {
+    // Notifications are best-effort; never break message flow.
   }
 }
 
@@ -699,6 +682,16 @@ app.on('window-all-closed', () => {
 // (null / false / error string) or throws where the handler's
 // existing error shape is a throw. Renderer arguments for the
 // privileged handlers are validated with the same module.
+//
+// Wave 5 (Annex C row 12): the work behind the registrations
+// lives in electron modules now — logIpc.cjs for the log
+// channels, ipcDialogs.cjs for the folder pickers,
+// engineSocket.cjs behind engine-send / get-ws-status. The
+// registrations stay in this file, in this guard's shadow: the
+// boundary (guard + argument validation) is main's wiring, and
+// the S3-M3 contract suites pin that surface here.
+const ipcDialogs = createIpcDialogs({ BrowserWindow, dialog });
+
 function isTrustedIpcSender(event, channel) {
   const trusted = isTrustedSender(event, {
     isDev,
@@ -724,16 +717,7 @@ ipcMain.handle('minimize-window', (event) => {
 
 ipcMain.handle('select-directory', async (event) => {
   if (!isTrustedIpcSender(event, 'select-directory')) return null;
-  const win = BrowserWindow.fromWebContents(event.sender);
-  const result = await dialog.showOpenDialog(win, {
-    properties: ['openDirectory', 'createDirectory'],
-    title: 'Select Download Directory'
-  });
-  if (result.canceled) {
-    return null;
-  } else {
-    return result.filePaths[0];
-  }
+  return ipcDialogs.selectDirectory(event);
 });
 
 ipcMain.handle('maximize-window', (event) => {
@@ -754,14 +738,11 @@ ipcMain.handle('open-logs-folder', async (event) => {
   // target (~/.aether/logs) holds only the crash logs, so the
   // button opened a folder without either file the panel shows.
   const dir = path.join(app.getPath('userData'), 'logs');
-  fs.mkdirSync(dir, { recursive: true });
-  const { shell } = require('electron');
-  await shell.openPath(dir);
-  return dir;
+  return getLogIpc().openLogsFolder(dir);
 });
 ipcMain.handle('get-ws-status', (event) => {
   if (!isTrustedIpcSender(event, 'get-ws-status')) return false;
-  return wsClient && wsClient.readyState === WebSocket.OPEN;
+  return engineSocket.isOpen();
 });
 
 // Wave 1 slice 4: startup-gate IPC (see engineStartupState above).
@@ -822,92 +803,48 @@ ipcMain.handle('open-engine-log', async (event) => {
 // to flood the file faster than rotation can bound it — and every
 // entry passes validateUiLogEntry, so the renderer can only ever
 // write as source 'ui' with a known level and a bounded message.
-const UI_LOG_RATE_LIMIT = 120; // entries…
-const UI_LOG_RATE_WINDOW_MS = 1000; // …per rolling window
-let uiLogWindowStart = 0;
-let uiLogWindowCount = 0;
-
 ipcMain.on('append-ui-log', (event, entry) => {
   if (!isTrustedIpcSender(event, 'append-ui-log')) return;
-  const nowMs = Date.now();
-  if (nowMs - uiLogWindowStart >= UI_LOG_RATE_WINDOW_MS) {
-    uiLogWindowStart = nowMs;
-    uiLogWindowCount = 0;
-  }
-  uiLogWindowCount += 1;
-  if (uiLogWindowCount > UI_LOG_RATE_LIMIT) return; // dropped silently: logging about logging helps no one
+  // The rate cap lives in logIpc (counted before validation,
+  // exactly as the inline limiter did); the write is its too.
+  if (!getLogIpc().acceptUiLogEntry()) return;
   const check = validateUiLogEntry(entry);
   if (!check.ok) {
     mainWarn(`[ipc] Refused append-ui-log entry: ${check.error}`);
     return;
   }
-  try { getAppLog().log(check.value.source, check.value.level, check.value.message); } catch { /* never throws by design */ }
+  getLogIpc().writeUiLogEntry(check.value);
 });
 
-// The viewer's data: the tails of both durable logs plus the file
-// inventory (name/size/last-write per source). Raw lines — this is
-// the user's own machine; redaction applies to the EXPORT below.
+// The viewer's data (electron/logIpc.cjs): the tails of both
+// durable logs plus the file inventory. E10-01: the result
+// carries the appLog sink's logBroken health flag — a session
+// whose file logging is failing must SAY so somewhere the user
+// can see it, and the panel reads it from this result.
 ipcMain.handle('read-logs', (event) => {
   if (!isTrustedIpcSender(event, 'read-logs')) return null;
-  return {
-    appTail: readLogTail(fs, appLogFilePath(), 500),
-    engineTail: readLogTail(fs, engineLogFilePath(), 500),
-    inventory: logInventory(),
-    level: getAppLog().getLevel(),
-    // E10-01: the appLog sink's health, surfaced in the panel —
-    // a session whose file logging is failing must SAY so
-    // somewhere the user can see it.
-    logBroken: getAppLog().isBroken(),
-  };
+  return getLogIpc().readLogs();
 });
 
-// Bundle v2, desktop half: everything getDesktopDiagnostics adds
-// to the engine bundle at export time. The three tails pass
-// through the secret-pattern scrubber (the JS mirror of the
-// engine audit redactor's bare-string patterns, appLog.cjs) —
-// the bundle is built to be handed to another person.
+// Bundle v2, desktop half (electron/logIpc.cjs): everything
+// getDesktopDiagnostics adds to the engine bundle at export
+// time, its tails scrubbed of secret-shaped values.
 ipcMain.handle('get-desktop-diagnostics', (event) => {
   if (!isTrustedIpcSender(event, 'get-desktop-diagnostics')) return null;
-  return {
-    app_version: app.getVersion(),
-    platform: process.platform,
-    app_log_tail: readLogTail(fs, appLogFilePath(), 500).map((line) => scrubSecrets(line)),
-    engine_log_tail: readLogTail(fs, engineLogFilePath(), 500).map((line) => scrubSecrets(line)),
-    crash_electron_tail: readLogTail(fs, crashElectronLogPath(), 200).map((line) => scrubSecrets(line)),
-    log_inventory: logInventory(),
-  };
+  return getLogIpc().getDesktopDiagnostics();
 });
 
-// Clear logs (Settings → Diagnostics, behind the panel's two-step
-// confirmation): app.log via the logger (it owns the size cache),
-// engine.log by plain truncate. Since D4-01 the lifecycle buffers
-// engine.log lines for up to one flush window, so lines buffered
-// at the moment of the truncate can still land just after it, and
-// its rotation counter over-counts by the truncated size until the
-// next run (rotation then fires early — the safe direction).
-// Crash logs are NOT cleared — they are the record of last resort.
+// Clear logs (Settings → Diagnostics, behind the panel's
+// two-step confirmation) — the action lives in logIpc.
 ipcMain.handle('clear-logs', (event) => {
   if (!isTrustedIpcSender(event, 'clear-logs')) return { ok: false, error: 'Refused: untrusted sender.' };
-  const appCleared = getAppLog().clear();
-  let engineCleared = true;
-  try {
-    fs.mkdirSync(path.dirname(engineLogFilePath()), { recursive: true });
-    fs.writeFileSync(engineLogFilePath(), '');
-  } catch {
-    engineCleared = false;
-  }
-  if (appCleared && engineCleared) {
-    return { ok: true };
-  }
-  return { ok: false, error: 'Some log files could not be cleared.' };
+  return getLogIpc().clearLogs();
 });
 
 // The [main]/[ui] level threshold (Settings → Diagnostics select).
 ipcMain.handle('set-log-level', (event, level) => {
   if (!isTrustedIpcSender(event, 'set-log-level')) return { ok: false, level: getAppLog().getLevel() };
-  const ok = getAppLog().setLevel(level);
-  if (ok) mainLog(`Log level set to ${getAppLog().getLevel()} from Settings.`);
-  return { ok, level: getAppLog().getLevel() };
+  return getLogIpc().setLogLevel(level);
 });
 
 ipcMain.on('engine-send', (event, msg) => {
@@ -917,9 +854,7 @@ ipcMain.on('engine-send', (event, msg) => {
     mainWarn(`[ipc] Refused engine-send message: ${check.error}`);
     return;
   }
-  if (wsClient && wsClient.readyState === WebSocket.OPEN) {
-    wsClient.send(check.value);
-  }
+  engineSocket.send(check.value);
 });
 
 ipcMain.handle('open-floating-chat', (event, sessionId) => {
@@ -979,13 +914,7 @@ ipcMain.handle('show-open-dialog', async (event, options) => {
     mainWarn(`[ipc] Refused show-open-dialog options: ${check.error}`);
     return null;
   }
-  const win = BrowserWindow.fromWebContents(event.sender);
-  const result = await dialog.showOpenDialog(win, check.value || {
-    properties: ['openDirectory'],
-    title: 'Select Folder'
-  });
-  if (result.canceled) return null;
-  return result.filePaths[0];
+  return ipcDialogs.showOpenDialog(event, check.value);
 });
 
 // Epic 8, E8-4.1: Snip IPC handlers
