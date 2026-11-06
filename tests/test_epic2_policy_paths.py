@@ -82,6 +82,57 @@ def test_resolve_by_name_threads_args(tmp_path):
     assert verdict == "allow"
 
 
+SHELL_TOOL = Tool(name="execute_shell", description="", risk=ToolRisk.EXECUTE)
+
+
+def test_path_allow_does_not_cover_shell_mentions(tmp_path):
+    """E3-N02: a path "Always Allow" must not auto-allow a shell
+    command that merely *mentions* an in-prefix path. The tokens
+    harvested from a command string are mentions, not the call's
+    targets — the command's effect is its whole text."""
+    rules = _projects_rule(tmp_path)
+    proj = tmp_path / "projects"
+    # The audit's verified case: sole path token inside the prefix.
+    assert resolve_tool_policy(SHELL_TOOL, {}, args={"command": f"cat {proj}/x.txt"}, path_rules=rules) == "ask"
+    # In-prefix path as the script a shell is told to execute.
+    assert resolve_tool_policy(SHELL_TOOL, {}, args={"command": f"sh {proj}/install.sh"}, path_rules=rules) == "ask"
+    # Mention in-prefix, effect outside the prefix.
+    outside = tmp_path / "elsewhere"
+    assert resolve_tool_policy(SHELL_TOOL, {}, args={"command": f"echo {proj}/note > {outside}/loot.txt"}, path_rules=rules) == "ask"
+
+
+def test_path_deny_and_ask_still_apply_to_shell(tmp_path):
+    """Deny / Require Approval path rules keep judging shell commands
+    by the full token harvest — only the allow direction is scoped."""
+    proj = tmp_path / "projects"
+    args = {"command": f"cat {proj}/x.txt"}
+    deny_rules = [{"prefix": str(tmp_path), "verdict": "Deny"}]
+    assert resolve_tool_policy(SHELL_TOOL, {}, args=args, path_rules=deny_rules) == "deny"
+    ask_rules = [{"prefix": str(tmp_path), "verdict": "Require Approval"}]
+    assert resolve_tool_policy(SHELL_TOOL, {}, args=args, path_rules=ask_rules) == "ask"
+
+
+def test_path_allow_needs_every_declared_target_inside_prefix(tmp_path):
+    """Allow matches the grant semantics of approval_cache.covering_
+    grant: EVERY declared target must sit inside the prefix — one
+    in-prefix source no longer launders an out-of-prefix destination."""
+    rules = _projects_rule(tmp_path)
+    proj = tmp_path / "projects"
+    both_in = {"path": str(proj / "a.txt"), "destination": str(proj / "b.txt")}
+    assert resolve_tool_policy(WRITE_TOOL, {}, args=both_in, path_rules=rules) == "allow"
+    one_out = {"path": str(proj / "a.txt"), "destination": str(tmp_path / "elsewhere" / "b.txt")}
+    assert resolve_tool_policy(WRITE_TOOL, {}, args=one_out, path_rules=rules) == "ask"
+
+
+def test_path_allow_still_covers_execute_tool_with_declared_path(tmp_path):
+    """An EXECUTE-risk tool whose target is a declared path argument
+    (the run_checks shape) keeps file-tool semantics: the path arg IS
+    the target, not a mention inside command text."""
+    checks = Tool(name="run_checks", description="", risk=ToolRisk.EXECUTE)
+    args = {"path": str(tmp_path / "projects")}
+    assert resolve_tool_policy(checks, {}, args=args, path_rules=_projects_rule(tmp_path)) == "allow"
+
+
 def test_config_round_trip_keeps_path_rules(tmp_path):
     cfg = UserConfig()
     cfg.path_rules = _projects_rule(tmp_path)

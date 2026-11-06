@@ -26,6 +26,12 @@ occupies: a quoted string that a carrier will EXECUTE — a
 process substitution — is extracted and recursively evaluated as a
 command line of its own, while quoted data passed to ordinary
 commands stays masked and inert.
+
+Rules are also spelling-blind to ``rm`` flag placement (E3-N01):
+each ``rm`` invocation in command position is additionally judged
+in a flag-normalised view (split, reordered and long flags merged
+into one cluster), so ``rm -r -f /`` gets the verdict ``rm -rf /``
+gets instead of slipping between the cluster-shaped patterns.
 """
 
 from __future__ import annotations
@@ -55,7 +61,7 @@ def _rx(p: str) -> re.Pattern:
 DEFAULT_RULES: list[ShellRule] = [
     # ── deny ────────────────────────────────────────────────────────
     ShellRule("fork-bomb", _rx(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"), "deny"),
-    ShellRule("rm-root", _rx(r"\brm\b[^;|&]*(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|--recursive\s+--force|--force\s+--recursive)[^;|&]*\s(/|/\*|~|\$HOME)(\s|$|;|&)"), "deny"),
+    ShellRule("rm-root", _rx(r"\brm\b[^;|&]*((?<!-)-[a-z]*r[a-z]*f|(?<!-)-[a-z]*f[a-z]*r|--recursive\s+--force|--force\s+--recursive)[^;|&]*\s(/|/\*|~|\$HOME)(\s|$|;|&)"), "deny"),
     ShellRule("rm-no-preserve-root", _rx(r"\brm\b[^;|&]*--no-preserve-root"), "deny"),
     ShellRule("mkfs", _rx(r"\bmkfs(\.\w+)?\b"), "deny"),
     ShellRule("dd-to-device", _rx(r"\bdd\b[^;|&]*\bof=/dev/"), "deny"),
@@ -63,7 +69,7 @@ DEFAULT_RULES: list[ShellRule] = [
     ShellRule("shutdown", _rx(r"\b(shutdown|reboot|poweroff|halt)\b"), "deny"),
     # ── ask ─────────────────────────────────────────────────────────
     ShellRule("fetch-execute", _rx(r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z)?sh\b"), "ask"),
-    ShellRule("rm-recursive-force", _rx(r"\brm\b[^;|&]*(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|--recursive\s+--force|--force\s+--recursive)"), "ask"),
+    ShellRule("rm-recursive-force", _rx(r"\brm\b[^;|&]*((?<!-)-[a-z]*r[a-z]*f|(?<!-)-[a-z]*f[a-z]*r|--recursive\s+--force|--force\s+--recursive)"), "ask"),
     ShellRule("recursive-chmod-system", _rx(r"\b(chmod|chown)\b[^;|&]*-[a-z]*R[a-z]*[^;|&]*\s/(etc|usr|var|bin|sbin|System|Library)\b"), "ask"),
 ]
 
@@ -431,6 +437,77 @@ def _extract_substitutions(text: str) -> list[str]:
     return payloads
 
 
+# ── rm flag normalisation (E3-N01) ───────────────────────────────
+
+_RM_LONG_FLAGS = {"--recursive": "r", "--force": "f"}
+
+
+def _normalise_rm_segment(segment: str) -> list[str]:
+    """Flag-normalised views of a segment's ``rm`` invocations.
+
+    The rm rules are written against combined flag clusters
+    (``-rf``), but a shell accepts the same flags split across
+    tokens (``-r -f``), reordered, interleaved with other flags, or
+    spelled long (``--recursive --force``) — and at the frozen tip
+    every split spelling of ``rm -rf /`` evaluated to ALLOW. Rather
+    than growing the rule table a pattern per spelling, each ``rm``
+    invocation found in command position (the segment's own command
+    word, or a ``find … -exec`` clause) is rebuilt with its flags
+    merged into one canonical cluster, and the existing rules judge
+    that view alongside the raw text: a split spelling inherits
+    exactly the verdict its combined spelling gets.
+
+    Flag collection follows shell rules: tokens after ``--`` are
+    operands, and (GNU-style permutation) a flag token counts
+    wherever it appears among the arguments. Operands are the
+    lexer's decoded tokens, so a quoted ``'/'`` is still the root
+    it names. Commands other than ``rm`` are never normalised, and
+    an ``rm`` that is mere argument data (``echo rm -r -f /``) is
+    not in command position and produces no view.
+    """
+    tokens = _lex(segment)
+    if not tokens:
+        return []
+    positions = _command_positions(tokens)
+    if not positions:
+        return []
+    first = positions[0]
+    # -exec clauses only carry a command when find is the segment's
+    # own command word; otherwise (``echo find -exec rm …``) the rm
+    # is data, exactly as _segment_payloads treats it.
+    segment_is_find = _basename(tokens[first].value) == "find"
+    views: list[str] = []
+    for idx in positions:
+        if idx != first and not segment_is_find:
+            continue
+        if _basename(tokens[idx].value) != "rm":
+            continue
+        letters: list[str] = []
+        operands: list[str] = []
+        flags_done = False
+        for tok in tokens[idx + 1:]:
+            value = tok.value
+            if flags_done:
+                operands.append(value)
+            elif value == "--":
+                flags_done = True
+            elif value.startswith("--"):
+                letter = _RM_LONG_FLAGS.get(value.split("=", 1)[0])
+                if letter and letter not in letters:
+                    letters.append(letter)
+            elif value.startswith("-") and value != "-":
+                for ch in value[1:]:
+                    low = ch.lower()
+                    if ch.isalpha() and low not in letters:
+                        letters.append(low)
+            elif value:
+                operands.append(value)
+        if not letters:
+            continue
+        views.append(" ".join(["rm", "-" + "".join(letters), *operands]))
+    return views
+
+
 def _nested_payloads(command: str) -> list[str]:
     payloads = _extract_substitutions(command)
     for segment in split_segments(command):
@@ -457,8 +534,14 @@ def evaluate_shell_command(
 def _evaluate(command: str, rules: list[ShellRule], *, depth: int) -> ShellVerdict:
     # Whole-command pass first (catches patterns spanning substitutions
     # and pipes), then per-segment so the report names the segment.
-    # Quoted literals are masked in both passes.
-    targets = [_mask_quotes(command), *(_mask_quotes(s) for s in split_segments(command))]
+    # Quoted literals are masked in both passes. Each segment also
+    # contributes its flag-normalised rm views (E3-N01), built from
+    # decoded tokens, so split rm flag spellings are judged by the
+    # same rules as their combined spelling.
+    raw_segments = split_segments(command)
+    targets = [_mask_quotes(command), *(_mask_quotes(s) for s in raw_segments)]
+    for segment in raw_segments:
+        targets.extend(_normalise_rm_segment(segment))
     best = ShellVerdict("allow")
     for rule in rules:
         for target in targets:

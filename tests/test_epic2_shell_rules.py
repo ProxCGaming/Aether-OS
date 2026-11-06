@@ -137,6 +137,60 @@ def test_nested_deny_cannot_be_configured_away():
     assert not res.is_valid and "safety rule" in (res.error or "")
 
 
+# ── E3-N01: the rm rules must judge flag SPELLINGS, not clusters ──
+# The deny/ask patterns were written against combined clusters
+# (``-rf``), but a shell accepts the same flags split across tokens
+# (``-r -f``), reordered, or spelled long (``--recursive --force``).
+# At the frozen tip every split spelling of the headline case
+# evaluated to ALLOW. The invariant under test: a split / reordered /
+# long spelling gets exactly the verdict its combined spelling gets.
+
+
+@pytest.mark.parametrize("command", [
+    "rm -r -f /",
+    "rm -f -r /",
+    "rm -f -r ~",
+    "rm -r -f $HOME",
+    "rm -r -f /*",
+    "echo hi; rm -r -f /",        # split flags in a later segment
+    "rm -v -r -f /",              # unrelated flag interleaved
+    "rm -r --force /",            # mixed short + long
+    "rm --recursive -f ~",        # mixed long + short
+    "sudo rm -r -f /",            # wrapper before rm
+    "rm -r -f '/'",               # quotes around / do not change the target
+    'bash -c "rm -r -f /"',       # nested payload, split flags
+])
+def test_deny_split_flag_spellings(command):
+    v = evaluate_shell_command(command)
+    assert v.verdict == "deny" and v.rule == "rm-root", command
+
+
+@pytest.mark.parametrize("command", [
+    "rm -r -f build/",
+    "rm -f -r dist",
+    "rm -r -f",                   # no target: still recursive+force
+    "rm --recursive --force build/",
+    "rm -r --force ./out",
+    "find . -exec rm -r -f {} +",  # rm in -exec command position
+])
+def test_ask_split_flag_spellings(command):
+    v = evaluate_shell_command(command)
+    assert v.verdict == "ask" and v.rule == "rm-recursive-force", command
+
+
+@pytest.mark.parametrize("command", [
+    "rm -f file.txt",                  # force alone: nothing recursive
+    "rm --force file.txt",
+    "rm -r -i build/",                 # recursive without force (parity: "rm -r build/")
+    "rm -i -f file.txt",
+    'echo "rm -r -f / is dangerous"',  # rm as quoted data for echo
+    "grep -r -f patterns.txt .",       # -r -f are grep's flags, not rm's
+    "echo find -exec rm -r -f /",      # rm not in command position at all
+])
+def test_split_flag_lookalikes_stay_allow(command):
+    assert evaluate_shell_command(command).verdict == "allow", command
+
+
 def test_preflight_blocks_deny_rules():
     res = validate_tool_request("execute_shell", {"command": "ls; rm -rf /"}, workspace_roots=[])
     assert not res.is_valid and "safety rule" in (res.error or "")

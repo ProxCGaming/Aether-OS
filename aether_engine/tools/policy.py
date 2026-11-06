@@ -37,6 +37,17 @@ def _candidate_paths(args: dict | None) -> list[Path]:
     return candidate_paths(args)
 
 
+def _declared_target_paths(args: dict | None) -> list[Path]:
+    """The call's declared path arguments only — its actual targets.
+
+    Excludes the tokens harvested from a shell ``command`` string:
+    those are mentions, not targets (see tools.paths.candidate_paths).
+    """
+    from aether_engine.tools.paths import candidate_paths
+
+    return candidate_paths(args, include_command=False)
+
+
 def is_sensitive_floor_path(path: Path) -> bool:
     """True when ``path`` sits under a home-sensitive floor prefix.
 
@@ -84,12 +95,25 @@ def _path_rule_verdict(
     "Require Approval" | "Deny", "tools": [names]?, "risks":
     [risk values]?}`` — ordered, first match wins, matching the
     resolved candidate path from the call's arguments.
+
+    The verdicts judge different candidate sets (E3-N02). "Deny" and
+    "Require Approval" fail safe on contact: ANY candidate under the
+    prefix matches, including tokens harvested from a shell command.
+    "Always Allow" speaks about the call's targets, so it judges the
+    *declared* path arguments only and requires EVERY one of them
+    under the prefix — the same coverage semantics as
+    ``approval_cache.covering_grant``. A shell command has no declared
+    targets (its command-string tokens are mentions, and its effect
+    is the whole command text), so a path rule can never auto-allow
+    one; the user's "this folder is fine" is not "any command
+    mentioning this folder is pre-approved".
     """
     if not path_rules:
         return None
     candidates = _candidate_paths(args)
     if not candidates:
         return None
+    declared = _declared_target_paths(args)
     for rule in path_rules:
         if not isinstance(rule, dict):
             continue
@@ -104,6 +128,10 @@ def _path_rule_verdict(
         if isinstance(risks, list) and risks and tool.risk.value not in risks:
             continue
         prefix = Path(prefix_raw).expanduser().resolve()
+        if verdict == "allow":
+            if declared and all(c.is_relative_to(prefix) for c in declared):
+                return verdict
+            continue
         if any(c.is_relative_to(prefix) for c in candidates):
             return verdict
     return None
@@ -127,7 +155,10 @@ def resolve_tool_policy(
     relax the DEFAULT ask for non-read-only tools (its whole purpose:
     "writes under ~/projects are fine"), but it can never override an
     explicit per-tool Deny or Require Approval, and the sensitive-path
-    floor can raise any allow back to ask.
+    floor can raise any allow back to ask. An "Always Allow" path rule
+    judges the call's declared target paths only, all of which must
+    sit under the prefix — it never auto-allows a shell command for
+    mentioning an allowed path (E3-N02; see _path_rule_verdict).
 
     Epic 2, E2-07: shell commands carry segment-wise safety rules on
     top of everything else — a deny rule denies outright (no config

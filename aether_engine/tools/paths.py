@@ -69,7 +69,7 @@ def _looks_like_path(value: str) -> bool:
     return "/" in value or "\\" in value or value.startswith("~")
 
 
-def candidate_paths(args: dict | None) -> list[Path]:
+def candidate_paths(args: dict | None, *, include_command: bool = True) -> list[Path]:
     """Resolved paths a tool call would touch, from its arguments.
 
     Shared by policy (E2-06 floor + path rules) and the approval cache
@@ -86,6 +86,16 @@ def candidate_paths(args: dict | None) -> list[Path]:
     themselves (``resolve_contained``) remains the hard boundary, and
     these candidates exist so the policy floor and grant matching see
     the paths the common shapes actually carry.
+
+    The two harvests are different in kind, and ``include_command``
+    separates them: the ``_PATH_ARG_KEYS`` values are the call's
+    *declared targets* — the paths the tool will actually act on —
+    while command-string tokens are *mentions* whose role (target,
+    operand of something else, inert string data) the harvest cannot
+    know. Judgements that must speak about targets only (a path
+    rule's "Always Allow", E3-N02) pass ``include_command=False``;
+    judgements that fail safe on any contact (floors, deny rules,
+    grant coverage) keep the default full harvest.
     """
     if not args:
         return []
@@ -103,7 +113,7 @@ def candidate_paths(args: dict | None) -> list[Path]:
         if isinstance(raw, str) and raw and (key == "path" or _looks_like_path(raw)):
             _add(raw)
     command = args.get("command")
-    if isinstance(command, str) and command:
+    if include_command and isinstance(command, str) and command:
         for token in re.split(r"[\s\"'<>|;&]+", command):
             candidate = token.strip("`").rstrip(".,;:").rsplit("=", 1)[-1]
             if candidate.startswith(("/", "~")) or re.match(r"^[A-Za-z]:[\\/]", candidate):
