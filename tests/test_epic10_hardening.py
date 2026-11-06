@@ -161,7 +161,7 @@ from aether_engine.state import engine_state as _es
 def test_ws_backup_create_and_restore(tmp_path, monkeypatch):
     _es.token_path = tmp_path / "engine.token"
     _es.audit_logger.log_path = tmp_path / "audit.log"
-    _es.initialize_auth()
+    _es.initialize()
     monkeypatch.setattr(_ss, "DB_PATH", tmp_path / "memory.db")
     monkeypatch.setattr(_ss, "_initialized", False)
     _es.user_config.workspace_roots = [str(tmp_path)]

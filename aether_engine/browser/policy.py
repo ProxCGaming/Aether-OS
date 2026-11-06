@@ -233,9 +233,14 @@ _policy_loader: Callable[[], BrowserPolicy] | None = None
 
 def set_browser_policy_loader(
     loader: Callable[[], BrowserPolicy] | None,
-) -> None:
+):
+    """Install the live policy loader; returns the previous one
+    (N-43) so the installer can restore it when it is done — the
+    loader is a module-global seam, not per-connection state."""
     global _policy_loader
+    previous = _policy_loader
     _policy_loader = loader
+    return previous
 
 
 def _fail_closed_policy() -> BrowserPolicy:

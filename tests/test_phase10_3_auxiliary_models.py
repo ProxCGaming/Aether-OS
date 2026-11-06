@@ -132,7 +132,7 @@ class TestWebSocketRejectsPlaceboTasks:
         audit_file = tmp_path / "audit.log"
         engine_state.token_path = token_file
         engine_state.audit_logger.log_path = audit_file
-        engine_state.initialize_auth()
+        engine_state.initialize()
 
         orig_aux = dict(engine_state.user_config.auxiliary_models)
         orig_effort = engine_state.user_config.reasoning_effort

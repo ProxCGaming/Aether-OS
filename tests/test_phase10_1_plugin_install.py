@@ -32,7 +32,7 @@ class TestPhase101PluginInstall(unittest.TestCase):
 
         engine_state.token_path = self.token_file
         engine_state.audit_logger.log_path = self.audit_file
-        self.token = engine_state.initialize_auth()
+        self.token = engine_state.initialize()
 
         self.patcher = patch("aether_engine.memory.session_store.DB_PATH", self.tmp_path / "test_memory.db")
         self.patcher.start()
@@ -184,14 +184,19 @@ class TestPhase101PluginInstall(unittest.TestCase):
     def test_grant_with_unknown_request_id_does_not_drop_session(self):
         # Pre-fix: even a grant for an unknown request id raised NameError
         # and killed the session.
+        # E1-06 (Wave 2): the unknown grant is now ANSWERED with a
+        # failed PLUGIN_INSTALL_RESPONSE — the old "no response is
+        # expected" behaviour left the UI waiting forever — and the
+        # session must still stay alive for the next request.
         with TestClient(app) as client, self._connect(client) as ws:
             self._hello(ws)
             ws.send_text(Event(
                 type=EventType.PLUGIN_APPROVAL_GRANTED,
                 request_id="req-never-pending",
             ).to_json())
-            # No response is expected for an unknown grant (data is None),
-            # but the session must stay alive for the next request.
+            answered = self._recv_event(ws)
+            self.assertEqual(answered.type, EventType.PLUGIN_INSTALL_RESPONSE)
+            self.assertFalse(answered.payload["success"])
             ws.send_text(Event(type=EventType.PLUGIN_LIST_REQUEST).to_json())
             listed = self._recv_event(ws)
             self.assertEqual(listed.type, EventType.PLUGIN_LIST_RESPONSE)

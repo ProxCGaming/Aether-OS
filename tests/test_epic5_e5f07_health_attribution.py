@@ -71,7 +71,7 @@ def _cfg(**overrides) -> UserConfig:
 @pytest.fixture
 def ws_env(tmp_path, monkeypatch):
     """Engine state + stores isolated to tmp (E5-F02 ws_env pattern):
-    audit log path set BEFORE initialize_auth(); global config via a
+    audit log path set BEFORE initialize(); global config via a
     tmp CONFIG_PATH file; a FRESH health manager so the assertions
     below read only what the pump recorded."""
     engine_state.token_path = tmp_path / "engine.token"
@@ -80,7 +80,7 @@ def ws_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
     cfg = _cfg(workspace_roots=[str(tmp_path)])
     save_config(cfg, config_path)
-    engine_state.initialize_auth()
+    engine_state.initialize()
     monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "memory.db")
     monkeypatch.setattr(session_store, "_initialized", False)
     monkeypatch.setattr(

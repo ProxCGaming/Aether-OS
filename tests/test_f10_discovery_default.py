@@ -227,7 +227,7 @@ class TestProviderHandlersResolveDefaultViaRegistry:
 
         engine_state.token_path = tmp_path / "engine.token"
         engine_state.audit_logger.log_path = tmp_path / "audit.log"
-        engine_state.initialize_auth()
+        engine_state.initialize()
         try:
             yield engine_state
         finally:

@@ -333,7 +333,7 @@ def settings_env(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ws_module, "get_pending_approvals", AsyncMock(return_value=[]))
 
-    engine_state.initialize_auth()
+    engine_state.initialize()
     return {"tmp_path": tmp_path, "config_path": config_path,
             "ws_root": ws_root, "store": store}
 

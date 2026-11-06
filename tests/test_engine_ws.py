@@ -33,7 +33,7 @@ class TestEngineWebSocket(unittest.TestCase):
 
         engine_state.token_path = self.token_file
         engine_state.audit_logger.log_path = self.audit_file
-        self.token = engine_state.initialize_auth()
+        self.token = engine_state.initialize()
         
         self.patcher = patch("aether_engine.memory.session_store.DB_PATH", self.tmp_path / "test_memory.db")
         self.patcher.start()
@@ -570,7 +570,7 @@ class TestEditAndResendHardening(unittest.TestCase):
 
         engine_state.token_path = self.token_file
         engine_state.audit_logger.log_path = self.audit_file
-        self.token = engine_state.initialize_auth()
+        self.token = engine_state.initialize()
 
         from aether_engine.memory import session_store
 
@@ -665,7 +665,7 @@ class TestAgentUpdateValidation(unittest.TestCase):
         self.audit_file = self.tmp_path / "audit.log"
         engine_state.token_path = self.token_file
         engine_state.audit_logger.log_path = self.audit_file
-        self.token = engine_state.initialize_auth()
+        self.token = engine_state.initialize()
         self.patcher = patch(
             "aether_engine.memory.session_store.DB_PATH",
             self.tmp_path / "test_memory.db",

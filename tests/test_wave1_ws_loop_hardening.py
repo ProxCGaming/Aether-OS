@@ -71,7 +71,7 @@ class _WsHarness(unittest.TestCase):
 
         engine_state.token_path = self.token_file
         engine_state.audit_logger.log_path = self.audit_file
-        self.token = engine_state.initialize_auth()
+        self.token = engine_state.initialize()
 
         self.patcher = patch(
             "aether_engine.memory.session_store.DB_PATH",

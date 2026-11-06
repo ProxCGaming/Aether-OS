@@ -132,7 +132,7 @@ class TestSettingsWebSocketHandlers:
         audit_file = tmp_path / "audit.log"
         engine_state.token_path = token_file
         engine_state.audit_logger.log_path = audit_file
-        engine_state.initialize_auth()
+        engine_state.initialize()
 
         # initialize() replaces user_config and recomputes configured_providers,
         # so snapshot/mutate only after it runs.

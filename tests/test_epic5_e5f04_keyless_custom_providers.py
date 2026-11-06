@@ -244,14 +244,14 @@ def ws_env(tmp_path, monkeypatch):
     """Global config via a tmp CONFIG_PATH file (the E5-F02 lesson:
     initialize() reloads user_config from disk, so the keyless custom
     configuration must live in the config FILE). Audit log path is set
-    BEFORE initialize_auth() per the fixture law."""
+    BEFORE initialize() per the fixture law."""
     engine_state.token_path = tmp_path / "engine.token"
     engine_state.audit_logger.log_path = tmp_path / "audit.log"
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
     cfg = _keyless_cfg(workspace_roots=[str(tmp_path)])
     save_config(cfg, config_path)
-    engine_state.initialize_auth()
+    engine_state.initialize()
     monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "memory.db")
     monkeypatch.setattr(session_store, "_initialized", False)
     monkeypatch.setattr(

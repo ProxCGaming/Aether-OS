@@ -46,26 +46,40 @@ def record_crash(kind: str, exc_type, exc, tb) -> Path:
 
 
 def install_crash_logging() -> Path:
-    """Append unhandled exceptions (main + threads) to crash.log."""
+    """Append unhandled exceptions (main + threads) to crash.log.
+
+    Idempotent (E8-14): a second install must not wrap the hooks
+    again (which would record every crash twice), and the
+    threading hook CHAINS whatever hook was in place before —
+    replacing it outright silently dropped any handler installed
+    earlier by a library or the embedding shell.
+    """
     crash_path = logs_dir() / "crash.log"
 
     def _write(kind: str, exc_type, exc, tb) -> None:
         record_crash(kind, exc_type, exc, tb)
 
-    previous_hook = sys.excepthook
+    if not getattr(sys.excepthook, "_aether_crash_hook", False):
+        previous_hook = sys.excepthook
 
-    def hook(exc_type, exc, tb):
-        _write("UNHANDLED", exc_type, exc, tb)
-        previous_hook(exc_type, exc, tb)
+        def hook(exc_type, exc, tb):
+            _write("UNHANDLED", exc_type, exc, tb)
+            previous_hook(exc_type, exc, tb)
 
-    sys.excepthook = hook
+        hook._aether_crash_hook = True  # type: ignore[attr-defined]
+        sys.excepthook = hook
 
     import threading
 
-    def thread_hook(args):
-        _write(f"THREAD {args.thread.name}", args.exc_type, args.exc_value, args.exc_traceback)
+    if not getattr(threading.excepthook, "_aether_crash_hook", False):
+        previous_thread_hook = threading.excepthook
 
-    threading.excepthook = thread_hook
+        def thread_hook(args):
+            _write(f"THREAD {args.thread.name}", args.exc_type, args.exc_value, args.exc_traceback)
+            previous_thread_hook(args)
+
+        thread_hook._aether_crash_hook = True  # type: ignore[attr-defined]
+        threading.excepthook = thread_hook
     return crash_path
 
 

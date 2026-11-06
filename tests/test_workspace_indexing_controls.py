@@ -91,7 +91,7 @@ async def test_websocket_pause_and_config_handlers(tmp_path, monkeypatch):
 
     # Scope every engine-state mutation to this test (N12): the raw
     # assignments used to leak into later suites — worst of all,
-    # initialize_auth() starts the shared capability scheduler bound
+    # initialize() starts the shared capability scheduler bound
     # to THIS test's event loop, and pytest-asyncio closes that loop
     # at teardown, so a later suite's app shutdown died stopping a
     # scheduler whose loop was already closed. monkeypatch restores
@@ -104,7 +104,7 @@ async def test_websocket_pause_and_config_handlers(tmp_path, monkeypatch):
         engine_state, "user_config",
         UserConfig(embedding_model="qwen3-embedding:0.6b"))
     monkeypatch.setattr(engine_state, "auth_token", engine_state.auth_token)
-    token = engine_state.initialize_auth()
+    token = engine_state.initialize()
 
     custom_indexer = ProseIndexer(store=WorkspaceRagStore(rag_db), config=engine_state.user_config)
 

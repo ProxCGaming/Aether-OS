@@ -28,7 +28,7 @@ against current code before fixing:
 TDD: every test here fails on the pre-fix code for the stated reason
 and passes after the fix. All DBs are tmp files; the socket tests
 follow the E6-F05 isolated-settings fixture pattern (tmp
-``CONFIG_PATH``, audit log path set before ``initialize_auth()``).
+``CONFIG_PATH``, audit log path set before ``initialize()``).
 """
 import asyncio
 import sqlite3
@@ -361,7 +361,7 @@ class _DummyProtector(BaseProtector):
 def settings_env(tmp_path, monkeypatch):
     """Isolated engine state (the E6-F05 fixture pattern): tmp config
     file + tmp secret store. Audit log path is set BEFORE
-    initialize_auth() per the fixture law."""
+    initialize() per the fixture law."""
     engine_state.token_path = tmp_path / "engine.token"
     engine_state.audit_logger.log_path = tmp_path / "audit.log"
 
@@ -382,7 +382,7 @@ def settings_env(tmp_path, monkeypatch):
         ws_module, "get_pending_approvals", AsyncMock(return_value=[]))
     facade._BACKEND_CACHE.clear()
 
-    engine_state.initialize_auth()
+    engine_state.initialize()
     yield {"tmp_path": tmp_path, "config_path": config_path}
     facade._BACKEND_CACHE.clear()
 

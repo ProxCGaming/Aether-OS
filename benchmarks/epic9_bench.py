@@ -110,7 +110,7 @@ def bench_ttft():
     tmp = Path(tempfile.mkdtemp())
     engine_state.token_path = tmp / "engine.token"
     engine_state.audit_logger.log_path = tmp / "audit.log"
-    engine_state.initialize_auth()
+    engine_state.initialize()
     session_store.DB_PATH = tmp / "memory.db"
     session_store._initialized = False
 

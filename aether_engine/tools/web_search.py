@@ -32,16 +32,29 @@ _key_loader: Callable[[str], str] | None = None
 _config_loader: Callable[[], tuple[str, bool]] | None = None
 
 
-def set_search_key_loader(loader: Callable[[str], str] | None) -> None:
-    """Install the secret-store-backed key loader (websocket startup)."""
+def set_search_key_loader(loader: Callable[[str], str] | None):
+    """Install the secret-store-backed key loader (websocket startup).
+
+    Returns the previously installed loader (N-43) so the caller
+    that replaced it can restore it when it is done — the loaders
+    are module-global seams, not per-connection state.
+    """
     global _key_loader
+    previous = _key_loader
     _key_loader = loader
+    return previous
 
 
-def set_search_config_loader(loader: Callable[[], tuple[str, bool]] | None) -> None:
-    """Install the live config loader: () -> (provider, fallback_to_ddgs)."""
+def set_search_config_loader(loader: Callable[[], tuple[str, bool]] | None):
+    """Install the live config loader: () -> (provider, fallback_to_ddgs).
+
+    Returns the previously installed loader (N-43), like
+    :func:`set_search_key_loader`.
+    """
     global _config_loader
+    previous = _config_loader
     _config_loader = loader
+    return previous
 
 
 def current_search_config() -> tuple[str, bool]:

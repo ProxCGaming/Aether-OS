@@ -80,12 +80,10 @@ CLOUD_PROVIDERS: list[ProviderInfo] = [
 
 PROVIDER_MAP: dict[str, ProviderInfo] = {p.name: p for p in CLOUD_PROVIDERS}
 
-LOCAL_MODELS = [
-    {"name": "Qwen 3 8B", "size": "4.9 GB", "badges": ["Fast", "Code"]},
-    {"name": "Llama 3.1 8B", "size": "4.7 GB", "badges": ["General", "Chat"]},
-    {"name": "Gemma 3 12B", "size": "7.3 GB", "badges": ["Reasoning", "Multi-turn"]},
-    {"name": "DeepSeek R1 8B", "size": "4.9 GB", "badges": ["Reasoning", "Code"]},
-]
+# E8-10: a static LOCAL_MODELS catalogue used to live here. It had
+# no production consumer — the live local-model surface is
+# aether_engine/models/local_models.py (OllamaManager) — so the
+# dead list was removed rather than left to drift out of sync.
 
 
 # ---------------------------------------------------------------------------

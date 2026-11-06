@@ -67,7 +67,7 @@ class DummyProtector(BaseProtector):
 def settings_env(tmp_path, monkeypatch):
     """Isolated engine state: tmp config file, tmp secret store.
 
-    Audit log path is set BEFORE initialize_auth() per the fixture
+    Audit log path is set BEFORE initialize() per the fixture
     law; the config lives in a tmp CONFIG_PATH file because
     initialize() reloads user_config from disk.
     """
@@ -93,7 +93,7 @@ def settings_env(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ws_module, "get_pending_approvals", AsyncMock(return_value=[]))
 
-    engine_state.initialize_auth()
+    engine_state.initialize()
     return {"tmp_path": tmp_path, "config_path": config_path,
             "ws_root": ws_root, "store": store}
 

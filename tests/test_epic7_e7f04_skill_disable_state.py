@@ -355,10 +355,10 @@ class TestSuccessfulToggleControls:
 @pytest.fixture()
 def ws_env(tmp_path, monkeypatch):
     # Fixture law: the audit logger's path must be repointed into tmp
-    # BEFORE initialize_auth().
+    # BEFORE initialize().
     engine_state.token_path = tmp_path / "engine.token"
     engine_state.audit_logger.log_path = tmp_path / "audit.log"
-    engine_state.initialize_auth()
+    engine_state.initialize()
     monkeypatch.setattr(
         "aether_engine.memory.session_store.DB_PATH",
         tmp_path / "test_memory.db")

@@ -36,7 +36,7 @@ def media_env(tmp_path, monkeypatch):
     handler's lazy ``get_media_store`` import."""
     engine_state.token_path = tmp_path / "engine.token"
     # Mirror the established isolation pattern of every other suite
-    # that calls initialize_auth() (test_engine_ws, test_browser_core,
+    # that calls initialize() (test_engine_ws, test_browser_core,
     # test_browser_policy, ...): repoint the global audit logger into
     # this test's tmp dir too. Those suites set log_path per test and
     # delete their tmp dir on teardown WITHOUT restoring it, so in
@@ -45,7 +45,7 @@ def media_env(tmp_path, monkeypatch):
     # FileNotFoundError. Setting both paths here makes this fixture
     # independent of whatever ran before it.
     engine_state.audit_logger.log_path = tmp_path / "audit.log"
-    engine_state.initialize_auth()
+    engine_state.initialize()
 
     store = MediaStore(db_path=tmp_path / "media.db")
     store.init_db()

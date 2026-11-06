@@ -40,7 +40,7 @@ against current code before fixing:
 TDD: every test here fails on the pre-fix code for the stated
 reason and passes after the fix. Socket tests follow the E6-F05
 isolated-settings fixture pattern (tmp ``CONFIG_PATH``, audit log
-path set before ``initialize_auth()``).
+path set before ``initialize()``).
 """
 import asyncio
 import json
@@ -167,7 +167,7 @@ def socket_env(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ws_module, "get_pending_approvals", AsyncMock(return_value=[]))
 
-    engine_state.initialize_auth()
+    engine_state.initialize()
     yield {"tmp_path": tmp_path, "config_path": config_path}
 
 

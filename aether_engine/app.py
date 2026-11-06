@@ -256,4 +256,22 @@ app.include_router(ws_router)
 
 @app.get("/health")
 async def health():
-    return JSONResponse({"status": "ok", "schema_version": SCHEMA_VERSION})
+    # N-44: /health is the shell's readiness probe, so it reports
+    # the engine's REAL state — "ok" only once EngineState has
+    # finished initialising, "starting" (HTTP 503) before that —
+    # instead of an unconditional ok from a process whose state
+    # may never have come up.
+    initialized = bool(getattr(engine_state, "initialized", False))
+    scheduler = getattr(engine_state, "scheduler_manager", None)
+    scheduler_running = bool(
+        getattr(scheduler, "scheduler", None) is not None
+        and getattr(scheduler.scheduler, "running", False))
+    return JSONResponse(
+        {
+            "status": "ok" if initialized else "starting",
+            "schema_version": SCHEMA_VERSION,
+            "initialized": initialized,
+            "scheduler_running": scheduler_running,
+        },
+        status_code=200 if initialized else 503,
+    )

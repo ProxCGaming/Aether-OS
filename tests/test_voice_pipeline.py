@@ -603,7 +603,7 @@ def ws_env(tmp_path, monkeypatch):
 
     The direct engine_state assignments are saved up front and
     restored in the finaliser (N12): they used to leak this test's
-    tmp paths — and the config/token that initialize_auth() installs
+    tmp paths — and the config/token that initialize() installs
     — into every suite that ran after this file in the process."""
     saved_token_path = engine_state.token_path
     saved_log_path = engine_state.audit_logger.log_path
@@ -611,7 +611,7 @@ def ws_env(tmp_path, monkeypatch):
     saved_auth_token = engine_state.auth_token
     engine_state.token_path = tmp_path / "engine.token"
     engine_state.audit_logger.log_path = tmp_path / "audit.log"
-    engine_state.initialize_auth()
+    engine_state.initialize()
     monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "memory.db")
     monkeypatch.setattr(session_store, "_initialized", False)
     monkeypatch.setattr(

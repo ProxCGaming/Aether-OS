@@ -183,7 +183,7 @@ class TestDiscoveryWebSocket:
         audit_file = tmp_path / "audit.log"
         engine_state.token_path = token_file
         engine_state.audit_logger.log_path = audit_file
-        engine_state.initialize_auth()
+        engine_state.initialize()
 
         orig_models = dict(engine_state.user_config.provider_models)
         orig_excluded = {k: list(v) for k, v in engine_state.user_config.provider_excluded_models.items()}

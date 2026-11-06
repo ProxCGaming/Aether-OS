@@ -159,16 +159,22 @@ def test_restore_write_failure_leaves_profile_untouched(tmp_path, monkeypatch):
     zpath = tmp_path / "backup.zip"
     create_backup(zpath, home=src)
 
-    real_write_bytes = Path.write_bytes
+    # E8-08 (Wave 2): restore staging now STREAMS each member to
+    # its temp file via Path.open("wb") instead of one
+    # Path.write_bytes per member, so the mid-write-phase failure
+    # is injected at that seam. The pinned contract is unchanged:
+    # a staging failure leaves the profile byte-identical.
+    real_open = Path.open
     calls = {"n": 0}
 
-    def flaky_write_bytes(self: Path, data: bytes) -> int:
-        calls["n"] += 1
-        if calls["n"] == 2:
-            raise OSError("SYNTHETIC_DISK_FULL_SECOND_RESTORE_FILE")
-        return real_write_bytes(self, data)
+    def flaky_open(self: Path, mode: str = "r", *args, **kwargs):
+        if "w" in mode and self.name.endswith(".aether-restore-tmp"):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("SYNTHETIC_DISK_FULL_SECOND_RESTORE_FILE")
+        return real_open(self, mode, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "write_bytes", flaky_write_bytes)
+    monkeypatch.setattr(Path, "open", flaky_open)
     with pytest.raises(OSError, match="SYNTHETIC_DISK_FULL"):
         restore_backup(zpath, home=dst)
     monkeypatch.undo()
@@ -188,10 +194,16 @@ def test_restore_failure_on_first_write_also_leaves_profile_untouched(
     zpath = tmp_path / "backup.zip"
     create_backup(zpath, home=src)
 
-    def always_fail(self: Path, data: bytes) -> int:
-        raise OSError("SYNTHETIC_DISK_FULL_FIRST_RESTORE_FILE")
+    # E8-08 (Wave 2): failure injected at the streaming writer's
+    # seam — see test_restore_write_failure_leaves_profile_untouched.
+    real_open = Path.open
 
-    monkeypatch.setattr(Path, "write_bytes", always_fail)
+    def always_fail_open(self: Path, mode: str = "r", *args, **kwargs):
+        if "w" in mode and self.name.endswith(".aether-restore-tmp"):
+            raise OSError("SYNTHETIC_DISK_FULL_FIRST_RESTORE_FILE")
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", always_fail_open)
     with pytest.raises(OSError, match="SYNTHETIC_DISK_FULL"):
         restore_backup(zpath, home=dst)
     monkeypatch.undo()

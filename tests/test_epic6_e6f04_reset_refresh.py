@@ -77,7 +77,7 @@ def _registry() -> ModelRegistry:
 def reset_env(tmp_path, monkeypatch):
     """Isolated engine state initialised from a non-default config.
 
-    Audit log path is set BEFORE initialize_auth() per the fixture
+    Audit log path is set BEFORE initialize() per the fixture
     law; the config lives in a tmp CONFIG_PATH file because
     initialize() reloads user_config from disk.
     """
@@ -129,7 +129,7 @@ def reset_env(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ws_module, "get_pending_approvals", AsyncMock(return_value=[]))
 
-    engine_state.initialize_auth()
+    engine_state.initialize()
     return {
         "tmp_path": tmp_path,
         "config_path": config_path,

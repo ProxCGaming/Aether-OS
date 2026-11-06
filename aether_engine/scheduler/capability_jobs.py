@@ -602,6 +602,16 @@ class CapabilitySchedulerManager:
 
         return count
 
+    def record_run(self, record: dict[str, Any]) -> None:
+        """Public seam for persisting a capability-check run.
+
+        E1-14: the WebSocket layer records runs it executed itself
+        (the capability-check timeout path) through this method —
+        reaching for the private ``_record_run`` coupled the routes
+        layer to scheduler internals.
+        """
+        self._record_run(record)
+
     def _record_run(self, record: dict[str, Any]):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(

@@ -255,7 +255,7 @@ class TestMCPConfigSaveWebSocket:
         self.tmp_path = Path(self.tmp_dir.name)
         engine_state.token_path = self.tmp_path / "engine.token"
         engine_state.audit_logger.log_path = self.tmp_path / "audit.log"
-        self.token = engine_state.initialize_auth()
+        self.token = engine_state.initialize()
         self._db_patcher = patch(
             "aether_engine.memory.session_store.DB_PATH",
             self.tmp_path / "test_memory.db",

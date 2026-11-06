@@ -32,9 +32,9 @@ rather than copied raw. With consent the file is copied raw.
 
 Restore validates the ENTIRE manifest (every member present, every
 sha256 matching, every target path inside the data home) before
-writing a single byte; any failure refuses the whole restore. The
+changing a single live file; any failure refuses the whole restore. The
 write phase itself is staged, then committed (E10-F04): every
-member is written in full to a temp sibling of its target first,
+member is streamed in full to a temp sibling of its target first,
 and only when all members are staged are the temp files renamed
 over the live targets (the same temp + os.replace commit step as
 E3-F04/E6-F07). A write failure therefore lands in staging, while
@@ -304,64 +304,95 @@ def restore_backup(zip_path: Path, *, home: Path | None = None) -> dict[str, Any
     """
     home = home or data_home()
     home.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zip_path) as zf:
-        try:
-            manifest = json.loads(zf.read("manifest.json"))
-        except KeyError as e:
-            raise ValueError("not an Aether backup: manifest.json missing") from e
-        if manifest.get("format") != FORMAT_VERSION:
-            raise ValueError(f"unsupported backup format: {manifest.get('format')!r}")
-        names = set(zf.namelist())
-        staged: list[tuple[Path, bytes]] = []
-        seen_targets: set[Path] = set()
-        for entry in manifest.get("files", []):
-            rel = entry["path"]
-            target = (home / rel).resolve()
-            if home.resolve() not in target.parents and target != home.resolve():
-                raise ValueError(f"backup path escapes the data home: {rel}")
-            # E8-05: a duplicate target (the same path listed twice,
-            # or two spellings resolving to one file) would stage
-            # both entries onto ONE temp file, and the commit loop's
-            # second os.replace would fail after the first had
-            # already landed — a mixed profile, breaking the
-            # all-or-nothing promise above. Refuse it here, during
-            # validation, before anything is written.
-            if target in seen_targets:
-                raise ValueError(f"backup manifest lists duplicate path: {rel}")
-            seen_targets.add(target)
-            if rel not in names:
-                raise ValueError(f"backup member missing: {rel}")
-            data = zf.read(rel)
-            if len(data) != entry["size"] or _sha256(data) != entry["sha256"]:
-                raise ValueError(f"backup member corrupt (hash/size mismatch): {rel}")
-            staged.append((home / rel, data))
-    # E10-F04: stage every member to a temp sibling of its target
-    # BEFORE any live target changes, then commit by renaming the
-    # temp files over the targets. All fallible byte-writing
+    # E10-F04 + E8-08: stage every member to a temp sibling of its
+    # target BEFORE any live target changes, then commit by
+    # renaming the temp files over the targets. Members are
+    # STREAMED to their temp files in chunks, hashed as they go —
+    # the archive is never held in memory. All fallible work
+    # (path/membership checks, streaming, hash/size verification)
     # happens in the staging phase; if any of it fails, the staged
     # temps are removed and the profile is left exactly as it was.
     # The commit phase performs only same-directory renames of
-    # fully written files (os.replace — the E3-F04/E6-F07 commit
-    # step), which is also what keeps this compatible with the
-    # live-DB handling a later fix (E10-F05) adds at this seam.
-    temps: list[Path] = []
+    # fully staged, fully verified files (os.replace — the
+    # E3-F04/E6-F07 commit step), which is also what keeps this
+    # compatible with the live-DB handling a later fix (E10-F05)
+    # adds at this seam.
+    staged: list[tuple[Path, Path]] = []
     try:
-        for target, data in staged:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_name(f".{target.name}.aether-restore-tmp")
-            tmp.write_bytes(data)
-            temps.append(tmp)
-        # E10-F05: with every member staged and none committed yet,
-        # quiesce the databases being replaced — a refusal here
-        # still leaves the whole profile untouched.
-        _quiesce_live_databases([target for target, _ in staged])
-        for tmp, (target, _data) in zip(temps, staged):
-            os.replace(tmp, target)
+        with zipfile.ZipFile(zip_path) as zf:
+            try:
+                manifest = json.loads(zf.read("manifest.json"))
+            except KeyError as e:
+                raise ValueError("not an Aether backup: manifest.json missing") from e
+            # E8-09: the docstring above promises ValueError on any
+            # manifest problem, so malformed manifest SHAPES are
+            # refused as ValueError here — a non-object manifest, a
+            # non-list "files", or an entry without a string path /
+            # int size / string sha256 must not escape as the
+            # AttributeError/KeyError/TypeError raw access raises.
+            if not isinstance(manifest, dict):
+                raise ValueError("backup manifest is malformed: not a JSON object")  # noqa: TRY004 — the documented restore contract is ValueError for every manifest problem (E8-09)
+            if manifest.get("format") != FORMAT_VERSION:
+                raise ValueError(f"unsupported backup format: {manifest.get('format')!r}")
+            entries = manifest.get("files", [])
+            if not isinstance(entries, list):
+                raise ValueError("backup manifest is malformed: 'files' is not a list")  # noqa: TRY004 — same documented ValueError contract (E8-09)
+            names = set(zf.namelist())
+            seen_targets: set[Path] = set()
+            for entry in entries:
+                if not isinstance(entry, dict) \
+                        or not isinstance(entry.get("path"), str) \
+                        or not isinstance(entry.get("size"), int) \
+                        or not isinstance(entry.get("sha256"), str):
+                    raise ValueError(f"backup manifest entry is malformed: {entry!r}")  # noqa: TRY004 — same documented ValueError contract (E8-09)
+                rel = entry["path"]
+                target = home / rel
+                resolved = target.resolve()
+                if home.resolve() not in resolved.parents and resolved != home.resolve():
+                    raise ValueError(f"backup path escapes the data home: {rel}")
+                # E8-05: a duplicate target (the same path listed twice,
+                # or two spellings resolving to one file) would stage
+                # both entries onto ONE temp file, and the commit loop's
+                # second os.replace would fail after the first had
+                # already landed — a mixed profile, breaking the
+                # all-or-nothing promise above. Refuse it here, during
+                # validation, before anything is written.
+                if resolved in seen_targets:
+                    raise ValueError(f"backup manifest lists duplicate path: {rel}")
+                seen_targets.add(resolved)
+                if rel not in names:
+                    raise ValueError(f"backup member missing: {rel}")
+                tmp = target.with_name(f".{target.name}.aether-restore-tmp")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                digest = hashlib.sha256()
+                written = 0
+                with zf.open(rel) as src, tmp.open("wb") as dst:
+                    while chunk := src.read(1024 * 256):
+                        digest.update(chunk)
+                        dst.write(chunk)
+                        written += len(chunk)
+                staged.append((tmp, target))
+                if written != entry["size"] or digest.hexdigest() != entry["sha256"]:
+                    raise ValueError(f"backup member corrupt (hash/size mismatch): {rel}")
     except BaseException:
-        for tmp in temps:
+        for tmp, _target in staged:
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
         raise
-    return {"restored": [str(t.relative_to(home)) for t, _ in staged], "files": len(staged)}
+    try:
+        # E10-F05: with every member staged and none committed yet,
+        # quiesce the databases being replaced — a refusal here
+        # still leaves the whole profile untouched.
+        _quiesce_live_databases([target for _tmp, target in staged])
+        for tmp, target in staged:
+            os.replace(tmp, target)
+    except BaseException:
+        for tmp, _target in staged:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    return {"restored": [str(t.relative_to(home)) for _tmp, t in staged], "files": len(staged)}

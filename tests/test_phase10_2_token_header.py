@@ -56,7 +56,7 @@ class TestHeaderTokenAuth(unittest.TestCase):
 
         engine_state.token_path = self.token_file
         engine_state.audit_logger.log_path = self.audit_file
-        self.token = engine_state.initialize_auth()
+        self.token = engine_state.initialize()
 
         self.patcher = patch(
             "aether_engine.memory.session_store.DB_PATH",
@@ -192,14 +192,14 @@ class TestTokenFilePermissions(unittest.TestCase):
         self.assertEqual(leftovers, [])
 
     def test_engine_token_file_written_0600_on_initialize(self):
-        """engine_state.initialize_auth() (via write_token) creates a 0600 file."""
+        """engine_state.initialize() (via write_token) creates a 0600 file."""
         tmp_dir = tempfile.TemporaryDirectory()
         try:
             token_file = Path(tmp_dir.name) / "engine.token"
             audit_file = Path(tmp_dir.name) / "audit.log"
             engine_state.token_path = token_file
             engine_state.audit_logger.log_path = audit_file
-            engine_state.initialize_auth()
+            engine_state.initialize()
             mode = stat.S_IMODE(token_file.stat().st_mode)
             self.assertEqual(mode, 0o600, f"token file mode is {oct(mode)}, expected 0o600")
         finally:

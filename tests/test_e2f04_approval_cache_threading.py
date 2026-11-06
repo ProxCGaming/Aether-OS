@@ -148,7 +148,7 @@ def test_ws_grants_list_and_revoke_route(tmp_path, monkeypatch):
 
     engine_state.token_path = tmp_path / "engine.token"
     engine_state.audit_logger.log_path = tmp_path / "audit.log"
-    engine_state.initialize_auth()
+    engine_state.initialize()
 
     outcome: dict = {}
 

@@ -57,7 +57,7 @@ from aether_engine.voice.stt import FasterWhisperStt
 
 # ---------------------------------------------------------------------------
 # Fixtures (mirroring the E6-F05 settings fixture: audit path set
-# BEFORE initialize_auth per the fixture law; config in a tmp
+# BEFORE initialize per the fixture law; config in a tmp
 # CONFIG_PATH file because initialize() reloads user_config).
 # ---------------------------------------------------------------------------
 
@@ -96,7 +96,7 @@ def settings_env(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ws_module, "get_pending_approvals", AsyncMock(return_value=[]))
 
-    engine_state.initialize_auth()
+    engine_state.initialize()
     return {"tmp_path": tmp_path, "config_path": config_path,
             "ws_root": ws_root, "store": store}
 

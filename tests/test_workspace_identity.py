@@ -146,7 +146,7 @@ def test_config_round_trip_is_stable(tmp_path):
 def _ws_setup(tmp_path):
     engine_state.token_path = tmp_path / "engine.token"
     engine_state.audit_logger.log_path = tmp_path / "audit.log"
-    token = engine_state.initialize_auth()
+    token = engine_state.initialize()
     saved_roots = list(engine_state.user_config.workspace_roots or [])
     engine_state.user_config.workspace_roots = []
     yield token

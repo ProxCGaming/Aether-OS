@@ -117,7 +117,7 @@ def ws_env(tmp_path, monkeypatch):
     and restored (they are process-wide singletons)."""
     engine_state.token_path = tmp_path / "engine.token"
     engine_state.audit_logger.log_path = tmp_path / "audit.log"
-    token = engine_state.initialize_auth()
+    token = engine_state.initialize()
 
     monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "memory.db")
     monkeypatch.setattr(

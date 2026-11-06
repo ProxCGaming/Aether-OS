@@ -62,7 +62,7 @@ PROVIDERS = ["google_gemini", "openai", "anthropic"]
 
 # ---------------------------------------------------------------------------
 # Shared WS fixture (E5-F07 ws_env pattern): audit log path set BEFORE
-# initialize_auth(); global config via a tmp CONFIG_PATH file; fresh
+# initialize(); global config via a tmp CONFIG_PATH file; fresh
 # health manager + scripted registry.
 # ---------------------------------------------------------------------------
 
@@ -88,7 +88,7 @@ def ws_env(tmp_path, monkeypatch):
         default_provider="google_gemini", default_model="gemini-main",
         workspace_roots=[str(tmp_path)])
     save_config(cfg, config_path)
-    engine_state.initialize_auth()
+    engine_state.initialize()
     monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "memory.db")
     monkeypatch.setattr(session_store, "_initialized", False)
     monkeypatch.setattr(

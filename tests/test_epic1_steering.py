@@ -279,7 +279,7 @@ async def test_steer_during_approval_pause_applies_on_resume(graph_env):
 def ws_env(tmp_path, monkeypatch):
     engine_state.token_path = tmp_path / "engine.token"
     engine_state.audit_logger.log_path = tmp_path / "audit.log"
-    engine_state.initialize_auth()
+    engine_state.initialize()
     monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "memory.db")
     monkeypatch.setattr(session_store, "_initialized", False)
     monkeypatch.setattr(

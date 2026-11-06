@@ -452,7 +452,7 @@ def ws_env(store_env, monkeypatch):
     """Engine state isolated to tmp, mirroring test_epic8_rewind_manifest."""
     engine_state.token_path = store_env / "engine.token"
     engine_state.audit_logger.log_path = store_env / "audit.log"
-    engine_state.initialize_auth()
+    engine_state.initialize()
     monkeypatch.setattr(
         executor_module, "DEFAULT_CHECKPOINT_DB", store_env / "checkpoints.db")
     monkeypatch.setattr(

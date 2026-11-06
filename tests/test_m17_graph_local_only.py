@@ -310,7 +310,7 @@ class TestExecutorThreadsConstraints:
 def ws_env(executor_env, monkeypatch):
     engine_state.token_path = executor_env / "engine.token"
     engine_state.audit_logger.log_path = executor_env / "audit.log"
-    engine_state.initialize_auth()
+    engine_state.initialize()
     monkeypatch.setattr(
         ws_module, "get_pending_approvals", AsyncMock(return_value=[]))
     return {"tmp_path": executor_env}

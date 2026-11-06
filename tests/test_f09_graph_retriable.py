@@ -133,7 +133,7 @@ def ws_env(graph_env, monkeypatch):
     checkpoint DB under the same tmp_path)."""
     engine_state.token_path = graph_env / "engine.token"
     engine_state.audit_logger.log_path = graph_env / "audit.log"
-    engine_state.initialize_auth()
+    engine_state.initialize()
     monkeypatch.setattr(session_store, "DB_PATH", graph_env / "memory.db")
     monkeypatch.setattr(session_store, "_initialized", False)
     monkeypatch.setattr(

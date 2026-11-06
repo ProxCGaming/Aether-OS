@@ -148,6 +148,67 @@ CAPABILITY_CHECK_RUN_BUDGET_SECONDS = 180.0
 # arrives; a PLUGIN_APPROVAL_REJECTED pops (discards) the entry.
 pending_plugin_installs: dict[str, dict[str, Any]] = {}
 
+# E1-06: a prepared install the user never answers must not wait
+# forever — entries expire after this many seconds (swept whenever
+# a new install is prepared or a grant arrives), and each entry is
+# also dropped when the connection that prepared it disconnects.
+PLUGIN_INSTALL_TTL_SECONDS = 600.0
+pending_plugin_install_created: dict[str, float] = {}
+
+
+def _prune_expired_plugin_installs() -> None:
+    """Drop pending plugin installs older than the TTL (E1-06)."""
+    now = time.time()
+    expired = [
+        req_id for req_id, created in pending_plugin_install_created.items()
+        if now - created > PLUGIN_INSTALL_TTL_SECONDS]
+    for req_id in expired:
+        pending_plugin_installs.pop(req_id, None)
+        pending_plugin_install_created.pop(req_id, None)
+
+
+def _try_save_config() -> str | None:
+    """Persist the user config, returning the error text on failure.
+
+    E1-10: most settings handlers used to call save_config bare —
+    one OSError (full disk, locked file) propagated out of the
+    handler, tore down the WebSocket connection and cancelled the
+    running task mid-flight, and the client never even got a reply.
+    Handlers now fold the failure into their own reply vocabulary
+    through this helper: the change simply fails, honestly.
+    Returns None on success.
+    """
+    try:
+        save_config(engine_state.user_config)
+        return None
+    except OSError as e:
+        logger.warning(f"save_config failed: {e}")
+        return str(e)
+
+
+class _SendLockedWebSocket:
+    """Serialise ``send_text`` on one connection (N-05).
+
+    A task connection has dozens of concurrent senders — the task
+    pump, media/download/plugin background helpers, voice — and
+    Starlette/FastAPI sockets do not tolerate interleaved frames.
+    ``ws_tasks`` rebinds its socket reference to this proxy right
+    after accept, so every sender holding the endpoint's ``ws``
+    serialises through the one lock. All other attributes delegate
+    to the wrapped socket.
+    """
+
+    def __init__(self, ws: WebSocket):
+        self._ws = ws
+        self._send_lock = asyncio.Lock()
+
+    async def send_text(self, data: str) -> None:
+        async with self._send_lock:
+            await self._ws.send_text(data)
+
+    def __getattr__(self, name: str):
+        return getattr(self._ws, name)
+
 def should_attempt_task_fallback(*, attempt: int, saw_tool_activity: bool, has_factory: bool) -> bool:
     """§6.4 gate for task-level fallback (Epic 5, E5-02).
 
@@ -406,6 +467,29 @@ async def handle_artifact_get(artifact_id: str) -> dict[str, Any]:
             "error": "Artifact not found",
         }
 
+    # E1-04: every disk touch in the inspection (stat, read, the
+    # base64 encode of up to the 10 MB preview cap) used to run
+    # inline here — on the event loop, inside the receive loop's
+    # await — stalling every other event for the duration. It now
+    # runs on a worker thread, like the store fetch above.
+    diff, content, exists, error = await asyncio.to_thread(
+        _inspect_artifact_on_disk, art)
+
+    return {
+        "artifact": art,
+        "content": content,
+        "diff": diff,
+        "exists": exists,
+        "error": error,
+    }
+
+
+def _inspect_artifact_on_disk(art: dict[str, Any]):
+    """Synchronous half of :func:`handle_artifact_get` (E1-04).
+
+    All filesystem IO for one artifact record; runs off the event
+    loop. Returns ``(diff, content, exists, error)``.
+    """
     kind = art.get("kind", "file")
     file_path = art.get("file_path")
     diff = None
@@ -436,11 +520,18 @@ async def handle_artifact_get(artifact_id: str) -> dict[str, Any]:
                     else:
                         import base64
                         b64 = base64.b64encode(Path(file_path).read_bytes()).decode("ascii")
+                        # E1-15: .bmp/.ico are in the image
+                        # extension list above, so they map to
+                        # image MIME types — falling through to
+                        # application/octet-stream made their
+                        # previews impossible to render as images.
                         mime = (
                             "image/png" if ext == ".png"
                             else "image/jpeg" if ext in (".jpg", ".jpeg")
                             else "image/gif" if ext == ".gif"
                             else "image/webp" if ext == ".webp"
+                            else "image/bmp" if ext == ".bmp"
+                            else "image/x-icon" if ext == ".ico"
                             else "application/octet-stream"
                         )
                         content = f"data:{mime};base64,{b64}"
@@ -458,13 +549,7 @@ async def handle_artifact_get(artifact_id: str) -> dict[str, Any]:
         else:
             content = art.get("content")
 
-    return {
-        "artifact": art,
-        "content": content,
-        "diff": diff,
-        "exists": exists,
-        "error": error,
-    }
+    return diff, content, exists, error
 
 
 def _remove_session_attachments(session_id: str) -> None:
@@ -524,7 +609,16 @@ async def _register_message_attachments(
                         ext = ".jpg"
                     elif mime_type and "webp" in mime_type:
                         ext = ".webp"
-                    target_file = attach_dir / f"{uuid.uuid4().hex[:8]}_{name}"
+                    # E1-02: the client-supplied name is reduced to
+                    # its final path component before it joins the
+                    # filesystem path. A name carrying '/' or '\'
+                    # separators (a traversal attempt, or just a
+                    # chatty client) otherwise made the write raise
+                    # or escape the session's attachments directory.
+                    safe_name = name.replace("\\", "/").rsplit("/", 1)[-1].strip()
+                    if safe_name in ("", ".", ".."):
+                        safe_name = "attachment"
+                    target_file = attach_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
                     if not target_file.suffix:
                         target_file = target_file.with_suffix(ext)
                     target_file.write_bytes(base64.b64decode(b64_str))
@@ -592,6 +686,10 @@ async def ws_tasks(ws: WebSocket):
         return
 
     await ws.accept()
+    # N-05: from here on, every send on this connection serialises
+    # through one lock — the receive loop, the task pump and every
+    # background helper below all hold this `ws` reference.
+    ws = _SendLockedWebSocket(ws)  # type: ignore[assignment]
     engine_state.audit_logger.log_connection(True, ip, port, "Authenticated successfully")
     logger.info(f"Accepted authenticated connection from {ip}:{port}")
 
@@ -650,6 +748,26 @@ async def ws_tasks(ws: WebSocket):
     # instead of racing it and leaving a session running.
     voice_op_tail: asyncio.Task | None = None
     active_downloads: dict[str, asyncio.Task] = {}
+    # N-44: the id of the task this connection is currently running
+    # (set by the task pump when TASK_CREATED flows past, cleared
+    # when the pump exits) — CANCEL_TASK reports the task it
+    # actually cancelled instead of a hard-coded "unknown".
+    active_task_id: str | None = None
+    # N-19: every fire-and-forget helper spawned for this connection
+    # registers here so disconnect cleanup can cancel the work that
+    # would otherwise outlive its socket (sends into a dead
+    # connection, downloads nobody is waiting for).
+    _conn_background_tasks: set[asyncio.Task] = set()
+
+    def _spawn_background(coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        _conn_background_tasks.add(task)
+        task.add_done_callback(_conn_background_tasks.discard)
+        return task
+
+    # E1-06: plugin installs THIS connection prepared — dropped
+    # from the module-global pending table when it disconnects.
+    _own_plugin_install_ids: set[str] = set()
     secret_store = SecretStore()
     # Epic 8, E8-5.1a: this connection's voice session, if any. The
     # pipeline runs as its own task — the talker lane never queues
@@ -986,8 +1104,10 @@ async def ws_tasks(ws: WebSocket):
             try:
                 # Persist it like any other failed run so the summary
                 # and history below (and every later history poll)
-                # include it.
-                mgr._record_run(run_res)
+                # include it. E1-14: through the scheduler's public
+                # record_run — the routes layer no longer reaches
+                # for its private _record_run.
+                mgr.record_run(run_res)
             except Exception as e:  # noqa: BLE001 — the response matters more than the history row; never lose the reply over persistence
                 logger.warning(f"Could not record timed-out capability run: {e}")
         except Exception as e:  # noqa: BLE001 — a failed check must still produce a response, never silence
@@ -1492,6 +1612,72 @@ async def ws_tasks(ws: WebSocket):
         except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-export; nothing else to do
             logger.debug(f"Could not send memory export response: {e}")
 
+    async def _send_memory_episodes_result(req_id_, limit_):
+        """Answer a MEMORY_EPISODES_REQUEST off the loop (E1-11).
+
+        The backend reads (episode listing + embedding stats) are
+        synchronous store calls that scale with memory size; run
+        inline in the handler they stalled the receive loop behind
+        one Memory-screen refresh. Same RUX-B-08 pattern as the
+        memory export above.
+        """
+        def _build_payload():
+            backend = backend_or_none(engine_state.user_config, context="memory episodes list")
+            if backend is None:
+                return {"episodes": [], "error": "The configured memory backend is unavailable (see engine log)."}
+            return {
+                "episodes": backend.list_episodes(limit=limit_),
+                "backend": backend.name,
+                "embedding_stats": backend.embedding_stats(),
+            }
+
+        try:
+            payload = await asyncio.to_thread(_build_payload)
+        except Exception as e:  # noqa: BLE001 — a failed read must still produce a response, never silence
+            payload = {"episodes": [], "error": str(e)}
+        try:
+            await ws.send_text(Event(
+                type=EventType.MEMORY_EPISODES_RESPONSE,
+                request_id=req_id_,
+                payload=payload,
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected; nothing else to do
+            logger.debug(f"Could not send memory episodes response: {e}")
+
+    async def _send_memory_graph_result(req_id_, query_, limit_, include_history_):
+        """Answer a MEMORY_GRAPH_REQUEST off the loop (E1-11).
+
+        Fact listing/search is a synchronous backend read that
+        scales with the graph; same off-loop treatment as the
+        episodes list above.
+        """
+        def _build_payload():
+            backend = backend_or_none(engine_state.user_config, context="memory graph list")
+            if backend is None:
+                # E4-F08: report unavailability like the episodes
+                # list and export handlers do — not a bare empty
+                # list the UI cannot tell from "no facts".
+                return {"facts": [], "error": "The configured memory backend is unavailable (see engine log)."}
+            if query_:
+                # Epic 4, E4-08: fact search for the Memory UI.
+                return {"facts": backend.search_facts(
+                    str(query_), limit=limit_, include_history=include_history_)}
+            return {"facts": backend.list_facts(
+                limit=limit_, include_history=include_history_)}
+
+        try:
+            payload = await asyncio.to_thread(_build_payload)
+        except Exception as e:  # noqa: BLE001 — a failed read must still produce a response, never silence
+            payload = {"facts": [], "error": str(e)}
+        try:
+            await ws.send_text(Event(
+                type=EventType.MEMORY_GRAPH_RESPONSE,
+                request_id=req_id_,
+                payload=payload,
+            ).to_json())
+        except Exception as e:  # noqa: BLE001 — the client may have disconnected; nothing else to do
+            logger.debug(f"Could not send memory graph response: {e}")
+
     async def _send_diagnostics_export_result(req_id_):
         """Answer a DIAGNOSTICS_EXPORT_REQUEST off the loop (RUX-B-08).
 
@@ -1952,8 +2138,13 @@ async def ws_tasks(ws: WebSocket):
         set_search_key_loader,
     )
 
-    set_search_key_loader(secret_store.load_provider)
-    set_search_config_loader(
+    # N-43: these loaders are MODULE-GLOBAL seams. This connection
+    # captures whatever was installed before it so its disconnect
+    # cleanup can put it back — previously every connection's
+    # lambdas (bound to its own secret store) simply stayed
+    # installed after the connection died.
+    _prev_search_key_loader = set_search_key_loader(secret_store.load_provider)
+    _prev_search_config_loader = set_search_config_loader(
         lambda: (engine_state.user_config.search_provider, engine_state.user_config.search_fallback_to_ddgs)
     )
 
@@ -1965,7 +2156,8 @@ async def ws_tasks(ws: WebSocket):
         set_browser_policy_loader,
     )
 
-    set_browser_policy_loader(lambda: policy_from_user_config(engine_state.user_config))
+    _prev_browser_policy_loader = set_browser_policy_loader(
+        lambda: policy_from_user_config(engine_state.user_config))
 
     # N07: forward production-analyzer events (MEDIA_ANALYSIS_PROGRESS
     # / MEDIA_ANALYZED) to this connection so the Media Library
@@ -2389,12 +2581,18 @@ async def ws_tasks(ws: WebSocket):
         model and the failed pair), FALLBACK_COMPLETED just before
         the retried task's TASK_COMPLETED is delivered.
         """
+        nonlocal active_task_id
         # Epic 8, E8-A8.1a: attribute the provider calls made while
         # this task streams to the usage ledger. The session is known
         # now; the task id is refined in the event loop below, once
         # TASK_CREATED flows past. Reset when the pump finishes so a
         # later task on this connection starts clean.
         usage_token = set_usage_context(session_id=session_id)
+        # N-44: this pump's own task id, learned from TASK_CREATED —
+        # the connection-level holder lets CANCEL_TASK name the task
+        # it cancelled; the local copy lets the cancellation audit
+        # record below name it too.
+        pump_task_id: str | None = None
         # Finding E5-F07: open the serving-provider scope beside the
         # usage context. Provider calls made while this task streams
         # note which provider actually served them; the completion
@@ -2435,6 +2633,8 @@ async def ws_tasks(ws: WebSocket):
                     if ev.type == EventType.TASK_CREATED:
                         task_path = ev.payload.get("path")
                         task_prompt = ev.payload.get("prompt")
+                        pump_task_id = ev.payload.get("task_id")
+                        active_task_id = pump_task_id
                         ev.payload["routing"] = {
                             "provider": p_name,
                             "model": p_model,
@@ -2505,12 +2705,12 @@ async def ws_tasks(ws: WebSocket):
                                     ev.payload["message_id"] = _msg_id
                             except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not interrupt the task stream
                                 logger.error(f"Failed to save session message: {e}")
-                            asyncio.create_task(
+                            _spawn_background(
                                 _title_session_in_background(session_id, p_name, p_model, ev.payload["response"]))
                             if task_path == "fast_chat" and task_prompt:
                                 # Epic 4, E4-05: graph tasks learn in the
                                 # executor; fast chat learns here (parity).
-                                asyncio.create_task(_learn_fast_chat_in_background(
+                                _spawn_background(_learn_fast_chat_in_background(
                                     ev.payload.get("task_id", "unknown"), task_prompt,
                                     ev.payload["response"], p_name, p_model))
 
@@ -2615,7 +2815,10 @@ async def ws_tasks(ws: WebSocket):
                 await ws.send_text(failure_event.to_json())
                 return
         except asyncio.CancelledError:
-            engine_state.audit_logger.log_event("TASK_CANCELLED", {"task_id": "unknown"})
+            # N-44: name the task that was actually cancelled —
+            # "unknown" only when no TASK_CREATED ever named one.
+            engine_state.audit_logger.log_event(
+                "TASK_CANCELLED", {"task_id": pump_task_id or "unknown"})
             raise
         except Exception as e:  # task-generator boundary: any failure is converted into an ERROR event for the client
             logger.exception("Task generator failed with exception")
@@ -2628,6 +2831,8 @@ async def ws_tasks(ws: WebSocket):
             except Exception:  # the socket is already broken; nothing further can be signalled
                 logger.debug("Could not send task error event to client", exc_info=True)
         finally:
+            if active_task_id == pump_task_id:
+                active_task_id = None
             reset_usage_context(usage_token)
             end_serving_tracking(serving_token)
 
@@ -3064,6 +3269,38 @@ async def ws_tasks(ws: WebSocket):
                 ) if decision.local_only else None)
         )
 
+    async def _cancel_connection_background_work() -> None:
+        """Disconnect cleanup for this connection's own work (N-19).
+
+        The pre-existing teardown cancelled the task runner and the
+        voice lane but left everything else this connection started:
+        in-flight model downloads, dictation/voice chains, and every
+        fire-and-forget ``_send_*`` helper — which then sent into a
+        dead socket or, for downloads, kept running to completion
+        for nobody. Also drops this connection's pending plugin
+        installs (E1-06) and restores the module-global seam
+        loaders this connection replaced (N-43).
+        """
+        for dl_task in list(active_downloads.values()):
+            if not dl_task.done():
+                dl_task.cancel()
+        active_downloads.clear()
+        for tail in (dictation_tail, voice_op_tail):
+            if tail is not None and not tail.done():
+                tail.cancel()
+        pending = [t for t in _conn_background_tasks if not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for install_id in _own_plugin_install_ids:
+            pending_plugin_installs.pop(install_id, None)
+            pending_plugin_install_created.pop(install_id, None)
+        _own_plugin_install_ids.clear()
+        set_search_key_loader(_prev_search_key_loader)
+        set_search_config_loader(_prev_search_config_loader)
+        set_browser_policy_loader(_prev_browser_policy_loader)
+
     try:
         while True:
             raw = await ws.receive_text()
@@ -3183,7 +3420,11 @@ async def ws_tasks(ws: WebSocket):
                     await ws.send_text(Event(
                         type=EventType.TASK_CANCELLED,
                         request_id=req_id,
-                        payload={"task_id": "unknown", "state": TaskState.CANCELLED.value},
+                        # N-44: name the task actually cancelled
+                        # (the pump tracks it from TASK_CREATED);
+                        # "unknown" only for a launch cancelled
+                        # before its task ever had an id.
+                        payload={"task_id": active_task_id or "unknown", "state": TaskState.CANCELLED.value},
                     ).to_json())
                 else:
                     await ws.send_text(Event(
@@ -3370,6 +3611,16 @@ async def ws_tasks(ws: WebSocket):
 
                 if task_runner and not task_runner.done():
                     task_runner.cancel()
+                    # E1-09: AWAIT the displaced runner before the
+                    # resume pump starts — the same cancel-then-await
+                    # idiom _start_task_message uses. Cancelling
+                    # without awaiting let the old pump keep
+                    # streaming (and writing usage/persistence) into
+                    # the resumed task's lifetime.
+                    try:
+                        await task_runner
+                    except asyncio.CancelledError:
+                        pass
 
                 req_id = msg.request_id or "resume"
                 task_session_id = approval_key
@@ -3392,7 +3643,7 @@ async def ws_tasks(ws: WebSocket):
                     request_id=req_id,
                     payload={"providers": providers, "default_provider": cfg.default_provider, "default_model": cfg.default_model, "health": engine_state.health_manager.get_all_statuses()},
                 ).to_json())
-                asyncio.create_task(_send_provider_list_update(req_id))
+                _spawn_background(_send_provider_list_update(req_id))
 
             elif msg.type in (EventType.PROVIDER_VALIDATE_REQUEST, EventType.SETTINGS_PROVIDER_VALIDATE_REQUEST):
                 pname = msg.payload.get("provider", "")
@@ -3431,7 +3682,7 @@ async def ws_tasks(ws: WebSocket):
                     # Off the message loop (see _send_validation_result):
                     # the Test no longer blocks the socket, and repeat
                     # clicks share the in-flight validation.
-                    asyncio.create_task(_send_validation_result(resp_type, req_id, pname, key, base_url))
+                    _spawn_background(_send_validation_result(resp_type, req_id, pname, key, base_url))
 
             elif msg.type == EventType.PROVIDER_SAVE_REQUEST:
                 pname = msg.payload.get("provider", "")
@@ -3541,7 +3792,7 @@ async def ws_tasks(ws: WebSocket):
                         payload=save_payload,
                     ).to_json())
                     if deferred_discovery:
-                        asyncio.create_task(_complete_provider_save_discovery(
+                        _spawn_background(_complete_provider_save_discovery(
                             req_id, pname, key, base_url,
                             bool(is_default and not default_model)))
                 except Exception as e:  # noqa: BLE001 — handler boundary: any save failure is reported to the client in the response payload
@@ -3563,6 +3814,12 @@ async def ws_tasks(ws: WebSocket):
                 engine_state.user_config.custom_provider_names.pop(pname, None)
                 engine_state.user_config.custom_provider_types.pop(pname, None)
                 engine_state.model_registry.remove_provider_models(pname)
+                # E8-07 bookkeeping: this handler deregistered the
+                # provider itself (ALL entries, curated included —
+                # an explicit removal), so resync must not treat it
+                # as config-registered and restore its curated
+                # baseline on a later pass.
+                engine_state._config_registered_providers.discard(pname)
                 engine_state.health_manager.remove_provider(pname)
                 if pname in engine_state.configured_providers:
                     engine_state.configured_providers.remove(pname)
@@ -3581,12 +3838,22 @@ async def ws_tasks(ws: WebSocket):
                         engine_state.user_config.default_model = new_models[0] if new_models else ""
                     engine_state.active_provider = new_default
                     engine_state.active_model = engine_state.user_config.default_model
-                save_config(engine_state.user_config)
+                # E1-10: a save failure here is answered, not raised
+                # — the removal already happened in-session (secret
+                # store + registry), so the audit record stands; the
+                # reply reports that persistence failed.
+                save_err = _try_save_config()
                 engine_state.audit_logger.log_event("PROVIDER_REMOVED", {"provider": pname})
+                remove_payload: dict[str, Any] = {
+                    "provider": pname, "deleted": deleted,
+                    "success": save_err is None}
+                if save_err is not None:
+                    remove_payload["error"] = (
+                        f"Provider removed, but settings could not be saved: {save_err}")
                 await ws.send_text(Event(
                     type=EventType.PROVIDER_REMOVE_RESPONSE,
                     request_id=req_id,
-                    payload={"provider": pname, "deleted": deleted, "success": True},
+                    payload=remove_payload,
                 ).to_json())
 
             elif msg.type == EventType.PROVIDER_REVEAL_KEY_REQUEST:
@@ -3641,16 +3908,27 @@ async def ws_tasks(ws: WebSocket):
                     engine_state.model_registry.update_provider_models(pname, anchored)
                     engine_state.active_provider = pname
                     engine_state.active_model = model
-                    save_config(engine_state.user_config)
-                    # Unified logging: the applied value goes on
-                    # record — a switch that "didn't stick" can now
-                    # be checked against what the engine applied.
-                    logger.info(f"MODEL_SET_DEFAULT applied: {pname}/{model}")
-                    await ws.send_text(Event(
-                        type=EventType.MODEL_DEFAULT_CHANGED,
-                        request_id=req_id,
-                        payload={"provider": pname, "model": engine_state.user_config.default_model},
-                    ).to_json())
+                    save_err = _try_save_config()
+                    if save_err is not None:
+                        # E1-10: like the E1-07 refusal above, a
+                        # switch that could not be persisted is an
+                        # ERROR reply — never a MODEL_DEFAULT_CHANGED
+                        # for a choice the next launch would not see.
+                        await ws.send_text(Event(
+                            type=EventType.ERROR,
+                            request_id=req_id,
+                            payload={"error": f"Default model could not be saved: {save_err}"},
+                        ).to_json())
+                    else:
+                        # Unified logging: the applied value goes on
+                        # record — a switch that "didn't stick" can now
+                        # be checked against what the engine applied.
+                        logger.info(f"MODEL_SET_DEFAULT applied: {pname}/{model}")
+                        await ws.send_text(Event(
+                            type=EventType.MODEL_DEFAULT_CHANGED,
+                            request_id=req_id,
+                            payload={"provider": pname, "model": engine_state.user_config.default_model},
+                        ).to_json())
 
             # -----------------------------------------------------------
             # Session Events
@@ -4198,12 +4476,18 @@ async def ws_tasks(ws: WebSocket):
                 if budget is not None and budget <= 0:
                     budget = None
                 engine_state.user_config.daily_budget_usd = budget
-                save_config(engine_state.user_config)
+                save_err = _try_save_config()
 
                 await ws.send_text(Event(
                     type=EventType.DAILY_BUDGET_SET_RESPONSE,
                     request_id=req_id,
-                    payload={"daily_budget_usd": budget, "ok": True},
+                    # E1-10: a failed save is ok:False, not a
+                    # dropped connection.
+                    payload=(
+                        {"daily_budget_usd": budget, "ok": False,
+                         "error": f"Daily budget could not be saved: {save_err}"}
+                        if save_err is not None else
+                        {"daily_budget_usd": budget, "ok": True}),
                 ).to_json())
 
                 if budget is not None and budget > 0:
@@ -4261,7 +4545,15 @@ async def ws_tasks(ws: WebSocket):
                     "policy": policy_from_user_config(engine_state.user_config).to_dict(),
                 }
                 if ok:
-                    save_config(engine_state.user_config)
+                    # E1-10: fold a save failure into the same
+                    # success/error vocabulary instead of raising.
+                    save_err = _try_save_config()
+                    if save_err is not None:
+                        response_payload["success"] = False
+                        response_payload["error"] = (
+                            f"Browser policy could not be saved: {save_err}")
+                        ok = False
+                if ok:
                     changed = sorted(
                         key for key in ("enabled", "vault_autofill", "envelopes_enabled")
                         if msg.payload.get(key) is not None
@@ -4270,7 +4562,7 @@ async def ws_tasks(ws: WebSocket):
                         changed += [f"categories.{k}" for k in msg.payload["categories"]]
                     engine_state.audit_logger.log_event(
                         "BROWSER_POLICY_UPDATED", {"fields": changed})
-                else:
+                elif "error" not in response_payload:
                     response_payload["error"] = error
                 await ws.send_text(Event(
                     type=EventType.BROWSER_POLICY_SET_RESPONSE,
@@ -4499,7 +4791,7 @@ async def ws_tasks(ws: WebSocket):
                     search_limit = int(msg.payload.get("limit") or 20)
                 except (TypeError, ValueError):
                     search_limit = 20
-                asyncio.create_task(_send_media_search_result(
+                _spawn_background(_send_media_search_result(
                     req_id, search_query, search_collection, search_limit))
 
             elif msg.type == EventType.MEDIA_DELETE_REQUEST:
@@ -4537,7 +4829,7 @@ async def ws_tasks(ws: WebSocket):
             elif msg.type == EventType.LOCAL_MODEL_LIST_REQUEST:
                 # Off the message loop (see _send_local_model_list_result):
                 # the daemon call can take seconds (RUX-B-08).
-                asyncio.create_task(_send_local_model_list_result(req_id))
+                _spawn_background(_send_local_model_list_result(req_id))
 
             elif msg.type == EventType.LOCAL_MODEL_DOWNLOAD_START:
                 model_name = msg.payload.get("model", "") or msg.payload.get("repo_id", "")
@@ -4567,7 +4859,7 @@ async def ws_tasks(ws: WebSocket):
             elif msg.type == EventType.LOCAL_MODEL_DELETE_REQUEST:
                 # Off the message loop (see _send_local_model_delete_result):
                 # the daemon call can take seconds (RUX-B-08).
-                asyncio.create_task(_send_local_model_delete_result(
+                _spawn_background(_send_local_model_delete_result(
                     req_id, msg.payload.get("model", "")))
 
             # -----------------------------------------------------------
@@ -4576,7 +4868,7 @@ async def ws_tasks(ws: WebSocket):
             elif msg.type == EventType.MODEL_HUB_SEARCH_REQUEST:
                 # Off the message loop (see _send_model_hub_search_result):
                 # the catalogue call is live HTTP (RUX-B-08).
-                asyncio.create_task(_send_model_hub_search_result(
+                _spawn_background(_send_model_hub_search_result(
                     req_id,
                     msg.payload.get("source", "hf"),
                     msg.payload.get("query", "") or "",
@@ -4585,7 +4877,7 @@ async def ws_tasks(ws: WebSocket):
             elif msg.type == EventType.MODEL_HUB_DETAIL_REQUEST:
                 # Off the message loop (see _send_model_hub_detail_result):
                 # the catalogue call is live HTTP (RUX-B-08).
-                asyncio.create_task(_send_model_hub_detail_result(
+                _spawn_background(_send_model_hub_detail_result(
                     req_id,
                     msg.payload.get("source", "hf"),
                     msg.payload.get("id", "") or ""))
@@ -4651,7 +4943,7 @@ async def ws_tasks(ws: WebSocket):
                 # Off the message loop (see _send_model_hub_delete_result):
                 # the delete verifies against the daemon and removes
                 # the repo tree (RUX-B-08).
-                asyncio.create_task(_send_model_hub_delete_result(
+                _spawn_background(_send_model_hub_delete_result(
                     req_id,
                     msg.payload.get("source", "hf"),
                     msg.payload.get("id", "") or ""))
@@ -4677,7 +4969,7 @@ async def ws_tasks(ws: WebSocket):
                 # Off the message loop (see _send_capability_check_result):
                 # a run is minutes of discovery + live self-tests and
                 # must not wedge the socket behind it (RUX-B-03).
-                asyncio.create_task(_send_capability_check_result(req_id, msg.payload.get("method")))
+                _spawn_background(_send_capability_check_result(req_id, msg.payload.get("method")))
 
             elif msg.type == EventType.CAPABILITY_CHECK_GET_HISTORY:
                 status_sum = engine_state.scheduler_manager.get_status_summary()
@@ -4709,7 +5001,7 @@ async def ws_tasks(ws: WebSocket):
                 # Off the message loop (see _send_refresh_models_result):
                 # a refresh can take ~100 s of discovery and must not
                 # wedge the socket behind it (RUX-B-01).
-                asyncio.create_task(_send_refresh_models_result(req_id, dict(msg.payload)))
+                _spawn_background(_send_refresh_models_result(req_id, dict(msg.payload)))
 
             # -----------------------------------------------------------
             # Tools, MCP, Plugins, Memory Events
@@ -4837,21 +5129,29 @@ async def ws_tasks(ws: WebSocket):
                         engine_state.user_config.agent_models[agent_id] = model
                     if tools is not None:
                         engine_state.user_config.agent_tools[agent_id] = tools
-                    save_config(engine_state.user_config)
-
-                    await ws.send_text(Event(
-                        type=EventType.AGENT_UPDATE_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": True, "agent_id": agent_id},
-                    ).to_json())
+                    # E1-10: a save failure is reported in the same
+                    # vocabulary, not raised out of the handler.
+                    save_err = _try_save_config()
+                    if save_err is not None:
+                        await ws.send_text(Event(
+                            type=EventType.AGENT_UPDATE_RESPONSE,
+                            request_id=req_id,
+                            payload={"success": False, "agent_id": agent_id,
+                                     "error": f"Agent update could not be saved: {save_err}"},
+                        ).to_json())
+                    else:
+                        await ws.send_text(Event(
+                            type=EventType.AGENT_UPDATE_RESPONSE,
+                            request_id=req_id,
+                            payload={"success": True, "agent_id": agent_id},
+                        ).to_json())
 
             elif msg.type == EventType.TOOL_POLICY_SET_REQUEST:
                 tool_name = msg.payload.get("tool_name")
                 policy = msg.payload.get("policy")
                 response_payload = {"success": True, "tool_name": tool_name, "policy": policy}
-                
+
                 if tool_name and policy:
-                    from aether_engine.audit import AuditLogger
                     from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
                     from aether_engine.tools.policy import tool_risk_by_name
                     from aether_engine.tools.registry import ToolRisk
@@ -4876,11 +5176,26 @@ async def ws_tasks(ws: WebSocket):
                         policy = "Require Approval"
                         response_payload["policy"] = policy
                         response_payload["message"] = "Always Allow is not permitted for risky tools. Downgraded to Require Approval."
-                        AuditLogger().log_event("TOOL_POLICY_IGNORED", {"tool_name": tool_name, "requested": "Always Allow", "reason": "Risky tool"})
+                        # E1-12: through the engine's own audit
+                        # logger — a fresh AuditLogger() wrote to
+                        # the default path, splitting the record
+                        # from this session's.
+                        engine_state.audit_logger.log_event("TOOL_POLICY_IGNORED", {"tool_name": tool_name, "requested": "Always Allow", "reason": "Risky tool"})
 
                     engine_state.user_config.tool_policies[tool_name] = policy
-                    save_config(engine_state.user_config)
-                    
+                    # E1-10: a save failure flips the verdict rather
+                    # than raising out of the handler.
+                    save_err = _try_save_config()
+                    if save_err is not None:
+                        response_payload["success"] = False
+                        response_payload["error"] = f"Tool policy could not be saved: {save_err}"
+                else:
+                    # E1-12: nothing was (or could be) saved, so the
+                    # pre-built success:true above was a lie — the
+                    # refusal is reported honestly instead.
+                    response_payload["success"] = False
+                    response_payload["error"] = "tool_name and policy are required"
+
                 await ws.send_text(Event(
                     type=EventType.TOOL_POLICY_SET_RESPONSE,
                     request_id=req_id,
@@ -4891,14 +5206,26 @@ async def ws_tasks(ws: WebSocket):
                 # Epic 2, E2-08: approval mode selector in Settings.
                 mode = msg.payload.get("mode")
                 success = mode in ("ask", "write")
+                mode_error: str | None = None
                 if success:
                     engine_state.user_config.approval_mode = mode
-                    save_config(engine_state.user_config)
-                    engine_state.audit_logger.log_event("APPROVAL_MODE_SET", {"mode": mode})
+                    # E1-10: a save failure flips success rather
+                    # than raising out of the handler.
+                    save_err = _try_save_config()
+                    if save_err is not None:
+                        success = False
+                        mode_error = f"Approval mode could not be saved: {save_err}"
+                    else:
+                        engine_state.audit_logger.log_event("APPROVAL_MODE_SET", {"mode": mode})
+                approval_payload: dict[str, Any] = {
+                    "success": success,
+                    "mode": engine_state.user_config.approval_mode}
+                if mode_error is not None:
+                    approval_payload["error"] = mode_error
                 await ws.send_text(Event(
                     type=EventType.APPROVAL_MODE_SET_RESPONSE,
                     request_id=req_id,
-                    payload={"success": success, "mode": engine_state.user_config.approval_mode},
+                    payload=approval_payload,
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_LIST_REQUEST:
@@ -5092,20 +5419,28 @@ async def ws_tasks(ws: WebSocket):
                         engine_state.user_config.auxiliary_models.pop(task, None)
                     else:
                         engine_state.user_config.auxiliary_models[task] = f"{provider}:::{model}"
-                    save_config(engine_state.user_config)
-                    engine_state.audit_logger.log_event("AUXILIARY_MODEL_SET", {
-                        "task": task, "provider": provider, "model": model,
-                    })
+                    # E1-10: a save failure flips ok/error rather
+                    # than raising out of the handler.
+                    save_err = _try_save_config()
+                    if save_err is not None:
+                        ok, error = False, f"Settings could not be saved: {save_err}"
+                    else:
+                        engine_state.audit_logger.log_event("AUXILIARY_MODEL_SET", {
+                            "task": task, "provider": provider, "model": model,
+                        })
                 stale = [t for t in engine_state.user_config.auxiliary_models
                          if t not in AUXILIARY_TASK_CLASSES]
                 if stale:
                     for t in stale:
                         engine_state.user_config.auxiliary_models.pop(t, None)
-                    save_config(engine_state.user_config)
-                    engine_state.audit_logger.log_event("AUXILIARY_MODEL_PRUNED", {
-                        "tasks": stale,
-                        "reason": "task class has no engine call site",
-                    })
+                    save_err = _try_save_config()
+                    if save_err is not None:
+                        ok, error = False, f"Settings could not be saved: {save_err}"
+                    else:
+                        engine_state.audit_logger.log_event("AUXILIARY_MODEL_PRUNED", {
+                            "tasks": stale,
+                            "reason": "task class has no engine call site",
+                        })
                 await ws.send_text(Event(
                     type=EventType.AUXILIARY_MODEL_SET_RESPONSE,
                     request_id=req_id,
@@ -5125,8 +5460,13 @@ async def ws_tasks(ws: WebSocket):
                     ok, error = False, f"Invalid reasoning effort '{effort}'."
                 if ok:
                     engine_state.user_config.reasoning_effort = effort
-                    save_config(engine_state.user_config)
-                    engine_state.audit_logger.log_event("REASONING_EFFORT_SET", {"effort": effort})
+                    # E1-10: a save failure flips ok/error rather
+                    # than raising out of the handler.
+                    save_err = _try_save_config()
+                    if save_err is not None:
+                        ok, error = False, f"Settings could not be saved: {save_err}"
+                    else:
+                        engine_state.audit_logger.log_event("REASONING_EFFORT_SET", {"effort": effort})
                 await ws.send_text(Event(
                     type=EventType.REASONING_EFFORT_SET_RESPONSE,
                     request_id=req_id,
@@ -5164,14 +5504,14 @@ async def ws_tasks(ws: WebSocket):
                 # Off the message loop (see _send_mcp_server_remove_result):
                 # removal closes any live session at the connect
                 # timeout and must not wedge the socket (RUX-B-04).
-                asyncio.create_task(_send_mcp_server_remove_result(
+                _spawn_background(_send_mcp_server_remove_result(
                     req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_SERVER_UPDATE_REQUEST:
                 # Off the message loop (see _send_mcp_server_update_result):
                 # disabling a server disconnects it at the connect
                 # timeout and must not wedge the socket (RUX-B-04).
-                asyncio.create_task(_send_mcp_server_update_result(
+                _spawn_background(_send_mcp_server_update_result(
                     req_id, msg.payload.get("name"),
                     msg.payload.get("auto_connect"), msg.payload.get("enabled")))
 
@@ -5180,7 +5520,7 @@ async def ws_tasks(ws: WebSocket):
                 # a connect runs at the server's connect timeout —
                 # 30 s default, up to 300 s — and must not wedge the
                 # socket behind it (RUX-B-04).
-                asyncio.create_task(_send_mcp_server_connect_result(
+                _spawn_background(_send_mcp_server_connect_result(
                     req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_SERVER_DISCONNECT_REQUEST:
@@ -5188,28 +5528,28 @@ async def ws_tasks(ws: WebSocket):
                 # _send_mcp_server_disconnect_result): closing a hung
                 # session is bounded by the same timeouts and must
                 # not wedge the socket behind it (RUX-B-04).
-                asyncio.create_task(_send_mcp_server_disconnect_result(
+                _spawn_background(_send_mcp_server_disconnect_result(
                     req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_SERVER_TEST_REQUEST:
                 # Off the message loop (see _send_mcp_server_test_result):
                 # a test opens a throwaway session at the connect
                 # timeout and must not wedge the socket (RUX-B-04).
-                asyncio.create_task(_send_mcp_server_test_result(
+                _spawn_background(_send_mcp_server_test_result(
                     req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_RESOURCE_LIST_REQUEST:
                 # Off the message loop (see _send_mcp_resource_list_result):
                 # the list runs against the live session at its read
                 # timeout and must not wedge the socket (RUX-B-04).
-                asyncio.create_task(_send_mcp_resource_list_result(
+                _spawn_background(_send_mcp_resource_list_result(
                     req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_RESOURCE_READ_REQUEST:
                 # Off the message loop (see _send_mcp_resource_read_result):
                 # the read runs against the live session at its read
                 # timeout and must not wedge the socket (RUX-B-04).
-                asyncio.create_task(_send_mcp_resource_read_result(
+                _spawn_background(_send_mcp_resource_read_result(
                     req_id, msg.payload.get("name"), msg.payload.get("uri"),
                     msg.payload.get("session_id")))
 
@@ -5217,7 +5557,7 @@ async def ws_tasks(ws: WebSocket):
                 # Off the message loop (see _send_mcp_prompt_list_result):
                 # the list runs against the live session at its read
                 # timeout and must not wedge the socket (RUX-B-04).
-                asyncio.create_task(_send_mcp_prompt_list_result(
+                _spawn_background(_send_mcp_prompt_list_result(
                     req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_PROMPT_RUN_REQUEST:
@@ -5245,7 +5585,7 @@ async def ws_tasks(ws: WebSocket):
                         },
                     ).to_json())
                 else:
-                    asyncio.create_task(_send_mcp_prompt_run_result(
+                    _spawn_background(_send_mcp_prompt_run_result(
                         req_id, name, prompt_name, arguments,
                         msg.payload.get("session_id")))
 
@@ -5273,8 +5613,20 @@ async def ws_tasks(ws: WebSocket):
             elif msg.type == EventType.PLUGIN_INSTALL_REQUEST:
                 source = msg.payload.get("source")
                 try:
-                    data = engine_state.plugin_installer.prepare_install(source)
+                    # E1-08: prepare_install copies/inspects the
+                    # plugin source synchronously and scales with
+                    # plugin size — it runs on a worker thread, not
+                    # the receive loop.
+                    data = await asyncio.to_thread(
+                        engine_state.plugin_installer.prepare_install, source)
+                    # E1-06: sweep expired entries, then record this
+                    # one with its creation time + owning connection
+                    # (the stored VALUE stays the raw prepare
+                    # payload — it is sent to the client verbatim).
+                    _prune_expired_plugin_installs()
                     pending_plugin_installs[req_id] = data
+                    pending_plugin_install_created[req_id] = time.time()
+                    _own_plugin_install_ids.add(req_id)
                     await ws.send_text(Event(
                         type=EventType.PLUGIN_APPROVAL_REQUEST,
                         request_id=req_id,
@@ -5296,12 +5648,28 @@ async def ws_tasks(ws: WebSocket):
                 # scales with plugin size (RUX-B-10). The pending
                 # entry is still popped here, in the loop, so a
                 # duplicate grant can never install twice.
+                _prune_expired_plugin_installs()
                 data = pending_plugin_installs.pop(req_id, None)
+                pending_plugin_install_created.pop(req_id, None)
+                _own_plugin_install_ids.discard(req_id)
                 if data:
-                    asyncio.create_task(_send_plugin_install_result(req_id, data))
+                    _spawn_background(_send_plugin_install_result(req_id, data))
+                else:
+                    # E1-06: a grant naming an unknown or expired
+                    # install used to get NO reply at all — the UI
+                    # waited forever. It is answered like every
+                    # other failed install.
+                    await ws.send_text(Event(
+                        type=EventType.PLUGIN_INSTALL_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": False,
+                                 "error": "No pending plugin install for this approval (it may have expired)."},
+                    ).to_json())
 
             elif msg.type == EventType.PLUGIN_APPROVAL_REJECTED:
                 pending_plugin_installs.pop(req_id, None)
+                pending_plugin_install_created.pop(req_id, None)
+                _own_plugin_install_ids.discard(req_id)
                 await ws.send_text(Event(
                     type=EventType.PLUGIN_INSTALL_RESPONSE,
                     request_id=req_id,
@@ -5312,7 +5680,7 @@ async def ws_tasks(ws: WebSocket):
                 # Off the message loop (see _send_plugin_uninstall_
                 # result): the MCP disconnects await at the server
                 # timeout and the file work is synchronous (RUX-B-10).
-                asyncio.create_task(_send_plugin_uninstall_result(
+                _spawn_background(_send_plugin_uninstall_result(
                     req_id, msg.payload.get("name")))
                     
             elif msg.type == EventType.PLUGIN_TOGGLE_REQUEST:
@@ -5320,26 +5688,17 @@ async def ws_tasks(ws: WebSocket):
                 # result): a disable awaits the MCP disconnects at
                 # the server timeout before its synchronous file
                 # work (RUX-B-10).
-                asyncio.create_task(_send_plugin_toggle_result(
+                _spawn_background(_send_plugin_toggle_result(
                     req_id, msg.payload.get("name"), msg.payload.get("enabled", True)))
 
             elif msg.type == EventType.MEMORY_EPISODES_REQUEST:
                 # Epic 4, E4-01/E4-04: through the facade; the payload
                 # also carries embedding health for Diagnostics.
-                backend = backend_or_none(engine_state.user_config, context="memory episodes list")
-                if backend is None:
-                    payload = {"episodes": [], "error": "The configured memory backend is unavailable (see engine log)."}
-                else:
-                    payload = {
-                        "episodes": backend.list_episodes(limit=msg.payload.get("limit", 50)),
-                        "backend": backend.name,
-                        "embedding_stats": backend.embedding_stats(),
-                    }
-                await ws.send_text(Event(
-                    type=EventType.MEMORY_EPISODES_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
+                # E1-11: answered from a background task — the
+                # backend reads are synchronous and scale with
+                # memory size (see _send_memory_episodes_result).
+                _spawn_background(_send_memory_episodes_result(
+                    req_id, msg.payload.get("limit", 50)))
 
             elif msg.type == EventType.MEMORY_EPISODE_DELETE_REQUEST:
                 # Epic 4, E4-F08: the acknowledgement is derived from
@@ -5361,7 +5720,7 @@ async def ws_tasks(ws: WebSocket):
                 if error is not None:
                     engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
                         "operation": "episode_delete", "task_id": task_id, "error": error})
-                episodes = backend.list_episodes(limit=msg.payload.get("limit", 50)) if backend is not None and error is None else []
+                episodes = await asyncio.to_thread(backend.list_episodes, limit=msg.payload.get("limit", 50)) if backend is not None and error is None else []
                 payload = {"success": success, "task_id": task_id, "episodes": episodes}
                 if error is not None:
                     payload["error"] = error
@@ -5384,7 +5743,7 @@ async def ws_tasks(ws: WebSocket):
                 if error is not None:
                     engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
                         "operation": "episodes_clear", "error": error})
-                episodes = backend.list_episodes(limit=msg.payload.get("limit", 50)) if backend is not None and error is None else []
+                episodes = await asyncio.to_thread(backend.list_episodes, limit=msg.payload.get("limit", 50)) if backend is not None and error is None else []
                 payload = {"success": success, "episodes": episodes}
                 if error is not None:
                     payload["error"] = error
@@ -5395,29 +5754,13 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
             
             elif msg.type == EventType.MEMORY_GRAPH_REQUEST:
-                backend = backend_or_none(engine_state.user_config, context="memory graph list")
-                if backend is None:
-                    # E4-F08: report unavailability like the episodes
-                    # list and export handlers do — not a bare empty
-                    # list the UI cannot tell from "no facts".
-                    payload = {"facts": [], "error": "The configured memory backend is unavailable (see engine log)."}
-                elif msg.payload.get("query"):
-                    # Epic 4, E4-08: fact search for the Memory UI.
-                    payload = {"facts": backend.search_facts(
-                        str(msg.payload["query"]),
-                        limit=msg.payload.get("limit", 100),
-                        include_history=bool(msg.payload.get("include_history")),
-                    )}
-                else:
-                    payload = {"facts": backend.list_facts(
-                        limit=msg.payload.get("limit", 100),
-                        include_history=bool(msg.payload.get("include_history")),
-                    )}
-                await ws.send_text(Event(
-                    type=EventType.MEMORY_GRAPH_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
+                # E1-11: answered from a background task — the fact
+                # list/search is a synchronous backend read (see
+                # _send_memory_graph_result).
+                _spawn_background(_send_memory_graph_result(
+                    req_id, msg.payload.get("query"),
+                    msg.payload.get("limit", 100),
+                    bool(msg.payload.get("include_history"))))
 
             elif msg.type == EventType.MEMORY_FACT_DELETE_REQUEST:
                 # E4-F08: derived acknowledgement, same rule as the
@@ -5437,7 +5780,7 @@ async def ws_tasks(ws: WebSocket):
                 if error is not None:
                     engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
                         "operation": "fact_delete", "fact_id": fact_id, "error": error})
-                facts = backend.list_facts(limit=msg.payload.get("limit", 100)) if backend is not None and error is None else []
+                facts = await asyncio.to_thread(backend.list_facts, limit=msg.payload.get("limit", 100)) if backend is not None and error is None else []
                 payload = {"success": success, "fact_id": fact_id, "facts": facts}
                 if error is not None:
                     payload["error"] = error
@@ -5467,7 +5810,7 @@ async def ws_tasks(ws: WebSocket):
                 if error is not None:
                     engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
                         "operation": "entity_delete", "entity_name": entity_name, "error": error})
-                facts = backend.list_facts(limit=msg.payload.get("limit", 100)) if backend is not None and error is None else []
+                facts = await asyncio.to_thread(backend.list_facts, limit=msg.payload.get("limit", 100)) if backend is not None and error is None else []
                 payload = {"success": success, "entity_name": entity_name, "facts": facts}
                 if error is not None:
                     payload["error"] = error
@@ -5490,7 +5833,7 @@ async def ws_tasks(ws: WebSocket):
                 if error is not None:
                     engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
                         "operation": "graph_clear", "error": error})
-                facts = backend.list_facts(limit=msg.payload.get("limit", 100)) if backend is not None and error is None else []
+                facts = await asyncio.to_thread(backend.list_facts, limit=msg.payload.get("limit", 100)) if backend is not None and error is None else []
                 payload = {"success": success, "facts": facts}
                 if error is not None:
                     payload["error"] = error
@@ -5502,20 +5845,37 @@ async def ws_tasks(ws: WebSocket):
 
             elif msg.type == EventType.MEMORY_FACT_UPDATE_REQUEST:
                 # Epic 4, E4-03: edit one fact's text via the facade.
+                # E1-05: guarded exactly like its sibling handlers —
+                # this was the one memory-management handler whose
+                # backend call could raise straight out of the
+                # receive loop and kill the session.
                 backend = backend_or_none(engine_state.user_config, context="memory fact update")
                 fact_id = msg.payload.get("fact_id")
-                success = bool(
-                    backend is not None and fact_id
-                    and backend.update_fact(fact_id, msg.payload.get("fact_text", ""))
-                )
-                facts = backend.list_facts(
+                success, error = False, None
+                if backend is None:
+                    error = "The configured memory backend is unavailable (see engine log)."
+                elif not fact_id:
+                    error = "fact_id is required."
+                else:
+                    try:
+                        success = bool(backend.update_fact(fact_id, msg.payload.get("fact_text", "")))
+                    except Exception as e:  # noqa: BLE001 — handler boundary: a failed update is reported to the client, never dressed up as success or allowed to kill the receive loop
+                        error = str(e)
+                if error is not None:
+                    engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
+                        "operation": "fact_update", "fact_id": fact_id, "error": error})
+                facts = await asyncio.to_thread(
+                    backend.list_facts,
                     limit=msg.payload.get("limit", 100),
                     include_history=bool(msg.payload.get("include_history")),
-                ) if backend is not None else []
+                ) if backend is not None and error is None else []
+                update_payload = {"success": success, "fact_id": fact_id, "facts": facts}
+                if error is not None:
+                    update_payload["error"] = error
                 await ws.send_text(Event(
                     type=EventType.MEMORY_FACT_UPDATE_RESPONSE,
                     request_id=req_id,
-                    payload={"success": success, "fact_id": fact_id, "facts": facts},
+                    payload=update_payload,
                 ).to_json())
 
             elif msg.type == EventType.MEMORY_EXPORT_REQUEST:
@@ -5524,7 +5884,7 @@ async def ws_tasks(ws: WebSocket):
                 # Off the message loop (see _send_memory_export_result):
                 # the export is synchronous and scales with memory
                 # size, so it runs on a worker thread (RUX-B-08).
-                asyncio.create_task(_send_memory_export_result(req_id))
+                _spawn_background(_send_memory_export_result(req_id))
 
             elif msg.type == EventType.BACKUP_CREATE_REQUEST:
                 # Epic 10, E10-03: snapshot ~/.aether into a zip under
@@ -5586,7 +5946,7 @@ async def ws_tasks(ws: WebSocket):
                 # Off the message loop (see _send_diagnostics_export_
                 # result): the bundle build is synchronous bulk work,
                 # so it runs on a worker thread (RUX-B-08).
-                asyncio.create_task(_send_diagnostics_export_result(req_id))
+                _spawn_background(_send_diagnostics_export_result(req_id))
 
             elif msg.type == EventType.VERSION_CHECK_REQUEST:
                 # Epic 10, E10-05: report-only update check against the
@@ -5594,7 +5954,7 @@ async def ws_tasks(ws: WebSocket):
                 # installs — the user decides.
                 # Off the message loop (see _send_version_check_result):
                 # the check is live HTTP with a 10 s timeout (RUX-B-08).
-                asyncio.create_task(_send_version_check_result(req_id))
+                _spawn_background(_send_version_check_result(req_id))
 
             elif msg.type == EventType.SKILL_LIST_REQUEST:
                 from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
@@ -5731,25 +6091,34 @@ async def ws_tasks(ws: WebSocket):
                 if ws_path and existing is None:
                     canonical = canonical_workspace_root(ws_path)
                     roots.append(canonical)
-                    save_config(engine_state.user_config)
-                    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-                    GLOBAL_SKILL_MANAGER.update_workspace_roots(roots)
-                    p = Path(canonical)
-                    await ws.send_text(Event(
-                        type=EventType.WORKSPACE_ADD_RESPONSE,
-                        request_id=req_id,
-                        # E6-F11: the reply carries the same badge
-                        # fields WORKSPACE_LIST_RESPONSE computes
-                        # (first root is active; `exists` drives the
-                        # missing-folder state), so the Projects view
-                        # renders the new row correctly from the reply
-                        # itself instead of waiting for a LIST refetch.
-                        payload={"success": True, "workspace": {
-                            "path": canonical, "name": p.name, "is_indexed": False,
-                            "is_active": len(roots) == 1,
-                            "exists": p.is_dir(),
-                        }},
-                    ).to_json())
+                    # E1-10: a save failure is answered, not raised.
+                    save_err = _try_save_config()
+                    if save_err is not None:
+                        await ws.send_text(Event(
+                            type=EventType.WORKSPACE_ADD_RESPONSE,
+                            request_id=req_id,
+                            payload={"success": False,
+                                     "error": f"Workspace could not be saved: {save_err}"},
+                        ).to_json())
+                    else:
+                        from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+                        GLOBAL_SKILL_MANAGER.update_workspace_roots(roots)
+                        p = Path(canonical)
+                        await ws.send_text(Event(
+                            type=EventType.WORKSPACE_ADD_RESPONSE,
+                            request_id=req_id,
+                            # E6-F11: the reply carries the same badge
+                            # fields WORKSPACE_LIST_RESPONSE computes
+                            # (first root is active; `exists` drives the
+                            # missing-folder state), so the Projects view
+                            # renders the new row correctly from the reply
+                            # itself instead of waiting for a LIST refetch.
+                            payload={"success": True, "workspace": {
+                                "path": canonical, "name": p.name, "is_indexed": False,
+                                "is_active": len(roots) == 1,
+                                "exists": p.is_dir(),
+                            }},
+                        ).to_json())
                 elif existing is not None:
                     p = Path(existing)
                     await ws.send_text(Event(
@@ -5786,20 +6155,29 @@ async def ws_tasks(ws: WebSocket):
                 removed = remove_workspace_root(
                     engine_state.user_config.workspace_roots, ws_path)
                 if removed is not None:
-                    save_config(engine_state.user_config)
-                    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-                    GLOBAL_SKILL_MANAGER.update_workspace_roots(engine_state.user_config.workspace_roots)
-                    # Slice 3 (grill Q7): the removed root's sessions
-                    # fall back to unbound — removal never deletes a
-                    # session — and the reply reports how many were
-                    # unbound, keyed by the canonical root removed.
-                    unbound_sessions = await _unbind_sessions_bound_to(removed)
-                    await ws.send_text(Event(
-                        type=EventType.WORKSPACE_REMOVE_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": True, "path": removed,
-                                 "unbound_sessions": unbound_sessions},
-                    ).to_json())
+                    # E1-10: a save failure is answered, not raised.
+                    save_err = _try_save_config()
+                    if save_err is not None:
+                        await ws.send_text(Event(
+                            type=EventType.WORKSPACE_REMOVE_RESPONSE,
+                            request_id=req_id,
+                            payload={"success": False,
+                                     "error": f"Workspace removal could not be saved: {save_err}"},
+                        ).to_json())
+                    else:
+                        from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+                        GLOBAL_SKILL_MANAGER.update_workspace_roots(engine_state.user_config.workspace_roots)
+                        # Slice 3 (grill Q7): the removed root's sessions
+                        # fall back to unbound — removal never deletes a
+                        # session — and the reply reports how many were
+                        # unbound, keyed by the canonical root removed.
+                        unbound_sessions = await _unbind_sessions_bound_to(removed)
+                        await ws.send_text(Event(
+                            type=EventType.WORKSPACE_REMOVE_RESPONSE,
+                            request_id=req_id,
+                            payload={"success": True, "path": removed,
+                                     "unbound_sessions": unbound_sessions},
+                        ).to_json())
                 else:
                     await ws.send_text(Event(
                         type=EventType.WORKSPACE_REMOVE_RESPONSE,
@@ -5845,7 +6223,7 @@ async def ws_tasks(ws: WebSocket):
                             logger.exception("Workspace indexing failed for %s", root)
                         indexer.start_watching(root)
 
-                    asyncio.create_task(_run_index())
+                    _spawn_background(_run_index())
                 await ws.send_text(Event(
                     type=EventType.WORKSPACE_INDEX_START_RESPONSE,
                     request_id=req_id,
@@ -5892,6 +6270,7 @@ async def ws_tasks(ws: WebSocket):
                 req_embedder = msg.payload.get("embedder")
                 old_embedder = indexer.embedder
                 reindex_required = False
+                index_save_err: str | None = None
                 if req_embedder and req_embedder != old_embedder:
                     reindex_required = True
                     await asyncio.to_thread(indexer.set_embedder, req_embedder)
@@ -5907,11 +6286,19 @@ async def ws_tasks(ws: WebSocket):
                         reset_episodic_embeddings_for_embedder, req_embedder)
                     if hasattr(engine_state, "user_config") and engine_state.user_config:
                         engine_state.user_config.embedding_model = req_embedder
-                        save_config(engine_state.user_config)
+                        # E1-10: a save failure flips ok, not the
+                        # connection.
+                        index_save_err = _try_save_config()
+                index_payload: dict[str, Any] = {
+                    "ok": index_save_err is None,
+                    "reindex_required": reindex_required}
+                if index_save_err is not None:
+                    index_payload["error"] = (
+                        f"Embedding model could not be saved: {index_save_err}")
                 await ws.send_text(Event(
                     type=EventType.WORKSPACE_INDEX_CONFIG_RESPONSE,
                     request_id=req_id,
-                    payload={"ok": True, "reindex_required": reindex_required},
+                    payload=index_payload,
                 ).to_json())
 
             elif msg.type == EventType.WORKSPACE_SET_ACTIVE_REQUEST:
@@ -5928,14 +6315,23 @@ async def ws_tasks(ws: WebSocket):
                 if existing is not None:
                     roots.remove(existing)
                     roots.insert(0, existing)
-                    save_config(engine_state.user_config)
-                    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-                    GLOBAL_SKILL_MANAGER.update_workspace_roots(roots)
-                    await ws.send_text(Event(
-                        type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": True, "path": existing},
-                    ).to_json())
+                    # E1-10: a save failure is answered, not raised.
+                    save_err = _try_save_config()
+                    if save_err is not None:
+                        await ws.send_text(Event(
+                            type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
+                            request_id=req_id,
+                            payload={"success": False,
+                                     "error": f"Workspace change could not be saved: {save_err}"},
+                        ).to_json())
+                    else:
+                        from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+                        GLOBAL_SKILL_MANAGER.update_workspace_roots(roots)
+                        await ws.send_text(Event(
+                            type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
+                            request_id=req_id,
+                            payload={"success": True, "path": existing},
+                        ).to_json())
                 else:
                     await ws.send_text(Event(
                         type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
@@ -6253,6 +6649,7 @@ async def ws_tasks(ws: WebSocket):
         await _stop_read_aloud()
         await _close_speech_engines()
         await _cancel_voice_background_tasks()
+        await _cancel_connection_background_work()
         engine_state.audit_logger.log_event("CLIENT_DISCONNECTED", {"client_ip": ip})
     except Exception as e:  # noqa: BLE001 — top-level socket boundary: any session failure is logged and the task is cancelled, never propagated
         logger.error(f"WebSocket session error: {e}")
@@ -6265,6 +6662,7 @@ async def ws_tasks(ws: WebSocket):
         await _stop_read_aloud()
         await _close_speech_engines()
         await _cancel_voice_background_tasks()
+        await _cancel_connection_background_work()
 
 # --- Legacy unauthenticated HTTP management routes: REMOVED (Phase 9, A1) ---
 # The seven HTTP routes that used to live here (GET/POST/DELETE/PATCH on

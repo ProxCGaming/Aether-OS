@@ -336,7 +336,7 @@ def ws_env(store_env, monkeypatch):
     """Engine state isolated to tmp, mirroring test_epic1_fast_chat."""
     engine_state.token_path = store_env / "engine.token"
     engine_state.audit_logger.log_path = store_env / "audit.log"
-    engine_state.initialize_auth()
+    engine_state.initialize()
     monkeypatch.setattr(
         ws_module, "get_pending_approvals", AsyncMock(return_value=[]))
     return {"tmp_path": store_env}

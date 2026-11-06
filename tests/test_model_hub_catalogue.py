@@ -555,10 +555,10 @@ def test_hub_contracts_registered():
 @pytest.fixture
 def ws_env(tmp_path):
     """Engine auth isolated to tmp (the session-ws fixture law:
-    the audit log path is set BEFORE initialize_auth)."""
+    the audit log path is set BEFORE initialize)."""
     engine_state.token_path = tmp_path / "engine.token"
     engine_state.audit_logger.log_path = tmp_path / "audit.log"
-    engine_state.initialize_auth()
+    engine_state.initialize()
     yield
 
 

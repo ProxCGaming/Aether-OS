@@ -69,7 +69,7 @@ def ws_env(tmp_path, monkeypatch):
         default_provider="google_gemini", default_model="gemini-main",
         workspace_roots=[str(tmp_path)])
     save_config(cfg, config_path)
-    engine_state.initialize_auth()
+    engine_state.initialize()
     monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "memory.db")
     monkeypatch.setattr(session_store, "_initialized", False)
     monkeypatch.setattr(

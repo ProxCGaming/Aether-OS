@@ -212,7 +212,7 @@ class TestFactoryFallbackGovernance:
 @pytest.fixture
 def ws_env(tmp_path, monkeypatch):
     """Engine state + stores isolated to tmp (F-09 ws_env pattern):
-    the audit log path is set BEFORE initialize_auth() — the
+    the audit log path is set BEFORE initialize() — the
     process-global audit logger otherwise leaks a dangling path
     across suites.
 
@@ -228,7 +228,7 @@ def ws_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
     cfg = _cfg(workspace_roots=[str(tmp_path)])
     save_config(cfg, config_path)
-    engine_state.initialize_auth()
+    engine_state.initialize()
     monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "memory.db")
     monkeypatch.setattr(session_store, "_initialized", False)
     monkeypatch.setattr(

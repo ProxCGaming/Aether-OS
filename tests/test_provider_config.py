@@ -5,7 +5,6 @@ from pathlib import Path
 from aether_engine.config import (
     CLOUD_PROVIDERS,
     DEFAULT_GEMINI_MODEL,
-    LOCAL_MODELS,
     PROVIDER_MAP,
     UserConfig,
     load_config,
@@ -34,12 +33,6 @@ class TestProviderConfig(unittest.TestCase):
         for p in CLOUD_PROVIDERS:
             self.assertIn(p.name, PROVIDER_MAP)
             self.assertIs(PROVIDER_MAP[p.name], p)
-
-    def test_local_models_static_list(self):
-        self.assertEqual(len(LOCAL_MODELS), 4)
-        names = [m["name"] for m in LOCAL_MODELS]
-        self.assertIn("Qwen 3 8B", names)
-        self.assertIn("Llama 3.1 8B", names)
 
     def test_user_config_roundtrip(self):
         cfg = UserConfig(

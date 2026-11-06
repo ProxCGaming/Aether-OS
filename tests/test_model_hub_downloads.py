@@ -673,11 +673,11 @@ async def test_delete_unknown_source_refuses(tmp_path):
 @pytest.fixture
 def ws_env(tmp_path, monkeypatch):
     """Engine auth isolated to tmp (the session-ws fixture law:
-    the audit log path is set BEFORE initialize_auth), and the
+    the audit log path is set BEFORE initialize), and the
     state's hub-download manager swapped for a fully faked one."""
     engine_state.token_path = tmp_path / "engine.token"
     engine_state.audit_logger.log_path = tmp_path / "audit.log"
-    engine_state.initialize_auth()
+    engine_state.initialize()
     ollama = _FakeOllama()
     ollama.downloaded_models = [
         {"name": "llama3:8b", "size_bytes": 4700, "path": "~/.ollama/models"},
