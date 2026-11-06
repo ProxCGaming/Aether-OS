@@ -2,8 +2,9 @@ import asyncio
 import base64
 import copy
 import logging
-import re
 import time
+from collections.abc import Awaitable, Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -27,19 +28,14 @@ from aether_engine.config import (
     remove_workspace_root,
     save_config,
 )
-from aether_engine.cost.ledger import (
-    reset_usage_context,
-    set_usage_context,
-    usage_context,
-)
 from aether_engine.langgraph.checkpointer import delete_thread_checkpoints
 from aether_engine.langgraph.executor import (
     get_pending_approvals,
     get_persisted_run_config,
     resume_langgraph_task,
-    run_langgraph_task,
+    run_langgraph_task,  # noqa: F401 — patch target: tests patch it here; ws_task_exec/ws_voice resolve it through this module at call time
 )
-from aether_engine.langgraph.fast_chat import load_session_history, run_fast_chat
+from aether_engine.langgraph.fast_chat import run_fast_chat  # noqa: F401 — patch target: tests patch it here; ws_task_exec resolves it through this module at call time
 from aether_engine.langgraph.steering import enqueue_steer
 from aether_engine.memory import session_store
 from aether_engine.memory.facade import backend_or_none
@@ -48,12 +44,6 @@ from aether_engine.orchestration.core import (
     _create_provider_instance,
 )
 from aether_engine.providers.discovery import fetch_available_models  # noqa: F401 — patch target: tests patch it here; ws_providers resolves it through this module at call time
-from aether_engine.providers.serving import (
-    begin_serving_tracking,
-    clear_serving_provider,
-    end_serving_tracking,
-    serving_provider,
-)
 from aether_engine.rewind import fork as fork_service
 from aether_engine.rewind import manifest as rewind_manifest
 from aether_engine.rewind import service as rewind_service
@@ -99,16 +89,20 @@ from aether_engine.routes.ws_providers import (
 from aether_engine.routes.ws_sessions import (
     _ARTIFACT_TRUNCATION_MARKER,  # noqa: F401 — re-export, see ws_sessions
     ARTIFACT_CONTENT_CAP_BYTES,  # noqa: F401 — re-export, see ws_sessions
-    _create_bound_session,
+    _create_bound_session,  # noqa: F401 — re-export, see ws_sessions
     _inspect_artifact_on_disk,  # noqa: F401 — re-export, see ws_sessions
     _read_text_capped,  # noqa: F401 — re-export, see ws_sessions
     _register_message_attachments,
     _remove_session_attachments,
     _resolve_workspace_binding,
-    _run_mcp_prompt_into_chat,
+    _run_mcp_prompt_into_chat,  # noqa: F401 — re-export, see ws_sessions
     _unbind_sessions_bound_to,
     _workspace_session_counts,
     handle_artifact_get,
+)
+from aether_engine.routes.ws_task_exec import (
+    execute_task_generator,
+    start_task_message,
 )
 from aether_engine.routes.ws_voice import (
     cancel_voice_background_tasks,
@@ -127,18 +121,9 @@ from aether_engine.routes.ws_voice import (
     stop_read_aloud,
     stop_voice_session,
 )
-from aether_engine.routing.intent import classify_intent
-from aether_engine.routing.policy import (
-    RoutingDecision,
-    infer_task_requirements,
-    local_only_from_vision_override,
-)
-from aether_engine.routing.startup import (
-    derive_configured_providers,
-    is_keyless_custom_provider,
-)
-from aether_engine.secrets.dpapi import SecretDecryptionError
-from aether_engine.secrets.storage import ProviderNotFoundError, SecretStore
+from aether_engine.routing.intent import classify_intent  # noqa: F401 — patch target: tests patch it here; ws_task_exec/ws_voice resolve it through this module at call time
+from aether_engine.routing.policy import local_only_from_vision_override
+from aether_engine.secrets.storage import SecretStore
 from aether_engine.state import engine_state
 from aether_engine.tools.registry import build_tool_registry
 from aether_engine.validation.diagnostics import run_environment_diagnostics
@@ -375,40 +360,26 @@ async def ws_tasks(ws: WebSocket):
     except Exception as e:  # noqa: BLE001 — best-effort approval recovery on connect: failure must not block the socket
         logger.warning(f"Error fetching pending approvals: {e}")
 
-    task_runner: asyncio.Task | None = None
-    # Session of the task this connection most recently started or
-    # resumed — lets STEER_TASK tell "a task is live for this session"
-    # apart from "start a new task" (Epic 1, E1-07).
-    task_session_id: str | None = None
-    # RUX-B-07: START_TASK's pre-work runs in a launch task, not in
-    # the receive loop. Launches are chained in receipt order (each
-    # launch waits for the previous one) so the ordering the serial
-    # loop used to guarantee between successive task starts — cancel
-    # the old runner first, commit any staged rewind, then build the
-    # new task — is preserved inside the launch pipeline.
-    task_start_tail: asyncio.Task | None = None
-    active_downloads: dict[str, asyncio.Task] = {}
-    # N-44: the id of the task this connection is currently running
-    # (set by the task pump when TASK_CREATED flows past, cleared
-    # when the pump exits) — CANCEL_TASK reports the task it
-    # actually cancelled instead of a hard-coded "unknown".
-    active_task_id: str | None = None
+    # Wave 5, slice 3: this connection's task state — the
+    # runner, its session, the chained launch tail, the active
+    # downloads and the current task id — lives on the
+    # WsConnection (routes/ws_connection.py); the task-exec
+    # core that drives it lives in routes/ws_task_exec.py.
     secret_store = SecretStore()
     # Wave 5: the per-connection working state — send-locked
     # socket, audit logger, secret store, background-task registry
     # (N-19), per-name locks, voice-session state — lives on one
     # WsConnection the handler families share
     # (routes/ws_connection.py). The local names below stay as
-    # aliases into it, so the code that has not moved yet keeps
-    # working against the context unchanged.
+    # aliases into it.
     conn = WsConnection(ws, engine_state.audit_logger, secret_store)
     _conn_background_tasks = conn.background_tasks
     _spawn_background = conn.spawn_background
+    # The task pump (routes/ws_task_exec.py), bound to this
+    # connection: the voice family's escalated background jobs
+    # drive it through the conn slot, as they did the closure.
+    conn.execute_task_generator = partial(execute_task_generator, conn)
 
-    # E1-06: plugin installs THIS connection prepared — dropped
-    # from the module-global pending table when it disconnects.
-    _own_plugin_install_ids: set[str] = set()
-    voice_state = conn.voice_state
 
     # Wave 5: the provider/model handler family lives in
     # routes/ws_providers.py — the dispatch branches below call
@@ -484,56 +455,6 @@ async def ws_tasks(ws: WebSocket):
 
     _unsubscribe_media_events = subscribe_media_events(_push_media_event)
 
-    async def _learn_fast_chat_in_background(task_id: str, prompt: str, response_text: str, p_name: str, p_model: str):
-        """Epic 4, E4-05: fast-chat learn parity — detached after
-        TASK_COMPLETED; the work itself lives in
-        fast_chat.learn_fast_chat_exchange (thin wrapper here: build
-        the chat's provider instance, then delegate)."""
-        from aether_engine.langgraph.fast_chat import learn_fast_chat_exchange
-        from aether_engine.orchestration.core import _create_provider_instance
-
-        try:
-            provider = _create_provider_instance(p_name, p_model, secret_store)
-        except Exception:  # noqa: BLE001 — no provider instance: the episode still records; only fact extraction is skipped
-            provider = None
-        await learn_fast_chat_exchange(
-            task_id, prompt, response_text, provider, engine_state.user_config)
-
-    async def _title_session_in_background(session_id: str, p_name: str, p_model: str, response_text: str):
-        """E1-08: give a still-default session title a model-written one.
-
-        Runs detached after a task completes; every failure simply
-        keeps the existing title.
-        """
-        try:
-            from aether_engine.orchestration.core import _create_provider_instance
-            from aether_engine.session_titles import (
-                generate_session_title,
-                is_default_title,
-                resolve_title_provider,
-            )
-
-            session = await asyncio.to_thread(session_store.get_session, session_id)
-            if not session:
-                return
-            messages = session.get("messages") or []
-            first_user = next((m.get("content") for m in messages if m.get("role") == "user"), None)
-            if not first_user or not is_default_title(session.get("title"), first_user):
-                return
-            try:
-                fallback = _create_provider_instance(p_name, p_model, secret_store)
-            except Exception:  # noqa: BLE001 — no provider instance, no title.
-                return
-            provider = resolve_title_provider(engine_state.user_config, secret_store, fallback)
-            title = await generate_session_title(provider, first_user, response_text)
-            if title and await asyncio.to_thread(session_store.update_session_title, session_id, title):
-                await ws.send_text(Event(
-                    type=EventType.SESSION_TITLE_UPDATED,
-                    request_id="title",
-                    payload={"session_id": session_id, "title": title},
-                ).to_json())
-        except Exception:  # Background decoration must never surface as a task error.
-            logger.warning("Session title update failed", exc_info=True)
 
     # ── Voice session (Epic 8, E8-5.1a) ─────────────────────────────
     # The cascade itself lives in aether_engine.voice.pipeline; this
@@ -543,722 +464,6 @@ async def ws_tasks(ws: WebSocket):
     # Wave 5: the voice pipeline lifecycle helpers, speech-engine
     # cache, escalated background-job runner and teardown helpers
     # live in routes/ws_voice.py.
-
-
-    async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str, session_id: str | None = None, *, routing_reason: str = "Default Routing", routing_capabilities: list | None = None, retry_factory=None, fallback_blocked_message: str | None = None):
-        """Stream one task's events to the client.
-
-        Epic 5, E5-03: the TASK_CREATED routing stamp carries the
-        routing decision's real reason + capabilities, not a
-        hard-coded "Default Routing".
-
-        Epic 5, E5-02 — task-level fallback, §6.4-shaped: when the
-        run fails with a retriable error BEFORE any tool activity
-        (no TOOL_ACTIVITY / TOOL_APPROVAL_REQUEST seen), a supplied
-        ``retry_factory`` may rebuild the task once on the top
-        fallback candidate; the switch is audited as
-        FALLBACK_TRIGGERED and the retry streams as the same task.
-        Once tools have run, or on a second failure, the failure
-        event is delivered as before. The resume path passes no
-        factory: a resumed task has history, so §6.4 forbids it.
-
-        E8-03: the switch is also announced to the client with the
-        contract events the renderer handles — FALLBACK_STARTED when
-        the retry is accepted (payload names the fallback provider /
-        model and the failed pair), FALLBACK_COMPLETED just before
-        the retried task's TASK_COMPLETED is delivered.
-        """
-        nonlocal active_task_id
-        # Epic 8, E8-A8.1a: attribute the provider calls made while
-        # this task streams to the usage ledger. The session is known
-        # now; the task id is refined in the event loop below, once
-        # TASK_CREATED flows past. Reset when the pump finishes so a
-        # later task on this connection starts clean.
-        usage_token = set_usage_context(session_id=session_id)
-        # N-44: this pump's own task id, learned from TASK_CREATED —
-        # the connection-level holder lets CANCEL_TASK name the task
-        # it cancelled; the local copy lets the cancellation audit
-        # record below name it too.
-        pump_task_id: str | None = None
-        # Finding E5-F07: open the serving-provider scope beside the
-        # usage context. Provider calls made while this task streams
-        # note which provider actually served them; the completion
-        # credit below follows that note instead of the outer
-        # provider variable.
-        serving_token = begin_serving_tracking()
-        try:
-            attempt = 0
-            current_reason = routing_reason
-            # E8-03: set when a §6.4 retry is accepted; cleared when
-            # its FALLBACK_COMPLETED has been announced (exactly once).
-            fallback_context: dict | None = None
-            while True:
-                attempt += 1
-                primary_failed = False
-                failure_event = None
-                failure_recorded = False
-                clear_serving_provider()
-                saw_tool_activity = False
-                task_path: str | None = None
-                task_prompt: str | None = None
-
-                async for ev in generator:
-                    # Epic 8, E8-A8.1a: keep the usage attribution
-                    # current — provider calls record against the
-                    # task id as soon as any event names it
-                    # (TASK_CREATED is always first for fresh tasks).
-                    if isinstance(ev.payload, dict):
-                        _ev_task_id = ev.payload.get("task_id")
-                        if _ev_task_id:
-                            set_usage_context(task_id=_ev_task_id)
-                        if ev.type == EventType.TASK_CREATED:
-                            set_usage_context(
-                                task_class=ev.payload.get("path")
-                                or ev.payload.get("task_class"))
-                    if ev.type in (EventType.TOOL_ACTIVITY, EventType.TOOL_APPROVAL_REQUEST):
-                        saw_tool_activity = True
-                    if ev.type == EventType.TASK_CREATED:
-                        task_path = ev.payload.get("path")
-                        task_prompt = ev.payload.get("prompt")
-                        pump_task_id = ev.payload.get("task_id")
-                        active_task_id = pump_task_id
-                        ev.payload["routing"] = {
-                            "provider": p_name,
-                            "model": p_model,
-                            "reason": current_reason,
-                            "capabilities": routing_capabilities or [],
-                        }
-                        engine_state.audit_logger.log_task_transition(
-                            ev.payload.get("task_id", "unknown"),
-                            TaskState.PENDING,
-                            TaskState.RUNNING,
-                            ev.payload,
-                        )
-                    elif ev.type in (EventType.TASK_COMPLETED, EventType.TASK_CANCELLED, EventType.TASK_FAILED, EventType.TASK_INTERRUPTED):
-                        to = {
-                            EventType.TASK_COMPLETED: TaskState.SUCCEEDED,
-                            EventType.TASK_CANCELLED: TaskState.CANCELLED,
-                            EventType.TASK_FAILED: TaskState.FAILED,
-                            EventType.TASK_INTERRUPTED: TaskState.PENDING_APPROVAL,
-                        }[ev.type]
-                        engine_state.audit_logger.log_task_transition(
-                            ev.payload.get("task_id", "unknown"),
-                            TaskState.RUNNING,
-                            to,
-                            ev.payload,
-                        )
-
-                    if ev.type == EventType.TASK_FAILED:
-                        if ev.payload.get("retriable"):
-                            primary_failed = True
-                            failure_event = ev
-                            break
-                        # Finding E5-F07: a nonretriable failure (a
-                        # 401, a bad request) is still this provider's
-                        # task outcome — record it as a permanent
-                        # failure instead of letting the provider keep
-                        # a clean health slate. The retriable path
-                        # records after the loop, ahead of the §6.4
-                        # retry decision; the event itself is still
-                        # delivered to the client unchanged below.
-                        if not failure_recorded:
-                            failure_recorded = True
-                            engine_state.health_manager.record_failure(
-                                p_name,
-                                ev.payload.get("error", "Unknown error"),
-                                is_retriable=False)
-
-                    if ev.type == EventType.TASK_COMPLETED:
-                        latency = ev.payload.get("latency_ms", 100.0)
-                        # Finding E5-F07: credit the provider that
-                        # served the completing call (per-call
-                        # fallback may have handed the work to another
-                        # provider); with no serving note, the outer
-                        # provider is credited exactly as before.
-                        engine_state.health_manager.record_success(
-                            serving_provider() or p_name, latency)
-                        if session_id:
-                            ev.payload["session_id"] = session_id
-                        if session_id and ev.payload.get("response"):
-                            # Save the final response from assistant with full thought history
-                            try:
-                                _msg_id = await asyncio.to_thread(session_store.add_message, session_id, "assistant", ev.payload["response"], ev.payload.get("thoughts"))
-                                # N10: stamp the persisted message's own
-                                # identity onto the event before it is
-                                # sent, so consumers (voice announcements,
-                                # the desktop) can refer to the exact
-                                # message this completion produced.
-                                if _msg_id:
-                                    ev.payload["message_id"] = _msg_id
-                            except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not interrupt the task stream
-                                logger.error(f"Failed to save session message: {e}")
-                            _spawn_background(
-                                _title_session_in_background(session_id, p_name, p_model, ev.payload["response"]))
-                            if task_path == "fast_chat" and task_prompt:
-                                # Epic 4, E4-05: graph tasks learn in the
-                                # executor; fast chat learns here (parity).
-                                _spawn_background(_learn_fast_chat_in_background(
-                                    ev.payload.get("task_id", "unknown"), task_prompt,
-                                    ev.payload["response"], p_name, p_model))
-
-                    if ev.type == EventType.TOOL_APPROVAL_REQUEST:
-                        engine_state.audit_logger.log_event("APPROVAL_REQUESTED", {
-                            "tool_name": ev.payload.get("tool_name"),
-                            "args": ev.payload.get("args"),
-                            "task_id": ev.payload.get("task_id", "unknown"),
-                        })
-
-                    if ev.type == EventType.TASK_COMPLETED and fallback_context is not None:
-                        # E8-03: announce the fallback's success
-                        # before the completion itself is delivered,
-                        # so the renderer's system messages bracket
-                        # the retried answer in order. The payload
-                        # carries `provider`/`model` — the fields
-                        # App.jsx reads for FALLBACK_COMPLETED.
-                        await ws.send_text(Event(
-                            type=EventType.FALLBACK_COMPLETED,
-                            request_id=req_id,
-                            payload={
-                                **fallback_context,
-                                "task_id": ev.payload.get("task_id", "unknown"),
-                            },
-                        ).to_json())
-                        fallback_context = None
-
-                    await ws.send_text(ev.to_json())
-
-                if not (primary_failed and failure_event):
-                    return
-
-                err_msg = failure_event.payload.get("error", "Unknown error")
-                engine_state.health_manager.record_failure(p_name, err_msg, is_retriable=True)
-
-                # §6.4 gate: one retry, only before any tool ran,
-                # only when the caller supplied a factory.
-                if should_attempt_task_fallback(
-                        attempt=attempt, saw_tool_activity=saw_tool_activity,
-                        has_factory=retry_factory is not None):
-                    rebuilt = await retry_factory(
-                        p_name, p_model, failure_event.payload.get("task_id", "unknown"))
-                    if rebuilt is not None:
-                        generator, fallback_provider, fallback_model = rebuilt
-                        engine_state.audit_logger.log_event("FALLBACK_TRIGGERED", {
-                            "task_id": failure_event.payload.get("task_id", "unknown"),
-                            "failed_provider": p_name,
-                            "failed_model": p_model,
-                            "fallback_provider": fallback_provider,
-                            "fallback_model": fallback_model,
-                            "error": err_msg,
-                        })
-                        logger.warning(
-                            f"FALLBACK_TRIGGERED: {p_name}/{p_model} failed before any tool ran; "
-                            f"retrying on {fallback_provider}/{fallback_model}")
-                        # E8-03: announce the switch to the client
-                        # (the renderer renders a system message) and
-                        # remember the pair so the retry's completion
-                        # can be announced as FALLBACK_COMPLETED.
-                        fallback_context = {
-                            "provider": fallback_provider,
-                            "model": fallback_model,
-                            "failed_provider": p_name,
-                            "failed_model": p_model,
-                        }
-                        await ws.send_text(Event(
-                            type=EventType.FALLBACK_STARTED,
-                            request_id=req_id,
-                            payload={
-                                **fallback_context,
-                                "task_id": failure_event.payload.get("task_id", "unknown"),
-                                "error": err_msg,
-                            },
-                        ).to_json())
-                        current_reason = (
-                            f"Fallback: {p_name}/{p_model} failed before any tool ran; "
-                            f"retried on {fallback_provider}/{fallback_model}")
-                        p_name, p_model = fallback_provider, fallback_model
-                        # E5-F12: the retry's TASK_CREATED restamp must
-                        # advertise the FALLBACK model's capabilities,
-                        # not the failed primary's. Re-derive them from
-                        # the registry entry for the (provider, model)
-                        # now serving — the same source the original
-                        # RoutingDecision stamp came from. No entry
-                        # means no advertised capabilities, never the
-                        # primary's leftovers.
-                        _fb_entry = engine_state.model_registry.get_model(
-                            fallback_model, provider=fallback_provider)
-                        routing_capabilities = (
-                            list(_fb_entry.capabilities)
-                            if _fb_entry is not None else [])
-                        continue
-                    elif fallback_blocked_message:
-                        # The route was constrained (finding M17) and
-                        # no lawful fallback exists: replace the raw
-                        # provider error with the honest explanation
-                        # before the failure reaches the client, so
-                        # the user learns the local model is down AND
-                        # that nothing was sent anywhere else.
-                        failure_event.payload["error"] = fallback_blocked_message
-
-                await ws.send_text(failure_event.to_json())
-                return
-        except asyncio.CancelledError:
-            # N-44: name the task that was actually cancelled —
-            # "unknown" only when no TASK_CREATED ever named one.
-            engine_state.audit_logger.log_event(
-                "TASK_CANCELLED", {"task_id": pump_task_id or "unknown"})
-            raise
-        except Exception as e:  # task-generator boundary: any failure is converted into an ERROR event for the client
-            logger.exception("Task generator failed with exception")
-            try:
-                await ws.send_text(Event(
-                    type=EventType.ERROR,
-                    request_id=req_id,
-                    payload={"error": f"Internal engine error: {e!s}"}
-                ).to_json())
-            except Exception:  # the socket is already broken; nothing further can be signalled
-                logger.debug("Could not send task error event to client", exc_info=True)
-        finally:
-            if active_task_id == pump_task_id:
-                active_task_id = None
-            reset_usage_context(usage_token)
-            end_serving_tracking(serving_token)
-
-    # The voice family's escalated background jobs drive this
-    # pump through the connection context (routes/ws_voice.py).
-    conn.execute_task_generator = execute_task_generator
-
-    async def _start_task_message(msg_, req_id_, previous_start_):
-        """Run one START_TASK's pre-work off the receive loop (RUX-B-07).
-
-        Everything the START_TASK branch used to do inline before
-        task_runner existed — cancelling the previous runner and
-        waiting for it, committing a staged rewind, a /mcp: slash
-        run, provider construction, and the intent-classification
-        model call (12 s timeout) — now runs in this launch task.
-        The ordering those steps depend on is preserved two ways:
-        launches are chained (this launch shields and awaits the
-        previous launch before touching anything), and the steps
-        themselves stay in their original order inside the launch,
-        so the task pipeline — never the socket — absorbs the
-        waits. The task's own events keep their original order
-        because they all originate from this one launch.
-        """
-        nonlocal task_runner, task_session_id
-        msg = msg_
-        req_id = req_id_
-        if previous_start_ is not None:
-            try:
-                await asyncio.shield(previous_start_)
-            except asyncio.CancelledError:
-                if not previous_start_.cancelled():
-                    raise
-            except Exception as e:  # noqa: BLE001 — a failed earlier launch answered for itself; this launch still runs
-                logger.debug(f"Earlier task launch ended with an error before a chained launch: {e}")
-        # E1-13: validate the launch's content BEFORE cancelling the
-        # live runner. A prompt-less, attachment-less start names no
-        # task at all — answer it with an error and leave the live
-        # task untouched, instead of replacing it with a fabricated
-        # "Say hello" task (the old default below). Attachments alone
-        # are real content and still launch, with an honest empty
-        # prompt.
-        _raw_prompt = msg.payload.get("prompt")
-        prompt = _raw_prompt.strip() if isinstance(_raw_prompt, str) else ""
-        attachments = msg.payload.get("attachments") or []
-        if not prompt and not attachments:
-            await ws.send_text(Event(
-                type=EventType.ERROR,
-                request_id=req_id,
-                payload={"error": "START_TASK requires a non-empty prompt or attachments; nothing was started."},
-            ).to_json())
-            return
-        if task_runner and not task_runner.done():
-            task_runner.cancel()
-            try:
-                await task_runner
-            except asyncio.CancelledError:
-                pass
-        cfg = engine_state.user_config
-        requested_model = msg.payload.get("model")
-        session_id = msg.payload.get("session_id")
-
-        if not session_id:
-            # Create new session if none provided. Implicit
-            # creation takes the SESSION_CREATE binding rule
-            # (slice 3): the active root at creation time, or
-            # unbound — via the one shared helper.
-            title = prompt[:30] + "..." if len(prompt) > 30 else prompt
-            session_id, session_binding = await _create_bound_session(title)
-            try:
-                await ws.send_text(Event(
-                    type=EventType.SESSION_CREATE_RESPONSE,
-                    request_id=req_id,
-                    payload={"session_id": session_id, "workspace": session_binding, "preserve_messages": True}
-                ).to_json())
-                await ws.send_text(Event(
-                    type=EventType.SESSION_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"sessions": await asyncio.to_thread(session_store.list_sessions)}
-                ).to_json())
-            except Exception:  # best-effort notification: the session is already created; a failed send must not abort task start
-                logger.debug("Could not send session create/list events to client", exc_info=True)
-        else:
-            sess_info = await asyncio.to_thread(session_store.get_session, session_id)
-            if sess_info and sess_info.get("title") in ("New Conversation", "New Chat") and not sess_info.get("messages"):
-                title = prompt[:30] + "..." if len(prompt) > 30 else prompt
-                await asyncio.to_thread(session_store.update_session_title, session_id, title)
-                try:
-                    await ws.send_text(Event(
-                        type=EventType.SESSION_LIST_RESPONSE,
-                        request_id=req_id,
-                        payload={"sessions": await asyncio.to_thread(session_store.list_sessions)}
-                    ).to_json())
-                except Exception:  # best-effort notification: a failed send must not abort task start
-                    logger.debug("Could not send session list event to client", exc_info=True)
-        # Epic 8, E8-1.1b: a new message in a session with a
-        # staged rewind commits it — the undo window closes
-        # and the discarded steps are pruned now, before the
-        # new task builds on the rewound state.
-        await rewind_service.commit(session_id)
-
-        # Issue 007: ``/mcp:<server>:<prompt>`` runs a prompt
-        # template into the chat instead of starting a graph task.
-        # No arguments in the slash form (use the MCP tab for
-        # prompts with arguments). The slash text itself is not
-        # saved as a user message — only the prompt's messages are.
-        _mcp_slash = re.match(r"^/mcp:([A-Za-z0-9_.\-]{1,100}):([A-Za-z0-9_.\-]+)$", prompt)
-        if _mcp_slash:
-            _run = await _run_mcp_prompt_into_chat(
-                _mcp_slash.group(1), _mcp_slash.group(2), None, session_id
-            )
-            await ws.send_text(Event(
-                type=EventType.MCP_PROMPT_RUN_RESPONSE,
-                request_id=req_id,
-                payload={
-                    "success": _run["ok"], "name": _mcp_slash.group(1),
-                    "prompt": _mcp_slash.group(2),
-                    "messages": _run["messages"],
-                    "session_id": _run["session_id"], "error": _run["error"],
-                },
-            ).to_json())
-            return
-
-        try:
-            # The UI's client-generated id becomes the row id, so
-            # the rendered message and the stored message share
-            # one identity (edit-and-resend addresses the row).
-            await asyncio.to_thread(
-                session_store.add_message, session_id, "user", prompt,
-                None, msg.payload.get("message_id"), attachments)
-            await _register_message_attachments(
-                session_id, msg.payload.get("message_id"), attachments, ws)
-        except Exception as e:  # noqa: BLE001 — best-effort persistence: a save failure must not block the task
-            logger.error(f"Failed to save user message: {e}")
-
-        # E5-F04: "configured" is derived ONCE, here as
-        # everywhere (routing.startup.derive_configured_providers):
-        # stored secrets plus keyless custom providers whose
-        # saved configuration is complete. Deriving from
-        # secrets alone made an accepted keyless custom
-        # provider invisible to routing.
-        engine_state.configured_providers = derive_configured_providers(
-            cfg, secret_store, engine_state.model_registry)
-
-        decision: RoutingDecision = engine_state.routing_policy.select_route(
-            prompt=prompt,
-            configured_providers=engine_state.configured_providers,
-            health_manager=engine_state.health_manager,
-            user_default_provider=cfg.default_provider,
-            user_default_model=cfg.default_model,
-            requested_model=requested_model,
-            auxiliary_models=cfg.auxiliary_models,
-            images=attachments,
-        )
-
-        workspace_roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
-
-        # Epic 1, E1-14 config layers, computed for BOTH paths:
-        # the graph branch uses it for the task, and the Epic 5
-        # retry-factory snapshot below reads it unconditionally
-        # — when it lived only in the graph branch, every
-        # fast-chat task died here with an UnboundLocalError
-        # and the client waited forever for a reply.
-        # E5-F02: it is resolved BEFORE the provider is built,
-        # and the provider factory receives it — the per-call
-        # fallback enforcement point must be governed by the
-        # task's effective fallback policy (disable / chain),
-        # not by the globals alone.
-        from aether_engine.config_layers import effective_user_config
-
-        task_user_config = effective_user_config(
-            engine_state.user_config,
-            workspace_root=workspace_roots[0] if workspace_roots else None,
-            overlay=msg.payload.get("config_overlay"),
-        )
-
-        try:
-            provider_instance = _create_provider_instance(
-                decision.provider, decision.model, secret_store,
-                local_only=decision.local_only,
-                require_vision=bool(attachments),
-                user_config=task_user_config,
-            )
-        except ProviderNotFoundError as e:
-            if is_keyless_custom_provider(decision.provider, task_user_config):
-                # E5-F04: this provider is configured WITHOUT
-                # a key by design — a construction failure here
-                # is not a missing key, and the error must name
-                # the real cause instead of demanding a secret
-                # the server does not have.
-                error_text = (
-                    f"Provider {decision.provider} is configured without an API key "
-                    f"but could not be started: {e}. Check its base URL in Settings → Models."
-                )
-            else:
-                error_text = f"API key not found for {decision.provider}. Please add your key in Settings → Models."
-            await ws.send_text(Event(
-                type=EventType.TASK_FAILED,
-                request_id=req_id,
-                payload={
-                    "task_id": "none", "retriable": False, "state": TaskState.FAILED.value,
-                    "error": error_text,
-                },
-            ).to_json())
-            return
-        except SecretDecryptionError as e:
-            await ws.send_text(Event(
-                type=EventType.TASK_FAILED,
-                request_id=req_id,
-                payload={
-                    "task_id": "none", "retriable": False, "state": TaskState.FAILED.value,
-                    "error": f"Failed to decrypt API key: {e}. Please re-enter your key in Settings → Models.",
-                },
-            ).to_json())
-            return
-
-        slash_cmd_str = msg.payload.get("slash_command")
-        if not slash_cmd_str and prompt.startswith("/"):
-            slash_cmd_str = prompt.split(" ")[0]
-
-        forced_agent = None
-        active_skills = []
-
-        if slash_cmd_str:
-            from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-            from aether_engine.skills.slash_registry import (
-                GLOBAL_SLASH_REGISTRY,
-            )
-
-            resolved = GLOBAL_SLASH_REGISTRY.resolve(slash_cmd_str)
-
-            if resolved:
-                if resolved.type == "agent_route":
-                    forced_agent = resolved.target
-            else:
-                skill_manifest = GLOBAL_SKILL_MANAGER.resolve_slash_command(slash_cmd_str)
-                if skill_manifest:
-                    active_skills.append(skill_manifest.name)
-                    if skill_manifest.requirements.agents:
-                        forced_agent = skill_manifest.requirements.agents[0]
-
-        # Epic 1, E1-04: fast-chat split. Slash commands, skill
-        # invocations and forced agents always take the graph;
-        # everything else is classified — plain conversation
-        # streams straight from the resolved chat model with no
-        # supervisor round-trip, work goes to the graph as before.
-        intent = None
-        if not slash_cmd_str and not forced_agent and not active_skills:
-            # Finding M19: classification is a real model call
-            # made BEFORE the task pump sets the attribution
-            # context — scope it to the session so its ledger
-            # row is attributed instead of landing unattributed.
-            with usage_context(session_id=session_id):
-                intent = await classify_intent(prompt, provider=provider_instance)
-
-        if intent is not None and intent.is_chat:
-            history = await asyncio.to_thread(
-                load_session_history, session_id, prompt)
-            task_generator = run_fast_chat(
-                prompt,
-                provider_instance,
-                history,
-                request_id=req_id,
-                session_id=session_id,
-                attachments=attachments,
-                # S1-M8: fast chat reads attachment paths only
-                # inside sanctioned roots — the session
-                # attachments dir plus these granted roots.
-                workspace_roots=workspace_roots,
-            )
-        else:
-            # One central builder (PRD Q3) — task start, approval
-            # resume and tool list used to build registries
-            # independently and had already drifted apart.
-            from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-
-            reqs = infer_task_requirements(prompt)
-            tools = build_tool_registry(
-                # E3-F02: the MCP risk overrides are the
-                # task's EFFECTIVE ones (global -> project ->
-                # per-task overlay, resolved above), exactly
-                # as the approval-resume path uses the resumed
-                # task's effective overrides (E1-F04) — not
-                # the current globals, which would discard a
-                # task-level tightening or loosening.
-                mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=task_user_config.mcp_tool_risk_overrides),
-                include_file_tools=reqs.wants_code or (requested_model is not None),
-            )
-
-            # Config layers were resolved above for both paths
-            # (E1-14); engine_state.user_config is never mutated.
-            task_generator = run_langgraph_task(
-                prompt=prompt,
-                provider=provider_instance,
-                tools=tools,
-                request_id=req_id,
-                approval_handler=None,
-                workspace_roots=workspace_roots,
-                disabled_nodes=engine_state.disabled_nodes,
-                session_id=session_id,
-                agent_models=task_user_config.agent_models,
-                agent_tools=task_user_config.agent_tools,
-                secret_store=secret_store,
-                user_config=task_user_config,
-                forced_agent=forced_agent,
-                active_skills=active_skills,
-                plan_mode=bool(msg.payload.get("plan_mode")),
-                attachments=attachments,
-                # N08: the originating user message id — media
-                # the task generates is registered against it
-                # so "jump to conversation" lands exactly.
-                message_id=msg.payload.get("message_id"),
-                # M17 residual: the decision's constraints
-                # travel into the graph run, whose internal
-                # provider constructions read them from the
-                # run config.
-                local_only=decision.local_only,
-                require_vision=bool(attachments),
-            )
-
-        # Epic 5, E5-02: task-level fallback factory (§6.4).
-        # Rebuilds THIS task — same path, same registry and
-        # config — on the top healthy fallback candidate,
-        # reusing the failed task's id so the client sees one
-        # task. execute_task_generator only calls it when the
-        # failure was retriable and no tool activity occurred.
-        # Snapshot the per-message values the factory needs
-        # (also keeps the closure from binding loop variables).
-        _rebuild = {
-            "prompt": prompt,
-            "use_fast": intent is not None and intent.is_chat,
-            "history": history if (intent is not None and intent.is_chat) else None,
-            "tools": None if (intent is not None and intent.is_chat) else tools,
-            "req_id": req_id,
-            "session_id": session_id,
-            "workspace_roots": workspace_roots,
-            "disabled_nodes": engine_state.disabled_nodes,
-            "agent_models": task_user_config.agent_models,
-            "agent_tools": task_user_config.agent_tools,
-            "user_config": task_user_config,
-            "forced_agent": forced_agent,
-            "active_skills": active_skills,
-            "plan_mode": bool(msg.payload.get("plan_mode")),
-            "attachments": attachments,
-            "message_id": msg.payload.get("message_id"),
-            # Finding M17: the routing decision's constraints
-            # travel with the snapshot so the retry factory
-            # re-checks them instead of re-routing freely.
-            "local_only": decision.local_only,
-            "has_images": bool(attachments),
-        }
-
-        async def _task_retry_factory(failed_provider, failed_model, failed_task_id, _ctx=_rebuild):
-            from aether_engine.routing.fallback import (
-                get_configured_fallback_candidates,
-            )
-
-            # E5-F02: the task's effective fallback policy
-            # governs this enforcement point too — the same
-            # authority function, fed the same effective
-            # config the per-call point was built with. A
-            # disabled fallback or an empty chain-derived
-            # list means no retry (return None), exactly as
-            # an exhausted candidate list always has.
-            candidates = get_configured_fallback_candidates(
-                failed_provider,
-                _ctx["user_config"],
-                configured_providers=engine_state.configured_providers,
-                health_manager=engine_state.health_manager,
-                registry=engine_state.model_registry,
-                local_only=_ctx["local_only"],
-                require_vision=_ctx["has_images"],
-            )
-            if not candidates:
-                return None
-            entry = candidates[0]
-            try:
-                fallback_instance = _create_provider_instance(
-                    entry.provider, entry.id, secret_store,
-                    local_only=_ctx["local_only"],
-                    require_vision=_ctx["has_images"],
-                    user_config=_ctx["user_config"],
-                )
-            except Exception:
-                # Provider construction can fail on config/key
-                # errors; then there is no fallback to offer.
-                logger.warning(f"Task fallback: could not build provider for {entry.provider}", exc_info=True)
-                return None
-            if _ctx["use_fast"]:
-                gen = run_fast_chat(
-                    _ctx["prompt"], fallback_instance, _ctx["history"],
-                    request_id=_ctx["req_id"], session_id=_ctx["session_id"],
-                    task_id=failed_task_id, attachments=_ctx.get("attachments"),
-                    workspace_roots=_ctx.get("workspace_roots"))
-            else:
-                gen = run_langgraph_task(
-                    prompt=_ctx["prompt"],
-                    provider=fallback_instance,
-                    tools=_ctx["tools"],
-                    request_id=_ctx["req_id"],
-                    approval_handler=None,
-                    workspace_roots=_ctx["workspace_roots"],
-                    disabled_nodes=_ctx["disabled_nodes"],
-                    session_id=_ctx["session_id"],
-                    agent_models=_ctx["agent_models"],
-                    agent_tools=_ctx["agent_tools"],
-                    secret_store=secret_store,
-                    user_config=_ctx["user_config"],
-                    forced_agent=_ctx["forced_agent"],
-                    active_skills=_ctx["active_skills"],
-                    plan_mode=_ctx["plan_mode"],
-                    task_id=failed_task_id,
-                    attachments=_ctx.get("attachments"),
-                    message_id=_ctx.get("message_id"),
-                    # M17 residual: as at task start, the
-                    # rebuilt run carries the constraints.
-                    local_only=_ctx["local_only"],
-                    require_vision=_ctx["has_images"],
-                )
-            return gen, entry.provider, entry.id
-
-        task_session_id = session_id
-        task_runner = asyncio.create_task(
-            execute_task_generator(
-                task_generator, decision.provider, decision.model, req_id,
-                session_id=session_id,
-                routing_reason=decision.reason,
-                routing_capabilities=decision.capabilities,
-                retry_factory=_task_retry_factory,
-                # Finding M17: on a local-only route, a failure
-                # with no lawful fallback must tell the user
-                # the local vision model is unavailable and
-                # that the image was NOT sent anywhere.
-                fallback_blocked_message=(
-                    f"The local vision model ({decision.provider}/{decision.model}) is unavailable, "
-                    "so the image was not processed. Because a local vision model is configured, "
-                    "Aether did not send the image to a cloud provider. Check that the local "
-                    "model is running, or pick a different vision model in Settings → Models."
-                ) if decision.local_only else None)
-        )
 
     async def _cancel_connection_background_work() -> None:
         """Disconnect cleanup for this connection's own work (N-19).
@@ -1272,10 +477,10 @@ async def ws_tasks(ws: WebSocket):
         installs (E1-06) and restores the module-global seam
         loaders this connection replaced (N-43).
         """
-        for dl_task in list(active_downloads.values()):
+        for dl_task in list(conn.active_downloads.values()):
             if not dl_task.done():
                 dl_task.cancel()
-        active_downloads.clear()
+        conn.active_downloads.clear()
         for tail in (conn.dictation_tail, conn.voice_op_tail):
             if tail is not None and not tail.done():
                 tail.cancel()
@@ -1284,10 +489,10 @@ async def ws_tasks(ws: WebSocket):
             t.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        for install_id in _own_plugin_install_ids:
+        for install_id in conn.own_plugin_install_ids:
             pending_plugin_installs.pop(install_id, None)
             pending_plugin_install_created.pop(install_id, None)
-        _own_plugin_install_ids.clear()
+        conn.own_plugin_install_ids.clear()
         set_search_key_loader(_prev_search_key_loader)
         set_search_config_loader(_prev_search_config_loader)
         set_browser_policy_loader(_prev_browser_policy_loader)
@@ -1333,12 +538,12 @@ async def ws_tasks(ws: WebSocket):
                         payload={"error": "STEER_TASK requires a non-empty prompt; nothing was steered or started."},
                     ).to_json())
                     continue
-                steer_session = msg.payload.get("session_id") or task_session_id
+                steer_session = msg.payload.get("session_id") or conn.task_session_id
                 steer_active = bool(
                     steer_session
-                    and task_runner is not None
-                    and not task_runner.done()
-                    and (task_session_id is None or task_session_id == steer_session)
+                    and conn.task_runner is not None
+                    and not conn.task_runner.done()
+                    and (conn.task_session_id is None or conn.task_session_id == steer_session)
                 )
                 steer_paused = False
                 if steer_session and not steer_active:
@@ -1369,3273 +574,17 @@ async def ws_tasks(ws: WebSocket):
                     continue
                 msg.type = EventType.START_TASK
 
-            # -----------------------------------------------------------
-            # Task lifecycle events
-            # -----------------------------------------------------------
-            if msg.type == EventType.START_TASK:
-                # RUX-B-07: the pre-work runs in a launch task (see
-                # _start_task_message); the loop only chains it
-                # after the previous launch and moves on, so a slow
-                # classification / cancel-wait / slash run can no
-                # longer wedge every other message on the socket.
-                _previous_start = task_start_tail
-                task_start_tail = asyncio.create_task(
-                    _start_task_message(msg, req_id, _previous_start))
-
-            elif msg.type == EventType.CANCEL_TASK:
-                # RUX-B-07: a task still in its launch pre-work is
-                # cancellable too — cancelling the launch prevents
-                # the runner from ever being created, which is the
-                # outcome the old serial loop produced by reading
-                # the cancel only after the (now-cancelled) start.
-                launch_pending = task_start_tail is not None and not task_start_tail.done()
-                if launch_pending:
-                    task_start_tail.cancel()
-                    logger.info("Cancellation requested for pending task launch.")
-                if task_runner and not task_runner.done():
-                    task_runner.cancel()
-                    logger.info("Cancellation requested for active task runner.")
-                if launch_pending and not (task_runner and not task_runner.done()):
-                    # A launch cancelled in its pre-work never
-                    # creates the pump, so the pump's own
-                    # TASK_CANCELLED audit record
-                    # (execute_task_generator's CancelledError
-                    # handler) never fires for this cancel. Write
-                    # the same record here so every honoured cancel
-                    # leaves exactly one audit entry; when a runner
-                    # is active, its pump writes the record instead
-                    # and this branch must not double-log.
-                    engine_state.audit_logger.log_event(
-                        "TASK_CANCELLED", {"task_id": "unknown"})
-                if launch_pending or (task_runner and not task_runner.done()):
-                    await ws.send_text(Event(
-                        type=EventType.TASK_CANCELLED,
-                        request_id=req_id,
-                        # N-44: name the task actually cancelled
-                        # (the pump tracks it from TASK_CREATED);
-                        # "unknown" only for a launch cancelled
-                        # before its task ever had an id.
-                        payload={"task_id": active_task_id or "unknown", "state": TaskState.CANCELLED.value},
-                    ).to_json())
-                else:
-                    await ws.send_text(Event(
-                        type=EventType.ERROR,
-                        request_id=req_id,
-                        payload={"error": "No active task to cancel"},
-                    ).to_json())
-
-            elif msg.type == EventType.PING:
-                await ws.send_text(Event(
-                    type=EventType.PONG,
-                    request_id=req_id,
-                    payload={"echo_ts": msg.ts},
-                ).to_json())
-
-            elif msg.type in (EventType.TOOL_APPROVAL_GRANTED, EventType.TOOL_APPROVAL_REJECTED):
-                approval_key = msg.payload.get("approval_key") or msg.request_id
-                is_approved = (msg.type == EventType.TOOL_APPROVAL_GRANTED)
-                
-                if is_approved:
-                    engine_state.audit_logger.log_event("APPROVAL_GRANTED", {"approval_key": approval_key})
-                else:
-                    engine_state.audit_logger.log_event("APPROVAL_REJECTED", {"approval_key": approval_key})
-
-                # Epic 8, E8-1.3: approval-time argument edits ride the
-                # GRANTED event. Audit the changed field names against
-                # the pending call's original args (best-effort, like
-                # the scoped-grant recording below: a lookup failure
-                # must never block the approval the user just gave).
-                edited_args = msg.payload.get("edited_args") if is_approved else None
-                if not isinstance(edited_args, dict):
-                    edited_args = None
-                # Epic 8, E8-6.2: an envelope grant the owner made at
-                # a browser confirmation rides the GRANTED event; the
-                # pause node scopes it to the confirmed action.
-                browser_envelope = msg.payload.get("browser_envelope") if is_approved else None
-                if not isinstance(browser_envelope, dict):
-                    browser_envelope = None
-                if edited_args is not None:
-                    try:
-                        pending = await get_pending_approvals()
-                        match = next((p for p in pending if p.get("thread_id") == approval_key), None)
-                        if match:
-                            _audit_approval_arguments_edited(
-                                engine_state.audit_logger,
-                                approval_key,
-                                match.get("tool_name"),
-                                match.get("args") or {},
-                                edited_args,
-                            )
-                    except Exception:
-                        logger.debug("Failed to audit approval argument edits", exc_info=True)
-
-                # E1-F04: the resume rebuilds the PAUSED task's
-                # effective configuration — the run_config snapshot
-                # checkpointed with the thread's state when the task
-                # started: provider/model, per-agent models/tools,
-                # forced agent, workspace roots and the layered user
-                # config including its MCP risk overrides. The
-                # current globals are only the fallback for threads
-                # paused before snapshots existed. E1-F03: the
-                # resumed execution is bound to the paused task's own
-                # session (from that same durable state), never to a
-                # connection-local variable — an approval arriving on
-                # a fresh connection resumes exactly the task that
-                # paused.
-                run_cfg = await get_persisted_run_config(approval_key) or {}
-                resume_session_id = run_cfg.get("session_id") or approval_key
-                resume_user_config = engine_state.user_config
-                if isinstance(run_cfg.get("user_config"), dict):
-                    try:
-                        resume_user_config = UserConfig.from_dict(run_cfg["user_config"])
-                    except Exception:  # a corrupt snapshot degrades to the live config, never blocks an approval
-                        logger.debug("Could not restore task user_config for approval resume", exc_info=True)
-                resume_provider_name = run_cfg.get("provider_name") or engine_state.active_provider
-                resume_model = run_cfg.get("model") or engine_state.active_model
-                resume_agent_models = run_cfg.get(
-                    "agent_models", resume_user_config.agent_models)
-                resume_agent_tools = run_cfg.get(
-                    "agent_tools", resume_user_config.agent_tools)
-                resume_workspace_roots = (
-                    run_cfg.get("workspace_roots")
-                    or resume_user_config.workspace_roots
-                    or [str(Path.home() / "AetherWorkspace")])
-
-                # M17 residual: the recreated instance honours the
-                # run's routing constraints. With a snapshot they are
-                # the original decision's own values; without one they
-                # are re-derived from the same sources that decision
-                # used — local_only from the auxiliary vision override
-                # in user config, and image presence from the thread's
-                # stored messages (the executor re-derives both again
-                # from the checkpoint for the resumed graph config).
-                if run_cfg:
-                    resume_local_only = bool(run_cfg.get("local_only"))
-                    resume_has_images = bool(run_cfg.get("require_vision"))
-                else:
-                    resume_local_only = local_only_from_vision_override(
-                        engine_state.user_config.auxiliary_models)
-                    resume_has_images = False
-                    try:
-                        _thread_session = await asyncio.to_thread(
-                            session_store.get_session, approval_key)
-                        resume_has_images = any(
-                            m.get("attachments")
-                            for m in (_thread_session or {}).get("messages", []))
-                    except Exception:
-                        logger.debug(
-                            "Could not inspect resumed thread attachments "
-                            "for the vision constraint", exc_info=True)
-                try:
-                    provider_instance = _create_provider_instance(
-                        resume_provider_name, resume_model, secret_store,
-                        local_only=resume_local_only,
-                        require_vision=resume_has_images,
-                    )
-                except Exception:  # provider construction can fail on config/key errors; skipping the resume is the designed degradation
-                    logger.debug("Could not instantiate provider for approval resume", exc_info=True)
-                    continue # Ignore if provider cannot be instantiated
-
-                # Same central builder as task start (PRD Q3) — the resume
-                # path used to register all file tools unconditionally while
-                # task start gated them on coding tasks. The MCP risk
-                # overrides are the resumed task's effective ones
-                # (E1-F04), not the current globals.
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-
-                tools = build_tool_registry(
-                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=resume_user_config.mcp_tool_risk_overrides),
-                )
-
-                # Epic 2, E2-09: a scoped approval ("this file" / "this
-                # folder") becomes a stored grant before the resume, so
-                # the NEXT matching call is covered. Best-effort by
-                # design: a grant-recording failure must never block
-                # the approval the user just gave.
-                grant_scope = msg.payload.get("scope") if is_approved else None
-                if grant_scope in ("file", "folder"):
-                    try:
-                        from aether_engine.tools.approval_cache import get_default_cache
-                        from aether_engine.tools.paths import candidate_paths
-
-                        pending = await get_pending_approvals()
-                        match = next((p for p in pending if p.get("thread_id") == approval_key), None)
-                        if match:
-                            paths = candidate_paths(match.get("args"))
-                            if paths:
-                                prefix = paths[0] if grant_scope == "file" else paths[0].parent
-                                risk = tools.get_tool(match["tool_name"]).risk.value
-                                grant_id = get_default_cache().grant(str(prefix), risk, tool_name=match["tool_name"])
-                                engine_state.audit_logger.log_event(
-                                    "APPROVAL_GRANT_CREATED",
-                                    {"grant_id": grant_id, "tool_name": match["tool_name"], "prefix": str(prefix), "ceiling": risk, "scope": grant_scope},
-                                )
-                    except Exception:
-                        # Grant recording is best-effort beside an approval already given.
-                        logger.debug("Failed to record scoped approval grant", exc_info=True)
-
-                # Pass the approved decision back into LangGraph,
-                # with the paused task's session binding and forced
-                # agent restored alongside its configuration (E1-F03
-                # + E1-F04).
-                resume_gen = resume_langgraph_task(
-                    thread_id=approval_key,
-                    approved=is_approved,
-                    provider=provider_instance,
-                    tools=tools,
-                    workspace_roots=resume_workspace_roots,
-                    disabled_nodes=engine_state.disabled_nodes,
-                    agent_models=resume_agent_models,
-                    agent_tools=resume_agent_tools,
-                    secret_store=secret_store,
-                    user_config=resume_user_config,
-                    session_id=resume_session_id,
-                    forced_agent=run_cfg.get("forced_agent"),
-                    edited_args=edited_args,
-                    browser_envelope=browser_envelope,
-                    # M17 residual: the resumed run's graph config
-                    # carries the same constraints (the executor also
-                    # re-derives them from the checkpoint as a net).
-                    local_only=resume_local_only,
-                    require_vision=resume_has_images,
-                )
-
-                if task_runner and not task_runner.done():
-                    task_runner.cancel()
-                    # E1-09: AWAIT the displaced runner before the
-                    # resume pump starts — the same cancel-then-await
-                    # idiom _start_task_message uses. Cancelling
-                    # without awaiting let the old pump keep
-                    # streaming (and writing usage/persistence) into
-                    # the resumed task's lifetime.
-                    try:
-                        await task_runner
-                    except asyncio.CancelledError:
-                        pass
-
-                req_id = msg.request_id or "resume"
-                task_session_id = approval_key
-                task_runner = asyncio.create_task(
-                    execute_task_generator(resume_gen, resume_provider_name, resume_model, req_id, session_id=resume_session_id)
-                )
-
-            # -----------------------------------------------------------
-            # Provider management & health events
-            # -----------------------------------------------------------
-            elif msg.type == EventType.PROVIDER_LIST_REQUEST:
-                # RUX-B-02: answer from the model cache immediately;
-                # discovery for providers with an empty cache runs in
-                # a background task and pushes a refreshed list when
-                # it lands (see send_provider_list_update).
-                providers = await _build_provider_list_async(secret_store, discover=False)
-                cfg = engine_state.user_config
-                await ws.send_text(Event(
-                    type=EventType.PROVIDER_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"providers": providers, "default_provider": cfg.default_provider, "default_model": cfg.default_model, "health": engine_state.health_manager.get_all_statuses()},
-                ).to_json())
-                _spawn_background(send_provider_list_update(conn, req_id))
-
-            elif msg.type in (EventType.PROVIDER_VALIDATE_REQUEST, EventType.SETTINGS_PROVIDER_VALIDATE_REQUEST):
-                pname = msg.payload.get("provider", "")
-                key = msg.payload.get("api_key", "")
-                base_url = msg.payload.get("base_url", "")
-                resp_type = (
-                    EventType.SETTINGS_PROVIDER_VALIDATE_RESULT
-                    if msg.type == EventType.SETTINGS_PROVIDER_VALIDATE_REQUEST
-                    else EventType.PROVIDER_VALIDATE_RESPONSE
-                )
-                is_custom = pname == "custom_openai" or engine_state.user_config.custom_provider_types.get(pname) == "openai_compatible"
-                
-                # If key is empty (e.g. masked in UI), attempt to load the saved key
-                if not key:
-                    saved_key = secret_store.load_provider(pname)
-                    if saved_key:
-                        key = saved_key
-                
-                # If base_url is empty, attempt to load the saved base_url
-                if not base_url:
-                    saved_url = engine_state.user_config.custom_base_urls.get(pname)
-                    if saved_url:
-                        base_url = saved_url
-                
-                # send_validation_result validates with
-                # persist_models=False: testing a throwaway/template
-                # provider must not leak discovery data into the
-                # persisted config.
-                if not key and not is_custom:
-                    await ws.send_text(Event(
-                        type=resp_type,
-                        request_id=req_id,
-                        payload={"provider": pname, "status": "invalid_key", "message": "API key cannot be empty."},
-                    ).to_json())
-                else:
-                    # Off the message loop (see send_validation_result):
-                    # the Test no longer blocks the socket, and repeat
-                    # clicks share the in-flight validation.
-                    _spawn_background(send_validation_result(conn, resp_type, req_id, pname, key, base_url))
-
-            elif msg.type == EventType.PROVIDER_SAVE_REQUEST:
-                pname = msg.payload.get("provider", "")
-                key = msg.payload.get("api_key", "")
-                base_url = msg.payload.get("base_url", "")
-                is_default = msg.payload.get("is_default", False)
-                default_model = msg.payload.get("default_model", "")
-                models = msg.payload.get("models", [])
-                display_name = msg.payload.get("display_name", "")
-                provider_type = msg.payload.get("provider_type", "")
-                try:
-                    if not isinstance(pname, str) or not pname.strip():
-                        raise ValueError("Provider name is required.")
-                    is_custom_provider = (
-                        pname == "custom_openai"
-                        or pname.startswith("custom_")
-                        or provider_type == "openai_compatible"
-                    )
-                    if is_custom_provider:
-                        if display_name:
-                            engine_state.user_config.custom_provider_names[pname] = display_name
-                        if provider_type:
-                            engine_state.user_config.custom_provider_types[pname] = provider_type
-                        engine_state.user_config.custom_base_urls[pname] = base_url
-                    elif base_url:
-                        engine_state.user_config.custom_base_urls[pname] = base_url
-
-                    # Save config before fetching models so custom names/URLs are persisted
-                    # even if the model fetch raises an exception.
-                    save_config(engine_state.user_config)
-
-                    # A new provider derived from the "custom_openai" template leaves
-                    # throwaway discovery data on that template (written during Test /
-                    # Refresh). Clear it unless the template is itself a real provider.
-                    if is_custom_provider and pname != "custom_openai":
-                        template_in_use = (
-                            "custom_openai" in set(secret_store.list_providers())
-                            or "custom_openai" in engine_state.user_config.custom_base_urls
-                            or "custom_openai" in engine_state.user_config.custom_provider_types
-                        )
-                        if not template_in_use:
-                            engine_state.user_config.provider_models.pop("custom_openai", None)
-                            engine_state.model_registry.remove_provider_models("custom_openai")
-                            engine_state.health_manager.remove_provider("custom_openai")
-
-                    # RUX-B-06: a key saved without a model list used
-                    # to discover inline here (≤10 s on the message
-                    # loop). The save itself — key, config, defaults —
-                    # is instant and answers now; discovery moves to
-                    # complete_provider_save_discovery, which applies
-                    # the same results and pushes the refreshed list.
-                    deferred_discovery = bool(key and not models)
-                    if key:
-                        secret_store.save_provider(pname, key)
-                        engine_state.health_manager.reset_provider(pname)
-                        if models:
-                            engine_state.user_config.provider_models[pname] = models
-                            engine_state.model_registry.update_provider_models(pname, models)
-                    elif models:
-                        engine_state.user_config.provider_models[pname] = models
-                        engine_state.model_registry.update_provider_models(pname, models)
-
-                    if default_model:
-                        if is_default or engine_state.user_config.default_provider == pname:
-                            engine_state.user_config.default_provider = pname
-                            engine_state.user_config.default_model = default_model
-                            engine_state.active_provider = pname
-                            engine_state.active_model = default_model
-                    elif is_default and pname:
-                        engine_state.user_config.default_provider = pname
-                        if deferred_discovery:
-                            # The model choice waits for the deferred
-                            # discovery (same registry-priority
-                            # resolution, in complete_provider_save_
-                            # discovery) — resolving now could only use
-                            # the stale pre-discovery list.
-                            engine_state.active_provider = pname
-                        else:
-                            # F-10 residual: resolve the default through the
-                            # registry's curated priority, never from the raw
-                            # provider_models list's [0] — that list's order
-                            # is not priority and may be stale or
-                            # client-supplied (a pre-fix list with the 404
-                            # gemini-2.5-flash first would otherwise be
-                            # silently re-pinned as the default here).
-                            default_entry = engine_state.model_registry.get_default_model_for_provider(pname)
-                            resolved_default = default_entry.id if default_entry else ""
-                            if not resolved_default:
-                                cur_models = engine_state.user_config.provider_models.get(pname, [])
-                                resolved_default = cur_models[0] if cur_models else ""
-                            if resolved_default:
-                                engine_state.user_config.default_model = resolved_default
-                                engine_state.active_model = resolved_default
-                            engine_state.active_provider = pname
-
-                    save_config(engine_state.user_config)
-                    engine_state.audit_logger.log_event("PROVIDER_SAVED", {"provider": pname})
-                    save_payload = {
-                        "provider": pname,
-                        "success": True,
-                        "models": engine_state.user_config.provider_models.get(pname, []),
-                        "excluded_models": engine_state.user_config.provider_excluded_models.get(pname, []),
-                    }
-                    await ws.send_text(Event(
-                        type=EventType.PROVIDER_SAVE_RESPONSE,
-                        request_id=req_id,
-                        payload=save_payload,
-                    ).to_json())
-                    if deferred_discovery:
-                        _spawn_background(complete_provider_save_discovery(conn, 
-                            req_id, pname, key, base_url,
-                            bool(is_default and not default_model)))
-                except Exception as e:  # noqa: BLE001 — handler boundary: any save failure is reported to the client in the response payload
-                    await ws.send_text(Event(
-                        type=EventType.PROVIDER_SAVE_RESPONSE,
-                        request_id=req_id,
-                        payload={
-                            "provider": pname,
-                            "success": False,
-                            "error": f"{type(e).__name__}: {e}",
-                        },
-                    ).to_json())
-
-            elif msg.type == EventType.PROVIDER_REMOVE_REQUEST:
-                pname = msg.payload.get("provider", "")
-                deleted = secret_store.delete_provider(pname)
-                engine_state.user_config.provider_models.pop(pname, None)
-                engine_state.user_config.custom_base_urls.pop(pname, None)
-                engine_state.user_config.custom_provider_names.pop(pname, None)
-                engine_state.user_config.custom_provider_types.pop(pname, None)
-                engine_state.model_registry.remove_provider_models(pname)
-                # E8-07 bookkeeping: this handler deregistered the
-                # provider itself (ALL entries, curated included —
-                # an explicit removal), so resync must not treat it
-                # as config-registered and restore its curated
-                # baseline on a later pass.
-                engine_state._config_registered_providers.discard(pname)
-                engine_state.health_manager.remove_provider(pname)
-                if pname in engine_state.configured_providers:
-                    engine_state.configured_providers.remove(pname)
-                if engine_state.user_config.default_provider == pname:
-                    remaining = [p for p in secret_store.list_providers() if p != pname]
-                    new_default = remaining[0] if remaining else "google_gemini"
-                    engine_state.user_config.default_provider = new_default
-                    # F-10 residual: as in PROVIDER_SAVE_REQUEST, the
-                    # replacement default model comes from the
-                    # registry's curated priority, not list position.
-                    default_entry = engine_state.model_registry.get_default_model_for_provider(new_default)
-                    if default_entry:
-                        engine_state.user_config.default_model = default_entry.id
-                    else:
-                        new_models = engine_state.user_config.provider_models.get(new_default, [])
-                        engine_state.user_config.default_model = new_models[0] if new_models else ""
-                    engine_state.active_provider = new_default
-                    engine_state.active_model = engine_state.user_config.default_model
-                # E1-10: a save failure here is answered, not raised
-                # — the removal already happened in-session (secret
-                # store + registry), so the audit record stands; the
-                # reply reports that persistence failed.
-                save_err = _try_save_config()
-                engine_state.audit_logger.log_event("PROVIDER_REMOVED", {"provider": pname})
-                remove_payload: dict[str, Any] = {
-                    "provider": pname, "deleted": deleted,
-                    "success": save_err is None}
-                if save_err is not None:
-                    remove_payload["error"] = (
-                        f"Provider removed, but settings could not be saved: {save_err}")
-                await ws.send_text(Event(
-                    type=EventType.PROVIDER_REMOVE_RESPONSE,
-                    request_id=req_id,
-                    payload=remove_payload,
-                ).to_json())
-
-            elif msg.type == EventType.PROVIDER_REVEAL_KEY_REQUEST:
-                pname = msg.payload.get("provider", "")
-                try:
-                    decrypted_key = secret_store.load_provider(pname)
-                    await ws.send_text(Event(
-                        type=EventType.PROVIDER_REVEAL_KEY_RESPONSE,
-                        request_id=req_id,
-                        payload={"provider": pname, "api_key": decrypted_key, "success": True},
-                    ).to_json())
-                except Exception as e:  # noqa: BLE001 — handler boundary: any decrypt/load failure is reported to the client in the response payload
-                    await ws.send_text(Event(
-                        type=EventType.PROVIDER_REVEAL_KEY_RESPONSE,
-                        request_id=req_id,
-                        payload={"provider": pname, "success": False, "error": str(e)},
-                    ).to_json())
-
-            elif msg.type == EventType.MODEL_SET_DEFAULT:
-                pname = msg.payload.get("provider", engine_state.user_config.default_provider)
-                model = msg.payload.get("model", "")
-                invalid = (
-                    not model
-                    or not pname
-                    or (isinstance(model, str) and not model.strip())
-                    or (isinstance(pname, str) and not pname.strip())
-                )
-                if invalid:
-                    # E1-07: validate at the boundary. The old code
-                    # answered an empty model with a MODEL_DEFAULT_CHANGED
-                    # echoing the *old* default — a success-shaped lie
-                    # that could even relabel another provider as the
-                    # default in the UI. Mutate nothing, save nothing.
-                    await ws.send_text(Event(
-                        type=EventType.ERROR,
-                        request_id=req_id,
-                        payload={"error": "MODEL_SET_DEFAULT requires a non-empty provider and model"},
-                    ).to_json())
-                else:
-                    engine_state.user_config.default_provider = pname
-                    engine_state.user_config.default_model = model
-                    # B10 anchor: the applied choice joins the
-                    # provider's persisted model list in the same save,
-                    # so a later discovery replace cannot silently
-                    # orphan it (anchor_default_model keeps it in the
-                    # list from then on). The registry update mirrors
-                    # what resync_active_state would derive at the
-                    # next launch from the same list.
-                    anchored = engine_state.user_config.provider_models.setdefault(pname, [])
-                    if model not in anchored:
-                        anchored.append(model)
-                    engine_state.model_registry.update_provider_models(pname, anchored)
-                    engine_state.active_provider = pname
-                    engine_state.active_model = model
-                    save_err = _try_save_config()
-                    if save_err is not None:
-                        # E1-10: like the E1-07 refusal above, a
-                        # switch that could not be persisted is an
-                        # ERROR reply — never a MODEL_DEFAULT_CHANGED
-                        # for a choice the next launch would not see.
-                        await ws.send_text(Event(
-                            type=EventType.ERROR,
-                            request_id=req_id,
-                            payload={"error": f"Default model could not be saved: {save_err}"},
-                        ).to_json())
-                    else:
-                        # Unified logging: the applied value goes on
-                        # record — a switch that "didn't stick" can now
-                        # be checked against what the engine applied.
-                        logger.info(f"MODEL_SET_DEFAULT applied: {pname}/{model}")
-                        await ws.send_text(Event(
-                            type=EventType.MODEL_DEFAULT_CHANGED,
-                            request_id=req_id,
-                            payload={"provider": pname, "model": engine_state.user_config.default_model},
-                        ).to_json())
-
-            # -----------------------------------------------------------
-            # Session Events
-            # -----------------------------------------------------------
-            elif msg.type == EventType.SESSION_LIST_REQUEST:
-                # Slice 3: an optional workspace filter with the
-                # store's three states — field absent = all sessions
-                # (exactly the pre-slice behaviour), a path = that
-                # workspace (canonicalised before the store sees it,
-                # so any spelling filters the one workspace), explicit
-                # null = unbound only. Every row already carries its
-                # `workspace` binding from the store.
-                if "workspace" not in msg.payload:
-                    sessions = await asyncio.to_thread(session_store.list_sessions)
-                    list_error = ""
-                elif msg.payload.get("workspace") is None:
-                    sessions = await asyncio.to_thread(session_store.list_sessions, None)
-                    list_error = ""
-                elif isinstance(msg.payload.get("workspace"), str):
-                    sessions = await asyncio.to_thread(
-                        session_store.list_sessions,
-                        canonical_workspace_root(msg.payload["workspace"]))
-                    list_error = ""
-                else:
-                    sessions = []
-                    list_error = "workspace filter must be a workspace path or null"
-                list_payload: dict[str, Any] = {"sessions": sessions}
-                if list_error:
-                    list_payload["error"] = list_error
-                await ws.send_text(Event(
-                    type=EventType.SESSION_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload=list_payload,
-                ).to_json())
-
-            elif msg.type == EventType.SESSION_GET_REQUEST:
-                sess_id = msg.payload.get("session_id")
-                session_data = await asyncio.to_thread(session_store.get_session, sess_id) if sess_id else None
-                await ws.send_text(Event(
-                    type=EventType.SESSION_GET_RESPONSE,
-                    request_id=req_id,
-                    payload={"session": session_data},
-                ).to_json())
-
-            elif msg.type == EventType.SESSION_CREATE_REQUEST:
-                title = msg.payload.get("title", "New Chat")
-                # Slice 3 (grill Q3/Q4): the optional workspace field
-                # follows the one binding rule — absent binds the
-                # active root (or unbound with no roots configured),
-                # a string binds that configured root by canonical
-                # identity, explicit null creates unbound. An
-                # unconfigured target is refused honestly and creates
-                # nothing. The reply names the new session's binding.
-                bind_ok, binding, bind_error = _resolve_workspace_binding(
-                    msg.payload, required=False)
-                if not bind_ok:
-                    await ws.send_text(Event(
-                        type=EventType.SESSION_CREATE_RESPONSE,
-                        request_id=req_id,
-                        payload={"session_id": None, "workspace": None,
-                                 "success": False, "error": bind_error},
-                    ).to_json())
-                else:
-                    sess_id = await asyncio.to_thread(
-                        session_store.create_session, title, binding)
-                    await ws.send_text(Event(
-                        type=EventType.SESSION_CREATE_RESPONSE,
-                        request_id=req_id,
-                        payload={"session_id": sess_id, "workspace": binding},
-                    ).to_json())
-
-            elif msg.type == EventType.SESSION_DELETE_REQUEST:
-                sess_id = msg.payload.get("session_id")
-                deleted = await asyncio.to_thread(session_store.delete_session, sess_id) if sess_id else False
-                if sess_id:
-                    try:
-                        from aether_engine.artifacts.store import get_artifact_store
-                        await asyncio.to_thread(get_artifact_store().delete_by_session, sess_id)
-                    except Exception as cascade_err:  # noqa: BLE001
-                        logger.warning(f"Failed to cascade delete artifacts for session {sess_id}: {cascade_err}")
-                    try:
-                        from aether_engine.media.store import get_media_store
-                        await asyncio.to_thread(get_media_store().delete_by_session, sess_id)
-                    except Exception as media_err:  # noqa: BLE001
-                        logger.warning(f"Failed to cascade delete media for session {sess_id}: {media_err}")
-                    try:
-                        await asyncio.to_thread(_remove_session_attachments, sess_id)
-                    except Exception as attach_err:  # noqa: BLE001
-                        logger.warning(f"Failed to remove attachments for session {sess_id}: {attach_err}")
-                await ws.send_text(Event(
-                    type=EventType.SESSION_DELETE_RESPONSE,
-                    request_id=req_id,
-                    payload={"session_id": sess_id, "deleted": deleted},
-                ).to_json())
-
-            elif msg.type == EventType.SESSION_TRUNCATE_REQUEST:
-                sess_id = msg.payload.get("session_id")
-                msg_id = msg.payload.get("message_id")
-                content = msg.payload.get("content")
-                role = msg.payload.get("role", "user")
-                try:
-                    occurrence = int(msg.payload["occurrence"]) if msg.payload.get("occurrence") is not None else None
-                except (TypeError, ValueError):
-                    occurrence = None
-                truncated = False
-                if sess_id:
-                    if msg_id:
-                        truncated = await asyncio.to_thread(session_store.truncate_session, sess_id, msg_id)
-                    if not truncated and content:
-                        # The UI id is not always a stored row id (MCP
-                        # prompt messages, transferred chats): fall back
-                        # to the occurrence-aware content match instead
-                        # of silently truncating nothing.
-                        truncated = await asyncio.to_thread(
-                            session_store.truncate_session_by_content,
-                            sess_id, role, content, occurrence=occurrence)
-                if truncated and sess_id:
-                    # Invalidate the graph thread (keyed by session id):
-                    # without this the next run keeps reasoning over the
-                    # deleted branch. Best-effort — the store is already
-                    # correct, and the executor re-seeds a fresh thread
-                    # from the retained history.
-                    try:
-                        await delete_thread_checkpoints(sess_id)
-                    except Exception:  # checkpoint cleanup must not fail the truncate response.
-                        logger.warning(
-                            f"Could not delete checkpoints for truncated session {sess_id}",
-                            exc_info=True)
-                await ws.send_text(Event(
-                    type=EventType.SESSION_TRUNCATE_RESPONSE,
-                    request_id=req_id,
-                    payload={"session_id": sess_id, "truncated": truncated},
-                ).to_json())
-
-            elif msg.type == EventType.SESSION_RENAME_REQUEST:
-                sess_id = msg.payload.get("session_id")
-                new_title = (msg.payload.get("title") or "").strip()
-                renamed = False
-                if sess_id and new_title:
-                    renamed = await asyncio.to_thread(
-                        session_store.update_session_title, sess_id, new_title[:120])
-                await ws.send_text(Event(
-                    type=EventType.SESSION_RENAME_RESPONSE,
-                    request_id=req_id,
-                    payload={"session_id": sess_id, "title": new_title, "renamed": renamed},
-                ).to_json())
-
-            elif msg.type == EventType.SESSION_MOVE_REQUEST:
-                # Per-workspace sessions, slice 3 (grill Q6): re-file
-                # a session under another workspace, or unbind it
-                # with a null workspace. Binding is organisational
-                # only (Q11) — a move touches no history, context, or
-                # checkpoints, and a running task keeps the roots it
-                # snapshotted at launch. Unknown sessions and
-                # unconfigured targets are refused honestly; the
-                # reply reports the session's binding after the
-                # request, moved or not.
-                sess_id = msg.payload.get("session_id")
-                session = await asyncio.to_thread(
-                    session_store.get_session, sess_id) if sess_id else None
-                if session is None:
-                    move_ok = False
-                    move_binding = None
-                    move_error = ("A session_id is required." if not sess_id
-                                  else f"Session not found: {sess_id}")
-                else:
-                    move_ok, move_binding, move_error = _resolve_workspace_binding(
-                        msg.payload, required=True)
-                    if move_ok:
-                        move_ok = await asyncio.to_thread(
-                            session_store.set_session_workspace,
-                            sess_id, move_binding)
-                        if not move_ok:
-                            move_error = f"Session not found: {sess_id}"
-                    if not move_ok:
-                        move_binding = session.get("workspace")
-                move_payload: dict[str, Any] = {
-                    "session_id": sess_id,
-                    "workspace": move_binding,
-                    "moved": move_ok,
-                }
-                if not move_ok:
-                    move_payload["error"] = move_error
-                await ws.send_text(Event(
-                    type=EventType.SESSION_MOVE_RESPONSE,
-                    request_id=req_id,
-                    payload=move_payload,
-                ).to_json())
-
-            elif msg.type == EventType.SESSION_SEARCH_REQUEST:
-                query = msg.payload.get("query", "")
-                results = await asyncio.to_thread(session_store.search_sessions, query)
-                await ws.send_text(Event(
-                    type=EventType.SESSION_SEARCH_RESPONSE,
-                    request_id=req_id,
-                    payload={"query": query, "results": results},
-                ).to_json())
-
-            elif msg.type == EventType.SESSION_EXPORT_REQUEST:
-                sess_id = msg.payload.get("session_id")
-                fmt = (msg.payload.get("format") or "json").lower()
-                content = None
-                zip_path = None
-                filename = ""
-                err = None
-                try:
-                    from aether_engine.session_export.exporter import (
-                        _safe_filename,
-                        export_session_json,
-                        export_session_markdown,
-                        export_session_zip,
-                    )
-                    sess = await asyncio.to_thread(session_store.get_session, sess_id)
-                    if not sess:
-                        raise ValueError(f"Session '{sess_id}' not found")
-                    title = sess.get("title", "Session")
-                    if fmt == "markdown":
-                        content = await asyncio.to_thread(export_session_markdown, sess_id)
-                        filename = _safe_filename(title, sess_id, "md")
-                    elif fmt == "zip":
-                        z_dest = await asyncio.to_thread(export_session_zip, sess_id)
-                        zip_path = str(z_dest)
-                        filename = z_dest.name
-                    else:
-                        fmt = "json"
-                        content = await asyncio.to_thread(export_session_json, sess_id)
-                        filename = _safe_filename(title, sess_id, "json")
-                except Exception as e:
-                    logger.exception(f"Session export failed for {sess_id}")
-                    err = str(e)
-
-                await ws.send_text(Event(
-                    type=EventType.SESSION_EXPORT_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "format": fmt,
-                        "content": content,
-                        "zip_path": zip_path,
-                        "filename": filename,
-                        "error": err,
-                    },
-                ).to_json())
-
-            elif msg.type == EventType.SESSION_IMPORT_REQUEST:
-                fmt = (msg.payload.get("format") or "json").lower()
-                raw_content = msg.payload.get("content")
-                fpath = msg.payload.get("file_path")
-                try:
-                    from aether_engine.session_export.importer import (
-                        import_session_archive,
-                        import_session_json,
-                    )
-                    if fmt == "zip" or (fpath and str(fpath).endswith(".zip")):
-                        result = await asyncio.to_thread(
-                            import_session_archive,
-                            archive_path=fpath,
-                            content=raw_content,
-                        )
-                    else:
-                        result = await asyncio.to_thread(
-                            import_session_json,
-                            content=raw_content,
-                            file_path=fpath,
-                        )
-                except Exception as e:
-                    logger.exception("Session import failed")
-                    result = {
-                        "ok": False,
-                        "session_id": "",
-                        "title": "",
-                        "message_count": 0,
-                        "error": str(e),
-                    }
-
-                await ws.send_text(Event(
-                    type=EventType.SESSION_IMPORT_RESPONSE,
-                    request_id=req_id,
-                    payload=result,
-                ).to_json())
-
-            elif msg.type == EventType.REWIND_MANIFEST_GET_REQUEST:
-                # Epic 8, E8-1.1a: the session's last task's rewind
-                # points (recorded by the task runners). An explicit
-                # task_id that is not the last task answers with no
-                # entries — points exist only for the last task (Q5).
-                sess_id = msg.payload.get("session_id")
-                req_task_id = msg.payload.get("task_id")
-                if sess_id:
-                    manifest_payload = await asyncio.to_thread(
-                        rewind_manifest.get_manifest, sess_id, req_task_id)
-                else:
-                    manifest_payload = {
-                        "session_id": sess_id, "task_id": None, "entries": []}
-                await ws.send_text(Event(
-                    type=EventType.REWIND_MANIFEST_GET_RESPONSE,
-                    request_id=req_id,
-                    payload=manifest_payload,
-                ).to_json())
-
-            elif msg.type == EventType.TASK_REWIND_REQUEST:
-                # Epic 8, E8-1.1b: execute a rewind against the
-                # manifest. Refused while this session's task is live
-                # or paused for approval — the points describe the
-                # last task, and rolling back under a running one
-                # would corrupt both. The service validates the rest
-                # (last task only, step exists, checkpoint matches).
-                sess_id = msg.payload.get("session_id")
-                rewind_busy = bool(
-                    sess_id
-                    and task_runner is not None
-                    and not task_runner.done()
-                    and (task_session_id is None or task_session_id == sess_id)
-                )
-                if sess_id and not rewind_busy:
-                    try:
-                        pending = await get_pending_approvals()
-                        rewind_busy = any(
-                            p.get("thread_id") == sess_id for p in pending)
-                    except Exception:  # noqa: BLE001 — best-effort scan, same doctrine as steering: a failed scan degrades to the service's own validation
-                        rewind_busy = False
-                if rewind_busy:
-                    rewind_result = {
-                        "ok": False,
-                        "session_id": sess_id,
-                        "rewound_to_step": msg.payload.get("step_index")
-                        if isinstance(msg.payload.get("step_index"), int) else -1,
-                        "undo_expires_at": 0.0,
-                        "files_not_reverted": [],
-                        "messages": [],
-                        "error": "Cannot rewind while a task is running or waiting for approval in this session.",
-                    }
-                else:
-                    rewind_result = await rewind_service.rewind(
-                        sess_id,
-                        msg.payload.get("task_id"),
-                        msg.payload.get("step_index"),
-                        msg.payload.get("checkpoint_id"),
-                    )
-                await ws.send_text(Event(
-                    type=EventType.TASK_REWIND_RESPONSE,
-                    request_id=req_id,
-                    payload=rewind_result,
-                ).to_json())
-
-            elif msg.type == EventType.TASK_REWIND_UNDO_REQUEST:
-                # Epic 8, E8-1.1b: restore the steps a staged rewind
-                # discarded — only inside the 5-second window.
-                sess_id = msg.payload.get("session_id")
-                if isinstance(sess_id, str) and sess_id:
-                    undo_result = await rewind_service.undo(sess_id)
-                else:
-                    undo_result = {
-                        "ok": False, "restored": False,
-                        "error": "A session_id is required.",
-                    }
-                await ws.send_text(Event(
-                    type=EventType.TASK_REWIND_UNDO_RESPONSE,
-                    request_id=req_id,
-                    payload=undo_result,
-                ).to_json())
-
-            elif msg.type == EventType.SESSION_FORK_REQUEST:
-                # Epic 8, E8-1.2: fork the session at a completed
-                # step boundary into a new session. Refused while
-                # this session's task is live or paused for approval
-                # — the boundary must describe settled state, and
-                # copying a thread mid-run could catch it torn. The
-                # service validates the boundary itself (manifest
-                # step of the last task, or a message id).
-                sess_id = msg.payload.get("session_id")
-                fork_busy = bool(
-                    sess_id
-                    and task_runner is not None
-                    and not task_runner.done()
-                    and (task_session_id is None or task_session_id == sess_id)
-                )
-                if sess_id and not fork_busy:
-                    try:
-                        pending = await get_pending_approvals()
-                        fork_busy = any(
-                            p.get("thread_id") == sess_id for p in pending)
-                    except Exception:  # noqa: BLE001 — best-effort scan, same doctrine as the rewind guard: a failed scan degrades to the service's own validation
-                        fork_busy = False
-                if fork_busy:
-                    fork_result = {
-                        "ok": False,
-                        "new_session_id": "",
-                        "source_session_id": sess_id,
-                        "title": "",
-                        "messages_copied": 0,
-                        "messages": [],
-                        "error": "Cannot fork while a task is running or waiting for approval in this session.",
-                    }
-                else:
-                    fork_result = await asyncio.to_thread(
-                        fork_service.fork_session_at,
-                        sess_id,
-                        message_id=msg.payload.get("message_id"),
-                        step_index=msg.payload.get("step_index"),
-                        new_title=msg.payload.get("new_title"),
-                    )
-                await ws.send_text(Event(
-                    type=EventType.SESSION_FORK_RESPONSE,
-                    request_id=req_id,
-                    payload=fork_result,
-                ).to_json())
-
-            elif msg.type == EventType.APPROVAL_GRANTS_REQUEST:
-                from aether_engine.tools.approval_cache import get_default_cache
-
-                grants = await asyncio.to_thread(get_default_cache().list_grants)
-                await ws.send_text(Event(
-                    type=EventType.APPROVAL_GRANTS_RESPONSE,
-                    request_id=req_id,
-                    payload={"grants": grants},
-                ).to_json())
-
-            elif msg.type == EventType.APPROVAL_GRANT_REVOKE_REQUEST:
-                from aether_engine.tools.approval_cache import get_default_cache
-
-                grant_id = msg.payload.get("id")
-                # E1-01: the id rides an untrusted payload — a
-                # non-numeric id is a rejected revoke (answered
-                # below with revoked=False), never a ValueError that
-                # kills the session.
-                try:
-                    grant_pk = int(grant_id) if grant_id is not None else None
-                except (TypeError, ValueError):
-                    grant_pk = None
-                cache = get_default_cache()
-                revoked = bool(grant_id) and grant_pk is not None and await asyncio.to_thread(cache.revoke, grant_pk)
-                if revoked:
-                    engine_state.audit_logger.log_event("APPROVAL_GRANT_REVOKED", {"grant_id": grant_id})
-                grants = await asyncio.to_thread(cache.list_grants)
-                await ws.send_text(Event(
-                    type=EventType.APPROVAL_GRANT_REVOKE_RESPONSE,
-                    request_id=req_id,
-                    payload={"id": grant_id, "revoked": revoked, "grants": grants},
-                ).to_json())
-
-            # -----------------------------------------------------------
-            # Artifact Store (Epic 8, E8-2.1)
-            # -----------------------------------------------------------
-            elif msg.type == EventType.ARTIFACT_LIST_REQUEST:
-                from aether_engine.artifacts.store import get_artifact_store
-                art_store = get_artifact_store()
-                sess_id = msg.payload.get("session_id")
-                is_global = bool(msg.payload.get("global"))
-                limit = msg.payload.get("limit")
-                offset = msg.payload.get("offset")
-                artifacts, total = await asyncio.to_thread(
-                    art_store.list_artifacts, session_id=sess_id, is_global=is_global, limit=limit, offset=offset
-                )
-                await ws.send_text(Event(
-                    type=EventType.ARTIFACT_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"artifacts": artifacts, "total": total},
-                ).to_json())
-
-            elif msg.type == EventType.ARTIFACT_GET_REQUEST:
-                art_id = msg.payload.get("artifact_id", "")
-                result = await handle_artifact_get(art_id)
-                await ws.send_text(Event(
-                    type=EventType.ARTIFACT_GET_RESPONSE,
-                    request_id=req_id,
-                    payload=result,
-                ).to_json())
-
-            elif msg.type == EventType.DEV_SERVER_DETECT_REQUEST:
-                # Epic 8, E8-2.2: probe for a running dev server so the
-                # canvas Preview tab can load it in its sandboxed frame.
-                from aether_engine.artifacts.dev_server import detect_dev_server
-
-                result = await asyncio.to_thread(
-                    detect_dev_server,
-                    workspace_root=msg.payload.get("workspace_root"),
-                    project_path=msg.payload.get("project_path"),
-                )
-                await ws.send_text(Event(
-                    type=EventType.DEV_SERVER_DETECT_RESPONSE,
-                    request_id=req_id,
-                    payload=result,
-                ).to_json())
-
-            elif msg.type == EventType.USAGE_LEDGER_QUERY_REQUEST:
-                # Epic 8, E8-A8.1a: the header cost popover and (with
-                # E8-A8.1b) Settings → Usage read the ledger here.
-                from aether_engine.cost.ledger import get_usage_ledger
-
-                result = await asyncio.to_thread(
-                    get_usage_ledger().query,
-                    session_id=msg.payload.get("session_id"),
-                    task_id=msg.payload.get("task_id"),
-                    start_ts=msg.payload.get("start_ts"),
-                    end_ts=msg.payload.get("end_ts"),
-                )
-                await ws.send_text(Event(
-                    type=EventType.USAGE_LEDGER_QUERY_RESPONSE,
-                    request_id=req_id,
-                    payload=result,
-                ).to_json())
-
-            elif msg.type == EventType.CONTEXT_BREAKDOWN_REQUEST:
-                # Epic 8, E8-A8.1b: segmented context breakdown for header and settings
-                from aether_engine.cost.context_breakdown import get_context_breakdown
-
-                session_id = msg.payload.get("session_id", "")
-                task_id = msg.payload.get("task_id")
-                model = msg.payload.get("model") or getattr(engine_state, "active_model", None)
-
-                result = await asyncio.to_thread(
-                    get_context_breakdown,
-                    session_id=session_id,
-                    task_id=task_id,
-                    model=model,
-                )
-                await ws.send_text(Event(
-                    type=EventType.CONTEXT_BREAKDOWN_RESPONSE,
-                    request_id=req_id,
-                    payload=result,
-                ).to_json())
-
-            elif msg.type == EventType.DAILY_BUDGET_SET_REQUEST:
-                # Epic 8, E8-A8.1b: daily budget update with soft alert
-                from aether_engine.cost.ledger import get_usage_ledger
-
-                raw_budget = msg.payload.get("daily_budget_usd")
-                try:
-                    budget = float(raw_budget) if raw_budget is not None else None
-                except (TypeError, ValueError):
-                    # E1-01: a non-numeric budget is rejected with an
-                    # answer naming the unchanged value — never a
-                    # ValueError that kills the session, and the bad
-                    # value is neither applied nor saved.
-                    await ws.send_text(Event(
-                        type=EventType.DAILY_BUDGET_SET_RESPONSE,
-                        request_id=req_id,
-                        payload={
-                            "daily_budget_usd": engine_state.user_config.daily_budget_usd,
-                            "ok": False,
-                            "error": f"Invalid daily budget value: {raw_budget!r} (expected a number)",
-                        },
-                    ).to_json())
-                    continue
-                if budget is not None and budget <= 0:
-                    budget = None
-                engine_state.user_config.daily_budget_usd = budget
-                save_err = _try_save_config()
-
-                await ws.send_text(Event(
-                    type=EventType.DAILY_BUDGET_SET_RESPONSE,
-                    request_id=req_id,
-                    # E1-10: a failed save is ok:False, not a
-                    # dropped connection.
-                    payload=(
-                        {"daily_budget_usd": budget, "ok": False,
-                         "error": f"Daily budget could not be saved: {save_err}"}
-                        if save_err is not None else
-                        {"daily_budget_usd": budget, "ok": True}),
-                ).to_json())
-
-                if budget is not None and budget > 0:
-                    today_spend = get_usage_ledger().today_total()
-                    if today_spend > budget:
-                        await ws.send_text(Event(
-                            type=EventType.DAILY_BUDGET_EXCEEDED,
-                            payload={
-                                "daily_budget_usd": float(budget),
-                                "today_spend_usd": float(today_spend),
-                            },
-                        ).to_json())
-
-            elif msg.type == EventType.BROWSER_TASK_PAUSE_REQUEST:
-                # Epic 8, E8-6.1: browser control channel — pause /
-                # resume / take-control / return-control / stop for
-                # the dedicated agent browser (browser task card).
-                from aether_engine.browser.session import get_browser_manager
-
-                browser_result = await get_browser_manager().control(
-                    session_id=msg.payload.get("session_id"),
-                    chat_session_id=msg.payload.get("chat_session_id"),
-                    action=str(msg.payload.get("action", "")),
-                )
-                await ws.send_text(Event(
-                    type=EventType.BROWSER_TASK_PAUSE_RESPONSE,
-                    request_id=req_id,
-                    payload=browser_result,
-                ).to_json())
-
-            elif msg.type == EventType.BROWSER_POLICY_GET_REQUEST:
-                # Epic 8, E8-6.2: Settings → Browser Agent Policy reads
-                # the confirmation policy (categories + toggles).
-                from aether_engine.browser.policy import policy_from_user_config
-
-                await ws.send_text(Event(
-                    type=EventType.BROWSER_POLICY_GET_RESPONSE,
-                    request_id=req_id,
-                    payload=policy_from_user_config(engine_state.user_config).to_dict(),
-                ).to_json())
-
-            elif msg.type == EventType.BROWSER_POLICY_SET_REQUEST:
-                # Epic 8, E8-6.2: partial policy update — validated
-                # fully before anything mutates, so a rejected update
-                # changes nothing. Persisted with the rest of the
-                # user config and audited by field name.
-                from aether_engine.browser.policy import (
-                    apply_policy_update,
-                    policy_from_user_config,
-                )
-
-                ok, error = apply_policy_update(engine_state.user_config, msg.payload)
-                response_payload: dict = {
-                    "success": ok,
-                    "policy": policy_from_user_config(engine_state.user_config).to_dict(),
-                }
-                if ok:
-                    # E1-10: fold a save failure into the same
-                    # success/error vocabulary instead of raising.
-                    save_err = _try_save_config()
-                    if save_err is not None:
-                        response_payload["success"] = False
-                        response_payload["error"] = (
-                            f"Browser policy could not be saved: {save_err}")
-                        ok = False
-                if ok:
-                    changed = sorted(
-                        key for key in ("enabled", "vault_autofill", "envelopes_enabled")
-                        if msg.payload.get(key) is not None
-                    )
-                    if isinstance(msg.payload.get("categories"), dict):
-                        changed += [f"categories.{k}" for k in msg.payload["categories"]]
-                    engine_state.audit_logger.log_event(
-                        "BROWSER_POLICY_UPDATED", {"fields": changed})
-                elif "error" not in response_payload:
-                    response_payload["error"] = error
-                await ws.send_text(Event(
-                    type=EventType.BROWSER_POLICY_SET_RESPONSE,
-                    request_id=req_id,
-                    payload=response_payload,
-                ).to_json())
-
-            elif msg.type == EventType.VAULT_ENTRY_LIST_REQUEST:
-                # Epic 8, E8-6.3: Settings → Password Vault lists
-                # entries METADATA ONLY (the store's list never
-                # selects a secret column, so no payload can carry a
-                # password). Agent-created entries appear here for
-                # the owner's review like any other.
-                from aether_engine.vault.store import get_credential_vault
-
-                entries = await asyncio.to_thread(
-                    get_credential_vault().list_entries)
-                await ws.send_text(Event(
-                    type=EventType.VAULT_ENTRY_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"entries": entries},
-                ).to_json())
-
-            elif msg.type == EventType.VAULT_ENTRY_SAVE_REQUEST:
-                # Create/update one entry from the Settings form.
-                # A blank password on an update means "keep the
-                # stored one" (the form never receives the current
-                # password, so it cannot send it back). The response
-                # echoes only success + id — never the fields.
-                from aether_engine.vault.store import (
-                    VaultError,
-                    get_credential_vault,
-                )
-
-                password = msg.payload.get("password") or None
-                if password is not None and not str(password).strip():
-                    password = None
-                totp = msg.payload.get("totp_secret")
-                if totp is not None and not str(totp).strip():
-                    # Blank mirrors the password rule: on update it
-                    # keeps the stored secret (the form never
-                    # receives it, so it cannot send it back); on
-                    # create it simply means "no TOTP secret".
-                    totp = None
-                try:
-                    entry_id = await asyncio.to_thread(
-                        get_credential_vault().save_entry,
-                        site=str(msg.payload.get("site", "")),
-                        username=str(msg.payload.get("username", "")),
-                        password=password,
-                        ask_every_time=bool(
-                            msg.payload.get("ask_every_time", False)),
-                        created_by="user",
-                        totp_secret=totp,
-                        entry_id=msg.payload.get("id") or None,
-                    )
-                    vault_payload: dict = {"success": True, "id": entry_id}
-                    engine_state.audit_logger.log_event(
-                        "VAULT_ENTRY_SAVED", {"entry_id": entry_id})
-                except VaultError as exc:
-                    vault_payload = {
-                        "success": False,
-                        "id": msg.payload.get("id") or "",
-                        "error": str(exc),
-                    }
-                await ws.send_text(Event(
-                    type=EventType.VAULT_ENTRY_SAVE_RESPONSE,
-                    request_id=req_id,
-                    payload=vault_payload,
-                ).to_json())
-
-            elif msg.type == EventType.VAULT_ENTRY_DELETE_REQUEST:
-                from aether_engine.vault.store import get_credential_vault
-
-                entry_id = str(msg.payload.get("id", ""))
-                removed = await asyncio.to_thread(
-                    get_credential_vault().delete_entry, entry_id)
-                if removed:
-                    engine_state.audit_logger.log_event(
-                        "VAULT_ENTRY_DELETED", {"entry_id": entry_id})
-                await ws.send_text(Event(
-                    type=EventType.VAULT_ENTRY_DELETE_RESPONSE,
-                    request_id=req_id,
-                    payload={"success": removed, "id": entry_id},
-                ).to_json())
-
-            elif msg.type == EventType.VAULT_TOTP_LIST_REQUEST:
-                # Open Point 14: Settings → Password Vault's
-                # Authenticator section lists standalone TOTP
-                # entries METADATA ONLY (the store's listing never
-                # selects the secret column).
-                from aether_engine.vault.store import get_credential_vault
-
-                totp_entries = await asyncio.to_thread(
-                    get_credential_vault().list_totp_entries)
-                await ws.send_text(Event(
-                    type=EventType.VAULT_TOTP_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"entries": totp_entries},
-                ).to_json())
-
-            elif msg.type == EventType.VAULT_TOTP_SAVE_REQUEST:
-                # Enrol / update one authenticator entry from the
-                # Settings form. The engine validates the Base32
-                # setup key and stores it normalised + encrypted; a
-                # blank secret on update means "keep the stored
-                # one", exactly like the password rule above. The
-                # response echoes only success + id — never fields.
-                from aether_engine.vault.store import (
-                    VaultError,
-                    get_credential_vault,
-                )
-
-                setup_key = msg.payload.get("secret")
-                if setup_key is not None and not str(setup_key).strip():
-                    setup_key = None
-                try:
-                    totp_id = await asyncio.to_thread(
-                        get_credential_vault().save_totp_entry,
-                        label=str(msg.payload.get("label", "")),
-                        issuer=str(msg.payload.get("issuer", "")),
-                        entry_id=msg.payload.get("id") or None,
-                        **{"secret": setup_key},  # noqa: PIE804 — dict form is deliberate (see tests/test_vault_totp.py)
-                    )
-                    totp_payload: dict = {"success": True, "id": totp_id}
-                    engine_state.audit_logger.log_event(
-                        "VAULT_TOTP_SAVED", {"entry_id": totp_id})
-                except VaultError as exc:
-                    totp_payload = {
-                        "success": False,
-                        "id": msg.payload.get("id") or "",
-                        "error": str(exc),
-                    }
-                await ws.send_text(Event(
-                    type=EventType.VAULT_TOTP_SAVE_RESPONSE,
-                    request_id=req_id,
-                    payload=totp_payload,
-                ).to_json())
-
-            elif msg.type == EventType.VAULT_TOTP_DELETE_REQUEST:
-                from aether_engine.vault.store import get_credential_vault
-
-                totp_id = str(msg.payload.get("id", ""))
-                removed = await asyncio.to_thread(
-                    get_credential_vault().delete_totp_entry, totp_id)
-                if removed:
-                    engine_state.audit_logger.log_event(
-                        "VAULT_TOTP_DELETED", {"entry_id": totp_id})
-                await ws.send_text(Event(
-                    type=EventType.VAULT_TOTP_DELETE_RESPONSE,
-                    request_id=req_id,
-                    payload={"success": removed, "id": totp_id},
-                ).to_json())
-
-            elif msg.type == EventType.VAULT_TOTP_CODES_REQUEST:
-                # The ONLY code-carrying payload in the system,
-                # served on the owner's Settings request. Secrets
-                # never leave the engine: the store computes the
-                # codes in-process from the decrypted secrets, and
-                # each entry's read is audited VAULT_TOTP_ACCESSED
-                # by the owner accessors there.
-                from aether_engine.vault.store import get_credential_vault
-
-                codes_payload = await asyncio.to_thread(
-                    get_credential_vault().totp_codes)
-                await ws.send_text(Event(
-                    type=EventType.VAULT_TOTP_CODES_RESPONSE,
-                    request_id=req_id,
-                    payload=codes_payload,
-                ).to_json())
-
-            elif msg.type == EventType.VAULT_FILL_APPROVAL_RESPONSE:
-                # The desktop's answer to an ask-every-time fill
-                # prompt (VAULT_FILL_APPROVAL_REQUEST). No reply
-                # event — the fill itself reports through the task.
-                # Unknown/stale request ids are tolerated silently:
-                # the service already failed that fill closed on its
-                # timeout if the answer never mattered.
-                from aether_engine.vault.service import get_vault_service
-
-                get_vault_service().resolve_fill_approval(
-                    str(msg.payload.get("request_id", "")),
-                    bool(msg.payload.get("approved", False)),
-                )
-
-            # -----------------------------------------------------------
-            # Media Store & Library (Epic 8, E8-4.2)
-            # -----------------------------------------------------------
-            elif msg.type == EventType.MEDIA_LIST_REQUEST:
-                from aether_engine.media.store import get_media_store
-                media_store = get_media_store()
-                collection = msg.payload.get("collection", "all")
-                sess_id = msg.payload.get("session_id")
-                limit = msg.payload.get("limit")
-                offset = msg.payload.get("offset")
-                query = msg.payload.get("query")
-                media_items, total = await asyncio.to_thread(
-                    media_store.list_media,
-                    collection=collection,
-                    session_id=sess_id,
-                    limit=limit,
-                    offset=offset,
-                    query=query,
-                )
-                await ws.send_text(Event(
-                    type=EventType.MEDIA_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"media": media_items, "total": total},
-                ).to_json())
-
-            elif msg.type == EventType.MEDIA_SEARCH_REQUEST:
-                # N07: Library search is served by the backend recall
-                # path (the same search_media_entries the media_recall
-                # tool uses) so transcript and semantic matches reach
-                # the UI. An empty query is an honest empty result —
-                # recall is never invoked with nothing to search for.
-                # Off the message loop (see send_media_search_result):
-                # the recall embeds the query and can take seconds
-                # (RUX-B-08). The payload parsing stays here — it is
-                # instant and defines the request the task runs.
-                search_query = str(msg.payload.get("query") or "").strip()
-                search_collection = msg.payload.get("collection", "all")
-                if search_collection not in ("all", "user", "generated"):
-                    search_collection = "all"
-                try:
-                    search_limit = int(msg.payload.get("limit") or 20)
-                except (TypeError, ValueError):
-                    search_limit = 20
-                _spawn_background(send_media_search_result(conn, 
-                    req_id, search_query, search_collection, search_limit))
-
-            elif msg.type == EventType.MEDIA_DELETE_REQUEST:
-                from aether_engine.media.store import get_media_store
-                media_store = get_media_store()
-                mid = msg.payload.get("media_id", "")
-                del_file = bool(msg.payload.get("delete_underlying_file", False))
-                deleted, file_deleted = await asyncio.to_thread(
-                    media_store.delete_media, mid, delete_underlying_file=del_file
-                )
-                await ws.send_text(Event(
-                    type=EventType.MEDIA_DELETE_RESPONSE,
-                    request_id=req_id,
-                    payload={"deleted": deleted, "media_id": mid, "file_deleted": file_deleted},
-                ).to_json())
-
-            elif msg.type == EventType.MEDIA_METADATA_UPDATE_REQUEST:
-                from aether_engine.media.store import get_media_store
-                media_store = get_media_store()
-                mid = msg.payload.get("media_id", "")
-                tags = msg.payload.get("tags")
-                notes = msg.payload.get("notes")
-                updated = await asyncio.to_thread(
-                    media_store.update_metadata, mid, tags=tags, notes=notes
-                )
-                await ws.send_text(Event(
-                    type=EventType.MEDIA_METADATA_UPDATE_RESPONSE,
-                    request_id=req_id,
-                    payload=updated,
-                ).to_json())
-
-            # -----------------------------------------------------------
-            # Local Models (Ollama) & Task Download Events
-            # -----------------------------------------------------------
-            elif msg.type == EventType.LOCAL_MODEL_LIST_REQUEST:
-                # Off the message loop (see send_local_model_list_result):
-                # the daemon call can take seconds (RUX-B-08).
-                _spawn_background(send_local_model_list_result(conn, req_id))
-
-            elif msg.type == EventType.LOCAL_MODEL_DOWNLOAD_START:
-                model_name = msg.payload.get("model", "") or msg.payload.get("repo_id", "")
-                dest_dir = msg.payload.get("destination_dir")
-                if task_runner and not task_runner.done():
-                    task_runner.cancel()
-
-                async def execute_local_download(model_name=model_name, destination_dir=dest_dir, request_id=req_id):
-                    async for dl_ev in engine_state.ollama_manager.download_model_task(
-                        model_name=model_name,
-                        destination_dir=destination_dir,
-                        request_id=request_id,
-                    ):
-                        await ws.send_text(dl_ev.to_json())
-
-                dl_task = asyncio.create_task(execute_local_download())
-                active_downloads[model_name] = dl_task
-                task_runner = dl_task
-
-            elif msg.type == EventType.LOCAL_MODEL_DOWNLOAD_CANCEL:
-                cancel_model = msg.payload.get("model", "")
-                dl = active_downloads.pop(cancel_model, None)
-                if dl and not dl.done():
-                    dl.cancel()
-                    logger.info(f"Download cancelled for model: {cancel_model}")
-
-            elif msg.type == EventType.LOCAL_MODEL_DELETE_REQUEST:
-                # Off the message loop (see send_local_model_delete_result):
-                # the daemon call can take seconds (RUX-B-08).
-                _spawn_background(send_local_model_delete_result(conn, 
-                    req_id, msg.payload.get("model", "")))
-
-            # -----------------------------------------------------------
-            # Model Hub catalogue layer (H1, read-only)
-            # -----------------------------------------------------------
-            elif msg.type == EventType.MODEL_HUB_SEARCH_REQUEST:
-                # Off the message loop (see send_model_hub_search_result):
-                # the catalogue call is live HTTP (RUX-B-08).
-                _spawn_background(send_model_hub_search_result(conn, 
-                    req_id,
-                    msg.payload.get("source", "hf"),
-                    msg.payload.get("query", "") or "",
-                    msg.payload.get("family")))
-
-            elif msg.type == EventType.MODEL_HUB_DETAIL_REQUEST:
-                # Off the message loop (see send_model_hub_detail_result):
-                # the catalogue call is live HTTP (RUX-B-08).
-                _spawn_background(send_model_hub_detail_result(conn, 
-                    req_id,
-                    msg.payload.get("source", "hf"),
-                    msg.payload.get("id", "") or ""))
-
-            # -----------------------------------------------------------
-            # Model Hub downloads (H2): begin/run split — the RESPONSE
-            # is the synchronous verdict (accepted, or the honest
-            # refusal: busy store, not runnable, voice components
-            # missing); progress then flows as the same task event
-            # stream the local-model pulls use. The download registers
-            # in active_downloads under its store key, so the existing
-            # LOCAL_MODEL_DOWNLOAD_CANCEL cancels hub downloads too.
-            # task_runner is deliberately NOT touched: a hub download
-            # must never cancel a running agent task.
-            # -----------------------------------------------------------
-            elif msg.type == EventType.MODEL_HUB_DOWNLOAD_REQUEST:
-                plan = await engine_state.hub_downloads.begin(
-                    source=msg.payload.get("source", "hf"),
-                    model_id=msg.payload.get("id", "") or "",
-                    variant=msg.payload.get("variant"),
-                )
-                if not plan.get("success"):
-                    await ws.send_text(Event(
-                        type=EventType.MODEL_HUB_DOWNLOAD_RESPONSE,
-                        request_id=req_id,
-                        payload={
-                            "success": False,
-                            "error": plan.get("error"),
-                        },
-                    ).to_json())
-                else:
-                    await ws.send_text(Event(
-                        type=EventType.MODEL_HUB_DOWNLOAD_RESPONSE,
-                        request_id=req_id,
-                        payload={
-                            "success": True,
-                            "model": plan["key"],
-                            "task_id": plan["task_id"],
-                        },
-                    ).to_json())
-
-                    async def execute_hub_download(plan=plan, request_id=req_id):
-                        try:
-                            async for dl_ev in engine_state.hub_downloads.run(
-                                plan, request_id=request_id
-                            ):
-                                await ws.send_text(dl_ev.to_json())
-                        finally:
-                            engine_state.hub_downloads.release(plan)
-
-                    hub_dl_task = asyncio.create_task(execute_hub_download())
-                    active_downloads[plan["key"]] = hub_dl_task
-
-            elif msg.type == EventType.MODEL_HUB_DOWNLOADED_REQUEST:
-                result = await engine_state.hub_downloads.downloaded()
-                await ws.send_text(Event(
-                    type=EventType.MODEL_HUB_DOWNLOADED_RESPONSE,
-                    request_id=req_id,
-                    payload=result,
-                ).to_json())
-
-            elif msg.type == EventType.MODEL_HUB_DELETE_REQUEST:
-                # Off the message loop (see send_model_hub_delete_result):
-                # the delete verifies against the daemon and removes
-                # the repo tree (RUX-B-08).
-                _spawn_background(send_model_hub_delete_result(conn, 
-                    req_id,
-                    msg.payload.get("source", "hf"),
-                    msg.payload.get("id", "") or ""))
-
-            # -----------------------------------------------------------
-            # Capabilities Check Scheduler Events
-            # -----------------------------------------------------------
-            elif msg.type == EventType.CAPABILITY_CHECK_SET_SCHEDULE:
-                interval = msg.payload.get("schedule", "weekly")
-                method = msg.payload.get("method", "Both")
-                engine_state.scheduler_manager.set_schedule(interval, method)
-                status_sum = engine_state.scheduler_manager.get_status_summary()
-                await ws.send_text(Event(
-                    type=EventType.CAPABILITY_CHECK_HISTORY_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "summary": status_sum,
-                        "history": engine_state.scheduler_manager.get_history(),
-                    },
-                ).to_json())
-
-            elif msg.type == EventType.CAPABILITY_CHECK_RUN_NOW:
-                # Off the message loop (see send_capability_check_result):
-                # a run is minutes of discovery + live self-tests and
-                # must not wedge the socket behind it (RUX-B-03).
-                _spawn_background(send_capability_check_result(conn, req_id, msg.payload.get("method")))
-
-            elif msg.type == EventType.CAPABILITY_CHECK_GET_HISTORY:
-                status_sum = engine_state.scheduler_manager.get_status_summary()
-                history = engine_state.scheduler_manager.get_history()
-                await ws.send_text(Event(
-                    type=EventType.CAPABILITY_CHECK_HISTORY_RESPONSE,
-                    request_id=req_id,
-                    payload={"summary": status_sum, "history": history},
-                ).to_json())
-
-            elif msg.type == EventType.ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST:
-                # The probes are synchronous (subprocess + urllib,
-                # ~7 s of timeouts on a dead network): run them on a
-                # worker thread so the event loop — and /health with
-                # it — never freezes behind them (RUX-B-05).
-                diag_logs = await asyncio.to_thread(run_environment_diagnostics)
-                # Determine overall summary status based on logs
-                failed_count = sum(1 for log in diag_logs if log["status"] == "FAILED")
-                await ws.send_text(Event(
-                    type=EventType.ENVIRONMENT_DIAGNOSTIC_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "summary": {"failed_count": failed_count},
-                        "history": diag_logs,
-                    },
-                ).to_json())
-
-            elif msg.type == EventType.REFRESH_MODELS_REQUEST:
-                # Off the message loop (see send_refresh_models_result):
-                # a refresh can take ~100 s of discovery and must not
-                # wedge the socket behind it (RUX-B-01).
-                _spawn_background(send_refresh_models_result(conn, req_id, dict(msg.payload)))
-
-            # -----------------------------------------------------------
-            # Tools, MCP, Plugins, Memory Events
-            # -----------------------------------------------------------
-            elif msg.type == EventType.TOOL_LIST_REQUEST:
-                from aether_engine.langgraph.nodes.supervisor import (
-                    SUPERVISOR_MEMORY_TOOLS,
-                )
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                from aether_engine.tools.policy import (
-                    KNOWN_NON_REGISTRY_TOOLS,
-                    resolve_policy_by_name,
-                )
-                from aether_engine.tools.registry import ToolRisk
-                
-                tool_registry = build_tool_registry(
-                    mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
-                )
-
-                def enrich_tool(d, name, risk, _registry=tool_registry):
-                    user_val = engine_state.user_config.tool_policies.get(name)
-                    # E2-F07: resolve through the SAME inputs enforcement
-                    # uses — the real registry (so a tool's registered
-                    # risk, not the EXECUTE fallback, drives the verdict)
-                    # and the live approval mode. Without them the list
-                    # reported "ask" for tools that actually run "allow".
-                    effective = resolve_policy_by_name(
-                        name,
-                        engine_state.user_config.tool_policies,
-                        _registry,
-                        approval_mode=engine_state.user_config.approval_mode,
-                    )
-                    d["risk"] = risk.value if isinstance(risk, ToolRisk) else risk
-                    d["effective_policy"] = effective
-                    d["policy_is_default"] = user_val is None
-                    d["always_allow_permitted"] = (risk == ToolRisk.READ_ONLY)
-                    d["policy"] = user_val or "Require Approval" # UI currently expects the raw setting in 'policy' too
-                    return d
-
-                all_tools = tool_registry.get_tools()
-                defs = []
-                for t in all_tools:
-                    d = t.to_definition()
-                    defs.append(enrich_tool(d, t.name, t.risk))
-
-                # Add Supervisor Memory Tools
-                for mt in SUPERVISOR_MEMORY_TOOLS:
-                    d = mt.copy()
-                    name = d["function"]["name"]
-                    risk = KNOWN_NON_REGISTRY_TOOLS.get(name, ToolRisk.EXECUTE)
-                    defs.append(enrich_tool(d, name, risk))
-
-                await ws.send_text(Event(
-                    type=EventType.TOOL_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"tools": defs, "approval_mode": engine_state.user_config.approval_mode},
-                ).to_json())
-
-            elif msg.type == EventType.AGENT_LIST_REQUEST:
-                agents = [
-                    {"id": "supervisor", "name": "Supervisor", "description": "Routes tasks and queries memory."},
-                    {"id": "planner", "name": "Planner Agent", "description": "Breaks goals into structured steps."},
-                    {"id": "coder", "name": "Coder Agent", "description": "Writes, tests, and debugs code."},
-                    {"id": "researcher", "name": "Researcher Agent", "description": "Gathers information and synthesizes findings."}
-                ]
-                
-                for agent in agents:
-                    agent["model"] = engine_state.user_config.agent_models.get(agent["id"], "inherit")
-                    agent["tools"] = engine_state.user_config.agent_tools.get(agent["id"])
-                
-                await ws.send_text(Event(
-                    type=EventType.AGENT_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"agents": agents},
-                ).to_json())
-
-            elif msg.type == EventType.AGENT_UPDATE_REQUEST:
-                agent_id = msg.payload.get("agent_id")
-                model = msg.payload.get("model")
-                tools = msg.payload.get("tools")
-
-                # S1-M9: validate before persisting anything; the
-                # update is atomic and success is only reported when
-                # something was actually saved.
-                _known_agent_ids = {"supervisor", "planner", "coder", "researcher"}
-                _error: str | None = None
-                if not agent_id:
-                    _error = "missing agent_id"
-                elif agent_id not in _known_agent_ids:
-                    _error = f"unknown agent_id: {agent_id}"
-                elif model is None and tools is None:
-                    _error = "nothing to update"
-                elif model is not None and model != "inherit":
-                    if not isinstance(model, str) or ":" not in model:
-                        _error = f"invalid model format: {model!r} (expected 'provider:model' or 'inherit')"
-                    else:
-                        _provider, _model_id = model.split(":", 1)
-                        if not _provider or not _model_id:
-                            _error = f"invalid model format: {model!r} (expected 'provider:model' or 'inherit')"
-                        else:
-                            _known_providers: set[str] = set(
-                                engine_state.configured_providers or []
-                            )
-                            _known_providers.update(
-                                (engine_state.user_config.provider_models or {}).keys()
-                            )
-                            try:
-                                _known_providers.update(
-                                    entry.provider
-                                    for entry in engine_state.model_registry.list_all_models()
-                                )
-                            except Exception:  # noqa: BLE001, S110 — best-effort enrichment: a registry listing failure must not block validation; config-known providers are still checked
-                                pass
-                            if _provider not in _known_providers:
-                                _error = f"unknown provider: {_provider}"
-
-                if _error is not None:
-                    await ws.send_text(Event(
-                        type=EventType.AGENT_UPDATE_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": False, "agent_id": agent_id, "error": _error},
-                    ).to_json())
-                else:
-                    if model is not None:
-                        engine_state.user_config.agent_models[agent_id] = model
-                    if tools is not None:
-                        engine_state.user_config.agent_tools[agent_id] = tools
-                    # E1-10: a save failure is reported in the same
-                    # vocabulary, not raised out of the handler.
-                    save_err = _try_save_config()
-                    if save_err is not None:
-                        await ws.send_text(Event(
-                            type=EventType.AGENT_UPDATE_RESPONSE,
-                            request_id=req_id,
-                            payload={"success": False, "agent_id": agent_id,
-                                     "error": f"Agent update could not be saved: {save_err}"},
-                        ).to_json())
-                    else:
-                        await ws.send_text(Event(
-                            type=EventType.AGENT_UPDATE_RESPONSE,
-                            request_id=req_id,
-                            payload={"success": True, "agent_id": agent_id},
-                        ).to_json())
-
-            elif msg.type == EventType.TOOL_POLICY_SET_REQUEST:
-                tool_name = msg.payload.get("tool_name")
-                policy = msg.payload.get("policy")
-                response_payload = {"success": True, "tool_name": tool_name, "policy": policy}
-
-                if tool_name and policy:
-                    from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                    from aether_engine.tools.policy import tool_risk_by_name
-                    from aether_engine.tools.registry import ToolRisk
-
-                    risk = ToolRisk.EXECUTE
-                    try:
-                        # E2-F07: gate on the tool's risk in the FULL
-                        # registry — the legacy-factory reconstruction
-                        # this replaces knew nothing of the filesystem,
-                        # codebase, browser or MCP tools, so safe
-                        # registered tools (read_file, project_tree,
-                        # READ_ONLY MCP tools) hit the EXECUTE default
-                        # and "Always Allow" was wrongly downgraded.
-                        setter_registry = build_tool_registry(
-                            mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
-                        )
-                        risk = tool_risk_by_name(tool_name, setter_registry)
-                    except Exception:  # best-effort risk lookup: on failure the fail-closed EXECUTE default above stands
-                        logger.debug(f"Tool risk lookup failed for {tool_name}", exc_info=True)
-
-                    if policy == "Always Allow" and risk != ToolRisk.READ_ONLY:
-                        policy = "Require Approval"
-                        response_payload["policy"] = policy
-                        response_payload["message"] = "Always Allow is not permitted for risky tools. Downgraded to Require Approval."
-                        # E1-12: through the engine's own audit
-                        # logger — a fresh AuditLogger() wrote to
-                        # the default path, splitting the record
-                        # from this session's.
-                        engine_state.audit_logger.log_event("TOOL_POLICY_IGNORED", {"tool_name": tool_name, "requested": "Always Allow", "reason": "Risky tool"})
-
-                    engine_state.user_config.tool_policies[tool_name] = policy
-                    # E1-10: a save failure flips the verdict rather
-                    # than raising out of the handler.
-                    save_err = _try_save_config()
-                    if save_err is not None:
-                        response_payload["success"] = False
-                        response_payload["error"] = f"Tool policy could not be saved: {save_err}"
-                else:
-                    # E1-12: nothing was (or could be) saved, so the
-                    # pre-built success:true above was a lie — the
-                    # refusal is reported honestly instead.
-                    response_payload["success"] = False
-                    response_payload["error"] = "tool_name and policy are required"
-
-                await ws.send_text(Event(
-                    type=EventType.TOOL_POLICY_SET_RESPONSE,
-                    request_id=req_id,
-                    payload=response_payload,
-                ).to_json())
-
-            elif msg.type == EventType.APPROVAL_MODE_SET_REQUEST:
-                # Epic 2, E2-08: approval mode selector in Settings.
-                mode = msg.payload.get("mode")
-                success = mode in ("ask", "write")
-                mode_error: str | None = None
-                if success:
-                    engine_state.user_config.approval_mode = mode
-                    # E1-10: a save failure flips success rather
-                    # than raising out of the handler.
-                    save_err = _try_save_config()
-                    if save_err is not None:
-                        success = False
-                        mode_error = f"Approval mode could not be saved: {save_err}"
-                    else:
-                        engine_state.audit_logger.log_event("APPROVAL_MODE_SET", {"mode": mode})
-                approval_payload: dict[str, Any] = {
-                    "success": success,
-                    "mode": engine_state.user_config.approval_mode}
-                if mode_error is not None:
-                    approval_payload["error"] = mode_error
-                await ws.send_text(Event(
-                    type=EventType.APPROVAL_MODE_SET_RESPONSE,
-                    request_id=req_id,
-                    payload=approval_payload,
-                ).to_json())
-
-            elif msg.type == EventType.MCP_SERVER_LIST_REQUEST:
-                from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-                servers = GLOBAL_MCP_REGISTRY.list_servers_with_status()
-                await ws.send_text(Event(
-                    type=EventType.MCP_SERVER_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "servers": servers,
-                        "config_error": getattr(GLOBAL_MCP_REGISTRY, "config_load_error", None),
-                    },
-                ).to_json())
-
-            elif msg.type == EventType.CONFIG_GET_REQUEST:
-                await ws.send_text(Event(
-                    type=EventType.CONFIG_GET_RESPONSE,
-                    request_id=req_id,
-                    payload={"config": engine_state.user_config.to_dict()},
-                ).to_json())
-
-            elif msg.type == EventType.CONFIG_UPDATE_REQUEST:
-                config_data = msg.payload.get("config", {})
-                if not isinstance(config_data, dict):
-                    # E1-01: a non-object config (a string passes the
-                    # "disable_fallbacks" membership test below as a
-                    # substring, then TypeErrors on indexing) is
-                    # refused with an answer, in the same vocabulary
-                    # as the E6-F05 refusal — nothing applied, nothing
-                    # saved, session alive.
-                    await ws.send_text(Event(
-                        type=EventType.CONFIG_UPDATE_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": False, "error": "Config update must be a JSON object of settings."},
-                    ).to_json())
-                    continue
-                # E6-F05: the fields handed over by Epics 1 and 2
-                # (spawn policy, prewalk, output schemas, compaction
-                # thresholds, path rules) are validated strictly —
-                # a malformed write is refused with an error reply
-                # and NOTHING in the update is applied or saved,
-                # rather than silently dropped or coerced the way
-                # the tolerant config-file loader treats bad values.
-                from aether_engine.config_updates import (
-                    HANDED_OFF_FIELDS,
-                    validate_handed_off_updates,
-                )
-                handed_off_error = None
-                handed_off_values: dict = {}
-                if isinstance(config_data, dict) and any(
-                        field in config_data for field in HANDED_OFF_FIELDS):
-                    try:
-                        handed_off_values = validate_handed_off_updates(config_data)
-                    except ValueError as exc:
-                        handed_off_error = str(exc)
-                if handed_off_error is not None:
-                    await ws.send_text(Event(
-                        type=EventType.CONFIG_UPDATE_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": False, "error": handed_off_error},
-                    ).to_json())
-                    continue
-                # E6-F07: snapshot before mutating — if the save
-                # below fails, live state rolls back to exactly this
-                # and the failure is answered, never swallowed. (The
-                # F05 refusal above runs before this point and applies
-                # nothing, so it needs no snapshot.)
-                previous_config = copy.deepcopy(engine_state.user_config)
-                for field, value in handed_off_values.items():
-                    setattr(engine_state.user_config, field, value)
-                if "disable_fallbacks" in config_data:
-                    engine_state.user_config.disable_fallbacks = config_data["disable_fallbacks"]
-                if "onboarding_completed" in config_data:
-                    engine_state.user_config.onboarding_completed = bool(config_data["onboarding_completed"])
-                if "fallback_chain" in config_data:
-                    engine_state.user_config.fallback_chain = config_data["fallback_chain"]
-                if "vad_threshold" in config_data:
-                    try:
-                        engine_state.user_config.vad_threshold = float(config_data["vad_threshold"])
-                    except (TypeError, ValueError):
-                        pass
-                if "silence_duration_ms" in config_data:
-                    try:
-                        engine_state.user_config.silence_duration_ms = int(config_data["silence_duration_ms"])
-                    except (TypeError, ValueError):
-                        pass
-                if "smart_turn_sensitivity" in config_data:
-                    try:
-                        engine_state.user_config.smart_turn_sensitivity = min(
-                            1.0, max(0.0, float(config_data["smart_turn_sensitivity"])))
-                    except (TypeError, ValueError):
-                        pass
-                # FUP-1: only the two literals apply; anything else
-                # is ignored, matching the tuning fields above. The
-                # value is read live per tool call (execute_tool
-                # passes user_config.approval_binding_mode into
-                # registry.execute), so this takes effect on the
-                # next call — no restart, no session rebuild.
-                if (
-                    "approval_binding_mode" in config_data
-                    and config_data["approval_binding_mode"] in ("rebind", "carry")
-                ):
-                    engine_state.user_config.approval_binding_mode = config_data["approval_binding_mode"]
-                if "snip_hotkey" in config_data:
-                    engine_state.user_config.snip_hotkey = str(config_data["snip_hotkey"])
-                try:
-                    save_config(engine_state.user_config)
-                except OSError as exc:
-                    # E6-F07: a failed save is a non-event — roll the
-                    # live state back and answer in the same
-                    # {success: False, error} vocabulary as the F05
-                    # refusal. Uncaught, this OSError killed the
-                    # handler and the client waited forever.
-                    engine_state.user_config = previous_config
-                    await ws.send_text(Event(
-                        type=EventType.CONFIG_UPDATE_RESPONSE,
-                        request_id=req_id,
-                        payload={
-                            "success": False,
-                            "error": f"Settings could not be saved: {exc}",
-                        },
-                    ).to_json())
-                    continue
-                await ws.send_text(Event(
-                    type=EventType.CONFIG_UPDATE_RESPONSE,
-                    request_id=req_id,
-                    payload={"success": True, "config": engine_state.user_config.to_dict()},
-                ).to_json())
-
-            elif msg.type == EventType.CONFIG_RESET_REQUEST:
-                # Epic 6, E6-06: reset-to-defaults that really resets —
-                # the user config is replaced with a fresh default
-                # UserConfig and saved. API keys live in the secret
-                # store (not the config) and files on disk are never
-                # touched; the UI confirm says exactly that.
-                # E6-F07: keep the pre-reset config until the save is
-                # durable — a failed save restores it and is answered
-                # with {success: False, error}; nothing is reset.
-                previous_config = engine_state.user_config
-                engine_state.user_config = UserConfig()
-                try:
-                    save_config(engine_state.user_config)
-                except OSError as exc:
-                    engine_state.user_config = previous_config
-                    await ws.send_text(Event(
-                        type=EventType.CONFIG_RESET_RESPONSE,
-                        request_id=req_id,
-                        payload={
-                            "success": False,
-                            "error": f"Settings reset could not be saved: {exc}",
-                        },
-                    ).to_json())
-                    continue
-                # E6-F04: the live fields that mirror the config
-                # (active provider/model, configured providers, skill
-                # roots) are independent state — re-derive them from
-                # the reset config exactly as initialize() does, or
-                # HELLO and the skill catalogue keep serving the
-                # pre-reset world until a restart.
-                engine_state.resync_active_state()
-                engine_state.audit_logger.log_event("CONFIG_RESET", {})
-                await ws.send_text(Event(
-                    type=EventType.CONFIG_RESET_RESPONSE,
-                    request_id=req_id,
-                    payload={"success": True, "config": engine_state.user_config.to_dict()},
-                ).to_json())
-
-            elif msg.type == EventType.AUXILIARY_MODEL_SET_REQUEST:
-                # Phase 9, B1: per-task-class auxiliary model override. The Settings
-                # UI sends {task, provider, model}; model "auto" clears the override.
-                # Phase 10.3, B1: only task classes in AUXILIARY_TASK_CLASSES are
-                # accepted. The other six (web, compression, skills, approval, mcp,
-                # title) have no engine call site, so accepting them would be a
-                # placebo — success:true for an override nothing ever reads.
-                # Stale entries for those tasks (e.g. from a config file written
-                # before Phase 10.3) are pruned here so the echoed dict never
-                # advertises an override the engine will not honor.
-                task = msg.payload.get("task", "")
-                provider = msg.payload.get("provider", "")
-                model = msg.payload.get("model", "auto")
-                ok, error = True, ""
-                if task not in AUXILIARY_TASK_CLASSES:
-                    ok, error = False, f"Unknown task class '{task}'."
-                elif model != "auto":
-                    if not provider or not model:
-                        ok, error = False, "Provider and model are required (or 'auto')."
-                    elif provider not in (engine_state.configured_providers or []):
-                        ok, error = False, f"Provider '{provider}' is not configured."
-                if ok:
-                    if model == "auto":
-                        engine_state.user_config.auxiliary_models.pop(task, None)
-                    else:
-                        engine_state.user_config.auxiliary_models[task] = f"{provider}:::{model}"
-                    # E1-10: a save failure flips ok/error rather
-                    # than raising out of the handler.
-                    save_err = _try_save_config()
-                    if save_err is not None:
-                        ok, error = False, f"Settings could not be saved: {save_err}"
-                    else:
-                        engine_state.audit_logger.log_event("AUXILIARY_MODEL_SET", {
-                            "task": task, "provider": provider, "model": model,
-                        })
-                stale = [t for t in engine_state.user_config.auxiliary_models
-                         if t not in AUXILIARY_TASK_CLASSES]
-                if stale:
-                    for t in stale:
-                        engine_state.user_config.auxiliary_models.pop(t, None)
-                    save_err = _try_save_config()
-                    if save_err is not None:
-                        ok, error = False, f"Settings could not be saved: {save_err}"
-                    else:
-                        engine_state.audit_logger.log_event("AUXILIARY_MODEL_PRUNED", {
-                            "tasks": stale,
-                            "reason": "task class has no engine call site",
-                        })
-                await ws.send_text(Event(
-                    type=EventType.AUXILIARY_MODEL_SET_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "success": ok,
-                        "error": error,
-                        "auxiliary_models": dict(engine_state.user_config.auxiliary_models),
-                    },
-                ).to_json())
-
-            elif msg.type == EventType.REASONING_EFFORT_SET_REQUEST:
-                # Phase 9, B2: persist the user's reasoning-effort preference so the
-                # engine (not just localStorage) can act on it.
-                effort = msg.payload.get("effort", "")
-                ok, error = True, ""
-                if effort not in ("standard", "medium", "high"):
-                    ok, error = False, f"Invalid reasoning effort '{effort}'."
-                if ok:
-                    engine_state.user_config.reasoning_effort = effort
-                    # E1-10: a save failure flips ok/error rather
-                    # than raising out of the handler.
-                    save_err = _try_save_config()
-                    if save_err is not None:
-                        ok, error = False, f"Settings could not be saved: {save_err}"
-                    else:
-                        engine_state.audit_logger.log_event("REASONING_EFFORT_SET", {"effort": effort})
-                await ws.send_text(Event(
-                    type=EventType.REASONING_EFFORT_SET_RESPONSE,
-                    request_id=req_id,
-                    payload={"success": ok, "error": error, "effort": engine_state.user_config.reasoning_effort},
-                ).to_json())
-
-            elif msg.type == EventType.MCP_SERVER_ADD_REQUEST:
-                from aether_engine.mcp.registry import (
-                    GLOBAL_MCP_REGISTRY,
-                    MCPConfigError,
-                    redact_mcp_config_for_ui,
-                )
-                name = msg.payload.get("name")
-                config = msg.payload.get("config", {})
-                ok, error = True, ""
-                if name and config:
-                    try:
-                        GLOBAL_MCP_REGISTRY.add_server(name, config)
-                    except (MCPConfigError, OSError) as e:
-                        # E3-F04: a storage OSError from the config
-                        # save must answer success:false like a
-                        # validation error — uncaught, it ended the
-                        # websocket session with no response at all.
-                        ok, error = False, str(e)
-                else:
-                    ok, error = False, "Server name and config are required."
-                await ws.send_text(Event(
-                    type=EventType.MCP_SERVER_ADD_RESPONSE,
-                    request_id=req_id,
-                    # S1: never echo header/env values back to the UI.
-                    payload={"success": ok, "name": name, "config": redact_mcp_config_for_ui(config), "error": error},
-                ).to_json())
-
-            elif msg.type == EventType.MCP_SERVER_REMOVE_REQUEST:
-                # Off the message loop (see send_mcp_server_remove_result):
-                # removal closes any live session at the connect
-                # timeout and must not wedge the socket (RUX-B-04).
-                _spawn_background(send_mcp_server_remove_result(conn, 
-                    req_id, msg.payload.get("name")))
-
-            elif msg.type == EventType.MCP_SERVER_UPDATE_REQUEST:
-                # Off the message loop (see send_mcp_server_update_result):
-                # disabling a server disconnects it at the connect
-                # timeout and must not wedge the socket (RUX-B-04).
-                _spawn_background(send_mcp_server_update_result(conn, 
-                    req_id, msg.payload.get("name"),
-                    msg.payload.get("auto_connect"), msg.payload.get("enabled")))
-
-            elif msg.type == EventType.MCP_SERVER_CONNECT_REQUEST:
-                # Off the message loop (see send_mcp_server_connect_result):
-                # a connect runs at the server's connect timeout —
-                # 30 s default, up to 300 s — and must not wedge the
-                # socket behind it (RUX-B-04).
-                _spawn_background(send_mcp_server_connect_result(conn, 
-                    req_id, msg.payload.get("name")))
-
-            elif msg.type == EventType.MCP_SERVER_DISCONNECT_REQUEST:
-                # Off the message loop (see
-                # send_mcp_server_disconnect_result): closing a hung
-                # session is bounded by the same timeouts and must
-                # not wedge the socket behind it (RUX-B-04).
-                _spawn_background(send_mcp_server_disconnect_result(conn, 
-                    req_id, msg.payload.get("name")))
-
-            elif msg.type == EventType.MCP_SERVER_TEST_REQUEST:
-                # Off the message loop (see send_mcp_server_test_result):
-                # a test opens a throwaway session at the connect
-                # timeout and must not wedge the socket (RUX-B-04).
-                _spawn_background(send_mcp_server_test_result(conn, 
-                    req_id, msg.payload.get("name")))
-
-            elif msg.type == EventType.MCP_RESOURCE_LIST_REQUEST:
-                # Off the message loop (see send_mcp_resource_list_result):
-                # the list runs against the live session at its read
-                # timeout and must not wedge the socket (RUX-B-04).
-                _spawn_background(send_mcp_resource_list_result(conn, 
-                    req_id, msg.payload.get("name")))
-
-            elif msg.type == EventType.MCP_RESOURCE_READ_REQUEST:
-                # Off the message loop (see send_mcp_resource_read_result):
-                # the read runs against the live session at its read
-                # timeout and must not wedge the socket (RUX-B-04).
-                _spawn_background(send_mcp_resource_read_result(conn, 
-                    req_id, msg.payload.get("name"), msg.payload.get("uri"),
-                    msg.payload.get("session_id")))
-
-            elif msg.type == EventType.MCP_PROMPT_LIST_REQUEST:
-                # Off the message loop (see send_mcp_prompt_list_result):
-                # the list runs against the live session at its read
-                # timeout and must not wedge the socket (RUX-B-04).
-                _spawn_background(send_mcp_prompt_list_result(conn, 
-                    req_id, msg.payload.get("name")))
-
-            elif msg.type == EventType.MCP_PROMPT_RUN_REQUEST:
-                # Issue 007: run a prompt template and insert its messages
-                # into the current chat (same pattern as resources in
-                # 006, but with the prompt's own roles). Never auto-run:
-                # only an explicit Run / slash command reaches here.
-                # The arguments-type rejection is a pure payload check
-                # — instant, answered inline exactly as before; the run
-                # itself is off the message loop (see
-                # send_mcp_prompt_run_result): it awaits the server at
-                # its read timeout and must not wedge the socket
-                # (RUX-B-04).
-                name = msg.payload.get("name")
-                prompt_name = msg.payload.get("prompt")
-                arguments = msg.payload.get("arguments")
-                if arguments is not None and not isinstance(arguments, dict):
-                    await ws.send_text(Event(
-                        type=EventType.MCP_PROMPT_RUN_RESPONSE,
-                        request_id=req_id,
-                        payload={
-                            "success": False, "name": name, "prompt": prompt_name,
-                            "messages": [], "session_id": msg.payload.get("session_id"),
-                            "error": "MCP prompt arguments must be an object of string values.",
-                        },
-                    ).to_json())
-                else:
-                    _spawn_background(send_mcp_prompt_run_result(conn, 
-                        req_id, name, prompt_name, arguments,
-                        msg.payload.get("session_id")))
-
-            elif msg.type == EventType.PLUGIN_LIST_REQUEST:
-                plugins_dict = engine_state.plugin_installer.get_all()
-                # E7-F05: carry each plugin's canonical identity as a
-                # top-level "name". The stored records keep the name
-                # only under manifest.name and the registry keys ARE
-                # that name (install() keys by manifest.name), so
-                # serialising the bare values discarded the one field
-                # the Settings panel sends back on toggle/uninstall —
-                # both actions then missed the plugin entirely.
-                # Additive: existing consumers read only the array and
-                # each record's "enabled"/"manifest".
-                plugins_list = [
-                    {**record, "name": key}
-                    for key, record in plugins_dict.items()
-                ] if plugins_dict else []
-                await ws.send_text(Event(
-                    type=EventType.PLUGIN_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"plugins": plugins_list},
-                ).to_json())
-
-            elif msg.type == EventType.PLUGIN_INSTALL_REQUEST:
-                source = msg.payload.get("source")
-                try:
-                    # E1-08: prepare_install copies/inspects the
-                    # plugin source synchronously and scales with
-                    # plugin size — it runs on a worker thread, not
-                    # the receive loop.
-                    data = await asyncio.to_thread(
-                        engine_state.plugin_installer.prepare_install, source)
-                    # E1-06: sweep expired entries, then record this
-                    # one with its creation time + owning connection
-                    # (the stored VALUE stays the raw prepare
-                    # payload — it is sent to the client verbatim).
-                    prune_expired_plugin_installs()
-                    pending_plugin_installs[req_id] = data
-                    pending_plugin_install_created[req_id] = time.time()
-                    _own_plugin_install_ids.add(req_id)
-                    await ws.send_text(Event(
-                        type=EventType.PLUGIN_APPROVAL_REQUEST,
-                        request_id=req_id,
-                        payload={
-                            "plugin_name": data["manifest"].get("name", "Unknown"),
-                            "plugin_details": data,
-                        },
-                    ).to_json())
-                except Exception as e:  # noqa: BLE001 — handler boundary: any prepare failure is reported to the client in the response payload
-                    await ws.send_text(Event(
-                        type=EventType.PLUGIN_INSTALL_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": False, "error": str(e)},
-                    ).to_json())
-
-            elif msg.type == EventType.PLUGIN_APPROVAL_GRANTED:
-                # Off the message loop (see send_plugin_install_
-                # result): the install copy is synchronous and
-                # scales with plugin size (RUX-B-10). The pending
-                # entry is still popped here, in the loop, so a
-                # duplicate grant can never install twice.
-                prune_expired_plugin_installs()
-                data = pending_plugin_installs.pop(req_id, None)
-                pending_plugin_install_created.pop(req_id, None)
-                _own_plugin_install_ids.discard(req_id)
-                if data:
-                    _spawn_background(send_plugin_install_result(conn, req_id, data))
-                else:
-                    # E1-06: a grant naming an unknown or expired
-                    # install used to get NO reply at all — the UI
-                    # waited forever. It is answered like every
-                    # other failed install.
-                    await ws.send_text(Event(
-                        type=EventType.PLUGIN_INSTALL_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": False,
-                                 "error": "No pending plugin install for this approval (it may have expired)."},
-                    ).to_json())
-
-            elif msg.type == EventType.PLUGIN_APPROVAL_REJECTED:
-                pending_plugin_installs.pop(req_id, None)
-                pending_plugin_install_created.pop(req_id, None)
-                _own_plugin_install_ids.discard(req_id)
-                await ws.send_text(Event(
-                    type=EventType.PLUGIN_INSTALL_RESPONSE,
-                    request_id=req_id,
-                    payload={"success": False, "error": "Install rejected by user."},
-                ).to_json())
-
-            elif msg.type == EventType.PLUGIN_UNINSTALL_REQUEST:
-                # Off the message loop (see send_plugin_uninstall_
-                # result): the MCP disconnects await at the server
-                # timeout and the file work is synchronous (RUX-B-10).
-                _spawn_background(send_plugin_uninstall_result(conn, 
-                    req_id, msg.payload.get("name")))
-                    
-            elif msg.type == EventType.PLUGIN_TOGGLE_REQUEST:
-                # Off the message loop (see send_plugin_toggle_
-                # result): a disable awaits the MCP disconnects at
-                # the server timeout before its synchronous file
-                # work (RUX-B-10).
-                _spawn_background(send_plugin_toggle_result(conn, 
-                    req_id, msg.payload.get("name"), msg.payload.get("enabled", True)))
-
-            elif msg.type == EventType.MEMORY_EPISODES_REQUEST:
-                # Epic 4, E4-01/E4-04: through the facade; the payload
-                # also carries embedding health for Diagnostics.
-                # E1-11: answered from a background task — the
-                # backend reads are synchronous and scale with
-                # memory size (see send_memory_episodes_result).
-                _spawn_background(send_memory_episodes_result(conn, 
-                    req_id, msg.payload.get("limit", 50)))
-
-            elif msg.type == EventType.MEMORY_EPISODE_DELETE_REQUEST:
-                # Epic 4, E4-F08: the acknowledgement is derived from
-                # what the backend actually did — an unavailable
-                # backend, a missing id, a False result or a raised
-                # error is a failure, never a simulated success.
-                backend = backend_or_none(engine_state.user_config, context="memory episode delete")
-                task_id = msg.payload.get("task_id")
-                success, error = False, None
-                if backend is None:
-                    error = "The configured memory backend is unavailable (see engine log)."
-                elif not task_id:
-                    error = "task_id is required."
-                else:
-                    try:
-                        success = bool(backend.delete_episode(task_id))
-                    except Exception as e:  # noqa: BLE001 — handler boundary: a failed delete is reported to the client, never dressed up as success or allowed to kill the receive loop
-                        error = str(e)
-                if error is not None:
-                    engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
-                        "operation": "episode_delete", "task_id": task_id, "error": error})
-                episodes = await asyncio.to_thread(backend.list_episodes, limit=msg.payload.get("limit", 50)) if backend is not None and error is None else []
-                payload = {"success": success, "task_id": task_id, "episodes": episodes}
-                if error is not None:
-                    payload["error"] = error
-                await ws.send_text(Event(
-                    type=EventType.MEMORY_EPISODE_DELETE_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
-
-            elif msg.type == EventType.MEMORY_EPISODES_CLEAR_REQUEST:
-                backend = backend_or_none(engine_state.user_config, context="memory episodes clear")
-                success, error = False, None
-                if backend is None:
-                    error = "The configured memory backend is unavailable (see engine log)."
-                else:
-                    try:
-                        success = bool(backend.clear_episodes())
-                    except Exception as e:  # noqa: BLE001 — handler boundary: a failed clear is reported to the client, never dressed up as success or allowed to kill the receive loop
-                        error = str(e)
-                if error is not None:
-                    engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
-                        "operation": "episodes_clear", "error": error})
-                episodes = await asyncio.to_thread(backend.list_episodes, limit=msg.payload.get("limit", 50)) if backend is not None and error is None else []
-                payload = {"success": success, "episodes": episodes}
-                if error is not None:
-                    payload["error"] = error
-                await ws.send_text(Event(
-                    type=EventType.MEMORY_EPISODES_CLEAR_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
-            
-            elif msg.type == EventType.MEMORY_GRAPH_REQUEST:
-                # E1-11: answered from a background task — the fact
-                # list/search is a synchronous backend read (see
-                # send_memory_graph_result).
-                _spawn_background(send_memory_graph_result(conn, 
-                    req_id, msg.payload.get("query"),
-                    msg.payload.get("limit", 100),
-                    bool(msg.payload.get("include_history"))))
-
-            elif msg.type == EventType.MEMORY_FACT_DELETE_REQUEST:
-                # E4-F08: derived acknowledgement, same rule as the
-                # episode delete handler above.
-                backend = backend_or_none(engine_state.user_config, context="memory fact delete")
-                fact_id = msg.payload.get("fact_id")
-                success, error = False, None
-                if backend is None:
-                    error = "The configured memory backend is unavailable (see engine log)."
-                elif not fact_id:
-                    error = "fact_id is required."
-                else:
-                    try:
-                        success = bool(backend.delete_fact(fact_id))
-                    except Exception as e:  # noqa: BLE001 — handler boundary: a failed delete is reported to the client, never dressed up as success or allowed to kill the receive loop
-                        error = str(e)
-                if error is not None:
-                    engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
-                        "operation": "fact_delete", "fact_id": fact_id, "error": error})
-                facts = await asyncio.to_thread(backend.list_facts, limit=msg.payload.get("limit", 100)) if backend is not None and error is None else []
-                payload = {"success": success, "fact_id": fact_id, "facts": facts}
-                if error is not None:
-                    payload["error"] = error
-                await ws.send_text(Event(
-                    type=EventType.MEMORY_FACT_DELETE_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
-
-            elif msg.type == EventType.MEMORY_ENTITY_DELETE_REQUEST:
-                # E4-F08: derived acknowledgement. Backends that
-                # honestly cannot group by entity (Mem0, LangMem)
-                # raise NotImplementedError — that is an explicit
-                # failure reply here, not a dead socket.
-                backend = backend_or_none(engine_state.user_config, context="memory entity delete")
-                entity_name = msg.payload.get("entity_name")
-                success, error = False, None
-                if backend is None:
-                    error = "The configured memory backend is unavailable (see engine log)."
-                elif not entity_name:
-                    error = "entity_name is required."
-                else:
-                    try:
-                        success = bool(backend.delete_entity(entity_name))
-                    except Exception as e:  # noqa: BLE001 — handler boundary: a failed delete is reported to the client, never dressed up as success or allowed to kill the receive loop
-                        error = str(e)
-                if error is not None:
-                    engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
-                        "operation": "entity_delete", "entity_name": entity_name, "error": error})
-                facts = await asyncio.to_thread(backend.list_facts, limit=msg.payload.get("limit", 100)) if backend is not None and error is None else []
-                payload = {"success": success, "entity_name": entity_name, "facts": facts}
-                if error is not None:
-                    payload["error"] = error
-                await ws.send_text(Event(
-                    type=EventType.MEMORY_ENTITY_DELETE_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
-
-            elif msg.type == EventType.MEMORY_GRAPH_CLEAR_REQUEST:
-                backend = backend_or_none(engine_state.user_config, context="memory graph clear")
-                success, error = False, None
-                if backend is None:
-                    error = "The configured memory backend is unavailable (see engine log)."
-                else:
-                    try:
-                        success = bool(backend.clear_facts())
-                    except Exception as e:  # noqa: BLE001 — handler boundary: a failed clear is reported to the client, never dressed up as success or allowed to kill the receive loop
-                        error = str(e)
-                if error is not None:
-                    engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
-                        "operation": "graph_clear", "error": error})
-                facts = await asyncio.to_thread(backend.list_facts, limit=msg.payload.get("limit", 100)) if backend is not None and error is None else []
-                payload = {"success": success, "facts": facts}
-                if error is not None:
-                    payload["error"] = error
-                await ws.send_text(Event(
-                    type=EventType.MEMORY_GRAPH_CLEAR_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
-
-            elif msg.type == EventType.MEMORY_FACT_UPDATE_REQUEST:
-                # Epic 4, E4-03: edit one fact's text via the facade.
-                # E1-05: guarded exactly like its sibling handlers —
-                # this was the one memory-management handler whose
-                # backend call could raise straight out of the
-                # receive loop and kill the session.
-                backend = backend_or_none(engine_state.user_config, context="memory fact update")
-                fact_id = msg.payload.get("fact_id")
-                success, error = False, None
-                if backend is None:
-                    error = "The configured memory backend is unavailable (see engine log)."
-                elif not fact_id:
-                    error = "fact_id is required."
-                else:
-                    try:
-                        success = bool(backend.update_fact(fact_id, msg.payload.get("fact_text", "")))
-                    except Exception as e:  # noqa: BLE001 — handler boundary: a failed update is reported to the client, never dressed up as success or allowed to kill the receive loop
-                        error = str(e)
-                if error is not None:
-                    engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
-                        "operation": "fact_update", "fact_id": fact_id, "error": error})
-                facts = await asyncio.to_thread(
-                    backend.list_facts,
-                    limit=msg.payload.get("limit", 100),
-                    include_history=bool(msg.payload.get("include_history")),
-                ) if backend is not None and error is None else []
-                update_payload = {"success": success, "fact_id": fact_id, "facts": facts}
-                if error is not None:
-                    update_payload["error"] = error
-                await ws.send_text(Event(
-                    type=EventType.MEMORY_FACT_UPDATE_RESPONSE,
-                    request_id=req_id,
-                    payload=update_payload,
-                ).to_json())
-
-            elif msg.type == EventType.MEMORY_EXPORT_REQUEST:
-                # Epic 4, E4-03: the full memory as JSON (facts incl.
-                # superseded history + episodes) for the UI to save.
-                # Off the message loop (see send_memory_export_result):
-                # the export is synchronous and scales with memory
-                # size, so it runs on a worker thread (RUX-B-08).
-                _spawn_background(send_memory_export_result(conn, req_id))
-
-            elif msg.type == EventType.BACKUP_CREATE_REQUEST:
-                # Epic 10, E10-03: snapshot ~/.aether into a zip under
-                # the active workspace's AetherBackups folder.
-                try:
-                    from aether_engine.backup import create_backup
-
-                    roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
-                    stamp = time.strftime("%Y%m%d-%H%M%S")
-                    dest = Path(roots[0]) / "AetherBackups" / f"aether-backup-{stamp}.zip"
-                    manifest = await asyncio.to_thread(
-                        create_backup, dest,
-                        # E10-F02: consent is the boolean True only —
-                        # bool("false") is True, so truthiness at this
-                        # untyped boundary would include secrets.db
-                        # on a string "false".
-                        include_secrets=msg.payload.get("include_secrets") is True,
-                    )
-                    engine_state.audit_logger.log_event("BACKUP_CREATED", {
-                        "path": str(dest), "files": len(manifest["files"]),
-                        "include_secrets": manifest["include_secrets"],
-                    })
-                    payload = {"success": True, "path": str(dest), "files": len(manifest["files"]),
-                               "include_secrets": manifest["include_secrets"]}
-                except Exception as e:  # noqa: BLE001 — backup failure must surface, not crash the handler
-                    payload = {"success": False, "error": str(e)}
-                await ws.send_text(Event(
-                    type=EventType.BACKUP_CREATE_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
-
-            elif msg.type == EventType.BACKUP_RESTORE_REQUEST:
-                # Epic 10, E10-03: validate-then-write restore. The
-                # running engine keeps in-memory state, so the
-                # response is explicit that a restart applies it.
-                try:
-                    from aether_engine.backup import restore_backup
-
-                    result = await asyncio.to_thread(
-                        restore_backup, Path(str(msg.payload.get("path", "")))
-                    )
-                    engine_state.audit_logger.log_event("BACKUP_RESTORED", {
-                        "files": result["files"],
-                    })
-                    payload = {"success": True, "files": result["files"],
-                               "restart_required": True}
-                except Exception as e:  # noqa: BLE001 — restore failure must surface, not crash the handler
-                    payload = {"success": False, "error": str(e)}
-                await ws.send_text(Event(
-                    type=EventType.BACKUP_RESTORE_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
-
-            elif msg.type == EventType.DIAGNOSTICS_EXPORT_REQUEST:
-                # Epic 10, E10-04: redacted bundle — config scrubbed by
-                # the audit redactor, memory as counts only.
-                # Off the message loop (see send_diagnostics_export_
-                # result): the bundle build is synchronous bulk work,
-                # so it runs on a worker thread (RUX-B-08).
-                _spawn_background(send_diagnostics_export_result(conn, req_id))
-
-            elif msg.type == EventType.VERSION_CHECK_REQUEST:
-                # Epic 10, E10-05: report-only update check against the
-                # project's GitHub releases. Nothing downloads or
-                # installs — the user decides.
-                # Off the message loop (see send_version_check_result):
-                # the check is live HTTP with a 10 s timeout (RUX-B-08).
-                _spawn_background(send_version_check_result(conn, req_id))
-
-            elif msg.type == EventType.SKILL_LIST_REQUEST:
-                from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-                skills = [s.__dict__ for s in GLOBAL_SKILL_MANAGER.list_all()]
-                await ws.send_text(Event(
-                    type=EventType.SKILL_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"skills": skills},
-                ).to_json())
-
-            elif msg.type == EventType.SKILL_TOGGLE_REQUEST:
-                # Epic 7, E7-03: enable/disable a skill. Disabled
-                # skills leave the manager's index at once — the
-                # agent's available set (list/match/slash/load) no
-                # longer contains them; Settings still lists them
-                # with enabled=False so they can be re-enabled.
-                from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-
-                skill_name = (msg.payload.get("name") or "").strip()
-                want_enabled = bool(msg.payload.get("enabled", True))
-                known = any(s.name == skill_name for s in GLOBAL_SKILL_MANAGER.list_all())
-                # E7-F04: a failed disable-state save must still get
-                # a reply — the toggle is then a non-event (the
-                # manager changed nothing) and the response reports
-                # the skill's actual current state, never the
-                # requested one.
-                save_error = None
-                if known:
-                    try:
-                        GLOBAL_SKILL_MANAGER.set_disabled(skill_name, not want_enabled)
-                    except Exception as e:  # noqa: BLE001 — the toggle must always reply; the session must survive
-                        save_error = str(e)
-                        logger.error(
-                            "Skill toggle for %r failed to persist: %s",
-                            skill_name, e)
-                payload = {
-                    "success": known and save_error is None,
-                    "name": skill_name,
-                    "enabled": (
-                        GLOBAL_SKILL_MANAGER.is_enabled(skill_name)
-                        if known else False
-                    ),
-                    "skills": [s.__dict__ for s in GLOBAL_SKILL_MANAGER.list_all()],
-                }
-                if save_error is not None:
-                    payload["error"] = save_error
-                await ws.send_text(Event(
-                    type=EventType.SKILL_TOGGLE_RESPONSE,
-                    request_id=req_id,
-                    payload=payload,
-                ).to_json())
-
-            elif msg.type == EventType.SLASH_COMMAND_LIST_REQUEST:
-                from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-                from aether_engine.skills.slash_registry import GLOBAL_SLASH_REGISTRY
-                commands = [c.to_dict() for c in GLOBAL_SLASH_REGISTRY.get_all()]
-                
-                # Combine dynamic skill commands
-                skill_commands = []
-                for s in GLOBAL_SKILL_MANAGER.list_all():
-                    # E7-F11: list_all() is the management listing
-                    # (Settings needs disabled skills visible for
-                    # re-enable) — the advertised command list is an
-                    # invocation path, so disabled skills are not
-                    # offered here.
-                    if not s.enabled:
-                        continue
-                    for cmd_str in s.slash_commands:
-                        skill_commands.append({
-                            "command": cmd_str,
-                            "description": f"Trigger skill: {s.name} - {s.description}",
-                            "type": "skill_invoke",
-                            "target": s.name,
-                            "aliases": [],
-                            "flags": []
-                        })
-                
-                # De-duplicate by command name
-                all_commands = {c["command"]: c for c in commands + skill_commands}
-                
-                await ws.send_text(Event(
-                    type=EventType.SLASH_COMMAND_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"commands": list(all_commands.values())},
-                ).to_json())
-
-            elif msg.type == EventType.WORKSPACE_LIST_REQUEST:
-                roots = engine_state.user_config.workspace_roots or []
-                # Per-workspace sessions, slice 3 (additive): each
-                # row gains the count of sessions bound to it, and
-                # the reply gains the unbound ("No workspace") count,
-                # so the Projects view can render filing state — and
-                # the Q7 removal confirmation its count — without a
-                # second call.
-                counts, unbound_count = await _workspace_session_counts()
-                workspaces = []
-                for idx, r in enumerate(roots):
-                    p = Path(r)
-                    workspaces.append({
-                        "path": r,
-                        "name": p.name,
-                        "is_indexed": False,  # No real indexing backend yet
-                        # Epic 6, E6-04: the first root is the active
-                        # workspace; `exists` drives the missing-folder
-                        # state in the Projects view.
-                        "is_active": idx == 0,
-                        "exists": p.is_dir(),
-                        "session_count": counts.get(r, 0),
-                    })
-                await ws.send_text(Event(
-                    type=EventType.WORKSPACE_LIST_RESPONSE,
-                    request_id=req_id,
-                    payload={"workspaces": workspaces,
-                             "unbound_session_count": unbound_count},
-                ).to_json())
-
-            elif msg.type == EventType.WORKSPACE_ADD_REQUEST:
-                # Per-workspace sessions, slice 2 (grill Q2/Q8): a
-                # root's identity is its canonical form. The incoming
-                # path is canonicalised BEFORE the duplicate check,
-                # so a second spelling of a configured folder (a
-                # trailing slash, a symlink, a dotted path) is refused
-                # and the reply points at the existing entry instead
-                # of adding a twin.
-                # E1-01: the path rides an untrusted payload — a
-                # non-string path coerces to empty (answered below
-                # as "Path empty") instead of raising AttributeError
-                # into the receive loop. Same guard in the REMOVE
-                # and SET_ACTIVE branches below.
-                _raw_ws_path = msg.payload.get("path")
-                ws_path = _raw_ws_path.strip() if isinstance(_raw_ws_path, str) else ""
-                roots = engine_state.user_config.workspace_roots
-                existing = find_workspace_root(roots, ws_path)
-                if ws_path and existing is None:
-                    canonical = canonical_workspace_root(ws_path)
-                    roots.append(canonical)
-                    # E1-10: a save failure is answered, not raised.
-                    save_err = _try_save_config()
-                    if save_err is not None:
-                        await ws.send_text(Event(
-                            type=EventType.WORKSPACE_ADD_RESPONSE,
-                            request_id=req_id,
-                            payload={"success": False,
-                                     "error": f"Workspace could not be saved: {save_err}"},
-                        ).to_json())
-                    else:
-                        from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-                        GLOBAL_SKILL_MANAGER.update_workspace_roots(roots)
-                        p = Path(canonical)
-                        await ws.send_text(Event(
-                            type=EventType.WORKSPACE_ADD_RESPONSE,
-                            request_id=req_id,
-                            # E6-F11: the reply carries the same badge
-                            # fields WORKSPACE_LIST_RESPONSE computes
-                            # (first root is active; `exists` drives the
-                            # missing-folder state), so the Projects view
-                            # renders the new row correctly from the reply
-                            # itself instead of waiting for a LIST refetch.
-                            payload={"success": True, "workspace": {
-                                "path": canonical, "name": p.name, "is_indexed": False,
-                                "is_active": len(roots) == 1,
-                                "exists": p.is_dir(),
-                            }},
-                        ).to_json())
-                elif existing is not None:
-                    p = Path(existing)
-                    await ws.send_text(Event(
-                        type=EventType.WORKSPACE_ADD_RESPONSE,
-                        request_id=req_id,
-                        # Q8 refusal: `exists` + the existing entry
-                        # (same badge shape as a LIST row) let the
-                        # Projects view highlight the real workspace
-                        # instead of dead-ending on an error string.
-                        payload={"success": False, "exists": True,
-                                 "error": "Path already exists",
-                                 "workspace": {
-                                     "path": existing, "name": p.name,
-                                     "is_indexed": False,
-                                     "is_active": roots.index(existing) == 0,
-                                     "exists": p.is_dir(),
-                                 }},
-                    ).to_json())
-                else:
-                    await ws.send_text(Event(
-                        type=EventType.WORKSPACE_ADD_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": False, "error": "Path empty"},
-                    ).to_json())
-
-            elif msg.type == EventType.WORKSPACE_REMOVE_REQUEST:
-                # Slice 2: removal addresses the canonical identity —
-                # any spelling of the folder removes its one stored
-                # entry, and the reply names the canonical root that
-                # was actually removed (slice 3 unbinds that root's
-                # sessions by this value).
-                _raw_ws_path = msg.payload.get("path")
-                ws_path = _raw_ws_path.strip() if isinstance(_raw_ws_path, str) else ""
-                removed = remove_workspace_root(
-                    engine_state.user_config.workspace_roots, ws_path)
-                if removed is not None:
-                    # E1-10: a save failure is answered, not raised.
-                    save_err = _try_save_config()
-                    if save_err is not None:
-                        await ws.send_text(Event(
-                            type=EventType.WORKSPACE_REMOVE_RESPONSE,
-                            request_id=req_id,
-                            payload={"success": False,
-                                     "error": f"Workspace removal could not be saved: {save_err}"},
-                        ).to_json())
-                    else:
-                        from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-                        GLOBAL_SKILL_MANAGER.update_workspace_roots(engine_state.user_config.workspace_roots)
-                        # Slice 3 (grill Q7): the removed root's sessions
-                        # fall back to unbound — removal never deletes a
-                        # session — and the reply reports how many were
-                        # unbound, keyed by the canonical root removed.
-                        unbound_sessions = await _unbind_sessions_bound_to(removed)
-                        await ws.send_text(Event(
-                            type=EventType.WORKSPACE_REMOVE_RESPONSE,
-                            request_id=req_id,
-                            payload={"success": True, "path": removed,
-                                     "unbound_sessions": unbound_sessions},
-                        ).to_json())
-                else:
-                    await ws.send_text(Event(
-                        type=EventType.WORKSPACE_REMOVE_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": False, "error": "Path not found"},
-                    ).to_json())
-
-            elif msg.type == EventType.WORKSPACE_INDEX_START_REQUEST:
-                # Epic 8, E8-3.2: consent-first indexing (grill Q17).
-                # Without confirm this is the consent preview: counts,
-                # size, embedder and destination, nothing started and
-                # nothing mutated. With confirm, consent is recorded,
-                # indexing runs in the background with PROGRESS pushes,
-                # and the watcher keeps the index fresh afterwards.
-                from aether_engine.rag.prose_indexer import get_prose_indexer
-
-                indexer = get_prose_indexer()
-                ws_root = msg.payload.get("workspace_root", "")
-                confirm = bool(msg.payload.get("confirm"))
-                req_embedder = msg.payload.get("embedder")
-                estimate = await asyncio.to_thread(indexer.estimate, ws_root)
-                if confirm and ws_root:
-                    if req_embedder:
-                        await asyncio.to_thread(indexer.set_embedder, req_embedder)
-                    await asyncio.to_thread(indexer.grant_consent, ws_root)
-
-                    async def _run_index(root=ws_root, indexer=indexer, req_id=req_id):
-                        async def _progress(**kw):
-                            try:
-                                await ws.send_text(Event(
-                                    type=EventType.WORKSPACE_INDEX_PROGRESS,
-                                    request_id=req_id,
-                                    payload=kw,
-                                ).to_json())
-                            except Exception:  # a dead socket must not kill indexing
-                                logger.debug("Index progress push failed", exc_info=True)
-
-                        try:
-                            await indexer.index_workspace(root, progress_cb=_progress)
-                        except Exception:
-                            # Background index pass: logged, never
-                            # propagated into the socket loop.
-                            logger.exception("Workspace indexing failed for %s", root)
-                        indexer.start_watching(root)
-
-                    _spawn_background(_run_index())
-                await ws.send_text(Event(
-                    type=EventType.WORKSPACE_INDEX_START_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "started": bool(confirm and ws_root),
-                        "estimated_files": estimate["estimated_files"],
-                        "estimated_bytes": estimate["estimated_bytes"],
-                        "embedder": indexer.embedder,
-                        "destination": str(indexer.store.db_path),
-                    },
-                ).to_json())
-
-            elif msg.type == EventType.WORKSPACE_INDEX_STATUS_REQUEST:
-                from aether_engine.rag.prose_indexer import get_prose_indexer
-
-                indexer = get_prose_indexer()
-                status_payload = await asyncio.to_thread(
-                    indexer.status, msg.payload.get("workspace_root"))
-                await ws.send_text(Event(
-                    type=EventType.WORKSPACE_INDEX_STATUS_RESPONSE,
-                    request_id=req_id,
-                    payload=status_payload,
-                ).to_json())
-
-            elif msg.type == EventType.WORKSPACE_INDEX_PAUSE_REQUEST:
-                from aether_engine.rag.prose_indexer import get_prose_indexer
-
-                indexer = get_prose_indexer()
-                pause = bool(msg.payload.get("pause", False))
-                if pause:
-                    indexer.pause()
-                else:
-                    indexer.resume()
-                await ws.send_text(Event(
-                    type=EventType.WORKSPACE_INDEX_PAUSE_RESPONSE,
-                    request_id=req_id,
-                    payload={"paused": indexer.paused},
-                ).to_json())
-
-            elif msg.type == EventType.WORKSPACE_INDEX_CONFIG_REQUEST:
-                from aether_engine.rag.prose_indexer import get_prose_indexer
-
-                indexer = get_prose_indexer()
-                req_embedder = msg.payload.get("embedder")
-                old_embedder = indexer.embedder
-                reindex_required = False
-                index_save_err: str | None = None
-                if req_embedder and req_embedder != old_embedder:
-                    reindex_required = True
-                    await asyncio.to_thread(indexer.set_embedder, req_embedder)
-                    # N02: the SAME switch invalidates episodic
-                    # vectors — they are stamped per model, and rows
-                    # from the old embedder are deleted here so none
-                    # stays recallable in the interim; the episodic
-                    # backfill rebuilds them under the new model.
-                    from aether_engine.memory.episodic import (
-                        reset_episodic_embeddings_for_embedder,
-                    )
-                    await asyncio.to_thread(
-                        reset_episodic_embeddings_for_embedder, req_embedder)
-                    if hasattr(engine_state, "user_config") and engine_state.user_config:
-                        engine_state.user_config.embedding_model = req_embedder
-                        # E1-10: a save failure flips ok, not the
-                        # connection.
-                        index_save_err = _try_save_config()
-                index_payload: dict[str, Any] = {
-                    "ok": index_save_err is None,
-                    "reindex_required": reindex_required}
-                if index_save_err is not None:
-                    index_payload["error"] = (
-                        f"Embedding model could not be saved: {index_save_err}")
-                await ws.send_text(Event(
-                    type=EventType.WORKSPACE_INDEX_CONFIG_RESPONSE,
-                    request_id=req_id,
-                    payload=index_payload,
-                ).to_json())
-
-            elif msg.type == EventType.WORKSPACE_SET_ACTIVE_REQUEST:
-                # Epic 6, E6-04: the active workspace is the first
-                # root (containment, skills, and task defaults all
-                # key off roots[0]); activating = move to front.
-                # Slice 2: the request addresses the canonical
-                # identity — any spelling of the folder activates its
-                # one stored (canonical) entry.
-                _raw_ws_path = msg.payload.get("path")
-                ws_path = _raw_ws_path.strip() if isinstance(_raw_ws_path, str) else ""
-                roots = engine_state.user_config.workspace_roots
-                existing = find_workspace_root(roots, ws_path)
-                if existing is not None:
-                    roots.remove(existing)
-                    roots.insert(0, existing)
-                    # E1-10: a save failure is answered, not raised.
-                    save_err = _try_save_config()
-                    if save_err is not None:
-                        await ws.send_text(Event(
-                            type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
-                            request_id=req_id,
-                            payload={"success": False,
-                                     "error": f"Workspace change could not be saved: {save_err}"},
-                        ).to_json())
-                    else:
-                        from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-                        GLOBAL_SKILL_MANAGER.update_workspace_roots(roots)
-                        await ws.send_text(Event(
-                            type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
-                            request_id=req_id,
-                            payload={"success": True, "path": existing},
-                        ).to_json())
-                else:
-                    await ws.send_text(Event(
-                        type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
-                        request_id=req_id,
-                        payload={"success": False, "error": "Path not found"},
-                    ).to_json())
-
-            elif msg.type in (EventType.PROJECT_CONFIG_GET_REQUEST,
-                              EventType.PROJECT_CONFIG_UPDATE_REQUEST):
-                # E6-F05 (the Epic 1 layered-config handoff): view and
-                # edit the project layer — `.aether/config.json` in a
-                # configured workspace — in exactly the shape
-                # config_layers consumes it: the layer itself, never
-                # the merged result. Roots are confined to
-                # user_config.workspace_roots, defaulting to the
-                # active (first) root.
-                import json as _json
-
-                from aether_engine.config_layers import (
-                    PROJECT_CONFIG_RELPATH,
-                    PROJECT_FORBIDDEN_KEYS,
-                )
-                is_update = msg.type == EventType.PROJECT_CONFIG_UPDATE_REQUEST
-                response_type = (
-                    EventType.PROJECT_CONFIG_UPDATE_RESPONSE if is_update
-                    else EventType.PROJECT_CONFIG_GET_RESPONSE)
-                roots = engine_state.user_config.workspace_roots or []
-                requested_root = (msg.payload.get("workspace_root") or "").strip()
-                project_root = requested_root or (roots[0] if roots else "")
-                project_error = None
-                if not roots:
-                    project_error = "No workspace is configured — add one in Projects first."
-                elif project_root not in roots:
-                    project_error = f"Unknown workspace: {project_root}"
-                if project_error is not None:
-                    await ws.send_text(Event(
-                        type=response_type,
-                        request_id=req_id,
-                        payload={"success": False, "error": project_error},
-                    ).to_json())
-                    continue
-                layer_path = Path(project_root) / PROJECT_CONFIG_RELPATH
-                if is_update:
-                    content = msg.payload.get("content", "")
-                    parsed_layer = None
-                    if not isinstance(content, str):
-                        project_error = "Project config content must be JSON text."
-                    else:
-                        try:
-                            parsed_layer = _json.loads(content)
-                        except ValueError as exc:
-                            project_error = f"Project config is not valid JSON: {exc}"
-                        else:
-                            if not isinstance(parsed_layer, dict):
-                                project_error = "Project config must be a JSON object."
-                    if project_error is not None:
-                        await ws.send_text(Event(
-                            type=response_type,
-                            request_id=req_id,
-                            payload={"success": False, "error": project_error},
-                        ).to_json())
-                        continue
-                    # Write the validated dict (canonical form), via
-                    # a temp file + replace so a failed write can
-                    # never leave a truncated layer behind.
-                    layer_path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp_layer = layer_path.with_suffix(".tmp")
-                    tmp_layer.write_text(
-                        _json.dumps(parsed_layer, indent=2) + "\n", "utf-8")
-                    tmp_layer.replace(layer_path)
-                    engine_state.audit_logger.log_event(
-                        "PROJECT_CONFIG_UPDATED", {"workspace_root": project_root})
-                    await ws.send_text(Event(
-                        type=response_type,
-                        request_id=req_id,
-                        payload={"success": True,
-                                 "workspace_root": project_root,
-                                 "config": parsed_layer},
-                    ).to_json())
-                else:
-                    raw_text = ""
-                    parse_error = None
-                    parsed_layer = None
-                    exists = layer_path.is_file()
-                    if exists:
-                        raw_text = layer_path.read_text("utf-8", errors="replace")
-                        try:
-                            candidate = _json.loads(raw_text)
-                            if isinstance(candidate, dict):
-                                parsed_layer = candidate
-                            else:
-                                parse_error = "Project config is not a JSON object; the engine ignores it."
-                        except ValueError as exc:
-                            parse_error = f"Project config is not valid JSON ({exc}); the engine ignores it."
-                    await ws.send_text(Event(
-                        type=response_type,
-                        request_id=req_id,
-                        payload={
-                            "success": True,
-                            "workspace_root": project_root,
-                            "exists": exists,
-                            "content": raw_text,
-                            "config": parsed_layer,
-                            "parse_error": parse_error,
-                            "forbidden_keys": sorted(PROJECT_FORBIDDEN_KEYS),
-                        },
-                    ).to_json())
-
-            # -----------------------------------------------------------
-            # Voice session (Epic 8, E8-5.1a)
-            # -----------------------------------------------------------
-            elif msg.type == EventType.VOICE_SESSION_START_REQUEST:
-                # Off the receive loop (see send_voice_session_
-                # start_result): opening the stages can load the
-                # speech models and take seconds (RUX-B-09). The
-                # start is chained with session stops (and other
-                # starts) so their relative order is preserved.
-                enqueue_voice_op(conn, send_voice_session_start_result(conn, 
-                    req_id, dict(msg.payload)))
-
-            elif msg.type == EventType.VOICE_SESSION_STOP_REQUEST:
-                # Chained with session starts (see enqueue_voice_op):
-                # a stop sent while a start is still opening lands
-                # after it, never before it (RUX-B-09).
-                enqueue_voice_op(conn, send_voice_session_stop_result(conn, req_id))
-
-            elif msg.type == EventType.VOICE_PLAYBACK_PROGRESS:
-                # N09: the renderer's playback report for the live
-                # session (the highest chunk_seq it has FINISHED
-                # playing) — the input the pipeline's heard-word
-                # accounting reads. Fire-and-forget by design: no
-                # response; a report with no live session, or a
-                # malformed one, is ignored by the pipeline's own
-                # validation, never fatal to the socket.
-                progress_pipeline = voice_state.get("pipeline")
-                if progress_pipeline is not None:
-                    progress_pipeline.note_playback_progress(
-                        msg.payload.get("played_seq"))
-
-            # -----------------------------------------------------------
-            # Voice RTC negotiation (F-12a): the renderer offers,
-            # the live session's transport answers; ICE trickles
-            # both ways. Every failure answers ok=False with the
-            # honest reason — a dead negotiation is never silent.
-            # -----------------------------------------------------------
-            elif msg.type == EventType.VOICE_RTC_OFFER_REQUEST:
-                rtc_pipeline = voice_state.get("pipeline")
-                rtc_answer = None
-                rtc_error: str | None = None
-                if rtc_pipeline is None:
-                    rtc_error = "voice unavailable: no active voice session"
-                else:
-                    from aether_engine.voice import VoiceUnavailableError
-
-                    try:
-                        rtc_answer = await rtc_pipeline.handle_rtc_offer(
-                            msg.payload.get("sdp") or {})
-                    except VoiceUnavailableError as e:
-                        rtc_error = str(e)
-                    except Exception as e:  # noqa: BLE001 — negotiation failure must still produce a response
-                        rtc_error = (
-                            f"voice unavailable: RTC negotiation "
-                            f"failed ({e})")
-                await ws.send_text(Event(
-                    type=EventType.VOICE_RTC_OFFER_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "ok": rtc_answer is not None,
-                        "session_id": msg.payload.get("session_id"),
-                        "answer": rtc_answer,
-                        "error": rtc_error,
-                    },
-                ).to_json())
-
-            elif msg.type == EventType.VOICE_RTC_ICE_REQUEST:
-                rtc_pipeline = voice_state.get("pipeline")
-                rtc_error = None
-                if rtc_pipeline is None:
-                    rtc_error = "voice unavailable: no active voice session"
-                else:
-                    from aether_engine.voice import VoiceUnavailableError
-
-                    try:
-                        await rtc_pipeline.add_rtc_ice_candidate(
-                            msg.payload.get("candidate"))
-                    except VoiceUnavailableError as e:
-                        rtc_error = str(e)
-                    except Exception as e:  # noqa: BLE001 — as above: always answer
-                        rtc_error = (
-                            f"voice unavailable: RTC negotiation "
-                            f"failed ({e})")
-                await ws.send_text(Event(
-                    type=EventType.VOICE_RTC_ICE_RESPONSE,
-                    request_id=req_id,
-                    payload={
-                        "ok": rtc_error is None,
-                        "session_id": msg.payload.get("session_id"),
-                        "error": rtc_error,
-                    },
-                ).to_json())
-
-            # -----------------------------------------------------------
-            # Push-to-talk dictation + TTS read-aloud (Epic 8, E8-5.3)
-            # -----------------------------------------------------------
-            elif msg.type == EventType.DICTATION_START_REQUEST:
-                stt = dictation_stt(conn)
-                reason = stt.unavailable_reason()
-                if reason is not None:
-                    await ws.send_text(Event(
-                        type=EventType.DICTATION_START_RESPONSE,
-                        request_id=req_id,
-                        payload={"ok": False, "error": f"voice unavailable: {reason}"},
-                    ).to_json())
-                else:
-                    await ws.send_text(Event(
-                        type=EventType.DICTATION_START_RESPONSE,
-                        request_id=req_id,
-                        payload={"ok": True, "error": None},
-                    ).to_json())
-
-            elif msg.type == EventType.DICTATION_CHUNK_REQUEST:
-                # Off the receive loop, but chained in arrival
-                # order (see enqueue_dictation): each chunk's
-                # transcription can take seconds, and a later chunk
-                # must never be applied before an earlier one
-                # (RUX-B-09). The engine snapshot + availability
-                # check stay here, at receipt, as before.
-                _dictation_engine = dictation_stt(conn)
-                enqueue_dictation(conn, send_dictation_chunk_result(conn, 
-                    req_id,
-                    _dictation_engine.unavailable_reason(),
-                    msg.payload.get("audio") or "",
-                    _coerce_sample_rate(msg.payload.get("sample_rate")),
-                    bool(msg.payload.get("is_final", False))))
-
-            elif msg.type == EventType.DICTATION_STOP_REQUEST:
-                # The final transcription joins the same chain as
-                # the chunks (see enqueue_dictation), so the stop
-                # response can never overtake a chunk response
-                # (RUX-B-09).
-                enqueue_dictation(conn, send_dictation_stop_result(conn, 
-                    req_id,
-                    msg.payload.get("audio"),
-                    _coerce_sample_rate(msg.payload.get("sample_rate"))))
-
-            elif msg.type == EventType.READ_ALOUD_START_REQUEST:
-                await stop_read_aloud(conn)
-                tts = read_aloud_tts(conn)
-                reason = tts.unavailable_reason()
-                msg_id = msg.payload.get("message_id")
-                text_to_speak = msg.payload.get("text") or ""
-                voice_name = msg.payload.get("voice") or "af_heart"
-                if reason is not None:
-                    await ws.send_text(Event(
-                        type=EventType.READ_ALOUD_START_RESPONSE,
-                        request_id=req_id,
-                        payload={"ok": False, "message_id": msg_id, "error": f"voice unavailable: {reason}"},
-                    ).to_json())
-                else:
-                    await ws.send_text(Event(
-                        type=EventType.READ_ALOUD_START_RESPONSE,
-                        request_id=req_id,
-                        payload={"ok": True, "message_id": msg_id, "error": None},
-                    ).to_json())
-
-                    async def _run_read_aloud(mid: str | None, text: str, voice: str, tts_inst: Any, target_ws: WebSocket) -> None:
-                        try:
-                            # S4-M7: open the cached engine once for
-                            # the connection, not on every start.
-                            tts_inst = await open_read_aloud_tts(conn)
-                            async for chunk in tts_inst.synthesize(text, voice=voice):
-                                b64_chunk = base64.b64encode(chunk).decode("ascii")
-                                await target_ws.send_text(Event(
-                                    type=EventType.READ_ALOUD_CHUNK,
-                                    payload={"message_id": mid, "audio_chunk": b64_chunk, "is_final": False},
-                                ).to_json())
-                            await target_ws.send_text(Event(
-                                type=EventType.READ_ALOUD_CHUNK,
-                                payload={"message_id": mid, "audio_chunk": None, "is_final": True},
-                            ).to_json())
-                        except asyncio.CancelledError:
-                            pass
-                        except Exception as e:  # noqa: BLE001
-                            logger.error(f"Read-aloud synthesis error: {e}")
-                            try:
-                                await target_ws.send_text(Event(
-                                    type=EventType.READ_ALOUD_CHUNK,
-                                    payload={"message_id": mid, "audio_chunk": None, "is_final": True, "error": str(e)},
-                                ).to_json())
-                            except Exception:
-                                logger.debug("Failed to send error event", exc_info=True)
-
-                    voice_state["read_aloud_id"] = msg_id
-                    voice_state["read_aloud_task"] = asyncio.ensure_future(
-                        _run_read_aloud(msg_id, text_to_speak, voice_name, tts, ws)
-                    )
-
-            elif msg.type == EventType.READ_ALOUD_STOP_REQUEST:
-                msg_id = msg.payload.get("message_id")
-                await stop_read_aloud(conn)
-                await ws.send_text(Event(
-                    type=EventType.READ_ALOUD_STOP_RESPONSE,
-                    request_id=req_id,
-                    payload={"ok": True, "message_id": msg_id},
-                ).to_json())
+            handler = _DISPATCH.get(msg.type)
+            if handler is not None:
+                await handler(conn, msg)
 
     except WebSocketDisconnect:
         logger.info(f"Client disconnected from {ip}:{port}")
         _unsubscribe_media_events()
-        if task_start_tail and not task_start_tail.done():
-            task_start_tail.cancel()
-        if task_runner and not task_runner.done():
-            task_runner.cancel()
+        if conn.task_start_tail and not conn.task_start_tail.done():
+            conn.task_start_tail.cancel()
+        if conn.task_runner and not conn.task_runner.done():
+            conn.task_runner.cancel()
         await stop_voice_session(conn)
         await stop_read_aloud(conn)
         await close_speech_engines(conn)
@@ -4645,15 +594,3566 @@ async def ws_tasks(ws: WebSocket):
     except Exception as e:  # noqa: BLE001 — top-level socket boundary: any session failure is logged and the task is cancelled, never propagated
         logger.error(f"WebSocket session error: {e}")
         _unsubscribe_media_events()
-        if task_start_tail and not task_start_tail.done():
-            task_start_tail.cancel()
-        if task_runner and not task_runner.done():
-            task_runner.cancel()
+        if conn.task_start_tail and not conn.task_start_tail.done():
+            conn.task_start_tail.cancel()
+        if conn.task_runner and not conn.task_runner.done():
+            conn.task_runner.cancel()
         await stop_voice_session(conn)
         await stop_read_aloud(conn)
         await close_speech_engines(conn)
         await cancel_voice_background_tasks(conn)
         await _cancel_connection_background_work()
+
+
+# ---------------------------------------------------------------------------
+# Dispatch handlers (Wave 5, slice 3)
+#
+# The receive loop's message-type chain, as module-level handlers
+# over the connection context. Each handler is the branch it
+# replaces: its disposition — await inline, spawn a background
+# task, chain onto a tail, enqueue — is encoded in its body,
+# exactly as the branch encoded it, so the table below only
+# answers "which handler", never "how". STEER_TASK is not in
+# the table: the loop's pre-pass still owns it (it may rewrite
+# the message into a START_TASK, which then dispatches here).
+# Three event pairs share one handler each, as the branches
+# they came from were membership tests over the pair.
+# ---------------------------------------------------------------------------
+
+
+# -----------------------------------------------------------
+# Task lifecycle events
+# -----------------------------------------------------------
+
+
+async def _handle_start_task(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # RUX-B-07: the pre-work runs in a launch task (see
+    # _start_task_message); the loop only chains it
+    # after the previous launch and moves on, so a slow
+    # classification / cancel-wait / slash run can no
+    # longer wedge every other message on the socket.
+    _previous_start = conn.task_start_tail
+    conn.task_start_tail = asyncio.create_task(
+        start_task_message(conn, msg, req_id, _previous_start))
+
+async def _handle_cancel_task(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # RUX-B-07: a task still in its launch pre-work is
+    # cancellable too — cancelling the launch prevents
+    # the runner from ever being created, which is the
+    # outcome the old serial loop produced by reading
+    # the cancel only after the (now-cancelled) start.
+    launch_pending = conn.task_start_tail is not None and not conn.task_start_tail.done()
+    if launch_pending:
+        conn.task_start_tail.cancel()
+        logger.info("Cancellation requested for pending task launch.")
+    if conn.task_runner and not conn.task_runner.done():
+        conn.task_runner.cancel()
+        logger.info("Cancellation requested for active task runner.")
+    if launch_pending and not (conn.task_runner and not conn.task_runner.done()):
+        # A launch cancelled in its pre-work never
+        # creates the pump, so the pump's own
+        # TASK_CANCELLED audit record
+        # (execute_task_generator's CancelledError
+        # handler) never fires for this cancel. Write
+        # the same record here so every honoured cancel
+        # leaves exactly one audit entry; when a runner
+        # is active, its pump writes the record instead
+        # and this branch must not double-log.
+        engine_state.audit_logger.log_event(
+            "TASK_CANCELLED", {"task_id": "unknown"})
+    if launch_pending or (conn.task_runner and not conn.task_runner.done()):
+        await conn.ws.send_text(Event(
+            type=EventType.TASK_CANCELLED,
+            request_id=req_id,
+            # N-44: name the task actually cancelled
+            # (the pump tracks it from TASK_CREATED);
+            # "unknown" only for a launch cancelled
+            # before its task ever had an id.
+            payload={"task_id": conn.active_task_id or "unknown", "state": TaskState.CANCELLED.value},
+        ).to_json())
+    else:
+        await conn.ws.send_text(Event(
+            type=EventType.ERROR,
+            request_id=req_id,
+            payload={"error": "No active task to cancel"},
+        ).to_json())
+
+async def _handle_ping(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    await conn.ws.send_text(Event(
+        type=EventType.PONG,
+        request_id=req_id,
+        payload={"echo_ts": msg.ts},
+    ).to_json())
+
+async def _handle_tool_approval_decision(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    approval_key = msg.payload.get("approval_key") or msg.request_id
+    is_approved = (msg.type == EventType.TOOL_APPROVAL_GRANTED)
+                
+    if is_approved:
+        engine_state.audit_logger.log_event("APPROVAL_GRANTED", {"approval_key": approval_key})
+    else:
+        engine_state.audit_logger.log_event("APPROVAL_REJECTED", {"approval_key": approval_key})
+
+    # Epic 8, E8-1.3: approval-time argument edits ride the
+    # GRANTED event. Audit the changed field names against
+    # the pending call's original args (best-effort, like
+    # the scoped-grant recording below: a lookup failure
+    # must never block the approval the user just gave).
+    edited_args = msg.payload.get("edited_args") if is_approved else None
+    if not isinstance(edited_args, dict):
+        edited_args = None
+    # Epic 8, E8-6.2: an envelope grant the owner made at
+    # a browser confirmation rides the GRANTED event; the
+    # pause node scopes it to the confirmed action.
+    browser_envelope = msg.payload.get("browser_envelope") if is_approved else None
+    if not isinstance(browser_envelope, dict):
+        browser_envelope = None
+    if edited_args is not None:
+        try:
+            pending = await get_pending_approvals()
+            match = next((p for p in pending if p.get("thread_id") == approval_key), None)
+            if match:
+                _audit_approval_arguments_edited(
+                    engine_state.audit_logger,
+                    approval_key,
+                    match.get("tool_name"),
+                    match.get("args") or {},
+                    edited_args,
+                )
+        except Exception:
+            logger.debug("Failed to audit approval argument edits", exc_info=True)
+
+    # E1-F04: the resume rebuilds the PAUSED task's
+    # effective configuration — the run_config snapshot
+    # checkpointed with the thread's state when the task
+    # started: provider/model, per-agent models/tools,
+    # forced agent, workspace roots and the layered user
+    # config including its MCP risk overrides. The
+    # current globals are only the fallback for threads
+    # paused before snapshots existed. E1-F03: the
+    # resumed execution is bound to the paused task's own
+    # session (from that same durable state), never to a
+    # connection-local variable — an approval arriving on
+    # a fresh connection resumes exactly the task that
+    # paused.
+    run_cfg = await get_persisted_run_config(approval_key) or {}
+    resume_session_id = run_cfg.get("session_id") or approval_key
+    resume_user_config = engine_state.user_config
+    if isinstance(run_cfg.get("user_config"), dict):
+        try:
+            resume_user_config = UserConfig.from_dict(run_cfg["user_config"])
+        except Exception:  # a corrupt snapshot degrades to the live config, never blocks an approval
+            logger.debug("Could not restore task user_config for approval resume", exc_info=True)
+    resume_provider_name = run_cfg.get("provider_name") or engine_state.active_provider
+    resume_model = run_cfg.get("model") or engine_state.active_model
+    resume_agent_models = run_cfg.get(
+        "agent_models", resume_user_config.agent_models)
+    resume_agent_tools = run_cfg.get(
+        "agent_tools", resume_user_config.agent_tools)
+    resume_workspace_roots = (
+        run_cfg.get("workspace_roots")
+        or resume_user_config.workspace_roots
+        or [str(Path.home() / "AetherWorkspace")])
+
+    # M17 residual: the recreated instance honours the
+    # run's routing constraints. With a snapshot they are
+    # the original decision's own values; without one they
+    # are re-derived from the same sources that decision
+    # used — local_only from the auxiliary vision override
+    # in user config, and image presence from the thread's
+    # stored messages (the executor re-derives both again
+    # from the checkpoint for the resumed graph config).
+    if run_cfg:
+        resume_local_only = bool(run_cfg.get("local_only"))
+        resume_has_images = bool(run_cfg.get("require_vision"))
+    else:
+        resume_local_only = local_only_from_vision_override(
+            engine_state.user_config.auxiliary_models)
+        resume_has_images = False
+        try:
+            _thread_session = await asyncio.to_thread(
+                session_store.get_session, approval_key)
+            resume_has_images = any(
+                m.get("attachments")
+                for m in (_thread_session or {}).get("messages", []))
+        except Exception:
+            logger.debug(
+                "Could not inspect resumed thread attachments "
+                "for the vision constraint", exc_info=True)
+    try:
+        provider_instance = _create_provider_instance(
+            resume_provider_name, resume_model, conn.secret_store,
+            local_only=resume_local_only,
+            require_vision=resume_has_images,
+        )
+    except Exception:  # provider construction can fail on config/key errors; skipping the resume is the designed degradation
+        logger.debug("Could not instantiate provider for approval resume", exc_info=True)
+        return # Ignore if provider cannot be instantiated
+
+    # Same central builder as task start (PRD Q3) — the resume
+    # path used to register all file tools unconditionally while
+    # task start gated them on coding tasks. The MCP risk
+    # overrides are the resumed task's effective ones
+    # (E1-F04), not the current globals.
+    from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+
+    tools = build_tool_registry(
+        mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=resume_user_config.mcp_tool_risk_overrides),
+    )
+
+    # Epic 2, E2-09: a scoped approval ("this file" / "this
+    # folder") becomes a stored grant before the resume, so
+    # the NEXT matching call is covered. Best-effort by
+    # design: a grant-recording failure must never block
+    # the approval the user just gave.
+    grant_scope = msg.payload.get("scope") if is_approved else None
+    if grant_scope in ("file", "folder"):
+        try:
+            from aether_engine.tools.approval_cache import get_default_cache
+            from aether_engine.tools.paths import candidate_paths
+
+            pending = await get_pending_approvals()
+            match = next((p for p in pending if p.get("thread_id") == approval_key), None)
+            if match:
+                paths = candidate_paths(match.get("args"))
+                if paths:
+                    prefix = paths[0] if grant_scope == "file" else paths[0].parent
+                    risk = tools.get_tool(match["tool_name"]).risk.value
+                    grant_id = get_default_cache().grant(str(prefix), risk, tool_name=match["tool_name"])
+                    engine_state.audit_logger.log_event(
+                        "APPROVAL_GRANT_CREATED",
+                        {"grant_id": grant_id, "tool_name": match["tool_name"], "prefix": str(prefix), "ceiling": risk, "scope": grant_scope},
+                    )
+        except Exception:
+            # Grant recording is best-effort beside an approval already given.
+            logger.debug("Failed to record scoped approval grant", exc_info=True)
+
+    # Pass the approved decision back into LangGraph,
+    # with the paused task's session binding and forced
+    # agent restored alongside its configuration (E1-F03
+    # + E1-F04).
+    resume_gen = resume_langgraph_task(
+        thread_id=approval_key,
+        approved=is_approved,
+        provider=provider_instance,
+        tools=tools,
+        workspace_roots=resume_workspace_roots,
+        disabled_nodes=engine_state.disabled_nodes,
+        agent_models=resume_agent_models,
+        agent_tools=resume_agent_tools,
+        secret_store=conn.secret_store,
+        user_config=resume_user_config,
+        session_id=resume_session_id,
+        forced_agent=run_cfg.get("forced_agent"),
+        edited_args=edited_args,
+        browser_envelope=browser_envelope,
+        # M17 residual: the resumed run's graph config
+        # carries the same constraints (the executor also
+        # re-derives them from the checkpoint as a net).
+        local_only=resume_local_only,
+        require_vision=resume_has_images,
+    )
+
+    if conn.task_runner and not conn.task_runner.done():
+        conn.task_runner.cancel()
+        # E1-09: AWAIT the displaced runner before the
+        # resume pump starts — the same cancel-then-await
+        # idiom _start_task_message uses. Cancelling
+        # without awaiting let the old pump keep
+        # streaming (and writing usage/persistence) into
+        # the resumed task's lifetime.
+        try:
+            await conn.task_runner
+        except asyncio.CancelledError:
+            pass
+
+    req_id = msg.request_id or "resume"
+    conn.task_session_id = approval_key
+    conn.task_runner = asyncio.create_task(
+        conn.execute_task_generator(resume_gen, resume_provider_name, resume_model, req_id, session_id=resume_session_id)
+    )
+
+# -----------------------------------------------------------
+# Provider management & health events
+# -----------------------------------------------------------
+
+
+async def _handle_provider_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # RUX-B-02: answer from the model cache immediately;
+    # discovery for providers with an empty cache runs in
+    # a background task and pushes a refreshed list when
+    # it lands (see send_provider_list_update).
+    providers = await _build_provider_list_async(conn.secret_store, discover=False)
+    cfg = engine_state.user_config
+    await conn.ws.send_text(Event(
+        type=EventType.PROVIDER_LIST_RESPONSE,
+        request_id=req_id,
+        payload={"providers": providers, "default_provider": cfg.default_provider, "default_model": cfg.default_model, "health": engine_state.health_manager.get_all_statuses()},
+    ).to_json())
+    conn.spawn_background(send_provider_list_update(conn, req_id))
+
+async def _handle_provider_validate_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    pname = msg.payload.get("provider", "")
+    key = msg.payload.get("api_key", "")
+    base_url = msg.payload.get("base_url", "")
+    resp_type = (
+        EventType.SETTINGS_PROVIDER_VALIDATE_RESULT
+        if msg.type == EventType.SETTINGS_PROVIDER_VALIDATE_REQUEST
+        else EventType.PROVIDER_VALIDATE_RESPONSE
+    )
+    is_custom = pname == "custom_openai" or engine_state.user_config.custom_provider_types.get(pname) == "openai_compatible"
+                
+    # If key is empty (e.g. masked in UI), attempt to load the saved key
+    if not key:
+        saved_key = conn.secret_store.load_provider(pname)
+        if saved_key:
+            key = saved_key
+                
+    # If base_url is empty, attempt to load the saved base_url
+    if not base_url:
+        saved_url = engine_state.user_config.custom_base_urls.get(pname)
+        if saved_url:
+            base_url = saved_url
+                
+    # send_validation_result validates with
+    # persist_models=False: testing a throwaway/template
+    # provider must not leak discovery data into the
+    # persisted config.
+    if not key and not is_custom:
+        await conn.ws.send_text(Event(
+            type=resp_type,
+            request_id=req_id,
+            payload={"provider": pname, "status": "invalid_key", "message": "API key cannot be empty."},
+        ).to_json())
+    else:
+        # Off the message loop (see send_validation_result):
+        # the Test no longer blocks the socket, and repeat
+        # clicks share the in-flight validation.
+        conn.spawn_background(send_validation_result(conn, resp_type, req_id, pname, key, base_url))
+
+async def _handle_provider_save_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    pname = msg.payload.get("provider", "")
+    key = msg.payload.get("api_key", "")
+    base_url = msg.payload.get("base_url", "")
+    is_default = msg.payload.get("is_default", False)
+    default_model = msg.payload.get("default_model", "")
+    models = msg.payload.get("models", [])
+    display_name = msg.payload.get("display_name", "")
+    provider_type = msg.payload.get("provider_type", "")
+    try:
+        if not isinstance(pname, str) or not pname.strip():
+            raise ValueError("Provider name is required.")
+        is_custom_provider = (
+            pname == "custom_openai"
+            or pname.startswith("custom_")
+            or provider_type == "openai_compatible"
+        )
+        if is_custom_provider:
+            if display_name:
+                engine_state.user_config.custom_provider_names[pname] = display_name
+            if provider_type:
+                engine_state.user_config.custom_provider_types[pname] = provider_type
+            engine_state.user_config.custom_base_urls[pname] = base_url
+        elif base_url:
+            engine_state.user_config.custom_base_urls[pname] = base_url
+
+        # Save config before fetching models so custom names/URLs are persisted
+        # even if the model fetch raises an exception.
+        save_config(engine_state.user_config)
+
+        # A new provider derived from the "custom_openai" template leaves
+        # throwaway discovery data on that template (written during Test /
+        # Refresh). Clear it unless the template is itself a real provider.
+        if is_custom_provider and pname != "custom_openai":
+            template_in_use = (
+                "custom_openai" in set(conn.secret_store.list_providers())
+                or "custom_openai" in engine_state.user_config.custom_base_urls
+                or "custom_openai" in engine_state.user_config.custom_provider_types
+            )
+            if not template_in_use:
+                engine_state.user_config.provider_models.pop("custom_openai", None)
+                engine_state.model_registry.remove_provider_models("custom_openai")
+                engine_state.health_manager.remove_provider("custom_openai")
+
+        # RUX-B-06: a key saved without a model list used
+        # to discover inline here (≤10 s on the message
+        # loop). The save itself — key, config, defaults —
+        # is instant and answers now; discovery moves to
+        # complete_provider_save_discovery, which applies
+        # the same results and pushes the refreshed list.
+        deferred_discovery = bool(key and not models)
+        if key:
+            conn.secret_store.save_provider(pname, key)
+            engine_state.health_manager.reset_provider(pname)
+            if models:
+                engine_state.user_config.provider_models[pname] = models
+                engine_state.model_registry.update_provider_models(pname, models)
+        elif models:
+            engine_state.user_config.provider_models[pname] = models
+            engine_state.model_registry.update_provider_models(pname, models)
+
+        if default_model:
+            if is_default or engine_state.user_config.default_provider == pname:
+                engine_state.user_config.default_provider = pname
+                engine_state.user_config.default_model = default_model
+                engine_state.active_provider = pname
+                engine_state.active_model = default_model
+        elif is_default and pname:
+            engine_state.user_config.default_provider = pname
+            if deferred_discovery:
+                # The model choice waits for the deferred
+                # discovery (same registry-priority
+                # resolution, in complete_provider_save_
+                # discovery) — resolving now could only use
+                # the stale pre-discovery list.
+                engine_state.active_provider = pname
+            else:
+                # F-10 residual: resolve the default through the
+                # registry's curated priority, never from the raw
+                # provider_models list's [0] — that list's order
+                # is not priority and may be stale or
+                # client-supplied (a pre-fix list with the 404
+                # gemini-2.5-flash first would otherwise be
+                # silently re-pinned as the default here).
+                default_entry = engine_state.model_registry.get_default_model_for_provider(pname)
+                resolved_default = default_entry.id if default_entry else ""
+                if not resolved_default:
+                    cur_models = engine_state.user_config.provider_models.get(pname, [])
+                    resolved_default = cur_models[0] if cur_models else ""
+                if resolved_default:
+                    engine_state.user_config.default_model = resolved_default
+                    engine_state.active_model = resolved_default
+                engine_state.active_provider = pname
+
+        save_config(engine_state.user_config)
+        engine_state.audit_logger.log_event("PROVIDER_SAVED", {"provider": pname})
+        save_payload = {
+            "provider": pname,
+            "success": True,
+            "models": engine_state.user_config.provider_models.get(pname, []),
+            "excluded_models": engine_state.user_config.provider_excluded_models.get(pname, []),
+        }
+        await conn.ws.send_text(Event(
+            type=EventType.PROVIDER_SAVE_RESPONSE,
+            request_id=req_id,
+            payload=save_payload,
+        ).to_json())
+        if deferred_discovery:
+            conn.spawn_background(complete_provider_save_discovery(conn, 
+                req_id, pname, key, base_url,
+                bool(is_default and not default_model)))
+    except Exception as e:  # noqa: BLE001 — handler boundary: any save failure is reported to the client in the response payload
+        await conn.ws.send_text(Event(
+            type=EventType.PROVIDER_SAVE_RESPONSE,
+            request_id=req_id,
+            payload={
+                "provider": pname,
+                "success": False,
+                "error": f"{type(e).__name__}: {e}",
+            },
+        ).to_json())
+
+async def _handle_provider_remove_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    pname = msg.payload.get("provider", "")
+    deleted = conn.secret_store.delete_provider(pname)
+    engine_state.user_config.provider_models.pop(pname, None)
+    engine_state.user_config.custom_base_urls.pop(pname, None)
+    engine_state.user_config.custom_provider_names.pop(pname, None)
+    engine_state.user_config.custom_provider_types.pop(pname, None)
+    engine_state.model_registry.remove_provider_models(pname)
+    # E8-07 bookkeeping: this handler deregistered the
+    # provider itself (ALL entries, curated included —
+    # an explicit removal), so resync must not treat it
+    # as config-registered and restore its curated
+    # baseline on a later pass.
+    engine_state._config_registered_providers.discard(pname)
+    engine_state.health_manager.remove_provider(pname)
+    if pname in engine_state.configured_providers:
+        engine_state.configured_providers.remove(pname)
+    if engine_state.user_config.default_provider == pname:
+        remaining = [p for p in conn.secret_store.list_providers() if p != pname]
+        new_default = remaining[0] if remaining else "google_gemini"
+        engine_state.user_config.default_provider = new_default
+        # F-10 residual: as in PROVIDER_SAVE_REQUEST, the
+        # replacement default model comes from the
+        # registry's curated priority, not list position.
+        default_entry = engine_state.model_registry.get_default_model_for_provider(new_default)
+        if default_entry:
+            engine_state.user_config.default_model = default_entry.id
+        else:
+            new_models = engine_state.user_config.provider_models.get(new_default, [])
+            engine_state.user_config.default_model = new_models[0] if new_models else ""
+        engine_state.active_provider = new_default
+        engine_state.active_model = engine_state.user_config.default_model
+    # E1-10: a save failure here is answered, not raised
+    # — the removal already happened in-session (secret
+    # store + registry), so the audit record stands; the
+    # reply reports that persistence failed.
+    save_err = _try_save_config()
+    engine_state.audit_logger.log_event("PROVIDER_REMOVED", {"provider": pname})
+    remove_payload: dict[str, Any] = {
+        "provider": pname, "deleted": deleted,
+        "success": save_err is None}
+    if save_err is not None:
+        remove_payload["error"] = (
+            f"Provider removed, but settings could not be saved: {save_err}")
+    await conn.ws.send_text(Event(
+        type=EventType.PROVIDER_REMOVE_RESPONSE,
+        request_id=req_id,
+        payload=remove_payload,
+    ).to_json())
+
+async def _handle_provider_reveal_key_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    pname = msg.payload.get("provider", "")
+    try:
+        decrypted_key = conn.secret_store.load_provider(pname)
+        await conn.ws.send_text(Event(
+            type=EventType.PROVIDER_REVEAL_KEY_RESPONSE,
+            request_id=req_id,
+            payload={"provider": pname, "api_key": decrypted_key, "success": True},
+        ).to_json())
+    except Exception as e:  # noqa: BLE001 — handler boundary: any decrypt/load failure is reported to the client in the response payload
+        await conn.ws.send_text(Event(
+            type=EventType.PROVIDER_REVEAL_KEY_RESPONSE,
+            request_id=req_id,
+            payload={"provider": pname, "success": False, "error": str(e)},
+        ).to_json())
+
+async def _handle_model_set_default(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    pname = msg.payload.get("provider", engine_state.user_config.default_provider)
+    model = msg.payload.get("model", "")
+    invalid = (
+        not model
+        or not pname
+        or (isinstance(model, str) and not model.strip())
+        or (isinstance(pname, str) and not pname.strip())
+    )
+    if invalid:
+        # E1-07: validate at the boundary. The old code
+        # answered an empty model with a MODEL_DEFAULT_CHANGED
+        # echoing the *old* default — a success-shaped lie
+        # that could even relabel another provider as the
+        # default in the UI. Mutate nothing, save nothing.
+        await conn.ws.send_text(Event(
+            type=EventType.ERROR,
+            request_id=req_id,
+            payload={"error": "MODEL_SET_DEFAULT requires a non-empty provider and model"},
+        ).to_json())
+    else:
+        engine_state.user_config.default_provider = pname
+        engine_state.user_config.default_model = model
+        # B10 anchor: the applied choice joins the
+        # provider's persisted model list in the same save,
+        # so a later discovery replace cannot silently
+        # orphan it (anchor_default_model keeps it in the
+        # list from then on). The registry update mirrors
+        # what resync_active_state would derive at the
+        # next launch from the same list.
+        anchored = engine_state.user_config.provider_models.setdefault(pname, [])
+        if model not in anchored:
+            anchored.append(model)
+        engine_state.model_registry.update_provider_models(pname, anchored)
+        engine_state.active_provider = pname
+        engine_state.active_model = model
+        save_err = _try_save_config()
+        if save_err is not None:
+            # E1-10: like the E1-07 refusal above, a
+            # switch that could not be persisted is an
+            # ERROR reply — never a MODEL_DEFAULT_CHANGED
+            # for a choice the next launch would not see.
+            await conn.ws.send_text(Event(
+                type=EventType.ERROR,
+                request_id=req_id,
+                payload={"error": f"Default model could not be saved: {save_err}"},
+            ).to_json())
+        else:
+            # Unified logging: the applied value goes on
+            # record — a switch that "didn't stick" can now
+            # be checked against what the engine applied.
+            logger.info(f"MODEL_SET_DEFAULT applied: {pname}/{model}")
+            await conn.ws.send_text(Event(
+                type=EventType.MODEL_DEFAULT_CHANGED,
+                request_id=req_id,
+                payload={"provider": pname, "model": engine_state.user_config.default_model},
+            ).to_json())
+
+# -----------------------------------------------------------
+# Session Events
+# -----------------------------------------------------------
+
+
+async def _handle_session_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Slice 3: an optional workspace filter with the
+    # store's three states — field absent = all sessions
+    # (exactly the pre-slice behaviour), a path = that
+    # workspace (canonicalised before the store sees it,
+    # so any spelling filters the one workspace), explicit
+    # null = unbound only. Every row already carries its
+    # `workspace` binding from the store.
+    if "workspace" not in msg.payload:
+        sessions = await asyncio.to_thread(session_store.list_sessions)
+        list_error = ""
+    elif msg.payload.get("workspace") is None:
+        sessions = await asyncio.to_thread(session_store.list_sessions, None)
+        list_error = ""
+    elif isinstance(msg.payload.get("workspace"), str):
+        sessions = await asyncio.to_thread(
+            session_store.list_sessions,
+            canonical_workspace_root(msg.payload["workspace"]))
+        list_error = ""
+    else:
+        sessions = []
+        list_error = "workspace filter must be a workspace path or null"
+    list_payload: dict[str, Any] = {"sessions": sessions}
+    if list_error:
+        list_payload["error"] = list_error
+    await conn.ws.send_text(Event(
+        type=EventType.SESSION_LIST_RESPONSE,
+        request_id=req_id,
+        payload=list_payload,
+    ).to_json())
+
+async def _handle_session_get_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    sess_id = msg.payload.get("session_id")
+    session_data = await asyncio.to_thread(session_store.get_session, sess_id) if sess_id else None
+    await conn.ws.send_text(Event(
+        type=EventType.SESSION_GET_RESPONSE,
+        request_id=req_id,
+        payload={"session": session_data},
+    ).to_json())
+
+async def _handle_session_create_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    title = msg.payload.get("title", "New Chat")
+    # Slice 3 (grill Q3/Q4): the optional workspace field
+    # follows the one binding rule — absent binds the
+    # active root (or unbound with no roots configured),
+    # a string binds that configured root by canonical
+    # identity, explicit null creates unbound. An
+    # unconfigured target is refused honestly and creates
+    # nothing. The reply names the new session's binding.
+    bind_ok, binding, bind_error = _resolve_workspace_binding(
+        msg.payload, required=False)
+    if not bind_ok:
+        await conn.ws.send_text(Event(
+            type=EventType.SESSION_CREATE_RESPONSE,
+            request_id=req_id,
+            payload={"session_id": None, "workspace": None,
+                     "success": False, "error": bind_error},
+        ).to_json())
+    else:
+        sess_id = await asyncio.to_thread(
+            session_store.create_session, title, binding)
+        await conn.ws.send_text(Event(
+            type=EventType.SESSION_CREATE_RESPONSE,
+            request_id=req_id,
+            payload={"session_id": sess_id, "workspace": binding},
+        ).to_json())
+
+async def _handle_session_delete_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    sess_id = msg.payload.get("session_id")
+    deleted = await asyncio.to_thread(session_store.delete_session, sess_id) if sess_id else False
+    if sess_id:
+        try:
+            from aether_engine.artifacts.store import get_artifact_store
+            await asyncio.to_thread(get_artifact_store().delete_by_session, sess_id)
+        except Exception as cascade_err:  # noqa: BLE001
+            logger.warning(f"Failed to cascade delete artifacts for session {sess_id}: {cascade_err}")
+        try:
+            from aether_engine.media.store import get_media_store
+            await asyncio.to_thread(get_media_store().delete_by_session, sess_id)
+        except Exception as media_err:  # noqa: BLE001
+            logger.warning(f"Failed to cascade delete media for session {sess_id}: {media_err}")
+        try:
+            await asyncio.to_thread(_remove_session_attachments, sess_id)
+        except Exception as attach_err:  # noqa: BLE001
+            logger.warning(f"Failed to remove attachments for session {sess_id}: {attach_err}")
+    await conn.ws.send_text(Event(
+        type=EventType.SESSION_DELETE_RESPONSE,
+        request_id=req_id,
+        payload={"session_id": sess_id, "deleted": deleted},
+    ).to_json())
+
+async def _handle_session_truncate_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    sess_id = msg.payload.get("session_id")
+    msg_id = msg.payload.get("message_id")
+    content = msg.payload.get("content")
+    role = msg.payload.get("role", "user")
+    try:
+        occurrence = int(msg.payload["occurrence"]) if msg.payload.get("occurrence") is not None else None
+    except (TypeError, ValueError):
+        occurrence = None
+    truncated = False
+    if sess_id:
+        if msg_id:
+            truncated = await asyncio.to_thread(session_store.truncate_session, sess_id, msg_id)
+        if not truncated and content:
+            # The UI id is not always a stored row id (MCP
+            # prompt messages, transferred chats): fall back
+            # to the occurrence-aware content match instead
+            # of silently truncating nothing.
+            truncated = await asyncio.to_thread(
+                session_store.truncate_session_by_content,
+                sess_id, role, content, occurrence=occurrence)
+    if truncated and sess_id:
+        # Invalidate the graph thread (keyed by session id):
+        # without this the next run keeps reasoning over the
+        # deleted branch. Best-effort — the store is already
+        # correct, and the executor re-seeds a fresh thread
+        # from the retained history.
+        try:
+            await delete_thread_checkpoints(sess_id)
+        except Exception:  # checkpoint cleanup must not fail the truncate response.
+            logger.warning(
+                f"Could not delete checkpoints for truncated session {sess_id}",
+                exc_info=True)
+    await conn.ws.send_text(Event(
+        type=EventType.SESSION_TRUNCATE_RESPONSE,
+        request_id=req_id,
+        payload={"session_id": sess_id, "truncated": truncated},
+    ).to_json())
+
+async def _handle_session_rename_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    sess_id = msg.payload.get("session_id")
+    new_title = (msg.payload.get("title") or "").strip()
+    renamed = False
+    if sess_id and new_title:
+        renamed = await asyncio.to_thread(
+            session_store.update_session_title, sess_id, new_title[:120])
+    await conn.ws.send_text(Event(
+        type=EventType.SESSION_RENAME_RESPONSE,
+        request_id=req_id,
+        payload={"session_id": sess_id, "title": new_title, "renamed": renamed},
+    ).to_json())
+
+async def _handle_session_move_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Per-workspace sessions, slice 3 (grill Q6): re-file
+    # a session under another workspace, or unbind it
+    # with a null workspace. Binding is organisational
+    # only (Q11) — a move touches no history, context, or
+    # checkpoints, and a running task keeps the roots it
+    # snapshotted at launch. Unknown sessions and
+    # unconfigured targets are refused honestly; the
+    # reply reports the session's binding after the
+    # request, moved or not.
+    sess_id = msg.payload.get("session_id")
+    session = await asyncio.to_thread(
+        session_store.get_session, sess_id) if sess_id else None
+    if session is None:
+        move_ok = False
+        move_binding = None
+        move_error = ("A session_id is required." if not sess_id
+                      else f"Session not found: {sess_id}")
+    else:
+        move_ok, move_binding, move_error = _resolve_workspace_binding(
+            msg.payload, required=True)
+        if move_ok:
+            move_ok = await asyncio.to_thread(
+                session_store.set_session_workspace,
+                sess_id, move_binding)
+            if not move_ok:
+                move_error = f"Session not found: {sess_id}"
+        if not move_ok:
+            move_binding = session.get("workspace")
+    move_payload: dict[str, Any] = {
+        "session_id": sess_id,
+        "workspace": move_binding,
+        "moved": move_ok,
+    }
+    if not move_ok:
+        move_payload["error"] = move_error
+    await conn.ws.send_text(Event(
+        type=EventType.SESSION_MOVE_RESPONSE,
+        request_id=req_id,
+        payload=move_payload,
+    ).to_json())
+
+async def _handle_session_search_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    query = msg.payload.get("query", "")
+    results = await asyncio.to_thread(session_store.search_sessions, query)
+    await conn.ws.send_text(Event(
+        type=EventType.SESSION_SEARCH_RESPONSE,
+        request_id=req_id,
+        payload={"query": query, "results": results},
+    ).to_json())
+
+async def _handle_session_export_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    sess_id = msg.payload.get("session_id")
+    fmt = (msg.payload.get("format") or "json").lower()
+    content = None
+    zip_path = None
+    filename = ""
+    err = None
+    try:
+        from aether_engine.session_export.exporter import (
+            _safe_filename,
+            export_session_json,
+            export_session_markdown,
+            export_session_zip,
+        )
+        sess = await asyncio.to_thread(session_store.get_session, sess_id)
+        if not sess:
+            raise ValueError(f"Session '{sess_id}' not found")
+        title = sess.get("title", "Session")
+        if fmt == "markdown":
+            content = await asyncio.to_thread(export_session_markdown, sess_id)
+            filename = _safe_filename(title, sess_id, "md")
+        elif fmt == "zip":
+            z_dest = await asyncio.to_thread(export_session_zip, sess_id)
+            zip_path = str(z_dest)
+            filename = z_dest.name
+        else:
+            fmt = "json"
+            content = await asyncio.to_thread(export_session_json, sess_id)
+            filename = _safe_filename(title, sess_id, "json")
+    except Exception as e:
+        logger.exception(f"Session export failed for {sess_id}")
+        err = str(e)
+
+    await conn.ws.send_text(Event(
+        type=EventType.SESSION_EXPORT_RESPONSE,
+        request_id=req_id,
+        payload={
+            "format": fmt,
+            "content": content,
+            "zip_path": zip_path,
+            "filename": filename,
+            "error": err,
+        },
+    ).to_json())
+
+async def _handle_session_import_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    fmt = (msg.payload.get("format") or "json").lower()
+    raw_content = msg.payload.get("content")
+    fpath = msg.payload.get("file_path")
+    try:
+        from aether_engine.session_export.importer import (
+            import_session_archive,
+            import_session_json,
+        )
+        if fmt == "zip" or (fpath and str(fpath).endswith(".zip")):
+            result = await asyncio.to_thread(
+                import_session_archive,
+                archive_path=fpath,
+                content=raw_content,
+            )
+        else:
+            result = await asyncio.to_thread(
+                import_session_json,
+                content=raw_content,
+                file_path=fpath,
+            )
+    except Exception as e:
+        logger.exception("Session import failed")
+        result = {
+            "ok": False,
+            "session_id": "",
+            "title": "",
+            "message_count": 0,
+            "error": str(e),
+        }
+
+    await conn.ws.send_text(Event(
+        type=EventType.SESSION_IMPORT_RESPONSE,
+        request_id=req_id,
+        payload=result,
+    ).to_json())
+
+async def _handle_rewind_manifest_get_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-1.1a: the session's last task's rewind
+    # points (recorded by the task runners). An explicit
+    # task_id that is not the last task answers with no
+    # entries — points exist only for the last task (Q5).
+    sess_id = msg.payload.get("session_id")
+    req_task_id = msg.payload.get("task_id")
+    if sess_id:
+        manifest_payload = await asyncio.to_thread(
+            rewind_manifest.get_manifest, sess_id, req_task_id)
+    else:
+        manifest_payload = {
+            "session_id": sess_id, "task_id": None, "entries": []}
+    await conn.ws.send_text(Event(
+        type=EventType.REWIND_MANIFEST_GET_RESPONSE,
+        request_id=req_id,
+        payload=manifest_payload,
+    ).to_json())
+
+async def _handle_task_rewind_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-1.1b: execute a rewind against the
+    # manifest. Refused while this session's task is live
+    # or paused for approval — the points describe the
+    # last task, and rolling back under a running one
+    # would corrupt both. The service validates the rest
+    # (last task only, step exists, checkpoint matches).
+    sess_id = msg.payload.get("session_id")
+    rewind_busy = bool(
+        sess_id
+        and conn.task_runner is not None
+        and not conn.task_runner.done()
+        and (conn.task_session_id is None or conn.task_session_id == sess_id)
+    )
+    if sess_id and not rewind_busy:
+        try:
+            pending = await get_pending_approvals()
+            rewind_busy = any(
+                p.get("thread_id") == sess_id for p in pending)
+        except Exception:  # noqa: BLE001 — best-effort scan, same doctrine as steering: a failed scan degrades to the service's own validation
+            rewind_busy = False
+    if rewind_busy:
+        rewind_result = {
+            "ok": False,
+            "session_id": sess_id,
+            "rewound_to_step": msg.payload.get("step_index")
+            if isinstance(msg.payload.get("step_index"), int) else -1,
+            "undo_expires_at": 0.0,
+            "files_not_reverted": [],
+            "messages": [],
+            "error": "Cannot rewind while a task is running or waiting for approval in this session.",
+        }
+    else:
+        rewind_result = await rewind_service.rewind(
+            sess_id,
+            msg.payload.get("task_id"),
+            msg.payload.get("step_index"),
+            msg.payload.get("checkpoint_id"),
+        )
+    await conn.ws.send_text(Event(
+        type=EventType.TASK_REWIND_RESPONSE,
+        request_id=req_id,
+        payload=rewind_result,
+    ).to_json())
+
+async def _handle_task_rewind_undo_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-1.1b: restore the steps a staged rewind
+    # discarded — only inside the 5-second window.
+    sess_id = msg.payload.get("session_id")
+    if isinstance(sess_id, str) and sess_id:
+        undo_result = await rewind_service.undo(sess_id)
+    else:
+        undo_result = {
+            "ok": False, "restored": False,
+            "error": "A session_id is required.",
+        }
+    await conn.ws.send_text(Event(
+        type=EventType.TASK_REWIND_UNDO_RESPONSE,
+        request_id=req_id,
+        payload=undo_result,
+    ).to_json())
+
+async def _handle_session_fork_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-1.2: fork the session at a completed
+    # step boundary into a new session. Refused while
+    # this session's task is live or paused for approval
+    # — the boundary must describe settled state, and
+    # copying a thread mid-run could catch it torn. The
+    # service validates the boundary itself (manifest
+    # step of the last task, or a message id).
+    sess_id = msg.payload.get("session_id")
+    fork_busy = bool(
+        sess_id
+        and conn.task_runner is not None
+        and not conn.task_runner.done()
+        and (conn.task_session_id is None or conn.task_session_id == sess_id)
+    )
+    if sess_id and not fork_busy:
+        try:
+            pending = await get_pending_approvals()
+            fork_busy = any(
+                p.get("thread_id") == sess_id for p in pending)
+        except Exception:  # noqa: BLE001 — best-effort scan, same doctrine as the rewind guard: a failed scan degrades to the service's own validation
+            fork_busy = False
+    if fork_busy:
+        fork_result = {
+            "ok": False,
+            "new_session_id": "",
+            "source_session_id": sess_id,
+            "title": "",
+            "messages_copied": 0,
+            "messages": [],
+            "error": "Cannot fork while a task is running or waiting for approval in this session.",
+        }
+    else:
+        fork_result = await asyncio.to_thread(
+            fork_service.fork_session_at,
+            sess_id,
+            message_id=msg.payload.get("message_id"),
+            step_index=msg.payload.get("step_index"),
+            new_title=msg.payload.get("new_title"),
+        )
+    await conn.ws.send_text(Event(
+        type=EventType.SESSION_FORK_RESPONSE,
+        request_id=req_id,
+        payload=fork_result,
+    ).to_json())
+
+async def _handle_approval_grants_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.tools.approval_cache import get_default_cache
+
+    grants = await asyncio.to_thread(get_default_cache().list_grants)
+    await conn.ws.send_text(Event(
+        type=EventType.APPROVAL_GRANTS_RESPONSE,
+        request_id=req_id,
+        payload={"grants": grants},
+    ).to_json())
+
+async def _handle_approval_grant_revoke_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.tools.approval_cache import get_default_cache
+
+    grant_id = msg.payload.get("id")
+    # E1-01: the id rides an untrusted payload — a
+    # non-numeric id is a rejected revoke (answered
+    # below with revoked=False), never a ValueError that
+    # kills the session.
+    try:
+        grant_pk = int(grant_id) if grant_id is not None else None
+    except (TypeError, ValueError):
+        grant_pk = None
+    cache = get_default_cache()
+    revoked = bool(grant_id) and grant_pk is not None and await asyncio.to_thread(cache.revoke, grant_pk)
+    if revoked:
+        engine_state.audit_logger.log_event("APPROVAL_GRANT_REVOKED", {"grant_id": grant_id})
+    grants = await asyncio.to_thread(cache.list_grants)
+    await conn.ws.send_text(Event(
+        type=EventType.APPROVAL_GRANT_REVOKE_RESPONSE,
+        request_id=req_id,
+        payload={"id": grant_id, "revoked": revoked, "grants": grants},
+    ).to_json())
+
+# -----------------------------------------------------------
+# Artifact Store (Epic 8, E8-2.1)
+# -----------------------------------------------------------
+
+
+async def _handle_artifact_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.artifacts.store import get_artifact_store
+    art_store = get_artifact_store()
+    sess_id = msg.payload.get("session_id")
+    is_global = bool(msg.payload.get("global"))
+    limit = msg.payload.get("limit")
+    offset = msg.payload.get("offset")
+    artifacts, total = await asyncio.to_thread(
+        art_store.list_artifacts, session_id=sess_id, is_global=is_global, limit=limit, offset=offset
+    )
+    await conn.ws.send_text(Event(
+        type=EventType.ARTIFACT_LIST_RESPONSE,
+        request_id=req_id,
+        payload={"artifacts": artifacts, "total": total},
+    ).to_json())
+
+async def _handle_artifact_get_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    art_id = msg.payload.get("artifact_id", "")
+    result = await handle_artifact_get(art_id)
+    await conn.ws.send_text(Event(
+        type=EventType.ARTIFACT_GET_RESPONSE,
+        request_id=req_id,
+        payload=result,
+    ).to_json())
+
+async def _handle_dev_server_detect_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-2.2: probe for a running dev server so the
+    # canvas Preview tab can load it in its sandboxed frame.
+    from aether_engine.artifacts.dev_server import detect_dev_server
+
+    result = await asyncio.to_thread(
+        detect_dev_server,
+        workspace_root=msg.payload.get("workspace_root"),
+        project_path=msg.payload.get("project_path"),
+    )
+    await conn.ws.send_text(Event(
+        type=EventType.DEV_SERVER_DETECT_RESPONSE,
+        request_id=req_id,
+        payload=result,
+    ).to_json())
+
+async def _handle_usage_ledger_query_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-A8.1a: the header cost popover and (with
+    # E8-A8.1b) Settings → Usage read the ledger here.
+    from aether_engine.cost.ledger import get_usage_ledger
+
+    result = await asyncio.to_thread(
+        get_usage_ledger().query,
+        session_id=msg.payload.get("session_id"),
+        task_id=msg.payload.get("task_id"),
+        start_ts=msg.payload.get("start_ts"),
+        end_ts=msg.payload.get("end_ts"),
+    )
+    await conn.ws.send_text(Event(
+        type=EventType.USAGE_LEDGER_QUERY_RESPONSE,
+        request_id=req_id,
+        payload=result,
+    ).to_json())
+
+async def _handle_context_breakdown_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-A8.1b: segmented context breakdown for header and settings
+    from aether_engine.cost.context_breakdown import get_context_breakdown
+
+    session_id = msg.payload.get("session_id", "")
+    task_id = msg.payload.get("task_id")
+    model = msg.payload.get("model") or getattr(engine_state, "active_model", None)
+
+    result = await asyncio.to_thread(
+        get_context_breakdown,
+        session_id=session_id,
+        task_id=task_id,
+        model=model,
+    )
+    await conn.ws.send_text(Event(
+        type=EventType.CONTEXT_BREAKDOWN_RESPONSE,
+        request_id=req_id,
+        payload=result,
+    ).to_json())
+
+async def _handle_daily_budget_set_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-A8.1b: daily budget update with soft alert
+    from aether_engine.cost.ledger import get_usage_ledger
+
+    raw_budget = msg.payload.get("daily_budget_usd")
+    try:
+        budget = float(raw_budget) if raw_budget is not None else None
+    except (TypeError, ValueError):
+        # E1-01: a non-numeric budget is rejected with an
+        # answer naming the unchanged value — never a
+        # ValueError that kills the session, and the bad
+        # value is neither applied nor saved.
+        await conn.ws.send_text(Event(
+            type=EventType.DAILY_BUDGET_SET_RESPONSE,
+            request_id=req_id,
+            payload={
+                "daily_budget_usd": engine_state.user_config.daily_budget_usd,
+                "ok": False,
+                "error": f"Invalid daily budget value: {raw_budget!r} (expected a number)",
+            },
+        ).to_json())
+        return
+    if budget is not None and budget <= 0:
+        budget = None
+    engine_state.user_config.daily_budget_usd = budget
+    save_err = _try_save_config()
+
+    await conn.ws.send_text(Event(
+        type=EventType.DAILY_BUDGET_SET_RESPONSE,
+        request_id=req_id,
+        # E1-10: a failed save is ok:False, not a
+        # dropped connection.
+        payload=(
+            {"daily_budget_usd": budget, "ok": False,
+             "error": f"Daily budget could not be saved: {save_err}"}
+            if save_err is not None else
+            {"daily_budget_usd": budget, "ok": True}),
+    ).to_json())
+
+    if budget is not None and budget > 0:
+        today_spend = get_usage_ledger().today_total()
+        if today_spend > budget:
+            await conn.ws.send_text(Event(
+                type=EventType.DAILY_BUDGET_EXCEEDED,
+                payload={
+                    "daily_budget_usd": float(budget),
+                    "today_spend_usd": float(today_spend),
+                },
+            ).to_json())
+
+async def _handle_browser_task_pause_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-6.1: browser control channel — pause /
+    # resume / take-control / return-control / stop for
+    # the dedicated agent browser (browser task card).
+    from aether_engine.browser.session import get_browser_manager
+
+    browser_result = await get_browser_manager().control(
+        session_id=msg.payload.get("session_id"),
+        chat_session_id=msg.payload.get("chat_session_id"),
+        action=str(msg.payload.get("action", "")),
+    )
+    await conn.ws.send_text(Event(
+        type=EventType.BROWSER_TASK_PAUSE_RESPONSE,
+        request_id=req_id,
+        payload=browser_result,
+    ).to_json())
+
+async def _handle_browser_policy_get_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-6.2: Settings → Browser Agent Policy reads
+    # the confirmation policy (categories + toggles).
+    from aether_engine.browser.policy import policy_from_user_config
+
+    await conn.ws.send_text(Event(
+        type=EventType.BROWSER_POLICY_GET_RESPONSE,
+        request_id=req_id,
+        payload=policy_from_user_config(engine_state.user_config).to_dict(),
+    ).to_json())
+
+async def _handle_browser_policy_set_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-6.2: partial policy update — validated
+    # fully before anything mutates, so a rejected update
+    # changes nothing. Persisted with the rest of the
+    # user config and audited by field name.
+    from aether_engine.browser.policy import (
+        apply_policy_update,
+        policy_from_user_config,
+    )
+
+    ok, error = apply_policy_update(engine_state.user_config, msg.payload)
+    response_payload: dict = {
+        "success": ok,
+        "policy": policy_from_user_config(engine_state.user_config).to_dict(),
+    }
+    if ok:
+        # E1-10: fold a save failure into the same
+        # success/error vocabulary instead of raising.
+        save_err = _try_save_config()
+        if save_err is not None:
+            response_payload["success"] = False
+            response_payload["error"] = (
+                f"Browser policy could not be saved: {save_err}")
+            ok = False
+    if ok:
+        changed = sorted(
+            key for key in ("enabled", "vault_autofill", "envelopes_enabled")
+            if msg.payload.get(key) is not None
+        )
+        if isinstance(msg.payload.get("categories"), dict):
+            changed += [f"categories.{k}" for k in msg.payload["categories"]]
+        engine_state.audit_logger.log_event(
+            "BROWSER_POLICY_UPDATED", {"fields": changed})
+    elif "error" not in response_payload:
+        response_payload["error"] = error
+    await conn.ws.send_text(Event(
+        type=EventType.BROWSER_POLICY_SET_RESPONSE,
+        request_id=req_id,
+        payload=response_payload,
+    ).to_json())
+
+async def _handle_vault_entry_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-6.3: Settings → Password Vault lists
+    # entries METADATA ONLY (the store's list never
+    # selects a secret column, so no payload can carry a
+    # password). Agent-created entries appear here for
+    # the owner's review like any other.
+    from aether_engine.vault.store import get_credential_vault
+
+    entries = await asyncio.to_thread(
+        get_credential_vault().list_entries)
+    await conn.ws.send_text(Event(
+        type=EventType.VAULT_ENTRY_LIST_RESPONSE,
+        request_id=req_id,
+        payload={"entries": entries},
+    ).to_json())
+
+async def _handle_vault_entry_save_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Create/update one entry from the Settings form.
+    # A blank password on an update means "keep the
+    # stored one" (the form never receives the current
+    # password, so it cannot send it back). The response
+    # echoes only success + id — never the fields.
+    from aether_engine.vault.store import (
+        VaultError,
+        get_credential_vault,
+    )
+
+    password = msg.payload.get("password") or None
+    if password is not None and not str(password).strip():
+        password = None
+    totp = msg.payload.get("totp_secret")
+    if totp is not None and not str(totp).strip():
+        # Blank mirrors the password rule: on update it
+        # keeps the stored secret (the form never
+        # receives it, so it cannot send it back); on
+        # create it simply means "no TOTP secret".
+        totp = None
+    try:
+        entry_id = await asyncio.to_thread(
+            get_credential_vault().save_entry,
+            site=str(msg.payload.get("site", "")),
+            username=str(msg.payload.get("username", "")),
+            password=password,
+            ask_every_time=bool(
+                msg.payload.get("ask_every_time", False)),
+            created_by="user",
+            totp_secret=totp,
+            entry_id=msg.payload.get("id") or None,
+        )
+        vault_payload: dict = {"success": True, "id": entry_id}
+        engine_state.audit_logger.log_event(
+            "VAULT_ENTRY_SAVED", {"entry_id": entry_id})
+    except VaultError as exc:
+        vault_payload = {
+            "success": False,
+            "id": msg.payload.get("id") or "",
+            "error": str(exc),
+        }
+    await conn.ws.send_text(Event(
+        type=EventType.VAULT_ENTRY_SAVE_RESPONSE,
+        request_id=req_id,
+        payload=vault_payload,
+    ).to_json())
+
+async def _handle_vault_entry_delete_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.vault.store import get_credential_vault
+
+    entry_id = str(msg.payload.get("id", ""))
+    removed = await asyncio.to_thread(
+        get_credential_vault().delete_entry, entry_id)
+    if removed:
+        engine_state.audit_logger.log_event(
+            "VAULT_ENTRY_DELETED", {"entry_id": entry_id})
+    await conn.ws.send_text(Event(
+        type=EventType.VAULT_ENTRY_DELETE_RESPONSE,
+        request_id=req_id,
+        payload={"success": removed, "id": entry_id},
+    ).to_json())
+
+async def _handle_vault_totp_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Open Point 14: Settings → Password Vault's
+    # Authenticator section lists standalone TOTP
+    # entries METADATA ONLY (the store's listing never
+    # selects the secret column).
+    from aether_engine.vault.store import get_credential_vault
+
+    totp_entries = await asyncio.to_thread(
+        get_credential_vault().list_totp_entries)
+    await conn.ws.send_text(Event(
+        type=EventType.VAULT_TOTP_LIST_RESPONSE,
+        request_id=req_id,
+        payload={"entries": totp_entries},
+    ).to_json())
+
+async def _handle_vault_totp_save_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Enrol / update one authenticator entry from the
+    # Settings form. The engine validates the Base32
+    # setup key and stores it normalised + encrypted; a
+    # blank secret on update means "keep the stored
+    # one", exactly like the password rule above. The
+    # response echoes only success + id — never fields.
+    from aether_engine.vault.store import (
+        VaultError,
+        get_credential_vault,
+    )
+
+    setup_key = msg.payload.get("secret")
+    if setup_key is not None and not str(setup_key).strip():
+        setup_key = None
+    try:
+        totp_id = await asyncio.to_thread(
+            get_credential_vault().save_totp_entry,
+            label=str(msg.payload.get("label", "")),
+            issuer=str(msg.payload.get("issuer", "")),
+            entry_id=msg.payload.get("id") or None,
+            **{"secret": setup_key},  # noqa: PIE804 — dict form is deliberate (see tests/test_vault_totp.py)
+        )
+        totp_payload: dict = {"success": True, "id": totp_id}
+        engine_state.audit_logger.log_event(
+            "VAULT_TOTP_SAVED", {"entry_id": totp_id})
+    except VaultError as exc:
+        totp_payload = {
+            "success": False,
+            "id": msg.payload.get("id") or "",
+            "error": str(exc),
+        }
+    await conn.ws.send_text(Event(
+        type=EventType.VAULT_TOTP_SAVE_RESPONSE,
+        request_id=req_id,
+        payload=totp_payload,
+    ).to_json())
+
+async def _handle_vault_totp_delete_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.vault.store import get_credential_vault
+
+    totp_id = str(msg.payload.get("id", ""))
+    removed = await asyncio.to_thread(
+        get_credential_vault().delete_totp_entry, totp_id)
+    if removed:
+        engine_state.audit_logger.log_event(
+            "VAULT_TOTP_DELETED", {"entry_id": totp_id})
+    await conn.ws.send_text(Event(
+        type=EventType.VAULT_TOTP_DELETE_RESPONSE,
+        request_id=req_id,
+        payload={"success": removed, "id": totp_id},
+    ).to_json())
+
+async def _handle_vault_totp_codes_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # The ONLY code-carrying payload in the system,
+    # served on the owner's Settings request. Secrets
+    # never leave the engine: the store computes the
+    # codes in-process from the decrypted secrets, and
+    # each entry's read is audited VAULT_TOTP_ACCESSED
+    # by the owner accessors there.
+    from aether_engine.vault.store import get_credential_vault
+
+    codes_payload = await asyncio.to_thread(
+        get_credential_vault().totp_codes)
+    await conn.ws.send_text(Event(
+        type=EventType.VAULT_TOTP_CODES_RESPONSE,
+        request_id=req_id,
+        payload=codes_payload,
+    ).to_json())
+
+async def _handle_vault_fill_approval_response(conn: WsConnection, msg: Event) -> None:
+    # The desktop's answer to an ask-every-time fill
+    # prompt (VAULT_FILL_APPROVAL_REQUEST). No reply
+    # event — the fill itself reports through the task.
+    # Unknown/stale request ids are tolerated silently:
+    # the service already failed that fill closed on its
+    # timeout if the answer never mattered.
+    from aether_engine.vault.service import get_vault_service
+
+    get_vault_service().resolve_fill_approval(
+        str(msg.payload.get("request_id", "")),
+        bool(msg.payload.get("approved", False)),
+    )
+
+# -----------------------------------------------------------
+# Media Store & Library (Epic 8, E8-4.2)
+# -----------------------------------------------------------
+
+
+async def _handle_media_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.media.store import get_media_store
+    media_store = get_media_store()
+    collection = msg.payload.get("collection", "all")
+    sess_id = msg.payload.get("session_id")
+    limit = msg.payload.get("limit")
+    offset = msg.payload.get("offset")
+    query = msg.payload.get("query")
+    media_items, total = await asyncio.to_thread(
+        media_store.list_media,
+        collection=collection,
+        session_id=sess_id,
+        limit=limit,
+        offset=offset,
+        query=query,
+    )
+    await conn.ws.send_text(Event(
+        type=EventType.MEDIA_LIST_RESPONSE,
+        request_id=req_id,
+        payload={"media": media_items, "total": total},
+    ).to_json())
+
+async def _handle_media_search_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # N07: Library search is served by the backend recall
+    # path (the same search_media_entries the media_recall
+    # tool uses) so transcript and semantic matches reach
+    # the UI. An empty query is an honest empty result —
+    # recall is never invoked with nothing to search for.
+    # Off the message loop (see send_media_search_result):
+    # the recall embeds the query and can take seconds
+    # (RUX-B-08). The payload parsing stays here — it is
+    # instant and defines the request the task runs.
+    search_query = str(msg.payload.get("query") or "").strip()
+    search_collection = msg.payload.get("collection", "all")
+    if search_collection not in ("all", "user", "generated"):
+        search_collection = "all"
+    try:
+        search_limit = int(msg.payload.get("limit") or 20)
+    except (TypeError, ValueError):
+        search_limit = 20
+    conn.spawn_background(send_media_search_result(conn, 
+        req_id, search_query, search_collection, search_limit))
+
+async def _handle_media_delete_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.media.store import get_media_store
+    media_store = get_media_store()
+    mid = msg.payload.get("media_id", "")
+    del_file = bool(msg.payload.get("delete_underlying_file", False))
+    deleted, file_deleted = await asyncio.to_thread(
+        media_store.delete_media, mid, delete_underlying_file=del_file
+    )
+    await conn.ws.send_text(Event(
+        type=EventType.MEDIA_DELETE_RESPONSE,
+        request_id=req_id,
+        payload={"deleted": deleted, "media_id": mid, "file_deleted": file_deleted},
+    ).to_json())
+
+async def _handle_media_metadata_update_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.media.store import get_media_store
+    media_store = get_media_store()
+    mid = msg.payload.get("media_id", "")
+    tags = msg.payload.get("tags")
+    notes = msg.payload.get("notes")
+    updated = await asyncio.to_thread(
+        media_store.update_metadata, mid, tags=tags, notes=notes
+    )
+    await conn.ws.send_text(Event(
+        type=EventType.MEDIA_METADATA_UPDATE_RESPONSE,
+        request_id=req_id,
+        payload=updated,
+    ).to_json())
+
+# -----------------------------------------------------------
+# Local Models (Ollama) & Task Download Events
+# -----------------------------------------------------------
+
+
+async def _handle_local_model_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_local_model_list_result):
+    # the daemon call can take seconds (RUX-B-08).
+    conn.spawn_background(send_local_model_list_result(conn, req_id))
+
+async def _handle_local_model_download_start(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    model_name = msg.payload.get("model", "") or msg.payload.get("repo_id", "")
+    dest_dir = msg.payload.get("destination_dir")
+    if conn.task_runner and not conn.task_runner.done():
+        conn.task_runner.cancel()
+
+    async def execute_local_download(model_name=model_name, destination_dir=dest_dir, request_id=req_id):
+        async for dl_ev in engine_state.ollama_manager.download_model_task(
+            model_name=model_name,
+            destination_dir=destination_dir,
+            request_id=request_id,
+        ):
+            await conn.ws.send_text(dl_ev.to_json())
+
+    dl_task = asyncio.create_task(execute_local_download())
+    conn.active_downloads[model_name] = dl_task
+    conn.task_runner = dl_task
+
+async def _handle_local_model_download_cancel(conn: WsConnection, msg: Event) -> None:
+    cancel_model = msg.payload.get("model", "")
+    dl = conn.active_downloads.pop(cancel_model, None)
+    if dl and not dl.done():
+        dl.cancel()
+        logger.info(f"Download cancelled for model: {cancel_model}")
+
+async def _handle_local_model_delete_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_local_model_delete_result):
+    # the daemon call can take seconds (RUX-B-08).
+    conn.spawn_background(send_local_model_delete_result(conn, 
+        req_id, msg.payload.get("model", "")))
+
+# -----------------------------------------------------------
+# Model Hub catalogue layer (H1, read-only)
+# -----------------------------------------------------------
+
+
+async def _handle_model_hub_search_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_model_hub_search_result):
+    # the catalogue call is live HTTP (RUX-B-08).
+    conn.spawn_background(send_model_hub_search_result(conn, 
+        req_id,
+        msg.payload.get("source", "hf"),
+        msg.payload.get("query", "") or "",
+        msg.payload.get("family")))
+
+async def _handle_model_hub_detail_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_model_hub_detail_result):
+    # the catalogue call is live HTTP (RUX-B-08).
+    conn.spawn_background(send_model_hub_detail_result(conn, 
+        req_id,
+        msg.payload.get("source", "hf"),
+        msg.payload.get("id", "") or ""))
+
+# -----------------------------------------------------------
+# Model Hub downloads (H2): begin/run split — the RESPONSE
+# is the synchronous verdict (accepted, or the honest
+# refusal: busy store, not runnable, voice components
+# missing); progress then flows as the same task event
+# stream the local-model pulls use. The download registers
+# in active_downloads under its store key, so the existing
+# LOCAL_MODEL_DOWNLOAD_CANCEL cancels hub downloads too.
+# task_runner is deliberately NOT touched: a hub download
+# must never cancel a running agent task.
+# -----------------------------------------------------------
+
+
+async def _handle_model_hub_download_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    plan = await engine_state.hub_downloads.begin(
+        source=msg.payload.get("source", "hf"),
+        model_id=msg.payload.get("id", "") or "",
+        variant=msg.payload.get("variant"),
+    )
+    if not plan.get("success"):
+        await conn.ws.send_text(Event(
+            type=EventType.MODEL_HUB_DOWNLOAD_RESPONSE,
+            request_id=req_id,
+            payload={
+                "success": False,
+                "error": plan.get("error"),
+            },
+        ).to_json())
+    else:
+        await conn.ws.send_text(Event(
+            type=EventType.MODEL_HUB_DOWNLOAD_RESPONSE,
+            request_id=req_id,
+            payload={
+                "success": True,
+                "model": plan["key"],
+                "task_id": plan["task_id"],
+            },
+        ).to_json())
+
+        async def execute_hub_download(plan=plan, request_id=req_id):
+            try:
+                async for dl_ev in engine_state.hub_downloads.run(
+                    plan, request_id=request_id
+                ):
+                    await conn.ws.send_text(dl_ev.to_json())
+            finally:
+                engine_state.hub_downloads.release(plan)
+
+        hub_dl_task = asyncio.create_task(execute_hub_download())
+        conn.active_downloads[plan["key"]] = hub_dl_task
+
+async def _handle_model_hub_downloaded_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    result = await engine_state.hub_downloads.downloaded()
+    await conn.ws.send_text(Event(
+        type=EventType.MODEL_HUB_DOWNLOADED_RESPONSE,
+        request_id=req_id,
+        payload=result,
+    ).to_json())
+
+async def _handle_model_hub_delete_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_model_hub_delete_result):
+    # the delete verifies against the daemon and removes
+    # the repo tree (RUX-B-08).
+    conn.spawn_background(send_model_hub_delete_result(conn, 
+        req_id,
+        msg.payload.get("source", "hf"),
+        msg.payload.get("id", "") or ""))
+
+# -----------------------------------------------------------
+# Capabilities Check Scheduler Events
+# -----------------------------------------------------------
+
+
+async def _handle_capability_check_set_schedule(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    interval = msg.payload.get("schedule", "weekly")
+    method = msg.payload.get("method", "Both")
+    engine_state.scheduler_manager.set_schedule(interval, method)
+    status_sum = engine_state.scheduler_manager.get_status_summary()
+    await conn.ws.send_text(Event(
+        type=EventType.CAPABILITY_CHECK_HISTORY_RESPONSE,
+        request_id=req_id,
+        payload={
+            "summary": status_sum,
+            "history": engine_state.scheduler_manager.get_history(),
+        },
+    ).to_json())
+
+async def _handle_capability_check_run_now(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_capability_check_result):
+    # a run is minutes of discovery + live self-tests and
+    # must not wedge the socket behind it (RUX-B-03).
+    conn.spawn_background(send_capability_check_result(conn, req_id, msg.payload.get("method")))
+
+async def _handle_capability_check_get_history(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    status_sum = engine_state.scheduler_manager.get_status_summary()
+    history = engine_state.scheduler_manager.get_history()
+    await conn.ws.send_text(Event(
+        type=EventType.CAPABILITY_CHECK_HISTORY_RESPONSE,
+        request_id=req_id,
+        payload={"summary": status_sum, "history": history},
+    ).to_json())
+
+async def _handle_environment_diagnostic_run_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # The probes are synchronous (subprocess + urllib,
+    # ~7 s of timeouts on a dead network): run them on a
+    # worker thread so the event loop — and /health with
+    # it — never freezes behind them (RUX-B-05).
+    diag_logs = await asyncio.to_thread(run_environment_diagnostics)
+    # Determine overall summary status based on logs
+    failed_count = sum(1 for log in diag_logs if log["status"] == "FAILED")
+    await conn.ws.send_text(Event(
+        type=EventType.ENVIRONMENT_DIAGNOSTIC_RESPONSE,
+        request_id=req_id,
+        payload={
+            "summary": {"failed_count": failed_count},
+            "history": diag_logs,
+        },
+    ).to_json())
+
+async def _handle_refresh_models_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_refresh_models_result):
+    # a refresh can take ~100 s of discovery and must not
+    # wedge the socket behind it (RUX-B-01).
+    conn.spawn_background(send_refresh_models_result(conn, req_id, dict(msg.payload)))
+
+# -----------------------------------------------------------
+# Tools, MCP, Plugins, Memory Events
+# -----------------------------------------------------------
+
+
+async def _handle_tool_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.langgraph.nodes.supervisor import (
+        SUPERVISOR_MEMORY_TOOLS,
+    )
+    from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+    from aether_engine.tools.policy import (
+        KNOWN_NON_REGISTRY_TOOLS,
+        resolve_policy_by_name,
+    )
+    from aether_engine.tools.registry import ToolRisk
+                
+    tool_registry = build_tool_registry(
+        mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
+    )
+
+    def enrich_tool(d, name, risk, _registry=tool_registry):
+        user_val = engine_state.user_config.tool_policies.get(name)
+        # E2-F07: resolve through the SAME inputs enforcement
+        # uses — the real registry (so a tool's registered
+        # risk, not the EXECUTE fallback, drives the verdict)
+        # and the live approval mode. Without them the list
+        # reported "ask" for tools that actually run "allow".
+        effective = resolve_policy_by_name(
+            name,
+            engine_state.user_config.tool_policies,
+            _registry,
+            approval_mode=engine_state.user_config.approval_mode,
+        )
+        d["risk"] = risk.value if isinstance(risk, ToolRisk) else risk
+        d["effective_policy"] = effective
+        d["policy_is_default"] = user_val is None
+        d["always_allow_permitted"] = (risk == ToolRisk.READ_ONLY)
+        d["policy"] = user_val or "Require Approval" # UI currently expects the raw setting in 'policy' too
+        return d
+
+    all_tools = tool_registry.get_tools()
+    defs = []
+    for t in all_tools:
+        d = t.to_definition()
+        defs.append(enrich_tool(d, t.name, t.risk))
+
+    # Add Supervisor Memory Tools
+    for mt in SUPERVISOR_MEMORY_TOOLS:
+        d = mt.copy()
+        name = d["function"]["name"]
+        risk = KNOWN_NON_REGISTRY_TOOLS.get(name, ToolRisk.EXECUTE)
+        defs.append(enrich_tool(d, name, risk))
+
+    await conn.ws.send_text(Event(
+        type=EventType.TOOL_LIST_RESPONSE,
+        request_id=req_id,
+        payload={"tools": defs, "approval_mode": engine_state.user_config.approval_mode},
+    ).to_json())
+
+async def _handle_agent_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    agents = [
+        {"id": "supervisor", "name": "Supervisor", "description": "Routes tasks and queries memory."},
+        {"id": "planner", "name": "Planner Agent", "description": "Breaks goals into structured steps."},
+        {"id": "coder", "name": "Coder Agent", "description": "Writes, tests, and debugs code."},
+        {"id": "researcher", "name": "Researcher Agent", "description": "Gathers information and synthesizes findings."}
+    ]
+                
+    for agent in agents:
+        agent["model"] = engine_state.user_config.agent_models.get(agent["id"], "inherit")
+        agent["tools"] = engine_state.user_config.agent_tools.get(agent["id"])
+                
+    await conn.ws.send_text(Event(
+        type=EventType.AGENT_LIST_RESPONSE,
+        request_id=req_id,
+        payload={"agents": agents},
+    ).to_json())
+
+async def _handle_agent_update_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    agent_id = msg.payload.get("agent_id")
+    model = msg.payload.get("model")
+    tools = msg.payload.get("tools")
+
+    # S1-M9: validate before persisting anything; the
+    # update is atomic and success is only reported when
+    # something was actually saved.
+    _known_agent_ids = {"supervisor", "planner", "coder", "researcher"}
+    _error: str | None = None
+    if not agent_id:
+        _error = "missing agent_id"
+    elif agent_id not in _known_agent_ids:
+        _error = f"unknown agent_id: {agent_id}"
+    elif model is None and tools is None:
+        _error = "nothing to update"
+    elif model is not None and model != "inherit":
+        if not isinstance(model, str) or ":" not in model:
+            _error = f"invalid model format: {model!r} (expected 'provider:model' or 'inherit')"
+        else:
+            _provider, _model_id = model.split(":", 1)
+            if not _provider or not _model_id:
+                _error = f"invalid model format: {model!r} (expected 'provider:model' or 'inherit')"
+            else:
+                _known_providers: set[str] = set(
+                    engine_state.configured_providers or []
+                )
+                _known_providers.update(
+                    (engine_state.user_config.provider_models or {}).keys()
+                )
+                try:
+                    _known_providers.update(
+                        entry.provider
+                        for entry in engine_state.model_registry.list_all_models()
+                    )
+                except Exception:  # noqa: BLE001, S110 — best-effort enrichment: a registry listing failure must not block validation; config-known providers are still checked
+                    pass
+                if _provider not in _known_providers:
+                    _error = f"unknown provider: {_provider}"
+
+    if _error is not None:
+        await conn.ws.send_text(Event(
+            type=EventType.AGENT_UPDATE_RESPONSE,
+            request_id=req_id,
+            payload={"success": False, "agent_id": agent_id, "error": _error},
+        ).to_json())
+    else:
+        if model is not None:
+            engine_state.user_config.agent_models[agent_id] = model
+        if tools is not None:
+            engine_state.user_config.agent_tools[agent_id] = tools
+        # E1-10: a save failure is reported in the same
+        # vocabulary, not raised out of the handler.
+        save_err = _try_save_config()
+        if save_err is not None:
+            await conn.ws.send_text(Event(
+                type=EventType.AGENT_UPDATE_RESPONSE,
+                request_id=req_id,
+                payload={"success": False, "agent_id": agent_id,
+                         "error": f"Agent update could not be saved: {save_err}"},
+            ).to_json())
+        else:
+            await conn.ws.send_text(Event(
+                type=EventType.AGENT_UPDATE_RESPONSE,
+                request_id=req_id,
+                payload={"success": True, "agent_id": agent_id},
+            ).to_json())
+
+async def _handle_tool_policy_set_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    tool_name = msg.payload.get("tool_name")
+    policy = msg.payload.get("policy")
+    response_payload = {"success": True, "tool_name": tool_name, "policy": policy}
+
+    if tool_name and policy:
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+        from aether_engine.tools.policy import tool_risk_by_name
+        from aether_engine.tools.registry import ToolRisk
+
+        risk = ToolRisk.EXECUTE
+        try:
+            # E2-F07: gate on the tool's risk in the FULL
+            # registry — the legacy-factory reconstruction
+            # this replaces knew nothing of the filesystem,
+            # codebase, browser or MCP tools, so safe
+            # registered tools (read_file, project_tree,
+            # READ_ONLY MCP tools) hit the EXECUTE default
+            # and "Always Allow" was wrongly downgraded.
+            setter_registry = build_tool_registry(
+                mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
+            )
+            risk = tool_risk_by_name(tool_name, setter_registry)
+        except Exception:  # best-effort risk lookup: on failure the fail-closed EXECUTE default above stands
+            logger.debug(f"Tool risk lookup failed for {tool_name}", exc_info=True)
+
+        if policy == "Always Allow" and risk != ToolRisk.READ_ONLY:
+            policy = "Require Approval"
+            response_payload["policy"] = policy
+            response_payload["message"] = "Always Allow is not permitted for risky tools. Downgraded to Require Approval."
+            # E1-12: through the engine's own audit
+            # logger — a fresh AuditLogger() wrote to
+            # the default path, splitting the record
+            # from this session's.
+            engine_state.audit_logger.log_event("TOOL_POLICY_IGNORED", {"tool_name": tool_name, "requested": "Always Allow", "reason": "Risky tool"})
+
+        engine_state.user_config.tool_policies[tool_name] = policy
+        # E1-10: a save failure flips the verdict rather
+        # than raising out of the handler.
+        save_err = _try_save_config()
+        if save_err is not None:
+            response_payload["success"] = False
+            response_payload["error"] = f"Tool policy could not be saved: {save_err}"
+    else:
+        # E1-12: nothing was (or could be) saved, so the
+        # pre-built success:true above was a lie — the
+        # refusal is reported honestly instead.
+        response_payload["success"] = False
+        response_payload["error"] = "tool_name and policy are required"
+
+    await conn.ws.send_text(Event(
+        type=EventType.TOOL_POLICY_SET_RESPONSE,
+        request_id=req_id,
+        payload=response_payload,
+    ).to_json())
+
+async def _handle_approval_mode_set_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 2, E2-08: approval mode selector in Settings.
+    mode = msg.payload.get("mode")
+    success = mode in ("ask", "write")
+    mode_error: str | None = None
+    if success:
+        engine_state.user_config.approval_mode = mode
+        # E1-10: a save failure flips success rather
+        # than raising out of the handler.
+        save_err = _try_save_config()
+        if save_err is not None:
+            success = False
+            mode_error = f"Approval mode could not be saved: {save_err}"
+        else:
+            engine_state.audit_logger.log_event("APPROVAL_MODE_SET", {"mode": mode})
+    approval_payload: dict[str, Any] = {
+        "success": success,
+        "mode": engine_state.user_config.approval_mode}
+    if mode_error is not None:
+        approval_payload["error"] = mode_error
+    await conn.ws.send_text(Event(
+        type=EventType.APPROVAL_MODE_SET_RESPONSE,
+        request_id=req_id,
+        payload=approval_payload,
+    ).to_json())
+
+async def _handle_mcp_server_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+    servers = GLOBAL_MCP_REGISTRY.list_servers_with_status()
+    await conn.ws.send_text(Event(
+        type=EventType.MCP_SERVER_LIST_RESPONSE,
+        request_id=req_id,
+        payload={
+            "servers": servers,
+            "config_error": getattr(GLOBAL_MCP_REGISTRY, "config_load_error", None),
+        },
+    ).to_json())
+
+async def _handle_config_get_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    await conn.ws.send_text(Event(
+        type=EventType.CONFIG_GET_RESPONSE,
+        request_id=req_id,
+        payload={"config": engine_state.user_config.to_dict()},
+    ).to_json())
+
+async def _handle_config_update_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    config_data = msg.payload.get("config", {})
+    if not isinstance(config_data, dict):
+        # E1-01: a non-object config (a string passes the
+        # "disable_fallbacks" membership test below as a
+        # substring, then TypeErrors on indexing) is
+        # refused with an answer, in the same vocabulary
+        # as the E6-F05 refusal — nothing applied, nothing
+        # saved, session alive.
+        await conn.ws.send_text(Event(
+            type=EventType.CONFIG_UPDATE_RESPONSE,
+            request_id=req_id,
+            payload={"success": False, "error": "Config update must be a JSON object of settings."},
+        ).to_json())
+        return
+    # E6-F05: the fields handed over by Epics 1 and 2
+    # (spawn policy, prewalk, output schemas, compaction
+    # thresholds, path rules) are validated strictly —
+    # a malformed write is refused with an error reply
+    # and NOTHING in the update is applied or saved,
+    # rather than silently dropped or coerced the way
+    # the tolerant config-file loader treats bad values.
+    from aether_engine.config_updates import (
+        HANDED_OFF_FIELDS,
+        validate_handed_off_updates,
+    )
+    handed_off_error = None
+    handed_off_values: dict = {}
+    if isinstance(config_data, dict) and any(
+            field in config_data for field in HANDED_OFF_FIELDS):
+        try:
+            handed_off_values = validate_handed_off_updates(config_data)
+        except ValueError as exc:
+            handed_off_error = str(exc)
+    if handed_off_error is not None:
+        await conn.ws.send_text(Event(
+            type=EventType.CONFIG_UPDATE_RESPONSE,
+            request_id=req_id,
+            payload={"success": False, "error": handed_off_error},
+        ).to_json())
+        return
+    # E6-F07: snapshot before mutating — if the save
+    # below fails, live state rolls back to exactly this
+    # and the failure is answered, never swallowed. (The
+    # F05 refusal above runs before this point and applies
+    # nothing, so it needs no snapshot.)
+    previous_config = copy.deepcopy(engine_state.user_config)
+    for field, value in handed_off_values.items():
+        setattr(engine_state.user_config, field, value)
+    if "disable_fallbacks" in config_data:
+        engine_state.user_config.disable_fallbacks = config_data["disable_fallbacks"]
+    if "onboarding_completed" in config_data:
+        engine_state.user_config.onboarding_completed = bool(config_data["onboarding_completed"])
+    if "fallback_chain" in config_data:
+        engine_state.user_config.fallback_chain = config_data["fallback_chain"]
+    if "vad_threshold" in config_data:
+        try:
+            engine_state.user_config.vad_threshold = float(config_data["vad_threshold"])
+        except (TypeError, ValueError):
+            pass
+    if "silence_duration_ms" in config_data:
+        try:
+            engine_state.user_config.silence_duration_ms = int(config_data["silence_duration_ms"])
+        except (TypeError, ValueError):
+            pass
+    if "smart_turn_sensitivity" in config_data:
+        try:
+            engine_state.user_config.smart_turn_sensitivity = min(
+                1.0, max(0.0, float(config_data["smart_turn_sensitivity"])))
+        except (TypeError, ValueError):
+            pass
+    # FUP-1: only the two literals apply; anything else
+    # is ignored, matching the tuning fields above. The
+    # value is read live per tool call (execute_tool
+    # passes user_config.approval_binding_mode into
+    # registry.execute), so this takes effect on the
+    # next call — no restart, no session rebuild.
+    if (
+        "approval_binding_mode" in config_data
+        and config_data["approval_binding_mode"] in ("rebind", "carry")
+    ):
+        engine_state.user_config.approval_binding_mode = config_data["approval_binding_mode"]
+    if "snip_hotkey" in config_data:
+        engine_state.user_config.snip_hotkey = str(config_data["snip_hotkey"])
+    try:
+        save_config(engine_state.user_config)
+    except OSError as exc:
+        # E6-F07: a failed save is a non-event — roll the
+        # live state back and answer in the same
+        # {success: False, error} vocabulary as the F05
+        # refusal. Uncaught, this OSError killed the
+        # handler and the client waited forever.
+        engine_state.user_config = previous_config
+        await conn.ws.send_text(Event(
+            type=EventType.CONFIG_UPDATE_RESPONSE,
+            request_id=req_id,
+            payload={
+                "success": False,
+                "error": f"Settings could not be saved: {exc}",
+            },
+        ).to_json())
+        return
+    await conn.ws.send_text(Event(
+        type=EventType.CONFIG_UPDATE_RESPONSE,
+        request_id=req_id,
+        payload={"success": True, "config": engine_state.user_config.to_dict()},
+    ).to_json())
+
+async def _handle_config_reset_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 6, E6-06: reset-to-defaults that really resets —
+    # the user config is replaced with a fresh default
+    # UserConfig and saved. API keys live in the secret
+    # store (not the config) and files on disk are never
+    # touched; the UI confirm says exactly that.
+    # E6-F07: keep the pre-reset config until the save is
+    # durable — a failed save restores it and is answered
+    # with {success: False, error}; nothing is reset.
+    previous_config = engine_state.user_config
+    engine_state.user_config = UserConfig()
+    try:
+        save_config(engine_state.user_config)
+    except OSError as exc:
+        engine_state.user_config = previous_config
+        await conn.ws.send_text(Event(
+            type=EventType.CONFIG_RESET_RESPONSE,
+            request_id=req_id,
+            payload={
+                "success": False,
+                "error": f"Settings reset could not be saved: {exc}",
+            },
+        ).to_json())
+        return
+    # E6-F04: the live fields that mirror the config
+    # (active provider/model, configured providers, skill
+    # roots) are independent state — re-derive them from
+    # the reset config exactly as initialize() does, or
+    # HELLO and the skill catalogue keep serving the
+    # pre-reset world until a restart.
+    engine_state.resync_active_state()
+    engine_state.audit_logger.log_event("CONFIG_RESET", {})
+    await conn.ws.send_text(Event(
+        type=EventType.CONFIG_RESET_RESPONSE,
+        request_id=req_id,
+        payload={"success": True, "config": engine_state.user_config.to_dict()},
+    ).to_json())
+
+async def _handle_auxiliary_model_set_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Phase 9, B1: per-task-class auxiliary model override. The Settings
+    # UI sends {task, provider, model}; model "auto" clears the override.
+    # Phase 10.3, B1: only task classes in AUXILIARY_TASK_CLASSES are
+    # accepted. The other six (web, compression, skills, approval, mcp,
+    # title) have no engine call site, so accepting them would be a
+    # placebo — success:true for an override nothing ever reads.
+    # Stale entries for those tasks (e.g. from a config file written
+    # before Phase 10.3) are pruned here so the echoed dict never
+    # advertises an override the engine will not honor.
+    task = msg.payload.get("task", "")
+    provider = msg.payload.get("provider", "")
+    model = msg.payload.get("model", "auto")
+    ok, error = True, ""
+    if task not in AUXILIARY_TASK_CLASSES:
+        ok, error = False, f"Unknown task class '{task}'."
+    elif model != "auto":
+        if not provider or not model:
+            ok, error = False, "Provider and model are required (or 'auto')."
+        elif provider not in (engine_state.configured_providers or []):
+            ok, error = False, f"Provider '{provider}' is not configured."
+    if ok:
+        if model == "auto":
+            engine_state.user_config.auxiliary_models.pop(task, None)
+        else:
+            engine_state.user_config.auxiliary_models[task] = f"{provider}:::{model}"
+        # E1-10: a save failure flips ok/error rather
+        # than raising out of the handler.
+        save_err = _try_save_config()
+        if save_err is not None:
+            ok, error = False, f"Settings could not be saved: {save_err}"
+        else:
+            engine_state.audit_logger.log_event("AUXILIARY_MODEL_SET", {
+                "task": task, "provider": provider, "model": model,
+            })
+    stale = [t for t in engine_state.user_config.auxiliary_models
+             if t not in AUXILIARY_TASK_CLASSES]
+    if stale:
+        for t in stale:
+            engine_state.user_config.auxiliary_models.pop(t, None)
+        save_err = _try_save_config()
+        if save_err is not None:
+            ok, error = False, f"Settings could not be saved: {save_err}"
+        else:
+            engine_state.audit_logger.log_event("AUXILIARY_MODEL_PRUNED", {
+                "tasks": stale,
+                "reason": "task class has no engine call site",
+            })
+    await conn.ws.send_text(Event(
+        type=EventType.AUXILIARY_MODEL_SET_RESPONSE,
+        request_id=req_id,
+        payload={
+            "success": ok,
+            "error": error,
+            "auxiliary_models": dict(engine_state.user_config.auxiliary_models),
+        },
+    ).to_json())
+
+async def _handle_reasoning_effort_set_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Phase 9, B2: persist the user's reasoning-effort preference so the
+    # engine (not just localStorage) can act on it.
+    effort = msg.payload.get("effort", "")
+    ok, error = True, ""
+    if effort not in ("standard", "medium", "high"):
+        ok, error = False, f"Invalid reasoning effort '{effort}'."
+    if ok:
+        engine_state.user_config.reasoning_effort = effort
+        # E1-10: a save failure flips ok/error rather
+        # than raising out of the handler.
+        save_err = _try_save_config()
+        if save_err is not None:
+            ok, error = False, f"Settings could not be saved: {save_err}"
+        else:
+            engine_state.audit_logger.log_event("REASONING_EFFORT_SET", {"effort": effort})
+    await conn.ws.send_text(Event(
+        type=EventType.REASONING_EFFORT_SET_RESPONSE,
+        request_id=req_id,
+        payload={"success": ok, "error": error, "effort": engine_state.user_config.reasoning_effort},
+    ).to_json())
+
+async def _handle_mcp_server_add_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.mcp.registry import (
+        GLOBAL_MCP_REGISTRY,
+        MCPConfigError,
+        redact_mcp_config_for_ui,
+    )
+    name = msg.payload.get("name")
+    config = msg.payload.get("config", {})
+    ok, error = True, ""
+    if name and config:
+        try:
+            GLOBAL_MCP_REGISTRY.add_server(name, config)
+        except (MCPConfigError, OSError) as e:
+            # E3-F04: a storage OSError from the config
+            # save must answer success:false like a
+            # validation error — uncaught, it ended the
+            # websocket session with no response at all.
+            ok, error = False, str(e)
+    else:
+        ok, error = False, "Server name and config are required."
+    await conn.ws.send_text(Event(
+        type=EventType.MCP_SERVER_ADD_RESPONSE,
+        request_id=req_id,
+        # S1: never echo header/env values back to the UI.
+        payload={"success": ok, "name": name, "config": redact_mcp_config_for_ui(config), "error": error},
+    ).to_json())
+
+async def _handle_mcp_server_remove_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_mcp_server_remove_result):
+    # removal closes any live session at the connect
+    # timeout and must not wedge the socket (RUX-B-04).
+    conn.spawn_background(send_mcp_server_remove_result(conn, 
+        req_id, msg.payload.get("name")))
+
+async def _handle_mcp_server_update_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_mcp_server_update_result):
+    # disabling a server disconnects it at the connect
+    # timeout and must not wedge the socket (RUX-B-04).
+    conn.spawn_background(send_mcp_server_update_result(conn, 
+        req_id, msg.payload.get("name"),
+        msg.payload.get("auto_connect"), msg.payload.get("enabled")))
+
+async def _handle_mcp_server_connect_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_mcp_server_connect_result):
+    # a connect runs at the server's connect timeout —
+    # 30 s default, up to 300 s — and must not wedge the
+    # socket behind it (RUX-B-04).
+    conn.spawn_background(send_mcp_server_connect_result(conn, 
+        req_id, msg.payload.get("name")))
+
+async def _handle_mcp_server_disconnect_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see
+    # send_mcp_server_disconnect_result): closing a hung
+    # session is bounded by the same timeouts and must
+    # not wedge the socket behind it (RUX-B-04).
+    conn.spawn_background(send_mcp_server_disconnect_result(conn, 
+        req_id, msg.payload.get("name")))
+
+async def _handle_mcp_server_test_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_mcp_server_test_result):
+    # a test opens a throwaway session at the connect
+    # timeout and must not wedge the socket (RUX-B-04).
+    conn.spawn_background(send_mcp_server_test_result(conn, 
+        req_id, msg.payload.get("name")))
+
+async def _handle_mcp_resource_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_mcp_resource_list_result):
+    # the list runs against the live session at its read
+    # timeout and must not wedge the socket (RUX-B-04).
+    conn.spawn_background(send_mcp_resource_list_result(conn, 
+        req_id, msg.payload.get("name")))
+
+async def _handle_mcp_resource_read_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_mcp_resource_read_result):
+    # the read runs against the live session at its read
+    # timeout and must not wedge the socket (RUX-B-04).
+    conn.spawn_background(send_mcp_resource_read_result(conn, 
+        req_id, msg.payload.get("name"), msg.payload.get("uri"),
+        msg.payload.get("session_id")))
+
+async def _handle_mcp_prompt_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_mcp_prompt_list_result):
+    # the list runs against the live session at its read
+    # timeout and must not wedge the socket (RUX-B-04).
+    conn.spawn_background(send_mcp_prompt_list_result(conn, 
+        req_id, msg.payload.get("name")))
+
+async def _handle_mcp_prompt_run_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Issue 007: run a prompt template and insert its messages
+    # into the current chat (same pattern as resources in
+    # 006, but with the prompt's own roles). Never auto-run:
+    # only an explicit Run / slash command reaches here.
+    # The arguments-type rejection is a pure payload check
+    # — instant, answered inline exactly as before; the run
+    # itself is off the message loop (see
+    # send_mcp_prompt_run_result): it awaits the server at
+    # its read timeout and must not wedge the socket
+    # (RUX-B-04).
+    name = msg.payload.get("name")
+    prompt_name = msg.payload.get("prompt")
+    arguments = msg.payload.get("arguments")
+    if arguments is not None and not isinstance(arguments, dict):
+        await conn.ws.send_text(Event(
+            type=EventType.MCP_PROMPT_RUN_RESPONSE,
+            request_id=req_id,
+            payload={
+                "success": False, "name": name, "prompt": prompt_name,
+                "messages": [], "session_id": msg.payload.get("session_id"),
+                "error": "MCP prompt arguments must be an object of string values.",
+            },
+        ).to_json())
+    else:
+        conn.spawn_background(send_mcp_prompt_run_result(conn, 
+            req_id, name, prompt_name, arguments,
+            msg.payload.get("session_id")))
+
+async def _handle_plugin_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    plugins_dict = engine_state.plugin_installer.get_all()
+    # E7-F05: carry each plugin's canonical identity as a
+    # top-level "name". The stored records keep the name
+    # only under manifest.name and the registry keys ARE
+    # that name (install() keys by manifest.name), so
+    # serialising the bare values discarded the one field
+    # the Settings panel sends back on toggle/uninstall —
+    # both actions then missed the plugin entirely.
+    # Additive: existing consumers read only the array and
+    # each record's "enabled"/"manifest".
+    plugins_list = [
+        {**record, "name": key}
+        for key, record in plugins_dict.items()
+    ] if plugins_dict else []
+    await conn.ws.send_text(Event(
+        type=EventType.PLUGIN_LIST_RESPONSE,
+        request_id=req_id,
+        payload={"plugins": plugins_list},
+    ).to_json())
+
+async def _handle_plugin_install_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    source = msg.payload.get("source")
+    try:
+        # E1-08: prepare_install copies/inspects the
+        # plugin source synchronously and scales with
+        # plugin size — it runs on a worker thread, not
+        # the receive loop.
+        data = await asyncio.to_thread(
+            engine_state.plugin_installer.prepare_install, source)
+        # E1-06: sweep expired entries, then record this
+        # one with its creation time + owning connection
+        # (the stored VALUE stays the raw prepare
+        # payload — it is sent to the client verbatim).
+        prune_expired_plugin_installs()
+        pending_plugin_installs[req_id] = data
+        pending_plugin_install_created[req_id] = time.time()
+        conn.own_plugin_install_ids.add(req_id)
+        await conn.ws.send_text(Event(
+            type=EventType.PLUGIN_APPROVAL_REQUEST,
+            request_id=req_id,
+            payload={
+                "plugin_name": data["manifest"].get("name", "Unknown"),
+                "plugin_details": data,
+            },
+        ).to_json())
+    except Exception as e:  # noqa: BLE001 — handler boundary: any prepare failure is reported to the client in the response payload
+        await conn.ws.send_text(Event(
+            type=EventType.PLUGIN_INSTALL_RESPONSE,
+            request_id=req_id,
+            payload={"success": False, "error": str(e)},
+        ).to_json())
+
+async def _handle_plugin_approval_granted(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_plugin_install_
+    # result): the install copy is synchronous and
+    # scales with plugin size (RUX-B-10). The pending
+    # entry is still popped here, in the loop, so a
+    # duplicate grant can never install twice.
+    prune_expired_plugin_installs()
+    data = pending_plugin_installs.pop(req_id, None)
+    pending_plugin_install_created.pop(req_id, None)
+    conn.own_plugin_install_ids.discard(req_id)
+    if data:
+        conn.spawn_background(send_plugin_install_result(conn, req_id, data))
+    else:
+        # E1-06: a grant naming an unknown or expired
+        # install used to get NO reply at all — the UI
+        # waited forever. It is answered like every
+        # other failed install.
+        await conn.ws.send_text(Event(
+            type=EventType.PLUGIN_INSTALL_RESPONSE,
+            request_id=req_id,
+            payload={"success": False,
+                     "error": "No pending plugin install for this approval (it may have expired)."},
+        ).to_json())
+
+async def _handle_plugin_approval_rejected(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    pending_plugin_installs.pop(req_id, None)
+    pending_plugin_install_created.pop(req_id, None)
+    conn.own_plugin_install_ids.discard(req_id)
+    await conn.ws.send_text(Event(
+        type=EventType.PLUGIN_INSTALL_RESPONSE,
+        request_id=req_id,
+        payload={"success": False, "error": "Install rejected by user."},
+    ).to_json())
+
+async def _handle_plugin_uninstall_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_plugin_uninstall_
+    # result): the MCP disconnects await at the server
+    # timeout and the file work is synchronous (RUX-B-10).
+    conn.spawn_background(send_plugin_uninstall_result(conn, 
+        req_id, msg.payload.get("name")))
+
+async def _handle_plugin_toggle_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_plugin_toggle_
+    # result): a disable awaits the MCP disconnects at
+    # the server timeout before its synchronous file
+    # work (RUX-B-10).
+    conn.spawn_background(send_plugin_toggle_result(conn, 
+        req_id, msg.payload.get("name"), msg.payload.get("enabled", True)))
+
+async def _handle_memory_episodes_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 4, E4-01/E4-04: through the facade; the payload
+    # also carries embedding health for Diagnostics.
+    # E1-11: answered from a background task — the
+    # backend reads are synchronous and scale with
+    # memory size (see send_memory_episodes_result).
+    conn.spawn_background(send_memory_episodes_result(conn, 
+        req_id, msg.payload.get("limit", 50)))
+
+async def _handle_memory_episode_delete_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 4, E4-F08: the acknowledgement is derived from
+    # what the backend actually did — an unavailable
+    # backend, a missing id, a False result or a raised
+    # error is a failure, never a simulated success.
+    backend = backend_or_none(engine_state.user_config, context="memory episode delete")
+    task_id = msg.payload.get("task_id")
+    success, error = False, None
+    if backend is None:
+        error = "The configured memory backend is unavailable (see engine log)."
+    elif not task_id:
+        error = "task_id is required."
+    else:
+        try:
+            success = bool(backend.delete_episode(task_id))
+        except Exception as e:  # noqa: BLE001 — handler boundary: a failed delete is reported to the client, never dressed up as success or allowed to kill the receive loop
+            error = str(e)
+    if error is not None:
+        engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
+            "operation": "episode_delete", "task_id": task_id, "error": error})
+    episodes = await asyncio.to_thread(backend.list_episodes, limit=msg.payload.get("limit", 50)) if backend is not None and error is None else []
+    payload = {"success": success, "task_id": task_id, "episodes": episodes}
+    if error is not None:
+        payload["error"] = error
+    await conn.ws.send_text(Event(
+        type=EventType.MEMORY_EPISODE_DELETE_RESPONSE,
+        request_id=req_id,
+        payload=payload,
+    ).to_json())
+
+async def _handle_memory_episodes_clear_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    backend = backend_or_none(engine_state.user_config, context="memory episodes clear")
+    success, error = False, None
+    if backend is None:
+        error = "The configured memory backend is unavailable (see engine log)."
+    else:
+        try:
+            success = bool(backend.clear_episodes())
+        except Exception as e:  # noqa: BLE001 — handler boundary: a failed clear is reported to the client, never dressed up as success or allowed to kill the receive loop
+            error = str(e)
+    if error is not None:
+        engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
+            "operation": "episodes_clear", "error": error})
+    episodes = await asyncio.to_thread(backend.list_episodes, limit=msg.payload.get("limit", 50)) if backend is not None and error is None else []
+    payload = {"success": success, "episodes": episodes}
+    if error is not None:
+        payload["error"] = error
+    await conn.ws.send_text(Event(
+        type=EventType.MEMORY_EPISODES_CLEAR_RESPONSE,
+        request_id=req_id,
+        payload=payload,
+    ).to_json())
+
+async def _handle_memory_graph_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # E1-11: answered from a background task — the fact
+    # list/search is a synchronous backend read (see
+    # send_memory_graph_result).
+    conn.spawn_background(send_memory_graph_result(conn, 
+        req_id, msg.payload.get("query"),
+        msg.payload.get("limit", 100),
+        bool(msg.payload.get("include_history"))))
+
+async def _handle_memory_fact_delete_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # E4-F08: derived acknowledgement, same rule as the
+    # episode delete handler above.
+    backend = backend_or_none(engine_state.user_config, context="memory fact delete")
+    fact_id = msg.payload.get("fact_id")
+    success, error = False, None
+    if backend is None:
+        error = "The configured memory backend is unavailable (see engine log)."
+    elif not fact_id:
+        error = "fact_id is required."
+    else:
+        try:
+            success = bool(backend.delete_fact(fact_id))
+        except Exception as e:  # noqa: BLE001 — handler boundary: a failed delete is reported to the client, never dressed up as success or allowed to kill the receive loop
+            error = str(e)
+    if error is not None:
+        engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
+            "operation": "fact_delete", "fact_id": fact_id, "error": error})
+    facts = await asyncio.to_thread(backend.list_facts, limit=msg.payload.get("limit", 100)) if backend is not None and error is None else []
+    payload = {"success": success, "fact_id": fact_id, "facts": facts}
+    if error is not None:
+        payload["error"] = error
+    await conn.ws.send_text(Event(
+        type=EventType.MEMORY_FACT_DELETE_RESPONSE,
+        request_id=req_id,
+        payload=payload,
+    ).to_json())
+
+async def _handle_memory_entity_delete_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # E4-F08: derived acknowledgement. Backends that
+    # honestly cannot group by entity (Mem0, LangMem)
+    # raise NotImplementedError — that is an explicit
+    # failure reply here, not a dead socket.
+    backend = backend_or_none(engine_state.user_config, context="memory entity delete")
+    entity_name = msg.payload.get("entity_name")
+    success, error = False, None
+    if backend is None:
+        error = "The configured memory backend is unavailable (see engine log)."
+    elif not entity_name:
+        error = "entity_name is required."
+    else:
+        try:
+            success = bool(backend.delete_entity(entity_name))
+        except Exception as e:  # noqa: BLE001 — handler boundary: a failed delete is reported to the client, never dressed up as success or allowed to kill the receive loop
+            error = str(e)
+    if error is not None:
+        engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
+            "operation": "entity_delete", "entity_name": entity_name, "error": error})
+    facts = await asyncio.to_thread(backend.list_facts, limit=msg.payload.get("limit", 100)) if backend is not None and error is None else []
+    payload = {"success": success, "entity_name": entity_name, "facts": facts}
+    if error is not None:
+        payload["error"] = error
+    await conn.ws.send_text(Event(
+        type=EventType.MEMORY_ENTITY_DELETE_RESPONSE,
+        request_id=req_id,
+        payload=payload,
+    ).to_json())
+
+async def _handle_memory_graph_clear_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    backend = backend_or_none(engine_state.user_config, context="memory graph clear")
+    success, error = False, None
+    if backend is None:
+        error = "The configured memory backend is unavailable (see engine log)."
+    else:
+        try:
+            success = bool(backend.clear_facts())
+        except Exception as e:  # noqa: BLE001 — handler boundary: a failed clear is reported to the client, never dressed up as success or allowed to kill the receive loop
+            error = str(e)
+    if error is not None:
+        engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
+            "operation": "graph_clear", "error": error})
+    facts = await asyncio.to_thread(backend.list_facts, limit=msg.payload.get("limit", 100)) if backend is not None and error is None else []
+    payload = {"success": success, "facts": facts}
+    if error is not None:
+        payload["error"] = error
+    await conn.ws.send_text(Event(
+        type=EventType.MEMORY_GRAPH_CLEAR_RESPONSE,
+        request_id=req_id,
+        payload=payload,
+    ).to_json())
+
+async def _handle_memory_fact_update_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 4, E4-03: edit one fact's text via the facade.
+    # E1-05: guarded exactly like its sibling handlers —
+    # this was the one memory-management handler whose
+    # backend call could raise straight out of the
+    # receive loop and kill the session.
+    backend = backend_or_none(engine_state.user_config, context="memory fact update")
+    fact_id = msg.payload.get("fact_id")
+    success, error = False, None
+    if backend is None:
+        error = "The configured memory backend is unavailable (see engine log)."
+    elif not fact_id:
+        error = "fact_id is required."
+    else:
+        try:
+            success = bool(backend.update_fact(fact_id, msg.payload.get("fact_text", "")))
+        except Exception as e:  # noqa: BLE001 — handler boundary: a failed update is reported to the client, never dressed up as success or allowed to kill the receive loop
+            error = str(e)
+    if error is not None:
+        engine_state.audit_logger.log_event("MEMORY_MANAGEMENT_FAILED", {
+            "operation": "fact_update", "fact_id": fact_id, "error": error})
+    facts = await asyncio.to_thread(
+        backend.list_facts,
+        limit=msg.payload.get("limit", 100),
+        include_history=bool(msg.payload.get("include_history")),
+    ) if backend is not None and error is None else []
+    update_payload = {"success": success, "fact_id": fact_id, "facts": facts}
+    if error is not None:
+        update_payload["error"] = error
+    await conn.ws.send_text(Event(
+        type=EventType.MEMORY_FACT_UPDATE_RESPONSE,
+        request_id=req_id,
+        payload=update_payload,
+    ).to_json())
+
+async def _handle_memory_export_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 4, E4-03: the full memory as JSON (facts incl.
+    # superseded history + episodes) for the UI to save.
+    # Off the message loop (see send_memory_export_result):
+    # the export is synchronous and scales with memory
+    # size, so it runs on a worker thread (RUX-B-08).
+    conn.spawn_background(send_memory_export_result(conn, req_id))
+
+async def _handle_backup_create_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 10, E10-03: snapshot ~/.aether into a zip under
+    # the active workspace's AetherBackups folder.
+    try:
+        from aether_engine.backup import create_backup
+
+        roots = engine_state.user_config.workspace_roots or [str(Path.home() / "AetherWorkspace")]
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        dest = Path(roots[0]) / "AetherBackups" / f"aether-backup-{stamp}.zip"
+        manifest = await asyncio.to_thread(
+            create_backup, dest,
+            # E10-F02: consent is the boolean True only —
+            # bool("false") is True, so truthiness at this
+            # untyped boundary would include secrets.db
+            # on a string "false".
+            include_secrets=msg.payload.get("include_secrets") is True,
+        )
+        engine_state.audit_logger.log_event("BACKUP_CREATED", {
+            "path": str(dest), "files": len(manifest["files"]),
+            "include_secrets": manifest["include_secrets"],
+        })
+        payload = {"success": True, "path": str(dest), "files": len(manifest["files"]),
+                   "include_secrets": manifest["include_secrets"]}
+    except Exception as e:  # noqa: BLE001 — backup failure must surface, not crash the handler
+        payload = {"success": False, "error": str(e)}
+    await conn.ws.send_text(Event(
+        type=EventType.BACKUP_CREATE_RESPONSE,
+        request_id=req_id,
+        payload=payload,
+    ).to_json())
+
+async def _handle_backup_restore_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 10, E10-03: validate-then-write restore. The
+    # running engine keeps in-memory state, so the
+    # response is explicit that a restart applies it.
+    try:
+        from aether_engine.backup import restore_backup
+
+        result = await asyncio.to_thread(
+            restore_backup, Path(str(msg.payload.get("path", "")))
+        )
+        engine_state.audit_logger.log_event("BACKUP_RESTORED", {
+            "files": result["files"],
+        })
+        payload = {"success": True, "files": result["files"],
+                   "restart_required": True}
+    except Exception as e:  # noqa: BLE001 — restore failure must surface, not crash the handler
+        payload = {"success": False, "error": str(e)}
+    await conn.ws.send_text(Event(
+        type=EventType.BACKUP_RESTORE_RESPONSE,
+        request_id=req_id,
+        payload=payload,
+    ).to_json())
+
+async def _handle_diagnostics_export_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 10, E10-04: redacted bundle — config scrubbed by
+    # the audit redactor, memory as counts only.
+    # Off the message loop (see send_diagnostics_export_
+    # result): the bundle build is synchronous bulk work,
+    # so it runs on a worker thread (RUX-B-08).
+    conn.spawn_background(send_diagnostics_export_result(conn, req_id))
+
+async def _handle_version_check_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 10, E10-05: report-only update check against the
+    # project's GitHub releases. Nothing downloads or
+    # installs — the user decides.
+    # Off the message loop (see send_version_check_result):
+    # the check is live HTTP with a 10 s timeout (RUX-B-08).
+    conn.spawn_background(send_version_check_result(conn, req_id))
+
+async def _handle_skill_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+    skills = [s.__dict__ for s in GLOBAL_SKILL_MANAGER.list_all()]
+    await conn.ws.send_text(Event(
+        type=EventType.SKILL_LIST_RESPONSE,
+        request_id=req_id,
+        payload={"skills": skills},
+    ).to_json())
+
+async def _handle_skill_toggle_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 7, E7-03: enable/disable a skill. Disabled
+    # skills leave the manager's index at once — the
+    # agent's available set (list/match/slash/load) no
+    # longer contains them; Settings still lists them
+    # with enabled=False so they can be re-enabled.
+    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+
+    skill_name = (msg.payload.get("name") or "").strip()
+    want_enabled = bool(msg.payload.get("enabled", True))
+    known = any(s.name == skill_name for s in GLOBAL_SKILL_MANAGER.list_all())
+    # E7-F04: a failed disable-state save must still get
+    # a reply — the toggle is then a non-event (the
+    # manager changed nothing) and the response reports
+    # the skill's actual current state, never the
+    # requested one.
+    save_error = None
+    if known:
+        try:
+            GLOBAL_SKILL_MANAGER.set_disabled(skill_name, not want_enabled)
+        except Exception as e:  # noqa: BLE001 — the toggle must always reply; the session must survive
+            save_error = str(e)
+            logger.error(
+                "Skill toggle for %r failed to persist: %s",
+                skill_name, e)
+    payload = {
+        "success": known and save_error is None,
+        "name": skill_name,
+        "enabled": (
+            GLOBAL_SKILL_MANAGER.is_enabled(skill_name)
+            if known else False
+        ),
+        "skills": [s.__dict__ for s in GLOBAL_SKILL_MANAGER.list_all()],
+    }
+    if save_error is not None:
+        payload["error"] = save_error
+    await conn.ws.send_text(Event(
+        type=EventType.SKILL_TOGGLE_RESPONSE,
+        request_id=req_id,
+        payload=payload,
+    ).to_json())
+
+async def _handle_slash_command_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+    from aether_engine.skills.slash_registry import GLOBAL_SLASH_REGISTRY
+    commands = [c.to_dict() for c in GLOBAL_SLASH_REGISTRY.get_all()]
+                
+    # Combine dynamic skill commands
+    skill_commands = []
+    for s in GLOBAL_SKILL_MANAGER.list_all():
+        # E7-F11: list_all() is the management listing
+        # (Settings needs disabled skills visible for
+        # re-enable) — the advertised command list is an
+        # invocation path, so disabled skills are not
+        # offered here.
+        if not s.enabled:
+            continue
+        for cmd_str in s.slash_commands:
+            skill_commands.append({
+                "command": cmd_str,
+                "description": f"Trigger skill: {s.name} - {s.description}",
+                "type": "skill_invoke",
+                "target": s.name,
+                "aliases": [],
+                "flags": []
+            })
+                
+    # De-duplicate by command name
+    all_commands = {c["command"]: c for c in commands + skill_commands}
+                
+    await conn.ws.send_text(Event(
+        type=EventType.SLASH_COMMAND_LIST_RESPONSE,
+        request_id=req_id,
+        payload={"commands": list(all_commands.values())},
+    ).to_json())
+
+async def _handle_workspace_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    roots = engine_state.user_config.workspace_roots or []
+    # Per-workspace sessions, slice 3 (additive): each
+    # row gains the count of sessions bound to it, and
+    # the reply gains the unbound ("No workspace") count,
+    # so the Projects view can render filing state — and
+    # the Q7 removal confirmation its count — without a
+    # second call.
+    counts, unbound_count = await _workspace_session_counts()
+    workspaces = []
+    for idx, r in enumerate(roots):
+        p = Path(r)
+        workspaces.append({
+            "path": r,
+            "name": p.name,
+            "is_indexed": False,  # No real indexing backend yet
+            # Epic 6, E6-04: the first root is the active
+            # workspace; `exists` drives the missing-folder
+            # state in the Projects view.
+            "is_active": idx == 0,
+            "exists": p.is_dir(),
+            "session_count": counts.get(r, 0),
+        })
+    await conn.ws.send_text(Event(
+        type=EventType.WORKSPACE_LIST_RESPONSE,
+        request_id=req_id,
+        payload={"workspaces": workspaces,
+                 "unbound_session_count": unbound_count},
+    ).to_json())
+
+async def _handle_workspace_add_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Per-workspace sessions, slice 2 (grill Q2/Q8): a
+    # root's identity is its canonical form. The incoming
+    # path is canonicalised BEFORE the duplicate check,
+    # so a second spelling of a configured folder (a
+    # trailing slash, a symlink, a dotted path) is refused
+    # and the reply points at the existing entry instead
+    # of adding a twin.
+    # E1-01: the path rides an untrusted payload — a
+    # non-string path coerces to empty (answered below
+    # as "Path empty") instead of raising AttributeError
+    # into the receive loop. Same guard in the REMOVE
+    # and SET_ACTIVE branches below.
+    _raw_ws_path = msg.payload.get("path")
+    ws_path = _raw_ws_path.strip() if isinstance(_raw_ws_path, str) else ""
+    roots = engine_state.user_config.workspace_roots
+    existing = find_workspace_root(roots, ws_path)
+    if ws_path and existing is None:
+        canonical = canonical_workspace_root(ws_path)
+        roots.append(canonical)
+        # E1-10: a save failure is answered, not raised.
+        save_err = _try_save_config()
+        if save_err is not None:
+            await conn.ws.send_text(Event(
+                type=EventType.WORKSPACE_ADD_RESPONSE,
+                request_id=req_id,
+                payload={"success": False,
+                         "error": f"Workspace could not be saved: {save_err}"},
+            ).to_json())
+        else:
+            from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+            GLOBAL_SKILL_MANAGER.update_workspace_roots(roots)
+            p = Path(canonical)
+            await conn.ws.send_text(Event(
+                type=EventType.WORKSPACE_ADD_RESPONSE,
+                request_id=req_id,
+                # E6-F11: the reply carries the same badge
+                # fields WORKSPACE_LIST_RESPONSE computes
+                # (first root is active; `exists` drives the
+                # missing-folder state), so the Projects view
+                # renders the new row correctly from the reply
+                # itself instead of waiting for a LIST refetch.
+                payload={"success": True, "workspace": {
+                    "path": canonical, "name": p.name, "is_indexed": False,
+                    "is_active": len(roots) == 1,
+                    "exists": p.is_dir(),
+                }},
+            ).to_json())
+    elif existing is not None:
+        p = Path(existing)
+        await conn.ws.send_text(Event(
+            type=EventType.WORKSPACE_ADD_RESPONSE,
+            request_id=req_id,
+            # Q8 refusal: `exists` + the existing entry
+            # (same badge shape as a LIST row) let the
+            # Projects view highlight the real workspace
+            # instead of dead-ending on an error string.
+            payload={"success": False, "exists": True,
+                     "error": "Path already exists",
+                     "workspace": {
+                         "path": existing, "name": p.name,
+                         "is_indexed": False,
+                         "is_active": roots.index(existing) == 0,
+                         "exists": p.is_dir(),
+                     }},
+        ).to_json())
+    else:
+        await conn.ws.send_text(Event(
+            type=EventType.WORKSPACE_ADD_RESPONSE,
+            request_id=req_id,
+            payload={"success": False, "error": "Path empty"},
+        ).to_json())
+
+async def _handle_workspace_remove_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Slice 2: removal addresses the canonical identity —
+    # any spelling of the folder removes its one stored
+    # entry, and the reply names the canonical root that
+    # was actually removed (slice 3 unbinds that root's
+    # sessions by this value).
+    _raw_ws_path = msg.payload.get("path")
+    ws_path = _raw_ws_path.strip() if isinstance(_raw_ws_path, str) else ""
+    removed = remove_workspace_root(
+        engine_state.user_config.workspace_roots, ws_path)
+    if removed is not None:
+        # E1-10: a save failure is answered, not raised.
+        save_err = _try_save_config()
+        if save_err is not None:
+            await conn.ws.send_text(Event(
+                type=EventType.WORKSPACE_REMOVE_RESPONSE,
+                request_id=req_id,
+                payload={"success": False,
+                         "error": f"Workspace removal could not be saved: {save_err}"},
+            ).to_json())
+        else:
+            from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+            GLOBAL_SKILL_MANAGER.update_workspace_roots(engine_state.user_config.workspace_roots)
+            # Slice 3 (grill Q7): the removed root's sessions
+            # fall back to unbound — removal never deletes a
+            # session — and the reply reports how many were
+            # unbound, keyed by the canonical root removed.
+            unbound_sessions = await _unbind_sessions_bound_to(removed)
+            await conn.ws.send_text(Event(
+                type=EventType.WORKSPACE_REMOVE_RESPONSE,
+                request_id=req_id,
+                payload={"success": True, "path": removed,
+                         "unbound_sessions": unbound_sessions},
+            ).to_json())
+    else:
+        await conn.ws.send_text(Event(
+            type=EventType.WORKSPACE_REMOVE_RESPONSE,
+            request_id=req_id,
+            payload={"success": False, "error": "Path not found"},
+        ).to_json())
+
+async def _handle_workspace_index_start_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 8, E8-3.2: consent-first indexing (grill Q17).
+    # Without confirm this is the consent preview: counts,
+    # size, embedder and destination, nothing started and
+    # nothing mutated. With confirm, consent is recorded,
+    # indexing runs in the background with PROGRESS pushes,
+    # and the watcher keeps the index fresh afterwards.
+    from aether_engine.rag.prose_indexer import get_prose_indexer
+
+    indexer = get_prose_indexer()
+    ws_root = msg.payload.get("workspace_root", "")
+    confirm = bool(msg.payload.get("confirm"))
+    req_embedder = msg.payload.get("embedder")
+    estimate = await asyncio.to_thread(indexer.estimate, ws_root)
+    if confirm and ws_root:
+        if req_embedder:
+            await asyncio.to_thread(indexer.set_embedder, req_embedder)
+        await asyncio.to_thread(indexer.grant_consent, ws_root)
+
+        async def _run_index(root=ws_root, indexer=indexer, req_id=req_id):
+            async def _progress(**kw):
+                try:
+                    await conn.ws.send_text(Event(
+                        type=EventType.WORKSPACE_INDEX_PROGRESS,
+                        request_id=req_id,
+                        payload=kw,
+                    ).to_json())
+                except Exception:  # a dead socket must not kill indexing
+                    logger.debug("Index progress push failed", exc_info=True)
+
+            try:
+                await indexer.index_workspace(root, progress_cb=_progress)
+            except Exception:
+                # Background index pass: logged, never
+                # propagated into the socket loop.
+                logger.exception("Workspace indexing failed for %s", root)
+            indexer.start_watching(root)
+
+        conn.spawn_background(_run_index())
+    await conn.ws.send_text(Event(
+        type=EventType.WORKSPACE_INDEX_START_RESPONSE,
+        request_id=req_id,
+        payload={
+            "started": bool(confirm and ws_root),
+            "estimated_files": estimate["estimated_files"],
+            "estimated_bytes": estimate["estimated_bytes"],
+            "embedder": indexer.embedder,
+            "destination": str(indexer.store.db_path),
+        },
+    ).to_json())
+
+async def _handle_workspace_index_status_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.rag.prose_indexer import get_prose_indexer
+
+    indexer = get_prose_indexer()
+    status_payload = await asyncio.to_thread(
+        indexer.status, msg.payload.get("workspace_root"))
+    await conn.ws.send_text(Event(
+        type=EventType.WORKSPACE_INDEX_STATUS_RESPONSE,
+        request_id=req_id,
+        payload=status_payload,
+    ).to_json())
+
+async def _handle_workspace_index_pause_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.rag.prose_indexer import get_prose_indexer
+
+    indexer = get_prose_indexer()
+    pause = bool(msg.payload.get("pause", False))
+    if pause:
+        indexer.pause()
+    else:
+        indexer.resume()
+    await conn.ws.send_text(Event(
+        type=EventType.WORKSPACE_INDEX_PAUSE_RESPONSE,
+        request_id=req_id,
+        payload={"paused": indexer.paused},
+    ).to_json())
+
+async def _handle_workspace_index_config_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    from aether_engine.rag.prose_indexer import get_prose_indexer
+
+    indexer = get_prose_indexer()
+    req_embedder = msg.payload.get("embedder")
+    old_embedder = indexer.embedder
+    reindex_required = False
+    index_save_err: str | None = None
+    if req_embedder and req_embedder != old_embedder:
+        reindex_required = True
+        await asyncio.to_thread(indexer.set_embedder, req_embedder)
+        # N02: the SAME switch invalidates episodic
+        # vectors — they are stamped per model, and rows
+        # from the old embedder are deleted here so none
+        # stays recallable in the interim; the episodic
+        # backfill rebuilds them under the new model.
+        from aether_engine.memory.episodic import (
+            reset_episodic_embeddings_for_embedder,
+        )
+        await asyncio.to_thread(
+            reset_episodic_embeddings_for_embedder, req_embedder)
+        if hasattr(engine_state, "user_config") and engine_state.user_config:
+            engine_state.user_config.embedding_model = req_embedder
+            # E1-10: a save failure flips ok, not the
+            # connection.
+            index_save_err = _try_save_config()
+    index_payload: dict[str, Any] = {
+        "ok": index_save_err is None,
+        "reindex_required": reindex_required}
+    if index_save_err is not None:
+        index_payload["error"] = (
+            f"Embedding model could not be saved: {index_save_err}")
+    await conn.ws.send_text(Event(
+        type=EventType.WORKSPACE_INDEX_CONFIG_RESPONSE,
+        request_id=req_id,
+        payload=index_payload,
+    ).to_json())
+
+async def _handle_workspace_set_active_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Epic 6, E6-04: the active workspace is the first
+    # root (containment, skills, and task defaults all
+    # key off roots[0]); activating = move to front.
+    # Slice 2: the request addresses the canonical
+    # identity — any spelling of the folder activates its
+    # one stored (canonical) entry.
+    _raw_ws_path = msg.payload.get("path")
+    ws_path = _raw_ws_path.strip() if isinstance(_raw_ws_path, str) else ""
+    roots = engine_state.user_config.workspace_roots
+    existing = find_workspace_root(roots, ws_path)
+    if existing is not None:
+        roots.remove(existing)
+        roots.insert(0, existing)
+        # E1-10: a save failure is answered, not raised.
+        save_err = _try_save_config()
+        if save_err is not None:
+            await conn.ws.send_text(Event(
+                type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
+                request_id=req_id,
+                payload={"success": False,
+                         "error": f"Workspace change could not be saved: {save_err}"},
+            ).to_json())
+        else:
+            from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
+            GLOBAL_SKILL_MANAGER.update_workspace_roots(roots)
+            await conn.ws.send_text(Event(
+                type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
+                request_id=req_id,
+                payload={"success": True, "path": existing},
+            ).to_json())
+    else:
+        await conn.ws.send_text(Event(
+            type=EventType.WORKSPACE_SET_ACTIVE_RESPONSE,
+            request_id=req_id,
+            payload={"success": False, "error": "Path not found"},
+        ).to_json())
+
+async def _handle_project_config_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # E6-F05 (the Epic 1 layered-config handoff): view and
+    # edit the project layer — `.aether/config.json` in a
+    # configured workspace — in exactly the shape
+    # config_layers consumes it: the layer itself, never
+    # the merged result. Roots are confined to
+    # user_config.workspace_roots, defaulting to the
+    # active (first) root.
+    import json as _json
+
+    from aether_engine.config_layers import (
+        PROJECT_CONFIG_RELPATH,
+        PROJECT_FORBIDDEN_KEYS,
+    )
+    is_update = msg.type == EventType.PROJECT_CONFIG_UPDATE_REQUEST
+    response_type = (
+        EventType.PROJECT_CONFIG_UPDATE_RESPONSE if is_update
+        else EventType.PROJECT_CONFIG_GET_RESPONSE)
+    roots = engine_state.user_config.workspace_roots or []
+    requested_root = (msg.payload.get("workspace_root") or "").strip()
+    project_root = requested_root or (roots[0] if roots else "")
+    project_error = None
+    if not roots:
+        project_error = "No workspace is configured — add one in Projects first."
+    elif project_root not in roots:
+        project_error = f"Unknown workspace: {project_root}"
+    if project_error is not None:
+        await conn.ws.send_text(Event(
+            type=response_type,
+            request_id=req_id,
+            payload={"success": False, "error": project_error},
+        ).to_json())
+        return
+    layer_path = Path(project_root) / PROJECT_CONFIG_RELPATH
+    if is_update:
+        content = msg.payload.get("content", "")
+        parsed_layer = None
+        if not isinstance(content, str):
+            project_error = "Project config content must be JSON text."
+        else:
+            try:
+                parsed_layer = _json.loads(content)
+            except ValueError as exc:
+                project_error = f"Project config is not valid JSON: {exc}"
+            else:
+                if not isinstance(parsed_layer, dict):
+                    project_error = "Project config must be a JSON object."
+        if project_error is not None:
+            await conn.ws.send_text(Event(
+                type=response_type,
+                request_id=req_id,
+                payload={"success": False, "error": project_error},
+            ).to_json())
+            return
+        # Write the validated dict (canonical form), via
+        # a temp file + replace so a failed write can
+        # never leave a truncated layer behind.
+        layer_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_layer = layer_path.with_suffix(".tmp")
+        tmp_layer.write_text(
+            _json.dumps(parsed_layer, indent=2) + "\n", "utf-8")
+        tmp_layer.replace(layer_path)
+        engine_state.audit_logger.log_event(
+            "PROJECT_CONFIG_UPDATED", {"workspace_root": project_root})
+        await conn.ws.send_text(Event(
+            type=response_type,
+            request_id=req_id,
+            payload={"success": True,
+                     "workspace_root": project_root,
+                     "config": parsed_layer},
+        ).to_json())
+    else:
+        raw_text = ""
+        parse_error = None
+        parsed_layer = None
+        exists = layer_path.is_file()
+        if exists:
+            raw_text = layer_path.read_text("utf-8", errors="replace")
+            try:
+                candidate = _json.loads(raw_text)
+                if isinstance(candidate, dict):
+                    parsed_layer = candidate
+                else:
+                    parse_error = "Project config is not a JSON object; the engine ignores it."
+            except ValueError as exc:
+                parse_error = f"Project config is not valid JSON ({exc}); the engine ignores it."
+        await conn.ws.send_text(Event(
+            type=response_type,
+            request_id=req_id,
+            payload={
+                "success": True,
+                "workspace_root": project_root,
+                "exists": exists,
+                "content": raw_text,
+                "config": parsed_layer,
+                "parse_error": parse_error,
+                "forbidden_keys": sorted(PROJECT_FORBIDDEN_KEYS),
+            },
+        ).to_json())
+
+# -----------------------------------------------------------
+# Voice session (Epic 8, E8-5.1a)
+# -----------------------------------------------------------
+
+
+async def _handle_voice_session_start_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the receive loop (see send_voice_session_
+    # start_result): opening the stages can load the
+    # speech models and take seconds (RUX-B-09). The
+    # start is chained with session stops (and other
+    # starts) so their relative order is preserved.
+    enqueue_voice_op(conn, send_voice_session_start_result(conn, 
+        req_id, dict(msg.payload)))
+
+async def _handle_voice_session_stop_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Chained with session starts (see enqueue_voice_op):
+    # a stop sent while a start is still opening lands
+    # after it, never before it (RUX-B-09).
+    enqueue_voice_op(conn, send_voice_session_stop_result(conn, req_id))
+
+async def _handle_voice_playback_progress(conn: WsConnection, msg: Event) -> None:
+    # N09: the renderer's playback report for the live
+    # session (the highest chunk_seq it has FINISHED
+    # playing) — the input the pipeline's heard-word
+    # accounting reads. Fire-and-forget by design: no
+    # response; a report with no live session, or a
+    # malformed one, is ignored by the pipeline's own
+    # validation, never fatal to the socket.
+    progress_pipeline = conn.voice_state.get("pipeline")
+    if progress_pipeline is not None:
+        progress_pipeline.note_playback_progress(
+            msg.payload.get("played_seq"))
+
+# -----------------------------------------------------------
+# Voice RTC negotiation (F-12a): the renderer offers,
+# the live session's transport answers; ICE trickles
+# both ways. Every failure answers ok=False with the
+# honest reason — a dead negotiation is never silent.
+# -----------------------------------------------------------
+
+
+async def _handle_voice_rtc_offer_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    rtc_pipeline = conn.voice_state.get("pipeline")
+    rtc_answer = None
+    rtc_error: str | None = None
+    if rtc_pipeline is None:
+        rtc_error = "voice unavailable: no active voice session"
+    else:
+        from aether_engine.voice import VoiceUnavailableError
+
+        try:
+            rtc_answer = await rtc_pipeline.handle_rtc_offer(
+                msg.payload.get("sdp") or {})
+        except VoiceUnavailableError as e:
+            rtc_error = str(e)
+        except Exception as e:  # noqa: BLE001 — negotiation failure must still produce a response
+            rtc_error = (
+                f"voice unavailable: RTC negotiation "
+                f"failed ({e})")
+    await conn.ws.send_text(Event(
+        type=EventType.VOICE_RTC_OFFER_RESPONSE,
+        request_id=req_id,
+        payload={
+            "ok": rtc_answer is not None,
+            "session_id": msg.payload.get("session_id"),
+            "answer": rtc_answer,
+            "error": rtc_error,
+        },
+    ).to_json())
+
+async def _handle_voice_rtc_ice_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    rtc_pipeline = conn.voice_state.get("pipeline")
+    rtc_error = None
+    if rtc_pipeline is None:
+        rtc_error = "voice unavailable: no active voice session"
+    else:
+        from aether_engine.voice import VoiceUnavailableError
+
+        try:
+            await rtc_pipeline.add_rtc_ice_candidate(
+                msg.payload.get("candidate"))
+        except VoiceUnavailableError as e:
+            rtc_error = str(e)
+        except Exception as e:  # noqa: BLE001 — as above: always answer
+            rtc_error = (
+                f"voice unavailable: RTC negotiation "
+                f"failed ({e})")
+    await conn.ws.send_text(Event(
+        type=EventType.VOICE_RTC_ICE_RESPONSE,
+        request_id=req_id,
+        payload={
+            "ok": rtc_error is None,
+            "session_id": msg.payload.get("session_id"),
+            "error": rtc_error,
+        },
+    ).to_json())
+
+# -----------------------------------------------------------
+# Push-to-talk dictation + TTS read-aloud (Epic 8, E8-5.3)
+# -----------------------------------------------------------
+
+
+async def _handle_dictation_start_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    stt = dictation_stt(conn)
+    reason = stt.unavailable_reason()
+    if reason is not None:
+        await conn.ws.send_text(Event(
+            type=EventType.DICTATION_START_RESPONSE,
+            request_id=req_id,
+            payload={"ok": False, "error": f"voice unavailable: {reason}"},
+        ).to_json())
+    else:
+        await conn.ws.send_text(Event(
+            type=EventType.DICTATION_START_RESPONSE,
+            request_id=req_id,
+            payload={"ok": True, "error": None},
+        ).to_json())
+
+async def _handle_dictation_chunk_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the receive loop, but chained in arrival
+    # order (see enqueue_dictation): each chunk's
+    # transcription can take seconds, and a later chunk
+    # must never be applied before an earlier one
+    # (RUX-B-09). The engine snapshot + availability
+    # check stay here, at receipt, as before.
+    _dictation_engine = dictation_stt(conn)
+    enqueue_dictation(conn, send_dictation_chunk_result(conn, 
+        req_id,
+        _dictation_engine.unavailable_reason(),
+        msg.payload.get("audio") or "",
+        _coerce_sample_rate(msg.payload.get("sample_rate")),
+        bool(msg.payload.get("is_final", False))))
+
+async def _handle_dictation_stop_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # The final transcription joins the same chain as
+    # the chunks (see enqueue_dictation), so the stop
+    # response can never overtake a chunk response
+    # (RUX-B-09).
+    enqueue_dictation(conn, send_dictation_stop_result(conn, 
+        req_id,
+        msg.payload.get("audio"),
+        _coerce_sample_rate(msg.payload.get("sample_rate"))))
+
+async def _handle_read_aloud_start_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    await stop_read_aloud(conn)
+    tts = read_aloud_tts(conn)
+    reason = tts.unavailable_reason()
+    msg_id = msg.payload.get("message_id")
+    text_to_speak = msg.payload.get("text") or ""
+    voice_name = msg.payload.get("voice") or "af_heart"
+    if reason is not None:
+        await conn.ws.send_text(Event(
+            type=EventType.READ_ALOUD_START_RESPONSE,
+            request_id=req_id,
+            payload={"ok": False, "message_id": msg_id, "error": f"voice unavailable: {reason}"},
+        ).to_json())
+    else:
+        await conn.ws.send_text(Event(
+            type=EventType.READ_ALOUD_START_RESPONSE,
+            request_id=req_id,
+            payload={"ok": True, "message_id": msg_id, "error": None},
+        ).to_json())
+
+        async def _run_read_aloud(mid: str | None, text: str, voice: str, tts_inst: Any, target_ws: WebSocket) -> None:
+            try:
+                # S4-M7: open the cached engine once for
+                # the connection, not on every start.
+                tts_inst = await open_read_aloud_tts(conn)
+                async for chunk in tts_inst.synthesize(text, voice=voice):
+                    b64_chunk = base64.b64encode(chunk).decode("ascii")
+                    await target_ws.send_text(Event(
+                        type=EventType.READ_ALOUD_CHUNK,
+                        payload={"message_id": mid, "audio_chunk": b64_chunk, "is_final": False},
+                    ).to_json())
+                await target_ws.send_text(Event(
+                    type=EventType.READ_ALOUD_CHUNK,
+                    payload={"message_id": mid, "audio_chunk": None, "is_final": True},
+                ).to_json())
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Read-aloud synthesis error: {e}")
+                try:
+                    await target_ws.send_text(Event(
+                        type=EventType.READ_ALOUD_CHUNK,
+                        payload={"message_id": mid, "audio_chunk": None, "is_final": True, "error": str(e)},
+                    ).to_json())
+                except Exception:
+                    logger.debug("Failed to send error event", exc_info=True)
+
+        conn.voice_state["read_aloud_id"] = msg_id
+        conn.voice_state["read_aloud_task"] = asyncio.ensure_future(
+            _run_read_aloud(msg_id, text_to_speak, voice_name, tts, conn.ws)
+        )
+
+async def _handle_read_aloud_stop_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    msg_id = msg.payload.get("message_id")
+    await stop_read_aloud(conn)
+    await conn.ws.send_text(Event(
+        type=EventType.READ_ALOUD_STOP_RESPONSE,
+        request_id=req_id,
+        payload={"ok": True, "message_id": msg_id},
+    ).to_json())
+
+_DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
+    EventType.START_TASK: _handle_start_task,
+    EventType.CANCEL_TASK: _handle_cancel_task,
+    EventType.PING: _handle_ping,
+    EventType.TOOL_APPROVAL_GRANTED: _handle_tool_approval_decision,
+    EventType.TOOL_APPROVAL_REJECTED: _handle_tool_approval_decision,
+    EventType.PROVIDER_LIST_REQUEST: _handle_provider_list_request,
+    EventType.PROVIDER_VALIDATE_REQUEST: _handle_provider_validate_request,
+    EventType.SETTINGS_PROVIDER_VALIDATE_REQUEST: _handle_provider_validate_request,
+    EventType.PROVIDER_SAVE_REQUEST: _handle_provider_save_request,
+    EventType.PROVIDER_REMOVE_REQUEST: _handle_provider_remove_request,
+    EventType.PROVIDER_REVEAL_KEY_REQUEST: _handle_provider_reveal_key_request,
+    EventType.MODEL_SET_DEFAULT: _handle_model_set_default,
+    EventType.SESSION_LIST_REQUEST: _handle_session_list_request,
+    EventType.SESSION_GET_REQUEST: _handle_session_get_request,
+    EventType.SESSION_CREATE_REQUEST: _handle_session_create_request,
+    EventType.SESSION_DELETE_REQUEST: _handle_session_delete_request,
+    EventType.SESSION_TRUNCATE_REQUEST: _handle_session_truncate_request,
+    EventType.SESSION_RENAME_REQUEST: _handle_session_rename_request,
+    EventType.SESSION_MOVE_REQUEST: _handle_session_move_request,
+    EventType.SESSION_SEARCH_REQUEST: _handle_session_search_request,
+    EventType.SESSION_EXPORT_REQUEST: _handle_session_export_request,
+    EventType.SESSION_IMPORT_REQUEST: _handle_session_import_request,
+    EventType.REWIND_MANIFEST_GET_REQUEST: _handle_rewind_manifest_get_request,
+    EventType.TASK_REWIND_REQUEST: _handle_task_rewind_request,
+    EventType.TASK_REWIND_UNDO_REQUEST: _handle_task_rewind_undo_request,
+    EventType.SESSION_FORK_REQUEST: _handle_session_fork_request,
+    EventType.APPROVAL_GRANTS_REQUEST: _handle_approval_grants_request,
+    EventType.APPROVAL_GRANT_REVOKE_REQUEST: _handle_approval_grant_revoke_request,
+    EventType.ARTIFACT_LIST_REQUEST: _handle_artifact_list_request,
+    EventType.ARTIFACT_GET_REQUEST: _handle_artifact_get_request,
+    EventType.DEV_SERVER_DETECT_REQUEST: _handle_dev_server_detect_request,
+    EventType.USAGE_LEDGER_QUERY_REQUEST: _handle_usage_ledger_query_request,
+    EventType.CONTEXT_BREAKDOWN_REQUEST: _handle_context_breakdown_request,
+    EventType.DAILY_BUDGET_SET_REQUEST: _handle_daily_budget_set_request,
+    EventType.BROWSER_TASK_PAUSE_REQUEST: _handle_browser_task_pause_request,
+    EventType.BROWSER_POLICY_GET_REQUEST: _handle_browser_policy_get_request,
+    EventType.BROWSER_POLICY_SET_REQUEST: _handle_browser_policy_set_request,
+    EventType.VAULT_ENTRY_LIST_REQUEST: _handle_vault_entry_list_request,
+    EventType.VAULT_ENTRY_SAVE_REQUEST: _handle_vault_entry_save_request,
+    EventType.VAULT_ENTRY_DELETE_REQUEST: _handle_vault_entry_delete_request,
+    EventType.VAULT_TOTP_LIST_REQUEST: _handle_vault_totp_list_request,
+    EventType.VAULT_TOTP_SAVE_REQUEST: _handle_vault_totp_save_request,
+    EventType.VAULT_TOTP_DELETE_REQUEST: _handle_vault_totp_delete_request,
+    EventType.VAULT_TOTP_CODES_REQUEST: _handle_vault_totp_codes_request,
+    EventType.VAULT_FILL_APPROVAL_RESPONSE: _handle_vault_fill_approval_response,
+    EventType.MEDIA_LIST_REQUEST: _handle_media_list_request,
+    EventType.MEDIA_SEARCH_REQUEST: _handle_media_search_request,
+    EventType.MEDIA_DELETE_REQUEST: _handle_media_delete_request,
+    EventType.MEDIA_METADATA_UPDATE_REQUEST: _handle_media_metadata_update_request,
+    EventType.LOCAL_MODEL_LIST_REQUEST: _handle_local_model_list_request,
+    EventType.LOCAL_MODEL_DOWNLOAD_START: _handle_local_model_download_start,
+    EventType.LOCAL_MODEL_DOWNLOAD_CANCEL: _handle_local_model_download_cancel,
+    EventType.LOCAL_MODEL_DELETE_REQUEST: _handle_local_model_delete_request,
+    EventType.MODEL_HUB_SEARCH_REQUEST: _handle_model_hub_search_request,
+    EventType.MODEL_HUB_DETAIL_REQUEST: _handle_model_hub_detail_request,
+    EventType.MODEL_HUB_DOWNLOAD_REQUEST: _handle_model_hub_download_request,
+    EventType.MODEL_HUB_DOWNLOADED_REQUEST: _handle_model_hub_downloaded_request,
+    EventType.MODEL_HUB_DELETE_REQUEST: _handle_model_hub_delete_request,
+    EventType.CAPABILITY_CHECK_SET_SCHEDULE: _handle_capability_check_set_schedule,
+    EventType.CAPABILITY_CHECK_RUN_NOW: _handle_capability_check_run_now,
+    EventType.CAPABILITY_CHECK_GET_HISTORY: _handle_capability_check_get_history,
+    EventType.ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST: _handle_environment_diagnostic_run_request,
+    EventType.REFRESH_MODELS_REQUEST: _handle_refresh_models_request,
+    EventType.TOOL_LIST_REQUEST: _handle_tool_list_request,
+    EventType.AGENT_LIST_REQUEST: _handle_agent_list_request,
+    EventType.AGENT_UPDATE_REQUEST: _handle_agent_update_request,
+    EventType.TOOL_POLICY_SET_REQUEST: _handle_tool_policy_set_request,
+    EventType.APPROVAL_MODE_SET_REQUEST: _handle_approval_mode_set_request,
+    EventType.MCP_SERVER_LIST_REQUEST: _handle_mcp_server_list_request,
+    EventType.CONFIG_GET_REQUEST: _handle_config_get_request,
+    EventType.CONFIG_UPDATE_REQUEST: _handle_config_update_request,
+    EventType.CONFIG_RESET_REQUEST: _handle_config_reset_request,
+    EventType.AUXILIARY_MODEL_SET_REQUEST: _handle_auxiliary_model_set_request,
+    EventType.REASONING_EFFORT_SET_REQUEST: _handle_reasoning_effort_set_request,
+    EventType.MCP_SERVER_ADD_REQUEST: _handle_mcp_server_add_request,
+    EventType.MCP_SERVER_REMOVE_REQUEST: _handle_mcp_server_remove_request,
+    EventType.MCP_SERVER_UPDATE_REQUEST: _handle_mcp_server_update_request,
+    EventType.MCP_SERVER_CONNECT_REQUEST: _handle_mcp_server_connect_request,
+    EventType.MCP_SERVER_DISCONNECT_REQUEST: _handle_mcp_server_disconnect_request,
+    EventType.MCP_SERVER_TEST_REQUEST: _handle_mcp_server_test_request,
+    EventType.MCP_RESOURCE_LIST_REQUEST: _handle_mcp_resource_list_request,
+    EventType.MCP_RESOURCE_READ_REQUEST: _handle_mcp_resource_read_request,
+    EventType.MCP_PROMPT_LIST_REQUEST: _handle_mcp_prompt_list_request,
+    EventType.MCP_PROMPT_RUN_REQUEST: _handle_mcp_prompt_run_request,
+    EventType.PLUGIN_LIST_REQUEST: _handle_plugin_list_request,
+    EventType.PLUGIN_INSTALL_REQUEST: _handle_plugin_install_request,
+    EventType.PLUGIN_APPROVAL_GRANTED: _handle_plugin_approval_granted,
+    EventType.PLUGIN_APPROVAL_REJECTED: _handle_plugin_approval_rejected,
+    EventType.PLUGIN_UNINSTALL_REQUEST: _handle_plugin_uninstall_request,
+    EventType.PLUGIN_TOGGLE_REQUEST: _handle_plugin_toggle_request,
+    EventType.MEMORY_EPISODES_REQUEST: _handle_memory_episodes_request,
+    EventType.MEMORY_EPISODE_DELETE_REQUEST: _handle_memory_episode_delete_request,
+    EventType.MEMORY_EPISODES_CLEAR_REQUEST: _handle_memory_episodes_clear_request,
+    EventType.MEMORY_GRAPH_REQUEST: _handle_memory_graph_request,
+    EventType.MEMORY_FACT_DELETE_REQUEST: _handle_memory_fact_delete_request,
+    EventType.MEMORY_ENTITY_DELETE_REQUEST: _handle_memory_entity_delete_request,
+    EventType.MEMORY_GRAPH_CLEAR_REQUEST: _handle_memory_graph_clear_request,
+    EventType.MEMORY_FACT_UPDATE_REQUEST: _handle_memory_fact_update_request,
+    EventType.MEMORY_EXPORT_REQUEST: _handle_memory_export_request,
+    EventType.BACKUP_CREATE_REQUEST: _handle_backup_create_request,
+    EventType.BACKUP_RESTORE_REQUEST: _handle_backup_restore_request,
+    EventType.DIAGNOSTICS_EXPORT_REQUEST: _handle_diagnostics_export_request,
+    EventType.VERSION_CHECK_REQUEST: _handle_version_check_request,
+    EventType.SKILL_LIST_REQUEST: _handle_skill_list_request,
+    EventType.SKILL_TOGGLE_REQUEST: _handle_skill_toggle_request,
+    EventType.SLASH_COMMAND_LIST_REQUEST: _handle_slash_command_list_request,
+    EventType.WORKSPACE_LIST_REQUEST: _handle_workspace_list_request,
+    EventType.WORKSPACE_ADD_REQUEST: _handle_workspace_add_request,
+    EventType.WORKSPACE_REMOVE_REQUEST: _handle_workspace_remove_request,
+    EventType.WORKSPACE_INDEX_START_REQUEST: _handle_workspace_index_start_request,
+    EventType.WORKSPACE_INDEX_STATUS_REQUEST: _handle_workspace_index_status_request,
+    EventType.WORKSPACE_INDEX_PAUSE_REQUEST: _handle_workspace_index_pause_request,
+    EventType.WORKSPACE_INDEX_CONFIG_REQUEST: _handle_workspace_index_config_request,
+    EventType.WORKSPACE_SET_ACTIVE_REQUEST: _handle_workspace_set_active_request,
+    EventType.PROJECT_CONFIG_GET_REQUEST: _handle_project_config_request,
+    EventType.PROJECT_CONFIG_UPDATE_REQUEST: _handle_project_config_request,
+    EventType.VOICE_SESSION_START_REQUEST: _handle_voice_session_start_request,
+    EventType.VOICE_SESSION_STOP_REQUEST: _handle_voice_session_stop_request,
+    EventType.VOICE_PLAYBACK_PROGRESS: _handle_voice_playback_progress,
+    EventType.VOICE_RTC_OFFER_REQUEST: _handle_voice_rtc_offer_request,
+    EventType.VOICE_RTC_ICE_REQUEST: _handle_voice_rtc_ice_request,
+    EventType.DICTATION_START_REQUEST: _handle_dictation_start_request,
+    EventType.DICTATION_CHUNK_REQUEST: _handle_dictation_chunk_request,
+    EventType.DICTATION_STOP_REQUEST: _handle_dictation_stop_request,
+    EventType.READ_ALOUD_START_REQUEST: _handle_read_aloud_start_request,
+    EventType.READ_ALOUD_STOP_REQUEST: _handle_read_aloud_stop_request,
+}
 
 # --- Legacy unauthenticated HTTP management routes: REMOVED (Phase 9, A1) ---
 # The seven HTTP routes that used to live here (GET/POST/DELETE/PATCH on

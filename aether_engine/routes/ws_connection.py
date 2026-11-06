@@ -18,6 +18,13 @@ voice-start lock — and with the reply discipline (``send_event`` /
 (deslop C5): build the payload off the loop, turn a failure into
 the family's error payload (never silence), send the correlated
 Event, and swallow a dead socket with a debug log.
+
+Slice 3 grows it with the connection's task state — the runner,
+its session, the chained launch tail, the active downloads, the
+current task id, the plugin installs this connection prepared —
+which the task pump and the START_TASK launch (now module-level
+in ``routes/ws_task_exec.py``) share with the receive loop and
+its dispatch handlers.
 """
 import asyncio
 import logging
@@ -93,10 +100,36 @@ class WsConnection:
         # Session starts serialise on this lock, since two starts
         # would fight over voice_state (RUX-B-09).
         self.voice_start_lock = asyncio.Lock()
-        # The task pump (``execute_task_generator``) stays a
-        # ``ws_tasks`` closure until slice 3; the voice family's
-        # escalated background jobs drive it through this slot,
-        # which ``ws_tasks`` fills in once the closure is defined.
+        # Slice 3: this connection's task-execution state, shared
+        # by the pump, the launch pipeline and the dispatch
+        # handlers (routes/ws_task_exec.py).
+        self.task_runner: asyncio.Task | None = None
+        # Session of the task this connection most recently started or
+        # resumed — lets STEER_TASK tell "a task is live for this session"
+        # apart from "start a new task" (Epic 1, E1-07).
+        self.task_session_id: str | None = None
+        # RUX-B-07: START_TASK's pre-work runs in a launch task, not in
+        # the receive loop. Launches are chained in receipt order (each
+        # launch waits for the previous one) so the ordering the serial
+        # loop used to guarantee between successive task starts — cancel
+        # the old runner first, commit any staged rewind, then build the
+        # new task — is preserved inside the launch pipeline.
+        self.task_start_tail: asyncio.Task | None = None
+        self.active_downloads: dict[str, asyncio.Task] = {}
+        # N-44: the id of the task this connection is currently running
+        # (set by the task pump when TASK_CREATED flows past, cleared
+        # when the pump exits) — CANCEL_TASK reports the task it
+        # actually cancelled instead of a hard-coded "unknown".
+        self.active_task_id: str | None = None
+        # E1-06: plugin installs THIS connection prepared — dropped
+        # from the module-global pending table when it disconnects.
+        self.own_plugin_install_ids: set[str] = set()
+        # The task pump (``execute_task_generator``) lives in
+        # routes/ws_task_exec.py (slice 3); this slot holds it
+        # bound to this connection (a ``functools.partial`` filled
+        # in by ``ws_tasks``), so the voice family's escalated
+        # background jobs can drive the pump through the context,
+        # as they did when it was a ``ws_tasks`` closure.
         self.execute_task_generator: Any = None
 
     def spawn_background(self, coro) -> asyncio.Task:
