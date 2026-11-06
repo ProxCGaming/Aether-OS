@@ -1,7 +1,9 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
 
 :root {
-  --bg-color: #05050f;
+  /* Wave 4: --bg-color was removed — grep proves no var()
+     reference to it anywhere in the repo (body paints
+     transparent; the shell colour comes from the window). */
   --panel-bg: rgba(20, 20, 35, 0.4);
   --panel-border: rgba(255, 255, 255, 0.08);
   --text-primary: #f0f0f5;

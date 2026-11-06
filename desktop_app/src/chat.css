@@ -715,23 +715,12 @@
    declarations the upgraded block does not set (margin, mono
    font, backdrop blur) silently inherited into every card. */
 
-.tool-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 600;
-  color: #f8fafc;
-}
-
-.tool-name-container {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.tool-icon {
-  color: #a78bfa;
-}
+/* Wave 4: .tool-header, .tool-name-container and .tool-icon
+   stood here — leftovers of the pre-"Upgraded" tool card layout.
+   Repo-wide grep (all tracked files: JSX/JS, inline styles,
+   electron, tests, build config) finds their names nowhere but
+   these definitions; the live card uses .tool-card-topbar,
+   .tool-identity and .tool-terminal-icon. Removed as dead. */
 
 /* D3-08: the standalone .tool-status base and the standalone
    .tool-status-pending/completed/failed rules that stood here
@@ -746,47 +735,11 @@
   50% { opacity: 1; box-shadow: 0 0 8px rgba(234, 179, 8, 0.4); }
 }
 
-.tool-args, .tool-result {
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
-  padding: 8px 10px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 120px;
-  overflow-y: auto;
-}
-
-.tool-result {
-  color: #cbd5e1;
-}
-
-.tool-result::-webkit-scrollbar, .tool-args::-webkit-scrollbar {
-  width: 4px;
-}
-.tool-result::-webkit-scrollbar-thumb, .tool-args::-webkit-scrollbar-thumb {
-  background: rgba(167, 139, 250, 0.3);
-  border-radius: 4px;
-}
-
-.tool-show-more-btn {
-  background: transparent;
-  border: 1px solid rgba(167, 139, 250, 0.3);
-  color: #a78bfa;
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 11px;
-  cursor: pointer;
-  align-self: flex-start;
-  transition: all 0.2s ease;
-}
-
-.tool-show-more-btn:hover {
-  background: rgba(167, 139, 250, 0.1);
-  color: #ddd6fe;
-}
+/* Wave 4: .tool-args, .tool-result (with their scrollbar rules)
+   and .tool-show-more-btn stood here — the old card's inline
+   args/result panes and expander, superseded by the payload
+   drawers (.payload-drawer-*). Repo-wide grep finds their names
+   nowhere but these definitions. Removed as dead. */
 
 /* ========================================================
    Hierarchical Execution Tree & Payload Drawers

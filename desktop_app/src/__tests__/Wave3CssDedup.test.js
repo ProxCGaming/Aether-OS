@@ -57,6 +57,50 @@ describe('D3-09 — .session-item.active has one owner', () => {
   });
 });
 
+describe('Wave 4 — desktop dead code sweep (D-07 + full-surface grep proof)', () => {
+  // Proof standard: git grep over every tracked file in the repo
+  // (JSX/JS sources, inline style strings, electron main/preload,
+  // tests, index.html, vite/build config). A name that occurs
+  // nowhere but its own definition is dead. Names that survive
+  // only inside dynamic constructions count as live and stay.
+  it('deletes App.css — the unimported Vite starter template (design D-07)', () => {
+    expect(fs.existsSync(path.join(__dirname, '..', 'App.css'))).toBe(false);
+  });
+
+  it('drops the pre-"Upgraded" tool card rules no JSX carries', () => {
+    for (const sel of ['.tool-header', '.tool-name-container', '.tool-icon',
+      '.tool-args', '.tool-result', '.tool-show-more-btn']) {
+      expect(ruleCount(chatCss, sel)).toBe(0);
+    }
+    expect(chatCss).not.toContain('.tool-result::-webkit-scrollbar');
+    expect(chatCss).not.toContain('.tool-args::-webkit-scrollbar');
+  });
+
+  it('drops the --bg-color token nothing references', () => {
+    expect(indexCss).not.toContain('--bg-color:');
+  });
+
+  it('keeps the live keyframes — same-stylesheet and inline-style consumers', () => {
+    // Referenced by animation: declarations inside chat.css itself.
+    for (const kf of ['pulsePending', 'pulseBadge', 'pulseStop',
+      'pulseDot', 'contextMenuFadeIn', 'toastFadeIn']) {
+      expect(chatCss).toContain(`@keyframes ${kf}`);
+    }
+    // float1/2/3 drive the App.jsx orbs via inline style strings.
+    for (const kf of ['float1', 'float2', 'float3',
+      'voiceWavePulse', 'voiceDotPulse']) {
+      expect(indexCss).toContain(`@keyframes ${kf}`);
+    }
+  });
+
+  it('keeps the tokens backing live rules (--panel-* for .glass-panel)', () => {
+    expect(indexCss).toContain('--panel-bg:');
+    expect(indexCss).toContain('--panel-border:');
+    expect(indexCss).toContain('--text-primary:');
+    expect(indexCss).toContain('--text-secondary:');
+  });
+});
+
 describe('D3-20 — proven-dead CSS is removed', () => {
   it('keeps @keyframes spin — inline JSX styles animate with it', () => {
     expect(/@keyframes spin\s*\{/.test(indexCss)).toBe(true);
