@@ -352,6 +352,8 @@ _FALLBACK_OLLAMA_CATALOG: list[dict[str, Any]] = [
     {"name": "phi3:mini", "size": 2.3, "params": "3.8B", "quant": "Q4_K_M", "description": "Microsoft's highly efficient small model. Perfect for low RAM."},
     {"name": "gemma2:2b", "size": 1.6, "params": "2B", "quant": "Q4_K_M", "description": "Google's lightweight model based on Gemini."},
     {"name": "deepseek-coder-v2:16b", "size": 8.9, "params": "16B", "quant": "Q4_K_M", "description": "Exceptional coding and logic capabilities."},
+    {"name": "qwen3-embedding:0.6b", "size": 0.6, "params": "0.6B", "quant": "Q8_0", "family": "embedding", "description": "Qwen3 embedding model — the embedder Aether uses for memory and workspace search."},
+    {"name": "nomic-embed-text", "size": 0.27, "params": "137M", "quant": "F16", "family": "embedding", "description": "Lightweight English embedding model by Nomic."},
 ]
 
 
@@ -388,7 +390,10 @@ def ollama_catalogue_rows() -> list[dict[str, Any]]:
             "source": "ollama",
             "id": name,
             "name": name,
-            "family": "brain",
+            # The catalogue's own family when it declares one (the
+            # embedding models); chat entries predate the field and
+            # are brains.
+            "family": entry.get("family") or "brain",
             "downloads": None,
             "licence": entry.get("licence") or entry.get("license"),
             "formats": ["gguf"],

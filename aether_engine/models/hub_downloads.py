@@ -496,13 +496,23 @@ class ModelHubDownloads:
         """
         rows: list[dict[str, Any]] = []
         for model in await self._ollama.list_downloaded_models():
+            # The daemon-typed kind drives the family label: an
+            # embedding model in the Ollama store is an Embedding,
+            # not a Brain. Older inventories without a type keep
+            # the historical "brain" label.
+            model_type = model.get("type") or "unknown"
+            family = "embedding" if model_type == "embedding" else "brain"
             label, reason = label_runnability(
-                "brain", ["gguf"], model["name"])
+                family, ["gguf"], model["name"])
             rows.append({
                 "source": "ollama",
                 "id": model["name"],
                 "name": model["name"],
-                "family": "brain",
+                "family": family,
+                "type": model_type,
+                "params": model.get("parameter_size") or None,
+                "quant": model.get("quantization") or None,
+                "model_family": model.get("family") or None,
                 "downloads": None,
                 "licence": None,
                 "formats": ["gguf"],

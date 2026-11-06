@@ -60,6 +60,11 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
   const [activeTab, setActiveTab] = useState('indexed'); // 'indexed' | 'excluded'
   const [filterQuery, setFilterQuery] = useState('');
   const [warningModal, setWarningModal] = useState({ isOpen: false, pendingEmbedder: '' });
+  // Downloaded embedding models, from the engine's local-model
+  // list (daemon-typed via /api/show): the embedder picker below
+  // is fed from what the user actually HAS, not only the two
+  // built-in names it used to hardcode.
+  const [downloadedEmbedders, setDownloadedEmbedders] = useState([]);
 
   const sendEvent = useCallback(
     (type, payload = {}) => {
@@ -89,6 +94,11 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
     }
   }, [activeWorkspace, sendEvent]);
 
+  // Feed the embedder picker from the downloaded embedding models.
+  useEffect(() => {
+    sendEvent('LOCAL_MODEL_LIST_REQUEST', {});
+  }, [sendEvent]);
+
   // Request status when activeWorkspace is ready
   useEffect(() => {
     if (activeWorkspace) {
@@ -106,7 +116,15 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
     const handleMessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'WORKSPACE_LIST_RESPONSE') {
+        if (data.type === 'LOCAL_MODEL_LIST_RESPONSE') {
+          const models = Array.isArray(data.payload?.models) ? data.payload.models : [];
+          setDownloadedEmbedders(
+            models
+              .filter((m) => m && m.downloaded && (m.type === 'embedding' || m.type === 'both'))
+              .map((m) => m.name)
+              .filter(Boolean)
+          );
+        } else if (data.type === 'WORKSPACE_LIST_RESPONSE') {
           const list = data.payload?.workspaces || [];
           setWorkspaces(list);
           if (!activeWorkspace && list.length > 0) {
@@ -233,6 +251,27 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
       total_chunks: 0,
     }));
   };
+
+  // Embedder picker options: the two built-ins, plus every
+  // downloaded embedding-typed model, plus the currently active
+  // embedder (always selectable, even before the list lands or if
+  // it was pulled outside the app).
+  const embedderOptions = useMemo(() => {
+    const options = [
+      { value: 'qwen3-embedding:0.6b', label: 'qwen3-embedding:0.6b (Standard, 1024 dims)' },
+      { value: 'qwen3-embedding:4b', label: 'qwen3-embedding:4b (Quality, 1024 dims)' },
+    ];
+    for (const name of downloadedEmbedders) {
+      if (!options.some((o) => o.value === name)) {
+        options.push({ value: name, label: `${name} (Downloaded)` });
+      }
+    }
+    const current = status.embedder || 'qwen3-embedding:0.6b';
+    if (!options.some((o) => o.value === current)) {
+      options.push({ value: current, label: current });
+    }
+    return options;
+  }, [downloadedEmbedders, status.embedder]);
 
   // Filtered lists
   const filteredIndexedDocs = useMemo(() => {
@@ -543,12 +582,11 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
               cursor: 'pointer',
             }}
           >
-            <option value="qwen3-embedding:0.6b" style={{ background: '#181824' }}>
-              qwen3-embedding:0.6b (Standard, 1024 dims)
-            </option>
-            <option value="qwen3-embedding:4b" style={{ background: '#181824' }}>
-              qwen3-embedding:4b (Quality, 1024 dims)
-            </option>
+            {embedderOptions.map((option) => (
+              <option key={option.value} value={option.value} style={{ background: '#181824' }}>
+                {option.label}
+              </option>
+            ))}
           </select>
         </div>
       </div>

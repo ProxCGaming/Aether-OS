@@ -507,3 +507,70 @@ describe('Model Hub Set Active (preserved from the Ollama tab)', () => {
     expect(within(row).queryByRole('button', { name: 'Set Active' })).not.toBeInTheDocument();
   });
 });
+
+const DL_EMBEDDER = {
+  source: 'ollama', id: 'qwen3-embedding:0.6b', name: 'qwen3-embedding:0.6b', family: 'embedding',
+  downloads: null, licence: null, formats: ['gguf'], runnability: 'ollama',
+  runnability_reason: 'GGUF build — runs via Ollama.',
+  size_bytes: 639000000, downloaded: true, path: '/models/qwen3-embedding',
+  type: 'embedding', params: '0.6B', quant: 'Q8_0',
+};
+
+const DL_CHAT_TYPED = {
+  ...DL_OLLAMA, type: 'chat', params: '8.0B', quant: 'Q4_0',
+};
+
+describe('Downloaded model typing + embedder (catalogue sync)', () => {
+  it('shows the daemon type badge and params/quant chips on downloaded rows', async () => {
+    const { wsRef, getHandler } = await renderTab();
+    respond(getHandler, wsRef, 'MODEL_HUB_DOWNLOADED_REQUEST', 'MODEL_HUB_DOWNLOADED_RESPONSE', { models: [DL_EMBEDDER, DL_CHAT_TYPED], error: null });
+
+    const embRow = await screen.findByTestId('downloaded-row-ollama:qwen3-embedding:0.6b');
+    expect(within(embRow).getByTestId('downloaded-type-ollama:qwen3-embedding:0.6b')).toHaveTextContent('Embedding');
+    expect(within(embRow).getByText('0.6B Params')).toBeInTheDocument();
+    expect(within(embRow).getByText('Q8_0')).toBeInTheDocument();
+
+    const chatRow = await screen.findByTestId('downloaded-row-ollama:qwen3:8b');
+    expect(within(chatRow).getByTestId('downloaded-type-ollama:qwen3:8b')).toHaveTextContent('Chat');
+    expect(within(chatRow).getByText('8.0B Params')).toBeInTheDocument();
+  });
+
+  it('offers Use as Embedder only for embedding-capable models', async () => {
+    const { wsRef, getHandler } = await renderTab();
+    respond(getHandler, wsRef, 'MODEL_HUB_DOWNLOADED_REQUEST', 'MODEL_HUB_DOWNLOADED_RESPONSE', { models: [DL_EMBEDDER, DL_CHAT_TYPED], error: null });
+
+    const embRow = await screen.findByTestId('downloaded-row-ollama:qwen3-embedding:0.6b');
+    expect(within(embRow).getByTestId('use-as-embedder-ollama:qwen3-embedding:0.6b')).toBeInTheDocument();
+    const chatRow = await screen.findByTestId('downloaded-row-ollama:qwen3:8b');
+    expect(within(chatRow).queryByText(/Use as Embedder/)).not.toBeInTheDocument();
+  });
+
+  it('Use as Embedder sends the embedder config request and marks the row only on the engine response', async () => {
+    const { wsRef, getHandler } = await renderTab();
+    respond(getHandler, wsRef, 'MODEL_HUB_DOWNLOADED_REQUEST', 'MODEL_HUB_DOWNLOADED_RESPONSE', { models: [DL_EMBEDDER], error: null });
+
+    const row = await screen.findByTestId('downloaded-row-ollama:qwen3-embedding:0.6b');
+    fireEvent.click(within(row).getByTestId('use-as-embedder-ollama:qwen3-embedding:0.6b'));
+
+    const sent = lastSent(wsRef, 'WORKSPACE_INDEX_CONFIG_REQUEST');
+    expect(sent).toBeTruthy();
+    expect(sent.payload).toEqual({ embedder: 'qwen3-embedding:0.6b' });
+    // Not claimed yet: the row shows the pending state, not "Embedder".
+    expect(within(row).getByTestId('embedder-pending-ollama:qwen3-embedding:0.6b')).toBeInTheDocument();
+    expect(within(row).queryByTestId('embedder-active-ollama:qwen3-embedding:0.6b')).not.toBeInTheDocument();
+
+    broadcast(getHandler, 'WORKSPACE_INDEX_CONFIG_RESPONSE', { ok: true, reindex_required: true });
+    await waitFor(() => {
+      expect(within(row).getByTestId('embedder-active-ollama:qwen3-embedding:0.6b')).toBeInTheDocument();
+    });
+  });
+
+  it('marks the configured embedder row from the currentEmbedder prop', async () => {
+    const { wsRef, getHandler } = await renderTab({ currentEmbedder: 'qwen3-embedding:0.6b' });
+    respond(getHandler, wsRef, 'MODEL_HUB_DOWNLOADED_REQUEST', 'MODEL_HUB_DOWNLOADED_RESPONSE', { models: [DL_EMBEDDER], error: null });
+
+    const row = await screen.findByTestId('downloaded-row-ollama:qwen3-embedding:0.6b');
+    expect(within(row).getByTestId('embedder-active-ollama:qwen3-embedding:0.6b')).toBeInTheDocument();
+    expect(within(row).queryByTestId('use-as-embedder-ollama:qwen3-embedding:0.6b')).not.toBeInTheDocument();
+  });
+});

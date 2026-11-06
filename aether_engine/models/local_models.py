@@ -22,13 +22,46 @@ OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 # silent does, and the failure path reports a failed pull).
 OLLAMA_PULL_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=5.0)
 
-# Curated library catalog of common local models with sizes
+# Curated library catalog of common local models with sizes.
+# ``type`` is the catalogue's own knowledge of what a model is FOR:
+# "chat" models converse, "embedding" models vectorise text for
+# memory / workspace search. Downloaded models get their type from
+# the daemon instead (/api/show capabilities — see _show_metadata);
+# the catalogue entries carry it statically because the daemon can
+# only describe models it already has. The two embedding entries
+# exist because the engine's unified embedder (episodic memory +
+# prose index) IS one of these models — before they were listed,
+# the app required an embedder it never offered for download.
 DEFAULT_LOCAL_CATALOG: list[dict[str, Any]] = [
-    {"name": "llama3:8b", "size": "~4.7GB", "downloaded": False, "path": ""},
-    {"name": "mistral:7b", "size": "~4.1GB", "downloaded": False, "path": ""},
-    {"name": "phi3:mini", "size": "~2.3GB", "downloaded": False, "path": ""},
-    {"name": "gemma2:2b", "size": "~1.6GB", "downloaded": False, "path": ""},
+    {"name": "llama3:8b", "size": "~4.7GB", "downloaded": False, "path": "", "type": "chat"},
+    {"name": "mistral:7b", "size": "~4.1GB", "downloaded": False, "path": "", "type": "chat"},
+    {"name": "phi3:mini", "size": "~2.3GB", "downloaded": False, "path": "", "type": "chat"},
+    {"name": "gemma2:2b", "size": "~1.6GB", "downloaded": False, "path": "", "type": "chat"},
+    {"name": "qwen3-embedding:0.6b", "size": "~639MB", "downloaded": False, "path": "", "type": "embedding"},
+    {"name": "nomic-embed-text", "size": "~274MB", "downloaded": False, "path": "", "type": "embedding"},
 ]
+
+
+def model_type_from_capabilities(capabilities: Any) -> str:
+    """Map an Ollama /api/show ``capabilities`` list to a model type.
+
+    "embedding" capability -> "embedding"; "completion" capability
+    -> "chat"; both -> "both"; anything else (missing, malformed,
+    or neither capability) -> "unknown". Typing is descriptive
+    only — an "unknown" model is still listed and downloadable.
+    """
+    if not isinstance(capabilities, (list, tuple)):
+        return "unknown"
+    caps = {str(c).strip().lower() for c in capabilities}
+    has_embedding = "embedding" in caps
+    has_completion = "completion" in caps
+    if has_embedding and has_completion:
+        return "both"
+    if has_embedding:
+        return "embedding"
+    if has_completion:
+        return "chat"
+    return "unknown"
 
 
 class OllamaManager:
@@ -44,6 +77,49 @@ class OllamaManager:
         self.models_dir = (
             Path(models_dir) if models_dir else Path.home() / ".ollama" / "models")
         self._downloaded_paths: dict[str, str] = {}
+        # /api/show metadata cache: (model name, daemon modified_at)
+        # -> metadata dict. A model whose bytes change gets a new
+        # modified_at from /api/tags, so the key self-invalidates;
+        # a re-pull under the same stamp is the same model.
+        self._show_cache: dict[tuple[str, str], dict[str, Any]] = {}
+
+    async def _show_metadata(
+        self, client: httpx.AsyncClient, name: str, modified_at: str = "",
+    ) -> dict[str, Any]:
+        """Typed metadata for one downloaded model, from /api/show.
+
+        Returns {type, family, parameter_size, quantization}. Any
+        failure — daemon error, malformed body, missing fields —
+        degrades to type "unknown" with empty details; describing a
+        model must never break listing the models themselves.
+        """
+        key = (name, str(modified_at or ""))
+        cached = self._show_cache.get(key)
+        if cached is not None:
+            return cached
+        meta: dict[str, Any] = {
+            "type": "unknown", "family": "",
+            "parameter_size": "", "quantization": "",
+        }
+        try:
+            res = await client.post(
+                f"{self.base_url}/api/show", json={"name": name})
+            if res.status_code == 200:
+                data = res.json()
+                details = data.get("details") or {}
+                meta = {
+                    "type": model_type_from_capabilities(
+                        data.get("capabilities")),
+                    "family": str(details.get("family") or ""),
+                    "parameter_size": str(
+                        details.get("parameter_size") or ""),
+                    "quantization": str(
+                        details.get("quantization_level") or ""),
+                }
+        except Exception as e:  # noqa: BLE001 — metadata is descriptive: a failed /api/show degrades to "unknown", never breaks the list
+            logger.debug(f"/api/show for {name} failed: {e}")
+        self._show_cache[key] = meta
+        return meta
 
     async def is_ollama_running(self) -> bool:
         try:
@@ -54,7 +130,15 @@ class OllamaManager:
             return False
 
     async def list_models(self) -> list[dict[str, Any]]:
-        """List local models, placing downloaded models sorted at the top."""
+        """List local models, placing downloaded models sorted at the top.
+
+        Downloaded models are typed from the daemon itself: each is
+        enriched with /api/show metadata (type / family /
+        parameter_size / quantization — cached per name+modified_at),
+        so a model the user pulled outside the catalogue still shows
+        up WITH its kind instead of as an anonymous name. Catalogue
+        entries below carry their static ``type``.
+        """
         downloaded_names = set()
         models_result: list[dict[str, Any]] = []
 
@@ -70,11 +154,17 @@ class OllamaManager:
                             size_gb = round(size_bytes / (1024**3), 1)
                             path = self._downloaded_paths.get(name, f"~/.ollama/models/manifests/{name}")
                             downloaded_names.add(name)
+                            meta = await self._show_metadata(
+                                client, name, str(m.get("modified_at") or ""))
                             models_result.append({
                                 "name": name,
                                 "size": f"~{size_gb}GB",
                                 "downloaded": True,
                                 "path": path,
+                                "type": meta["type"],
+                                "family": meta["family"],
+                                "parameter_size": meta["parameter_size"],
+                                "quantization": meta["quantization"],
                             })
             except Exception as e:  # noqa: BLE001 — best-effort delete: any failure reports False  # noqa: BLE001 — download failure is reported as a TASK_FAILED event, never raised  # noqa: BLE001 — best-effort model listing: a dead Ollama yields an empty list
                 logger.warning(f"Error fetching Ollama tags: {e}")
@@ -87,6 +177,10 @@ class OllamaManager:
                     "size": item["size"],
                     "downloaded": False,
                     "path": self._downloaded_paths.get(item["name"], ""),
+                    "type": item.get("type", "unknown"),
+                    "family": "",
+                    "parameter_size": "",
+                    "quantization": "",
                 })
 
         # Ensure downloaded models sort to top
@@ -110,20 +204,29 @@ class OllamaManager:
                 if res.status_code != 200:
                     return []
                 data = res.json()
+                models: list[dict[str, Any]] = []
+                for m in data.get("models", []):
+                    name = m.get("name", "")
+                    if not name:
+                        continue
+                    # Same /api/show typing as list_models: the hub
+                    # inventory labels families from this, so an
+                    # embedding model must not surface as a "brain".
+                    meta = await self._show_metadata(
+                        client, name, str(m.get("modified_at") or ""))
+                    models.append({
+                        "name": name,
+                        "size_bytes": m.get("size", 0) or 0,
+                        "path": self._downloaded_paths.get(
+                            name, f"~/.ollama/models/manifests/{name}"),
+                        "type": meta["type"],
+                        "family": meta["family"],
+                        "parameter_size": meta["parameter_size"],
+                        "quantization": meta["quantization"],
+                    })
         except Exception as e:  # noqa: BLE001 — inventory is best-effort: an unreadable daemon response means "unknown", reported as empty
             logger.warning(f"Error fetching Ollama tags for inventory: {e}")
             return []
-        models: list[dict[str, Any]] = []
-        for m in data.get("models", []):
-            name = m.get("name", "")
-            if not name:
-                continue
-            models.append({
-                "name": name,
-                "size_bytes": m.get("size", 0) or 0,
-                "path": self._downloaded_paths.get(
-                    name, f"~/.ollama/models/manifests/{name}"),
-            })
         models.sort(key=lambda x: x["name"])
         return models
 
@@ -377,3 +480,73 @@ class OllamaManager:
         except Exception as e:  # noqa: BLE001 — delete failure reports False; metadata retained
             logger.error(f"Failed to delete model {model_name}: {e}")
             return False
+
+
+async def ensure_embedder(
+    manager: OllamaManager, model_name: str,
+) -> dict[str, Any]:
+    """Make sure the configured embedder is usable, pulling it if not.
+
+    Returns a status dict ``{state, model, detail}`` whose state is
+    one of:
+
+    - ``"ready"`` — Ollama is running and the model is downloaded.
+    - ``"pulled"`` — Ollama was running, the model was missing, and
+      the pull just completed.
+    - ``"ollama_off"`` — the daemon is not reachable. Decided by the
+      manager's 2-second probe: a dead daemon costs ~2s to report,
+      never an embedding-timeout burn.
+    - ``"pull_failed"`` — the daemon is up but the pull failed; the
+      daemon's own error is in ``detail``.
+
+    This is the lifecycle the embedding path always assumed and
+    never had: the engine's default embedder used to be a model
+    nothing downloaded and nothing checked for, so a missing
+    embedder silently disabled memory embeddings for the whole
+    session (and, with Ollama off, taxed every launch ~30s of
+    timeout first). Callers gate expensive embedding work (the
+    startup backfill) on this verdict.
+    """
+    model = str(model_name or "").strip()
+    if not model:
+        return {"state": "pull_failed", "model": model,
+                "detail": "no embedder model configured"}
+    if not await manager.is_ollama_running():
+        return {"state": "ollama_off", "model": model,
+                "detail": f"Ollama is not running (daemon unreachable at {manager.base_url})"}
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            res = await client.get(f"{manager.base_url}/api/tags")
+            if res.status_code == 200:
+                present = {
+                    str(m.get("name") or "")
+                    for m in res.json().get("models", [])
+                }
+                if model in present:
+                    return {"state": "ready", "model": model, "detail": ""}
+    except Exception as e:  # noqa: BLE001 — presence check is best-effort: an unreadable tags reply falls through to the pull, whose own failure reporting is precise
+        logger.debug(f"Embedder presence check for {model} failed: {e}")
+
+    # Missing (or unverifiable): pull it. Non-streaming — the
+    # daemon answers once, when the pull completes or fails; the
+    # progress-streaming path stays with the user-facing download
+    # task, this is a startup lifecycle call. Same per-phase
+    # timeout discipline as download_model_task (E5-F17).
+    try:
+        async with httpx.AsyncClient(timeout=OLLAMA_PULL_TIMEOUT) as client:
+            res = await client.post(
+                f"{manager.base_url}/api/pull",
+                json={"name": model, "stream": False},
+            )
+            if res.status_code == 200:
+                logger.info(f"Embedder {model} pulled for this session")
+                return {"state": "pulled", "model": model, "detail": ""}
+            detail = res.text.strip()[:300] if res.text else ""
+            return {
+                "state": "pull_failed", "model": model,
+                "detail": f"Ollama pull for {model} failed with "
+                          f"HTTP {res.status_code}" + (f": {detail}" if detail else ""),
+            }
+    except Exception as e:  # noqa: BLE001 — a failed pull is a status, not an exception: startup must continue without embeddings
+        return {"state": "pull_failed", "model": model,
+                "detail": f"Ollama pull for {model} failed: {e}"}

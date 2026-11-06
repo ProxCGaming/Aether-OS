@@ -71,8 +71,10 @@ def _reset_breaker():
     starts and ends with it closed (a tripped breaker is simulated
     explicitly inside the offline test)."""
     episodic._embed_unavailable_until = 0.0
+    episodic._embed_endpoint_suspect = False
     yield
     episodic._embed_unavailable_until = 0.0
+    episodic._embed_endpoint_suspect = False
 
 
 @pytest.fixture
@@ -380,6 +382,7 @@ async def test_offline_indexing_queues_and_backfills(indexer, tmp_path):
 
     # Cooldown over + endpoint back: the queue drains completely.
     episodic._embed_unavailable_until = 0.0
+    episodic._embed_endpoint_suspect = False
     with _patch_embedder():
         result = await indexer.backfill_pending()
     assert result["embedded"] > 0

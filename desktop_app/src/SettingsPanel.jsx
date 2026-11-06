@@ -1028,6 +1028,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                  // needs it to show which downloaded model is Active.
                  defaultProvider={(Array.isArray(providers) ? providers : []).find(p => p.is_default)?.name || ''}
                  defaultModel={(Array.isArray(providers) ? providers : []).find(p => p.is_default)?.default_model || ''}
+                 // The configured embedder lives on the applied
+                 // config; the tab marks that downloaded row as the
+                 // active Embedder.
+                 currentEmbedder={engineConfig?.embedding_model || ''}
                />
             )}
           </div>
