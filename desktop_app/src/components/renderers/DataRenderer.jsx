@@ -67,7 +67,13 @@ function JsonNode({ label, value, defaultOpen = true, depth = 0 }) {
 }
 
 export default function DataRenderer({ content = '', format = 'json' }) {
-  const isJson = format === 'json' || (!format && content.trim().startsWith('{') || content.trim().startsWith('['));
+  // D3-01: the sniffing fallback applies only when NO format was
+  // declared — the old grouping let startsWith('[') escape the
+  // !format guard (&& binds tighter than ||), so a CSV artifact
+  // whose first cell starts with '[' was misrouted to the JSON
+  // branch and reported as invalid JSON.
+  const isJson = format === 'json'
+    || (!format && (content.trim().startsWith('{') || content.trim().startsWith('[')));
 
   const parsedJson = useMemo(() => {
     if (!isJson) return null;

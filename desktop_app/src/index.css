@@ -7,7 +7,8 @@
   --text-primary: #f0f0f5;
   --text-secondary: #9090a0;
   --accent: var(--accent);
-  --accent-hover: #8b5cf6;
+  /* D3-20: --accent-hover was removed — grep proves no var()
+     reference to it anywhere in src. */
 }
 
 * {
@@ -97,11 +98,10 @@ h1, h2, h3 {
   color: var(--text-primary);
 }
 
-.session-item.active {
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
-  border-left: 2px solid #3b82f6;
-}
+/* D3-09: .session-item.active is defined ONCE, in chat.css next
+   to the .session-item base rule — the conflicting copy that
+   stood here (white wash + blue left border) was deleted so one
+   definition rules. */
 
 .session-delete-btn {
   background: transparent;

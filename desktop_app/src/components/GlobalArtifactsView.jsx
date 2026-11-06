@@ -18,6 +18,13 @@ import '../chat.css';
 import MediaLibrary from './MediaLibrary';
 import LoadStateRow from './Settings/LoadStateRow';
 
+// D3-03: a list request the engine never answers must not leave
+// the surface on "loading" for the whole visit. Mirrors
+// Onboarding's SAVE_NO_ANSWER_MS rule (which mirrors
+// ProviderSettings' RUX-C-03): the request arms a timer, and if
+// no answer lands within the window the load resolves to 'error'.
+export const LIST_NO_ANSWER_MS = 35000;
+
 export default function GlobalArtifactsView({
   artifacts: controlledArtifacts,
   initialArtifacts,
@@ -104,6 +111,7 @@ export default function GlobalArtifactsView({
     // engine was down showed the designed "No artifacts found" empty
     // state for the whole visit; the reconnectCount dep re-runs this
     // effect (and the query) on every reconnect.
+    let noAnswerTimer = null;
     if (!controlledArtifacts && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: 'ARTIFACT_LIST_REQUEST',
@@ -111,10 +119,17 @@ export default function GlobalArtifactsView({
         request_id: `global_artifacts_${Date.now()}`,
         payload: { global: true }
       }));
+      // D3-03: arm the no-answer deadline for THIS request. The
+      // state guard keeps a late timer from disturbing a list that
+      // already resolved (ready, or an error the reply reported).
+      noAnswerTimer = setTimeout(() => {
+        setListLoad((s) => (s === 'loading' ? 'error' : s));
+      }, LIST_NO_ANSWER_MS);
     }
 
     return () => {
       ws.removeEventListener('message', handleMessage);
+      if (noAnswerTimer) clearTimeout(noAnswerTimer);
     };
   }, [wsRef, controlledArtifacts, reconnectCount]);
 
@@ -158,6 +173,33 @@ export default function GlobalArtifactsView({
     }
     return counts;
   }, [effectiveArtifacts]);
+
+  // D3-21: the chips are built FROM the counts — the well-known
+  // kinds keep their names and order, and any other kind the
+  // engine actually recorded (html, image kinds, …) gains a chip
+  // of its own. Before this, kindCounts tallied kinds the filter
+  // could never select, so those artifacts were reachable only
+  // under "All" and their counts never appeared.
+  const kindChips = useMemo(() => {
+    const known = [
+      { id: 'file', label: 'Files' },
+      { id: 'diff', label: 'Diffs' },
+      { id: 'report', label: 'Reports' },
+    ];
+    const chips = [{ id: 'all', label: 'All', count: kindCounts.all }];
+    for (const k of known) {
+      chips.push({ id: k.id, label: k.label, count: kindCounts[k.id] || 0 });
+    }
+    for (const k of Object.keys(kindCounts)) {
+      if (k === 'all' || known.some((knownKind) => knownKind.id === k)) continue;
+      chips.push({
+        id: k,
+        label: k.charAt(0).toUpperCase() + k.slice(1),
+        count: kindCounts[k],
+      });
+    }
+    return chips;
+  }, [kindCounts]);
 
   const getArtifactIcon = (art) => {
     if (art.kind === 'diff') return <GitCommit size={15} color="#c084fc" />;
@@ -399,6 +441,7 @@ export default function GlobalArtifactsView({
           <Search size={15} color="#94a3b8" />
           <input
             type="text"
+            className="aether-search-input"
             data-testid="artifacts-search-input"
             placeholder="Search by title, path, session, task..."
             value={searchQuery}
@@ -406,7 +449,6 @@ export default function GlobalArtifactsView({
             style={{
               background: 'transparent',
               border: 'none',
-              outline: 'none',
               color: '#fff',
               fontSize: '12px',
               width: '100%'
@@ -433,12 +475,7 @@ export default function GlobalArtifactsView({
 
         {/* Kind Filters */}
         <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-          {[
-            { id: 'all', label: 'All', count: kindCounts.all },
-            { id: 'file', label: 'Files', count: kindCounts.file || 0 },
-            { id: 'diff', label: 'Diffs', count: kindCounts.diff || 0 },
-            { id: 'report', label: 'Reports', count: kindCounts.report || 0 },
-          ].map(k => {
+          {kindChips.map(k => {
             const isActive = selectedKind === k.id;
             return (
               <button

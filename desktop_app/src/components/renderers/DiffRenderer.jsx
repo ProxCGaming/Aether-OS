@@ -7,20 +7,33 @@ export default function DiffRenderer({ diff = '', _filePath = '' }) {
     let oldLine = 0;
     let newLine = 0;
 
+    // D3-14: ---/+++ are file-header meta ONLY before the current
+    // file's first hunk. After a hunk has started, a body line
+    // whose content begins -- or ++ arrives as ---…/+++… and is a
+    // removed/added line that consumes a line number — the old
+    // startsWith test classified every such line as meta and
+    // drifted both counters for the rest of the hunk. A new
+    // 'diff --git' section re-arms the header state.
+    let hunkSeen = false;
+
     return raw.map((line, idx) => {
       let type = 'context';
       let oldNum = '';
       let newNum = '';
 
-      if (line.startsWith('@@')) {
+      if (line.startsWith('diff --git')) {
+        type = 'meta';
+        hunkSeen = false;
+      } else if (line.startsWith('@@')) {
         type = 'hunk';
+        hunkSeen = true;
         // Parse hunk header: @@ -oldStart,oldLen +newStart,newLen @@
         const match = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
         if (match) {
           oldLine = parseInt(match[1], 10);
           newLine = parseInt(match[2], 10);
         }
-      } else if (line.startsWith('---') || line.startsWith('+++')) {
+      } else if ((line.startsWith('---') || line.startsWith('+++')) && !hunkSeen) {
         type = 'meta';
       } else if (line.startsWith('+')) {
         type = 'added';
@@ -78,7 +91,6 @@ export default function DiffRenderer({ diff = '', _filePath = '' }) {
         return (
           <div
             key={idx}
-            className={className}
             style={{
               display: 'flex',
               background: bg,

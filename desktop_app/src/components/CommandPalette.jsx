@@ -56,6 +56,18 @@ export default function CommandPalette({ open, items = [], onClose, isConnected 
     setSelected(0);
   }, [query]);
 
+  // D3-23: the host can swap `items` while the palette is open;
+  // when the results shrink, the selection must clamp into range —
+  // an out-of-range index left the palette with no visible
+  // selection and an Enter that addressed nothing. Adjusted during
+  // render (React's pattern for state derived from a changed
+  // input) so the clamped value is what this very render uses.
+  const [prevResults, setPrevResults] = useState(results);
+  if (results !== prevResults) {
+    setPrevResults(results);
+    setSelected((s) => Math.min(s, Math.max(results.length - 1, 0)));
+  }
+
   if (!open) return null;
 
   const runItem = (item) => {

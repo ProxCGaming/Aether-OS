@@ -17,7 +17,7 @@ describe('ImageViewer', () => {
     const img = screen.getByAltText('Test image');
     expect(img).toHaveAttribute('src', PNG_SRC);
     expect(screen.getByTestId('zoom-level')).toHaveTextContent('100%');
-    expect(img).toHaveStyle({ transform: 'scale(1)' });
+    expect(img).toHaveStyle({ width: '100%' });
   });
 
   it('falls back to the default alt text when none is given', () => {
@@ -29,7 +29,7 @@ describe('ImageViewer', () => {
     render(<ImageViewer src={PNG_SRC} alt="Zoomable" />);
     fireEvent.click(screen.getByTestId('zoom-in'));
     expect(screen.getByTestId('zoom-level')).toHaveTextContent('125%');
-    expect(screen.getByAltText('Zoomable')).toHaveStyle({ transform: 'scale(1.25)' });
+    expect(screen.getByAltText('Zoomable')).toHaveStyle({ width: '125%' });
     fireEvent.click(screen.getByTestId('zoom-in'));
     expect(screen.getByTestId('zoom-level')).toHaveTextContent('150%');
   });
@@ -59,6 +59,6 @@ describe('ImageViewer', () => {
     expect(screen.getByTestId('zoom-level')).toHaveTextContent('150%');
     fireEvent.click(screen.getByTestId('zoom-reset'));
     expect(screen.getByTestId('zoom-level')).toHaveTextContent('100%');
-    expect(screen.getByAltText('Zoomable')).toHaveStyle({ transform: 'scale(1)' });
+    expect(screen.getByAltText('Zoomable')).toHaveStyle({ width: '100%' });
   });
 });

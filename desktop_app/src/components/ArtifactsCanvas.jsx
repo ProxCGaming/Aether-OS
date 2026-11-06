@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { X, Copy, Check, Download, ExternalLink, FileCode, FileText, GitCommit, Image, Database, AlertCircle, Eye } from 'lucide-react';
+import { X, Copy, Check, Download, ExternalLink, FileCode, FileText, GitCommit, Image, Database, AlertCircle, Eye, Loader2 } from 'lucide-react';
 import CodeRenderer from './renderers/CodeRenderer';
 import MarkdownRenderer from './renderers/MarkdownRenderer';
 import DiffRenderer from './renderers/DiffRenderer';
@@ -36,6 +36,23 @@ const projectDirOf = (filePath) => {
   return dir || null;
 };
 
+// D3-17: viewer routing and list icons share ONE extension source.
+// The extension comes from the title when the title carries one,
+// else from the file path — an artifact titled "notes" whose path
+// ends in .md is a Markdown artifact. Before this, routing looked
+// at the title only (path-routed artifacts fell through to the
+// code viewer) and the icon's image set disagreed with the
+// viewer's (bmp/ico routed to the image viewer but iconed as code).
+const extOf = (name) => {
+  const n = (name || '').toLowerCase();
+  const dot = n.lastIndexOf('.');
+  return dot >= 0 ? n.slice(dot) : '';
+};
+
+const effectiveExt = (art) => extOf(art?.title) || extOf(art?.file_path);
+
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico']);
+
 export default function ArtifactsCanvas({
   isOpen = false,
   onClose = () => {},
@@ -43,11 +60,14 @@ export default function ArtifactsCanvas({
   selectedArtifactId = null,
   onSelectArtifact = () => {},
   activeArtifactContent = null,
-  _isLoading = false,
+  isLoading = false,
   devServerInfo = null,
   onDetectDevServer = null
 }) {
   const [copied, setCopied] = useState(false);
+  // D3-18: a rejected clipboard write is user-visible feedback,
+  // not a silent no-op.
+  const [copyFailed, setCopyFailed] = useState(false);
   const [viewerTab, setViewerTab] = useState('code');
   const [openError, setOpenError] = useState(null);
 
@@ -83,6 +103,8 @@ export default function ArtifactsCanvas({
   useEffect(() => {
     setViewerTab('code');
     setOpenError(null);
+    setCopied(false);
+    setCopyFailed(false);
   }, [currentArtifactId]);
 
   // E8-2.2: opening the Preview tab asks the engine to probe for a
@@ -101,16 +123,38 @@ export default function ArtifactsCanvas({
     const textToCopy = activeArtifactContent?.content || activeArtifactContent?.diff || '';
     if (textToCopy && navigator.clipboard) {
       navigator.clipboard.writeText(textToCopy).then(() => {
+        setCopyFailed(false);
         setCopied(true);
         setTimeout(() => setCopied(false), 1800);
-      }).catch(() => {});
+      }).catch(() => {
+        // D3-18: surface the failure on the button itself for the
+        // same dwell as the success state.
+        setCopied(false);
+        setCopyFailed(true);
+        setTimeout(() => setCopyFailed(false), 1800);
+      });
     }
   };
 
   const handleSaveCopy = () => {
     // N06: save the artifact's real bytes under its real MIME type.
-    const payload = artifactSavePayload(currentArtifact, activeArtifactContent);
-    if (!payload) return;
+    // D3-06: artifactSavePayload's contract is bytes-or-null; a
+    // null for content that EXISTS (e.g. undecodable base64) is a
+    // failure the user must see — the old code returned silently,
+    // so the click produced no save and no error.
+    let payload = null;
+    try {
+      payload = artifactSavePayload(currentArtifact, activeArtifactContent);
+    } catch {
+      payload = null;
+    }
+    if (!payload) {
+      const rawContent = activeArtifactContent?.content || activeArtifactContent?.diff || '';
+      if (rawContent) {
+        setOpenError("Could not save a copy — this artifact's content could not be decoded.");
+      }
+      return;
+    }
     const blob = new Blob([payload.bytes], { type: payload.mimeType });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -188,9 +232,34 @@ export default function ArtifactsCanvas({
     }
 
     const kind = currentArtifact.kind;
-    const title = (currentArtifact.title || '').toLowerCase();
     const content = activeArtifactContent?.content || '';
     const diff = activeArtifactContent?.diff || '';
+
+    // D3-19: the loading prop is honoured — while content is in
+    // flight and there is nothing to show yet, the pane says so
+    // instead of rendering an empty viewer. (Wiring the prop from
+    // App.jsx is a follow-up for the App owner; the canvas no
+    // longer swallows it.)
+    if (isLoading && !content && !diff) {
+      return (
+        <div
+          data-testid="artifact-content-loading"
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            height: '100%',
+            color: 'rgba(255, 255, 255, 0.4)',
+            fontSize: '13px',
+            gap: '8px'
+          }}
+        >
+          <Loader2 size={28} className="aether-spinner" />
+          <span>Loading artifact…</span>
+        </div>
+      );
+    }
 
     if (kind === 'diff') {
       return <DiffRenderer diff={diff || content} filePath={currentArtifact.file_path} />;
@@ -200,19 +269,21 @@ export default function ArtifactsCanvas({
       return <SummaryDocumentRenderer content={content} title={currentArtifact.title} />;
     }
 
-    if (title.endsWith('.md') || title.endsWith('.markdown')) {
+    const ext = effectiveExt(currentArtifact);
+
+    if (ext === '.md' || ext === '.markdown') {
       return <MarkdownRenderer content={content} />;
     }
 
-    if (title.endsWith('.json')) {
+    if (ext === '.json') {
       return <DataRenderer content={content} format="json" />;
     }
 
-    if (title.endsWith('.csv')) {
+    if (ext === '.csv') {
       return <DataRenderer content={content} format="csv" />;
     }
 
-    if (/\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/.test(title)) {
+    if (IMAGE_EXTS.has(ext)) {
       return <ImageViewer src={content} alt={currentArtifact.title} />;
     }
 
@@ -234,10 +305,12 @@ export default function ArtifactsCanvas({
   const getArtifactIcon = (art) => {
     if (art.kind === 'diff') return <GitCommit size={14} color="#c084fc" />;
     if (art.kind === 'report') return <FileText size={14} color="#60a5fa" />;
-    const t = (art.title || '').toLowerCase();
-    if (t.endsWith('.md')) return <FileText size={14} color="#60a5fa" />;
-    if (t.endsWith('.json') || t.endsWith('.csv')) return <Database size={14} color="#f59e0b" />;
-    if (/\.(png|jpg|jpeg|gif|webp|svg)$/.test(t)) return <Image size={14} color="#ec4899" />;
+    // D3-17: same effective extension and same image set as the
+    // viewer routing above.
+    const ext = effectiveExt(art);
+    if (ext === '.md' || ext === '.markdown') return <FileText size={14} color="#60a5fa" />;
+    if (ext === '.json' || ext === '.csv') return <Database size={14} color="#f59e0b" />;
+    if (IMAGE_EXTS.has(ext)) return <Image size={14} color="#ec4899" />;
     return <FileCode size={14} color="#34d399" />;
   };
 
@@ -482,7 +555,7 @@ export default function ArtifactsCanvas({
                   }}
                 >
                   {copied ? <Check size={12} color="#10b981" /> : <Copy size={12} />}
-                  <span>{copied ? 'Copied' : 'Copy'}</span>
+                  <span>{copied ? 'Copied' : copyFailed ? 'Copy failed' : 'Copy'}</span>
                 </button>
                 <button
                   type="button"

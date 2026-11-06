@@ -1,8 +1,14 @@
 import React, { useState } from 'react';
-import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
+import { ZoomIn, ZoomOut, RotateCcw, AlertCircle } from 'lucide-react';
 
 export default function ImageViewer({ src = '', alt = 'Artifact Image' }) {
   const [zoom, setZoom] = useState(100);
+  // D3-12: a failed load is a visible state, not an empty box with
+  // working-looking zoom controls. The failure is recorded against
+  // the src that produced it, so a new src starts clean without a
+  // reset effect.
+  const [failedSrc, setFailedSrc] = useState(null);
+  const loadError = failedSrc !== null && failedSrc === src;
 
   const handleZoomIn = () => setZoom((prev) => Math.min(prev + 25, 400));
   const handleZoomOut = () => setZoom((prev) => Math.max(prev - 25, 25));
@@ -94,30 +100,56 @@ export default function ImageViewer({ src = '', alt = 'Artifact Image' }) {
         </span>
       </div>
 
-      {/* Image canvas */}
+      {/* Image canvas. D3-12: zoom is a real layout size (width %),
+          not a transform — a transform leaves the layout box at
+          fit-size inside the scroll container, so at 200-400% the
+          overflowed edges have no scroll range and are simply
+          unreachable. margin:auto (instead of align/justify
+          centering) keeps an overflowing image scrollable to every
+          edge, and flexShrink: 0 stops the flex row from capping
+          the zoomed width at the container size. */}
       <div
         style={{
           flex: 1,
           overflow: 'auto',
           display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
           padding: '24px'
         }}
       >
-        <img
-          src={src}
-          alt={alt}
-          style={{
-            maxWidth: '100%',
-            maxHeight: '100%',
-            transform: `scale(${zoom / 100})`,
-            transformOrigin: 'center center',
-            transition: 'transform 150ms ease-out',
-            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)',
-            borderRadius: '4px'
-          }}
-        />
+        {loadError ? (
+          <div
+            data-testid="image-load-error"
+            style={{
+              margin: 'auto',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: '8px',
+              color: '#fca5a5',
+              fontSize: '13px',
+              textAlign: 'center'
+            }}
+          >
+            <AlertCircle size={28} color="#ef4444" />
+            <span>Image could not be loaded.</span>
+            <span style={{ color: 'rgba(255, 255, 255, 0.4)', fontSize: '11px' }}>{alt}</span>
+          </div>
+        ) : (
+          <img
+            src={src}
+            alt={alt}
+            onError={() => setFailedSrc(src)}
+            style={{
+              margin: 'auto',
+              flexShrink: 0,
+              width: `${zoom}%`,
+              height: 'auto',
+              transition: 'width 150ms ease-out',
+              boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)',
+              borderRadius: '4px'
+            }}
+          />
+        )}
       </div>
     </div>
   );

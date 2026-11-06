@@ -64,6 +64,16 @@ const normalizeUrl = (raw) => {
   return `http://${trimmed}`;
 };
 
+// A filesystem path (POSIX absolute, Windows drive, or UNC) — as
+// opposed to a server address a user might type into the URL bar.
+const isFilesystemPath = (raw) => {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return false;
+  if (/^[a-zA-Z]:[\\/]/.test(trimmed)) return true;
+  if (trimmed.startsWith('\\\\')) return true;
+  return trimmed.startsWith('/');
+};
+
 export default function ProjectPreview({
   artifact = null,
   content = null,
@@ -93,7 +103,17 @@ export default function ProjectPreview({
 
   const handleGo = (event) => {
     event.preventDefault();
-    const next = normalizeUrl(urlDraft ?? urlBarValue);
+    const raw = urlDraft ?? urlBarValue;
+    // D3-27: in static mode the bar shows the artifact's own file
+    // path. Running that through normalizeUrl minted
+    // http://<filesystem path> and switched the preview to a dead
+    // "server" — a filesystem path is not a server address, so Go
+    // on it simply stays with the static preview.
+    if (isFilesystemPath(raw)) {
+      setUrlDraft(null);
+      return;
+    }
+    const next = normalizeUrl(raw);
     if (next) {
       setCustomUrl(next);
       setUrlDraft(null);

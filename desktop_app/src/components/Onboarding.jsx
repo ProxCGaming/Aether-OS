@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useAetherSocket } from '../contexts/SocketContext';
+import { mintRequestId } from '../requestId';
 
 /**
  * First-run onboarding (Epic 6, E6-02).
@@ -111,17 +112,32 @@ export default function Onboarding({ providers = [], onDone }) {
     armSaveTimer('provider', setSaveState);
     sendMessage('PROVIDER_SAVE_REQUEST', {
       schema_version: 1,
-      request_id: Date.now().toString(),
+      request_id: mintRequestId(),
       payload: { provider: providerName, api_key: apiKey, base_url: '' },
     });
   };
 
   const pickWorkspace = async () => {
     if (!window.electronAPI?.showOpenDialog) return;
-    const selected = await window.electronAPI.showOpenDialog({
-      properties: ['openDirectory', 'createDirectory'],
-      title: 'Choose your workspace folder',
-    });
+    let selected;
+    try {
+      selected = await window.electronAPI.showOpenDialog({
+        properties: ['openDirectory', 'createDirectory'],
+        title: 'Choose your workspace folder',
+      });
+    } catch (err) {
+      // D3-13: a rejected dialog promise used to escape as an
+      // unhandled rejection and surface nowhere. It lands in the
+      // step's error state instead — the picker is offered again
+      // precisely because workspaceState is 'error'.
+      setWorkspaceState('error');
+      setWorkspaceError(
+        err && err.message
+          ? `the folder picker failed (${err.message})`
+          : 'the folder picker failed to open'
+      );
+      return;
+    }
     if (selected) {
       setWorkspacePath(selected);
       setWorkspaceSaved(false);
@@ -130,7 +146,7 @@ export default function Onboarding({ providers = [], onDone }) {
       setWorkspaceError('');
       sendMessage('WORKSPACE_ADD_REQUEST', {
         schema_version: 1,
-        request_id: Date.now().toString(),
+        request_id: mintRequestId(),
         payload: { path: selected },
       });
     }
@@ -142,7 +158,7 @@ export default function Onboarding({ providers = [], onDone }) {
     armSaveTimer('approval', setApprovalState);
     sendMessage('APPROVAL_MODE_SET_REQUEST', {
       schema_version: 1,
-      request_id: Date.now().toString(),
+      request_id: mintRequestId(),
       payload: { mode: approvalMode },
     });
     // No optimistic advance: the APPROVAL_MODE_SET_RESPONSE handler

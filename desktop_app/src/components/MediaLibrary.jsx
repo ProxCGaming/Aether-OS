@@ -16,6 +16,14 @@ import {
 } from 'lucide-react';
 import '../chat.css';
 import LoadStateRow from './Settings/LoadStateRow';
+import { toFileUrl } from './renderers/fileUrl';
+
+// D3-03: a list request the engine never answers must not leave
+// the surface on "loading" for the whole visit. Mirrors
+// Onboarding's SAVE_NO_ANSWER_MS rule (which mirrors
+// ProviderSettings' RUX-C-03): the request arms a timer, and if
+// no answer lands within the window the load resolves to 'error'.
+const LIST_NO_ANSWER_MS = 35000;
 
 export default function MediaLibrary({
   media: controlledMedia,
@@ -47,6 +55,27 @@ export default function MediaLibrary({
   // the surfaced result when reality fell short of the request.
   const [deleteNotice, setDeleteNotice] = useState(null); // {tone, text} | null
   const pendingDeletesRef = useRef(new Map()); // media_id -> {item, name, deleteFile}
+  // D3-02: the message handlers need the selected item's ID, not
+  // the item — reading it through this ref keeps selectedMedia out
+  // of the subscription effect's deps, so opening/closing the
+  // detail modal no longer tears down the listener and re-fetches
+  // the whole list.
+  const selectedMediaIdRef = useRef(null);
+  useEffect(() => {
+    selectedMediaIdRef.current = selectedMedia?.id ?? null;
+  }, [selectedMedia]);
+  // D3-07: items whose file URL failed to load fall back to the
+  // icon placeholder (the file may have moved since the list was
+  // answered) instead of a broken-image box.
+  const [failedThumbs, setFailedThumbs] = useState(() => new Set());
+  const markThumbFailed = useCallback((id) => {
+    setFailedThumbs((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  }, []);
   // N07: backend recall results for the current search query
   // ({query, items, degraded} | null). Null means "no backend answer
   // for this query" — the local metadata filter below is the fallback
@@ -139,7 +168,7 @@ export default function MediaLibrary({
               });
             } else {
               setInternalMedia(prev => prev.filter(m => m.id !== deletedId));
-              if (selectedMedia?.id === deletedId) setSelectedMedia(null);
+              if (selectedMediaIdRef.current === deletedId) setSelectedMedia(null);
               if (pending?.deleteFile && data.payload?.file_deleted === false) {
                 // Entry is gone, but the file the user explicitly
                 // asked to delete is not — it may already have been
@@ -166,7 +195,7 @@ export default function MediaLibrary({
                 m.id === progressId ? { ...m, status: progressStatus } : m
               ))
             } : prev));
-            if (selectedMedia?.id === progressId) {
+            if (selectedMediaIdRef.current === progressId) {
               setSelectedMedia(prev => (prev ? { ...prev, status: progressStatus } : prev));
             }
           }
@@ -180,7 +209,7 @@ export default function MediaLibrary({
               ...prev,
               items: prev.items.map(m => (m.id === analyzed.id ? { ...m, ...analyzed } : m))
             } : prev));
-            if (selectedMedia?.id === analyzed.id) {
+            if (selectedMediaIdRef.current === analyzed.id) {
               setSelectedMedia(prev => (prev ? { ...prev, ...analyzed } : prev));
             }
           }
@@ -205,7 +234,7 @@ export default function MediaLibrary({
               }
               return m;
             }));
-            if (selectedMedia?.id === updatedId) {
+            if (selectedMediaIdRef.current === updatedId) {
               setSelectedMedia(prev => prev ? {
                 ...prev,
                 tags: data.payload.tags ?? prev.tags,
@@ -225,6 +254,7 @@ export default function MediaLibrary({
     // engine was down left the grid on "No media items yet" for the
     // whole visit; the reconnectCount dep re-runs this effect (and
     // the query) on every reconnect.
+    let noAnswerTimer = null;
     if (!controlledMedia && !initialMedia && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: 'MEDIA_LIST_REQUEST',
@@ -232,12 +262,19 @@ export default function MediaLibrary({
         request_id: `media_list_${Date.now()}`,
         payload: { collection: 'all' }
       }));
+      // D3-03: arm the no-answer deadline for THIS request. The
+      // state guard keeps a late timer from disturbing a list that
+      // already resolved (ready, or an error the reply reported).
+      noAnswerTimer = setTimeout(() => {
+        setListLoad((s) => (s === 'loading' ? 'error' : s));
+      }, LIST_NO_ANSWER_MS);
     }
 
     return () => {
       ws.removeEventListener('message', handleMessage);
+      if (noAnswerTimer) clearTimeout(noAnswerTimer);
     };
-  }, [wsRef, controlledMedia, initialMedia, selectedMedia, reconnectCount]);
+  }, [wsRef, controlledMedia, initialMedia, reconnectCount]);
 
   // N07: route search through the backend recall path (transcript +
   // semantic matches) instead of only filtering the loaded page of
@@ -281,8 +318,11 @@ export default function MediaLibrary({
   const formatFileSize = (bytes) => {
     if (!bytes || bytes === 0) return '0 B';
     const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    // D3-24: the unit list runs to PB and the index is clamped into
+    // it — the old four-unit list indexed past its end at ≥ 1 TB
+    // and rendered "1024 undefined".
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
   };
 
@@ -480,7 +520,10 @@ export default function MediaLibrary({
     if (norm === 'snip') return 'Snip';
     if (norm === 'user_upload') return 'User upload';
     if (norm === 'agent_generated' || collection === 'generated') return 'Agent generated';
-    return collection === 'generated' ? 'Agent generated' : 'User upload';
+    // D3-25: an origin the library does not recognise is labelled
+    // Unknown — the old fallthrough called it 'User upload'
+    // (fabricating a provenance for any unrecognised source).
+    return 'Unknown';
   };
 
   const getOriginBadgeStyle = (origin, collection) => {
@@ -545,6 +588,7 @@ export default function MediaLibrary({
           <Search size={15} color="#94a3b8" />
           <input
             type="text"
+            className="aether-search-input"
             data-testid="media-search-input"
             placeholder="Search filename, tags, notes, transcripts..."
             value={searchQuery}
@@ -552,7 +596,6 @@ export default function MediaLibrary({
             style={{
               background: 'transparent',
               border: 'none',
-              outline: 'none',
               color: '#fff',
               fontSize: '12px',
               width: '100%'
@@ -767,6 +810,15 @@ export default function MediaLibrary({
               // offline queue — they clear themselves on flush.
               const deleteQueued = Boolean(pendingDeleteFor(item.id));
               const metaQueued = Boolean(pendingMetaFor(item.id));
+              // D3-07: the card renders the media itself through
+              // the app's existing file:// seam (the same one
+              // ProjectPreview uses for local artifacts) — until
+              // now it rendered only an icon and metadata text,
+              // so the library never showed the media at all. A
+              // failed load falls back to the placeholder below.
+              const thumbUrl = !isMissing && !failedThumbs.has(item.id)
+                ? toFileUrl(item.file_path)
+                : '';
 
               return (
                 <div
@@ -823,6 +875,24 @@ export default function MediaLibrary({
                         <AlertTriangle size={28} />
                         <span style={{ fontSize: '11px', fontWeight: 600 }}>Missing File</span>
                       </div>
+                    ) : thumbUrl && item.media_type === 'video' ? (
+                      <video
+                        data-testid={`media-thumb-${item.id}`}
+                        src={thumbUrl}
+                        preload="metadata"
+                        muted
+                        playsInline
+                        onError={() => markThumbFailed(item.id)}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                      />
+                    ) : thumbUrl ? (
+                      <img
+                        data-testid={`media-thumb-${item.id}`}
+                        src={thumbUrl}
+                        alt={filename}
+                        onError={() => markThumbFailed(item.id)}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                      />
                     ) : item.media_type === 'video' ? (
                       <div
                         style={{
@@ -1184,6 +1254,31 @@ export default function MediaLibrary({
               </div>
             </div>
 
+            {/* D3-07: the detail view shows the media itself, not
+                only its metadata — same file:// seam as the grid. */}
+            {selectedMedia.file_exists !== false
+              && toFileUrl(selectedMedia.file_path)
+              && !failedThumbs.has(selectedMedia.id) && (
+              selectedMedia.media_type === 'video' ? (
+                <video
+                  data-testid="media-detail-preview"
+                  src={toFileUrl(selectedMedia.file_path)}
+                  controls
+                  preload="metadata"
+                  onError={() => markThumbFailed(selectedMedia.id)}
+                  style={{ width: '100%', maxHeight: '320px', borderRadius: '10px', background: '#000' }}
+                />
+              ) : (
+                <img
+                  data-testid="media-detail-preview"
+                  src={toFileUrl(selectedMedia.file_path)}
+                  alt={selectedMedia.file_path.split(/[/\\]/).pop()}
+                  onError={() => markThumbFailed(selectedMedia.id)}
+                  style={{ width: '100%', maxHeight: '320px', objectFit: 'contain', borderRadius: '10px', background: '#000' }}
+                />
+              )
+            )}
+
             {/* Missing file alert inside modal */}
             {selectedMedia.file_exists === false && (
               <div
@@ -1280,6 +1375,7 @@ export default function MediaLibrary({
               <div style={{ display: 'flex', gap: '8px' }}>
                 <input
                   type="text"
+                  className="aether-search-input"
                   data-testid="media-tag-input"
                   placeholder="Add a tag..."
                   value={tagInput}
@@ -1297,8 +1393,7 @@ export default function MediaLibrary({
                     borderRadius: '8px',
                     padding: '8px 12px',
                     color: '#fff',
-                    fontSize: '12px',
-                    outline: 'none'
+                    fontSize: '12px'
                   }}
                 />
                 <button
@@ -1330,6 +1425,7 @@ export default function MediaLibrary({
                 Notes
               </label>
               <textarea
+                className="aether-search-input"
                 data-testid="media-notes-textarea"
                 rows={3}
                 placeholder="Add user notes, observations, or context..."
@@ -1343,7 +1439,6 @@ export default function MediaLibrary({
                   padding: '10px 12px',
                   color: '#fff',
                   fontSize: '12px',
-                  outline: 'none',
                   resize: 'vertical',
                   boxSizing: 'border-box'
                 }}

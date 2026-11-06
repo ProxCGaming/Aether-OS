@@ -41,6 +41,10 @@ export default function SnipOverlay({ isOpen, onCapture, onCancel, onError }) {
     if (!isSelecting) return;
     setIsSelecting(false);
 
+    // The drag's end is the last tracked move position — a move
+    // precedes every real release, so this is the release point
+    // whether the release lands on the overlay or is heard at
+    // window level after leaving it.
     const x = Math.min(startPos.x, currentPos.x);
     const y = Math.min(startPos.y, currentPos.y);
     const width = Math.abs(currentPos.x - startPos.x);
@@ -97,6 +101,24 @@ export default function SnipOverlay({ isOpen, onCapture, onCancel, onError }) {
     }
   }, [isSelecting, startPos, currentPos, onCapture, onError]);
 
+  // D3-22: the release that ends a drag is heard at WINDOW level,
+  // not only on the overlay div — a drag released outside the
+  // window used to strand isSelecting=true, and the next mouse move
+  // kept resizing a phantom selection. A window blur mid-drag
+  // (alt-tab, OS interruption) abandons the selection instead of
+  // stranding it the same way.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const onWindowMouseUp = () => { handleMouseUp(); };
+    const onWindowBlur = () => { setIsSelecting(false); };
+    window.addEventListener('mouseup', onWindowMouseUp);
+    window.addEventListener('blur', onWindowBlur);
+    return () => {
+      window.removeEventListener('mouseup', onWindowMouseUp);
+      window.removeEventListener('blur', onWindowBlur);
+    };
+  }, [isOpen, handleMouseUp]);
+
   if (!isOpen) return null;
 
   const left = Math.min(startPos.x, currentPos.x);
@@ -109,7 +131,6 @@ export default function SnipOverlay({ isOpen, onCapture, onCancel, onError }) {
       data-testid="snip-overlay"
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
       style={{
         position: 'fixed',
         inset: 0,

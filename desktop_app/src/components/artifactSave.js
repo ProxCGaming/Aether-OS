@@ -35,8 +35,8 @@ const utf8Bytes = (text) => {
       bytes.push(code);
     } else if (code < 0x800) {
       bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
-    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
-      const next = text.charCodeAt(i + 1);
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = i + 1 < text.length ? text.charCodeAt(i + 1) : -1;
       if (next >= 0xdc00 && next <= 0xdfff) {
         code = 0x10000 + ((code - 0xd800) * 0x400) + (next - 0xdc00);
         i++;
@@ -47,8 +47,13 @@ const utf8Bytes = (text) => {
           0x80 | (code & 0x3f),
         );
       } else {
-        bytes.push(0xef, 0xbf, 0xbd); // lone surrogate -> U+FFFD
+        bytes.push(0xef, 0xbf, 0xbd); // lone high surrogate -> U+FFFD
       }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      // D3-26: a lone LOW surrogate gets the same U+FFFD treatment
+      // as a lone high one — the old fall-through encoded the
+      // surrogate code point itself, which is invalid UTF-8.
+      bytes.push(0xef, 0xbf, 0xbd);
     } else {
       bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
     }
@@ -57,7 +62,14 @@ const utf8Bytes = (text) => {
 };
 
 const base64Bytes = (b64) => {
-  const bin = atob(b64);
+  let bin;
+  try {
+    bin = atob(b64);
+  } catch {
+    // D3-06: malformed base64 is "nothing real to save" (null),
+    // never an exception escaping the Save click.
+    return null;
+  }
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes;
@@ -78,6 +90,7 @@ export function artifactSavePayload(artifact, activeContent) {
     let bytes;
     if ((dataUrl[2] || '').toLowerCase().includes(';base64')) {
       bytes = base64Bytes(dataUrl[3]);
+      if (bytes === null) return null;
     } else {
       let text = dataUrl[3];
       try { text = decodeURIComponent(text); } catch { /* keep raw text */ }

@@ -130,6 +130,15 @@ export default function VoiceOverlay({
     }
     pendingRemoteRef.current = [];
     remoteAppliedRef.current = false;
+    // D3-05: the per-session sequence state resets too. The engine
+    // restarts its seq numbering each session; without this, a
+    // second session's answer/candidate whose seq equals the last
+    // session's is dropped as a "duplicate", and heard-chunk
+    // reports stay suppressed for engineSeq <= the old session's
+    // high-water mark — playback accounting silently stalls.
+    reportedSeqRef.current = -1;
+    lastAnswerSeqRef.current = null;
+    lastCandidateSeqRef.current = null;
     setMicLive(false);
     setRtcState(null);
     setRtcError(null);

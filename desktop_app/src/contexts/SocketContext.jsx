@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { createUiLogger, installUiLogging, messageTypeOf } from '../logUi';
+import { mintRequestId } from '../requestId';
+import { packetIdentityKey } from '../packetIdentity';
 
 const SocketContext = createContext(null);
 
@@ -28,25 +30,10 @@ const SocketContext = createContext(null);
 // content is exactly the defect being fixed.
 const DEDUP_WINDOW_MS = 150;
 
-// The dedup key for one raw engine packet, or null when the packet has
-// no identity to key on (unparseable, or neither id nor ts present).
-function packetIdentityKey(data) {
-  let parsed;
-  try {
-    parsed = JSON.parse(data);
-  } catch (e) {
-    return null;
-  }
-  if (!parsed || typeof parsed !== 'object') return null;
-  const id = parsed.event_id ?? parsed.request_id ?? null;
-  const ts = parsed.ts ?? null;
-  if (id === null && ts === null) return null;
-  // The exact bytes ride along so two instances that share an id and a
-  // ts but differ in content still count as distinct packets; only a
-  // byte-identical redelivery of an already-delivered identity is a
-  // duplicate.
-  return `${id}|${ts}|${parsed.type ?? ''}|${data}`;
-}
+// The dedup identity itself lives in ../packetIdentity (a pure
+// module, unit-testable without the provider): id | ts | type |
+// bounded digest of the bytes — never the bytes themselves
+// (D3-11).
 
 // Wave 2 slice 1: a descriptor for one message sitting in the offline
 // queue. The queue stores serialized envelopes, so the descriptor is
@@ -200,23 +187,44 @@ export const SocketProvider = ({ children }) => {
         if (event === 'message' && window.electronAPI && window.electronAPI.onEngineMessage) {
           // Packet identities delivered to THIS subscriber within the
           // retention window (identity key -> delivery time). Bounded by
-          // the window: entries are pruned on every packet, and a repeat
-          // of an identity after the window is a new delivery, not a
-          // duplicate.
+          // the window: entries are pruned on every packet — keyed or
+          // not — and a repeat of an identity after the window is a new
+          // delivery, not a duplicate. D3-11: pruning ALSO runs on a
+          // sweep timer while identities are held, so a socket that
+          // goes quiet does not retain entries past the window just
+          // because no further packet arrived to trigger the prune.
           const deliveredIdentities = new Map();
-          const cleanup = window.electronAPI.onEngineMessage((data) => {
+          const pruneIdentities = (now) => {
+            for (const [seenKey, seenAt] of deliveredIdentities) {
+              if ((now - seenAt) >= DEDUP_WINDOW_MS) {
+                deliveredIdentities.delete(seenKey);
+              }
+            }
+          };
+          let sweepTimer = null;
+          const stopSweep = () => {
+            if (sweepTimer !== null) {
+              clearInterval(sweepTimer);
+              sweepTimer = null;
+            }
+          };
+          const armSweep = () => {
+            if (sweepTimer !== null) return;
+            sweepTimer = setInterval(() => {
+              pruneIdentities(Date.now());
+              if (deliveredIdentities.size === 0) stopSweep();
+            }, DEDUP_WINDOW_MS);
+          };
+          const unsubscribe = window.electronAPI.onEngineMessage((data) => {
+            const now = Date.now();
+            pruneIdentities(now);
             const key = packetIdentityKey(data);
             if (key !== null) {
-              const now = Date.now();
-              for (const [seenKey, seenAt] of deliveredIdentities) {
-                if ((now - seenAt) >= DEDUP_WINDOW_MS) {
-                  deliveredIdentities.delete(seenKey);
-                }
-              }
               if (deliveredIdentities.has(key)) {
                 return; // true duplicate: same packet identity redelivered
               }
               deliveredIdentities.set(key, now);
+              armSweep();
             }
             // Message-TYPE trace on delivery (allowlist only) —
             // after dedup, so a redelivered packet is not traced
@@ -224,6 +232,10 @@ export const SocketProvider = ({ children }) => {
             uiLoggerRef.current.logMessageType('in', messageTypeOf(data));
             handler({ data });
           });
+          const cleanup = () => {
+            stopSweep();
+            if (typeof unsubscribe === 'function') unsubscribe();
+          };
           wsListeners.current.set(handler, cleanup);
         }
       },
@@ -386,7 +398,11 @@ export const SocketProvider = ({ children }) => {
     const data = JSON.stringify({
       type,
       schema_version: 1,
-      request_id: requestId !== null && requestId !== undefined ? String(requestId) : Date.now().toString(),
+      // D3-10: a minted id must name exactly one action — mint via
+      // mintRequestId (timestamp + monotonic counter + random
+      // suffix), never Date.now() alone, which collided for every
+      // action sent inside the same millisecond.
+      request_id: requestId !== null && requestId !== undefined ? String(requestId) : mintRequestId(),
       payload,
     });
     return wsRef.current.send(data);
