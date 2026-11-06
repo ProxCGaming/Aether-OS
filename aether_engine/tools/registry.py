@@ -369,16 +369,21 @@ async def _run_coro_tool(tool: Tool, kwargs: dict[str, Any]) -> Any:
     The async counterpart of :func:`_run_sync_tool`: coroutine tools
     (MCP, browser, READ_ONLY async natives) used to be awaited
     directly, so ``timeout_s`` bounded only synchronous tools and a
-    hung async tool hung the task forever. On timeout ``wait_for``
-    cancels the coroutine — a coroutine, unlike a thread, can
-    actually be stopped — and the caller sees the same
-    ToolExecutionError shape the sync path raises.
+    hung async tool hung the task forever. On timeout the coroutine
+    — unlike a thread — can actually be stopped, and the caller sees
+    the same ToolExecutionError shape the sync path raises.
+
+    ``asyncio.timeout`` rather than ``wait_for``: when the deadline
+    fires inside a tool whose own machinery shields and re-raises
+    (the MCP client's N-02 cancel grace), ``wait_for`` can surface
+    the inner ``CancelledError`` raw, past every graceful-failure
+    boundary; the timeout context converts its own expiry to
+    ``TimeoutError`` reliably, while a caller's genuine cancellation
+    still propagates as ``CancelledError``.
     """
     try:
-        return await asyncio.wait_for(
-            tool.execute_fn(**kwargs),
-            timeout=tool.timeout_s,
-        )
+        async with asyncio.timeout(tool.timeout_s):
+            return await tool.execute_fn(**kwargs)
     except TimeoutError as exc:
         raise ToolExecutionError(
             f"Tool '{tool.name}' timed out after {tool.timeout_s}s."

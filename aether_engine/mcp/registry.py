@@ -20,7 +20,10 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from aether_engine.mcp.client import MCPClientManager
+from aether_engine.mcp.client import (
+    MCP_TOOL_CALL_CANCEL_GRACE_SECONDS,
+    MCPClientManager,
+)
 from aether_engine.mcp.fallback import execute_mcp_tool_async
 from aether_engine.tools.registry import Tool, ToolRisk
 
@@ -43,6 +46,17 @@ class MCPConfigError(ValueError):
 # Tool-call timeout (PRD §4: Tool.timeout_s, default 60s). The server
 # config timeout bounds *connects* only; a tool call is bounded by this.
 MCP_TOOL_TIMEOUT_S = 60
+
+# Registry-level backstop for a converted MCP Tool. It must exceed the
+# call budget by the client's post-cancel grace (N-02): call_tool needs
+# up to MCP_TOOL_TIMEOUT_S + grace to fail gracefully, so a backstop
+# firing at the same 60s always pre-empts that path and leaks its
+# cancellation as a raw CancelledError (Wave 2 gate regression: the
+# dead-server graceful-failure test). +5s covers the fallback
+# formatting and scheduling slack.
+MCP_TOOL_BACKSTOP_TIMEOUT_S = (
+    MCP_TOOL_TIMEOUT_S + MCP_TOOL_CALL_CANCEL_GRACE_SECONDS + 5
+)
 
 
 def redact_mcp_config_for_ui(config: Any) -> dict[str, Any]:
@@ -673,7 +687,7 @@ class MCPRegistry:
             input_schema=_valid_input_schema(mcp_tool.inputSchema),
             execute_fn=_execute,
             risk=ToolRisk.EXECUTE,
-            timeout_s=MCP_TOOL_TIMEOUT_S,
+            timeout_s=MCP_TOOL_BACKSTOP_TIMEOUT_S,
             source=f"mcp:{server}",
         )
         holder["tool"] = tool
