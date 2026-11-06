@@ -94,8 +94,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    npm = _find_npm()
-    _check_desktop_app()
+    if args.dry_run:
+        # E9-U1: a dry run must work on exactly the machines it exists
+        # to diagnose — no Node installed, or npm ci not run yet.
+        # Resolve npm leniently and skip the install checks; the
+        # printed steps show what WOULD run once the machine is set
+        # up. A real run keeps both gates, unchanged.
+        npm = shutil.which("npm") or "npm"
+    else:
+        npm = _find_npm()
+        _check_desktop_app()
 
     if args.prod:
         build_cmd = [npm, "run", "build"]

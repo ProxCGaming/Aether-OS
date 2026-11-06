@@ -49,7 +49,10 @@ appends the audit JSONL record directly, in the exact record shape
 import asyncio
 import json
 import os
+import queue
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -67,6 +70,104 @@ DEFAULT_AUDIT_LOG_PATH = Path.home() / ".aether" / "logs" / "audit.log"
 # returned {"status": "noop"} for unknown tools).
 ALLOWED_TOOLS = frozenset({"execute_shell", "write_file", "delete_file", "edit_file", "create_directory", "run_checks"})
 
+# E9-W3: bounds for the pre-auth stdin read in main(). The payload is
+# one tool call's JSON (file bodies included); 16 MiB is generous
+# headroom over any legitimate call, while the byte cap and the read
+# deadline keep a hostile or broken writer from swelling this process
+# without limit or stalling it forever on a held-open pipe.
+MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
+PAYLOAD_READ_TIMEOUT_S = 30.0
+
+# E9-W2: bounds for execute_shell. The parent sandbox bounds the
+# worker's WALL-CLOCK (profile time caps) but nothing bounded BYTES:
+# communicate() buffered the child's whole output in worker memory,
+# returned it as one JSON document, and the parent buffered it again.
+# The pumps below keep at most SHELL_OUTPUT_MAX_BYTES per stream —
+# the same order as the registry's max_output_chars truncation on
+# the in-process path — while draining the rest so the child never
+# blocks on a full pipe. SHELL_TIMEOUT_S is the in-worker backstop
+# (run_checks uses the same 180s via CHECK_TIMEOUT_S) for direct
+# invocations the parent never supervises.
+SHELL_OUTPUT_MAX_BYTES = 20_000
+SHELL_TIMEOUT_S = 180
+
+
+async def _pump_capped(stream, out: dict) -> None:
+    """Drain *stream*, keeping the first SHELL_OUTPUT_MAX_BYTES.
+
+    Progress is published into *out* per chunk, so a timeout still
+    reports whatever was collected before the kill.
+    """
+    buf = bytearray()
+    truncated = False
+    while True:
+        chunk = await stream.read(8192)
+        if not chunk:
+            break
+        room = SHELL_OUTPUT_MAX_BYTES - len(buf)
+        if room > 0:
+            buf += chunk[:room]
+            truncated = truncated or len(chunk) > room
+        else:
+            truncated = True
+        out["data"] = bytes(buf)
+        out["truncated"] = truncated
+    out["data"] = bytes(buf)
+    out["truncated"] = truncated
+
+
+async def _collect_shell_output(proc) -> tuple[str, str, bool]:
+    """Collect a shell child's stdout/stderr under the E9-W2 bounds.
+
+    Returns (stdout, stderr, timed_out). On timeout the child is
+    killed and the partial output comes back with timed_out=True —
+    an execution outcome reported in-band (the run_checks precedent
+    in this module), not a refusal.
+
+    The collection is RACED with asyncio.wait, never cancelled:
+    cancelling a task that awaits proc.wait() poisons the
+    transport's exit waiter (Python 3.12), and the reap after a kill
+    then stalls until the command's natural end. On timeout the
+    child's whole process GROUP is killed (execute_shell spawns it
+    in its own session): killing only the shell would leave a
+    grandchild holding the pipes open, and the pumps would see no
+    EOF until it exited on its own — the deadline would not bind.
+    """
+    out_box: dict = {"data": b"", "truncated": False}
+    err_box: dict = {"data": b"", "truncated": False}
+    collect = asyncio.ensure_future(asyncio.gather(
+        _pump_capped(proc.stdout, out_box),
+        _pump_capped(proc.stderr, err_box),
+        proc.wait(),
+    ))
+    done, _pending = await asyncio.wait({collect}, timeout=SHELL_TIMEOUT_S)
+    timed_out = collect not in done
+    if timed_out:
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            await asyncio.wait_for(asyncio.shield(collect), timeout=5)
+        except TimeoutError:
+            # Something still holds the pipes open past the group
+            # kill — abandon the collection, report what was gathered.
+            collect.cancel()
+    elif collect.exception() is not None:
+        raise collect.exception()
+    stdout = out_box["data"].decode(errors="ignore")
+    if out_box["truncated"]:
+        stdout += f"\n[worker: stdout truncated at {SHELL_OUTPUT_MAX_BYTES} bytes]"
+    stderr = err_box["data"].decode(errors="ignore")
+    if err_box["truncated"]:
+        stderr += f"\n[worker: stderr truncated at {SHELL_OUTPUT_MAX_BYTES} bytes]"
+    if timed_out:
+        stderr += f"\n[worker: command timed out after {SHELL_TIMEOUT_S}s and was killed]"
+    return stdout, stderr, timed_out
+
 
 async def run_worker(task_payload: dict):
     tool_name = task_payload.get("tool_name")
@@ -83,9 +184,15 @@ async def run_worker(task_payload: dict):
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Own session/process group, so the E9-W2 timeout can
+            # kill the whole tree (see _collect_shell_output).
+            start_new_session=True,
         )
-        stdout, stderr = await proc.communicate()
-        return {"returncode": proc.returncode, "stdout": stdout.decode(errors="ignore"), "stderr": stderr.decode(errors="ignore")}
+        stdout, stderr, timed_out = await _collect_shell_output(proc)
+        result = {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr}
+        if timed_out:
+            result["timed_out"] = True
+        return result
 
     if tool_name == "write_file":
         path = args.get("path")
@@ -101,8 +208,16 @@ async def run_worker(task_payload: dict):
         path = args.get("path")
         if not path:
             raise ValueError("File path is required")
-        Path(path).unlink(missing_ok=True)
-        return {"path": path, "deleted": True}
+        # E9-W4: report what actually happened — deleting a missing
+        # path is a successful no-op (deleted=False), not a deletion.
+        # The try/except form (not exists()-then-unlink) also reports
+        # a dangling symlink truthfully: the link itself is removed.
+        try:
+            Path(path).unlink()
+            deleted = True
+        except FileNotFoundError:
+            deleted = False
+        return {"path": path, "deleted": deleted}
 
     if tool_name == "edit_file":
         # Epic 2, E2-03: same aether_common contract the engine's
@@ -213,20 +328,55 @@ def _refuse(action: str, tool_name, reason: str) -> int:
 
 
 async def main() -> int:
-    # Payload contract (S2-M4): exactly one JSON document on stdin,
-    # read to EOF. No argv form exists — see the module docstring.
-    # The read is synchronous on purpose: nothing else can run until
-    # the payload is in hand, and the engine closes stdin right after
-    # writing, so this cannot block on a live writer.
-    raw_payload = sys.stdin.read()
+    # Payload contract (S2-M4): exactly one JSON document on stdin.
+    # No argv form exists — see the module docstring. The read is
+    # bounded in bytes and in time (E9-W3): the engine writes the
+    # payload and closes stdin immediately (communicate(input=...)),
+    # so a conforming read finishes at once, but a writer that holds
+    # the pipe open — or an endless stdin — is refused after
+    # PAYLOAD_READ_TIMEOUT_S / MAX_PAYLOAD_BYTES instead of stalling
+    # or swelling this worker without limit. The blocking read runs
+    # on a DAEMON thread, polled against the deadline below: a
+    # refused worker must still be able to exit while its read is
+    # stuck (an executor thread would be joined at loop shutdown
+    # and hold the process hostage). Nothing else runs until the
+    # payload is in hand, which is the ordering the auth check
+    # below relies on.
+    read_q: queue.SimpleQueue = queue.SimpleQueue()
+
+    def _read_stdin() -> None:
+        try:
+            read_q.put(sys.stdin.buffer.read(MAX_PAYLOAD_BYTES + 1))
+        except Exception as e:  # noqa: BLE001 — reported as a refusal below
+            read_q.put(e)
+
+    threading.Thread(target=_read_stdin, name="aether-worker-stdin",
+                     daemon=True).start()
+    deadline = time.monotonic() + PAYLOAD_READ_TIMEOUT_S
+    raw_payload = None
+    while raw_payload is None:
+        try:
+            item = read_q.get_nowait()
+        except queue.Empty:
+            if time.monotonic() >= deadline:
+                return _refuse("WORKER_AUTH_REFUSED", None,
+                               "payload_read_timeout")
+            await asyncio.sleep(0.01)
+            continue
+        if isinstance(item, Exception):
+            return _refuse("WORKER_AUTH_REFUSED", None,
+                           f"payload_read_error: {item}")
+        raw_payload = item
+    if len(raw_payload) > MAX_PAYLOAD_BYTES:
+        return _refuse("WORKER_AUTH_REFUSED", None, "payload_too_large")
     try:
         payload = json.loads(raw_payload)
     except json.JSONDecodeError as e:
-        print(f"Invalid payload JSON: {e}", file=sys.stderr)
-        return 1
+        return _refuse("WORKER_EXECUTION_REFUSED", None,
+                       f"Invalid payload JSON: {e}")
     if not isinstance(payload, dict):
-        print("Invalid payload: expected a JSON object", file=sys.stderr)
-        return 1
+        return _refuse("WORKER_EXECUTION_REFUSED", None,
+                       "Invalid payload: expected a JSON object")
 
     # Tool name is audit metadata only — never log args (they may hold
     # file contents, shell commands, or secrets).
@@ -247,6 +397,9 @@ async def main() -> int:
         result = await run_worker(payload)
     except ValueError as e:
         return _refuse("WORKER_EXECUTION_REFUSED", tool_name, str(e))
+    except Exception as e:  # noqa: BLE001 — E9-W1: the docstring contract is that EVERY malformed payload is refused and audited; a non-ValueError shape (args not a dict, an unhashable tool_name, an OS error from the tool) must not escape as a bare traceback with no audit record.
+        return _refuse("WORKER_EXECUTION_REFUSED", tool_name,
+                       f"{type(e).__name__}: {e}")
     print(json.dumps(result))
     return 0
 

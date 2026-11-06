@@ -93,6 +93,11 @@ STAGE_BUDGETS_MS = {
     "TTS first-audio": 150.0,
 }
 
+#: How long one bench turn may take to produce its first audio chunk
+#: before the turn is declared failed (E9-V2). Generous next to the
+#: calibrated stage delays, which sum to well under a second.
+TURN_TIMEOUT_S = 6.0
+
 
 @dataclass
 class StageTimings:
@@ -205,13 +210,14 @@ class BenchmarkResult:
             if self.stt_transcript:
                 lines.append(f"  STT transcript: {self.stt_transcript!r}")
             lines.append("--------------------------------------------------------------------------------")
-        else:
-            lines.extend([
-                "",
-                "[NATIVE HARDWARE RUNTIMES DETECTED]",
-                "Running with local Silero VAD, Faster-Whisper STT, and Kokoro TTS on local device.",
-                "--------------------------------------------------------------------------------",
-            ])
+        # E9-V3: there is deliberately no third label branch. The old
+        # else printed "[NATIVE HARDWARE RUNTIMES DETECTED]" for
+        # is_fake=False with no environment block — a state no
+        # constructor in this module can produce (the fake bench
+        # hard-codes is_fake=True; real mode always sets environment),
+        # surviving as dead code from the pre-S4-M14 design. A result
+        # in that state now gets no hardware label at all rather than
+        # a fabricated one.
 
         if self.sample_count == 0:
             lines.extend([
@@ -657,14 +663,26 @@ async def run_single_turn_measurement(
     await pipeline.start()
     run_task = asyncio.ensure_future(pipeline.run())
 
+    turn_timed_out = False
     try:
-        await asyncio.wait_for(turn_finished_event.wait(), timeout=6.0)
+        await asyncio.wait_for(turn_finished_event.wait(), timeout=TURN_TIMEOUT_S)
+    except TimeoutError:
+        # E9-V2: no first audio inside the window is an attributed
+        # failure, not a bare traceback — flagged here and raised
+        # once the pipeline has been stopped, below.
+        turn_timed_out = True
     finally:
         await pipeline.stop()
         try:
             await asyncio.wait_for(run_task, timeout=1.0)
         except (TimeoutError, asyncio.CancelledError, Exception):  # noqa: S110, BLE001
             pass
+    if turn_timed_out:
+        raise VoiceUnavailableError(
+            "fake bench: turn produced no first audio within "
+            f"{TURN_TIMEOUT_S:.0f}s — the TTS first-audio stage "
+            "never emitted a chunk"
+        )
 
     # Compute individual stage durations
     stt_start = timestamps.get("stt_start", last_speech_time)
@@ -1145,14 +1163,21 @@ def main():
         print(res.format_report())
         return
 
-    res = run_voice_latency_bench(
-        runs=args.runs,
-        vad_ms=args.vad_ms,
-        stt_ms=args.stt_ms,
-        ttft_ms=args.ttft_ms,
-        tts_ms=args.tts_ms,
-        silence_ms=args.silence_ms,
-    )
+    try:
+        res = run_voice_latency_bench(
+            runs=args.runs,
+            vad_ms=args.vad_ms,
+            stt_ms=args.stt_ms,
+            ttft_ms=args.ttft_ms,
+            tts_ms=args.tts_ms,
+            silence_ms=args.silence_ms,
+        )
+    except VoiceUnavailableError as e:
+        # The same honest-failure contract as --real (E9-V2): name
+        # the reason — with its stage attribution — on stderr, emit
+        # no report, and exit nonzero.
+        print(f"voice bench failed: {e}", file=sys.stderr)
+        raise SystemExit(2) from e
 
     print(res.format_report())
 

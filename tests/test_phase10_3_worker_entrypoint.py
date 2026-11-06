@@ -83,7 +83,9 @@ class TestRunWorker:
             "tool_name": "delete_file",
             "args": {"path": str(tmp_path / "not-there.txt")},
         }))
-        assert result["deleted"] is True
+        # Still a successful no-op (no raise) — but E9-W4 corrected
+        # the flag: nothing was deleted, so it no longer claims True.
+        assert result["deleted"] is False
 
     def test_delete_file_without_path_raises(self):
         with pytest.raises(ValueError, match="File path is required"):

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import json
 import statistics
 import subprocess
@@ -45,6 +46,57 @@ def _median_ms(fn, runs):
 # cold — subprocess so import/init are measured honestly
 # ---------------------------------------------------------------------------
 
+def _rss_mb() -> float:
+    """Current-process RSS in MiB, cross-platform (E9-B2).
+
+    /proc/self/status on Linux; process memory counters via the
+    Windows kernel32 memory-info call; resource.ru_maxrss as the
+    remaining-POSIX fallback (bytes on macOS, KiB elsewhere).
+    Returns 0.0 when no source exists: the child then reports 0
+    instead of dying on a missing /proc, as it did off-Linux.
+    """
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) / 1024
+    except OSError:
+        pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            class _ProcessMemoryCounters(ctypes.Structure):
+                _fields_ = [
+                    ("cb", ctypes.c_ulong),
+                    ("page_fault_count", ctypes.c_ulong),
+                    ("peak_working_set_size", ctypes.c_size_t),
+                    ("working_set_size", ctypes.c_size_t),
+                    ("quota_peak_paged_pool_usage", ctypes.c_size_t),
+                    ("quota_paged_pool_usage", ctypes.c_size_t),
+                    ("quota_peak_non_paged_pool_usage", ctypes.c_size_t),
+                    ("quota_non_paged_pool_usage", ctypes.c_size_t),
+                    ("pagefile_usage", ctypes.c_size_t),
+                    ("peak_pagefile_usage", ctypes.c_size_t),
+                ]
+
+            counters = _ProcessMemoryCounters()
+            counters.cb = ctypes.sizeof(counters)
+            kernel32 = ctypes.windll.kernel32
+            if kernel32.K32GetProcessMemoryInfo(
+                kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+            ):
+                return counters.working_set_size / (1024 * 1024)
+        except Exception:  # noqa: BLE001, S110 — fall through to the next source
+            pass
+    try:
+        import resource
+
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return peak / (1024 * 1024) if sys.platform == "darwin" else peak / 1024
+    except Exception:  # noqa: BLE001 — no source available on this platform
+        return 0.0
+
+
 def bench_cold_child():
     start = time.perf_counter()
     import aether_engine.app  # noqa: F401
@@ -56,11 +108,7 @@ def bench_cold_child():
     engine_state.initialize()
     init_ms = (time.perf_counter() - start) * 1000
 
-    rss_kb = 0
-    for line in Path("/proc/self/status").read_text().splitlines():
-        if line.startswith("VmRSS:"):
-            rss_kb = int(line.split()[1])
-    print(json.dumps({"import_ms": import_ms, "init_ms": init_ms, "rss_mb": rss_kb / 1024}))
+    print(json.dumps({"import_ms": import_ms, "init_ms": init_ms, "rss_mb": _rss_mb()}))
 
 
 def bench_cold():
@@ -70,7 +118,22 @@ def bench_cold():
             [sys.executable, __file__, "--cold-child"],
             capture_output=True, text=True, cwd=REPO, timeout=300, check=False,
         )
-        samples.append(json.loads(out.stdout.strip().splitlines()[-1]))
+        lines = out.stdout.strip().splitlines()
+        if out.returncode != 0 or not lines:
+            # E9-B2: surface the child's own error. The old code
+            # indexed lines[-1] blind and died with IndexError /
+            # JSONDecodeError, hiding why the child failed.
+            raise RuntimeError(
+                f"cold-start child failed (exit {out.returncode}): "
+                f"{out.stderr.strip() or '<no stderr>'}"
+            )
+        try:
+            samples.append(json.loads(lines[-1]))
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"cold-start child printed no JSON result ({e}); "
+                f"stderr: {out.stderr.strip() or '<no stderr>'}"
+            ) from e
     return {
         "import (median of 3)": f"{statistics.median(s['import_ms'] for s in samples):.0f} ms",
         "engine_state.initialize (median of 3)": f"{statistics.median(s['init_ms'] for s in samples):.0f} ms",
@@ -81,6 +144,29 @@ def bench_cold():
 # ---------------------------------------------------------------------------
 # ttft — the real WS handler, fake provider (Epic 1 pattern)
 # ---------------------------------------------------------------------------
+
+TTFT_RECEIVE_TIMEOUT_S = 30.0
+
+
+def _receive_text_with_timeout(ws, timeout_s: float) -> str:
+    """``ws.receive_text()`` under a deadline (E9-B3).
+
+    The TestClient session's receive has no timeout parameter, and a
+    task that never completes would hang the bench forever instead
+    of reporting. The blocking receive runs on a side thread; the
+    wait here is bounded, and a timeout names what never arrived.
+    """
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(ws.receive_text)
+    pool.shutdown(wait=False)
+    try:
+        return future.result(timeout=timeout_s)
+    except TimeoutError:
+        raise RuntimeError(
+            f"ttft: no websocket message within {timeout_s:.0f}s "
+            "(the task never completed)"
+        ) from None
+
 
 def bench_ttft():
     from unittest.mock import AsyncMock, patch
@@ -125,7 +211,7 @@ def bench_ttft():
         sid = session_store.create_session("bench")
         for _ in range(5):
             with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {engine_state.auth_token}"}) as ws:
-                ws.receive_text()  # HELLO
+                _receive_text_with_timeout(ws, TTFT_RECEIVE_TIMEOUT_S)  # HELLO
                 start = time.perf_counter()
                 ws.send_text(Event(
                     type=EventType.START_TASK,
@@ -133,7 +219,7 @@ def bench_ttft():
                 ).to_json())
                 first = None
                 while True:
-                    ev = Event.from_json(ws.receive_text())
+                    ev = Event.from_json(_receive_text_with_timeout(ws, TTFT_RECEIVE_TIMEOUT_S))
                     if first is None and ev.type != EventType.HELLO:
                         first = (time.perf_counter() - start) * 1000
                     if ev.type == EventType.TASK_COMPLETED:
@@ -252,8 +338,8 @@ def bench_codec():
     dec = _median_ms(lambda: Event.from_json(payload), 200) * 1000
     return {
         "event size (typical stream chunk)": f"{len(payload)} bytes",
-        "to_json per event (avg of 200)": f"{enc:.1f} µs",
-        "from_json per event (avg of 200)": f"{dec:.1f} µs",
+        "to_json per event (median of 200)": f"{enc:.1f} µs",
+        "from_json per event (median of 200)": f"{dec:.1f} µs",
     }
 
 
@@ -295,6 +381,14 @@ def main():
         bench_cold_child()
         return
     wanted = [s for s in (args.only.split(",") if args.only else SECTIONS) if s]
+    unknown = [name for name in wanted if name not in SECTIONS]
+    if unknown:
+        # E9-B3: a typo'd --only was a bare KeyError traceback; name
+        # the bad sections and the valid ones, argparse-style.
+        ap.error(
+            f"unknown section(s): {', '.join(unknown)} "
+            f"(choose from: {', '.join(SECTIONS)})"
+        )
     for name in wanted:
         print(f"\n## {name}")
         for k, v in SECTIONS[name]().items():
