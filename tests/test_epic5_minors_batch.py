@@ -224,6 +224,18 @@ class TestRetryRestampCapabilities:
 
 class TestTargetedRefreshPersists:
     def _drive_refresh(self, ws_env, target, payload_extra=None):
+        # Hermeticity (Wave 5 close-out): the refresh handler honours
+        # the process-global discovery negative cache (RUX-B-02) — if
+        # an earlier suite in the same process recorded a discovery
+        # failure for this provider inside the TTL, the handler skips
+        # the fetch and nothing persists, failing this class on suite
+        # ordering alone (mechanism proven in the Wave 5 W2/W3
+        # slices: pair-run failure, 65s-sleep control passes). These
+        # tests mock the fetch itself; the cache is not their subject,
+        # so clear the target's entry to keep the class hermetic.
+        from aether_engine.orchestration.discovery import _discovery_failures
+
+        _discovery_failures.pop(target, None)
         stack = ExitStack()
         _mock_store(stack, PROVIDERS)
         stack.enter_context(patch.object(
