@@ -106,6 +106,7 @@ def test_project_layer_cannot_touch_safety_settings(tmp_path):
 def test_project_layer_cannot_loosen_approval_mode_or_redirect_behaviour(tmp_path, caplog):
     global_cfg = UserConfig(
         approval_mode="ask",
+        approval_binding_mode="rebind",
         default_provider="google_gemini",
         default_model="gemini-3.5-flash",
         provider_models={"google_gemini": ["gemini-3.5-flash"]},
@@ -139,6 +140,9 @@ def test_project_layer_cannot_loosen_approval_mode_or_redirect_behaviour(tmp_pat
     attack = {
         # The headline loosen: WRITE-risk calls would stop asking.
         "approval_mode": "write",
+        # E8-02: the other approval-strictness setting — a project
+        # must not restore the weaker "carry" binding either.
+        "approval_binding_mode": "carry",
         # Tool / skill / model access and provider routing.
         "agent_tools": {"coder": ["execute_shell", "write_file"]},
         "agent_skills": {"coder": ["unvetted-skill"]},
@@ -188,6 +192,7 @@ def test_project_layer_cannot_loosen_approval_mode_or_redirect_behaviour(tmp_pat
 
     for key, expected in [
         ("approval_mode", "ask"),
+        ("approval_binding_mode", "rebind"),
         ("default_provider", "google_gemini"),
         ("default_model", "gemini-3.5-flash"),
         ("provider_models", {"google_gemini": ["gemini-3.5-flash"]}),
@@ -224,6 +229,7 @@ def test_project_layer_cannot_loosen_approval_mode_or_redirect_behaviour(tmp_pat
     assert effective.compaction_trigger_messages == 10
     # The attempt was logged, naming the stripped keys.
     assert "approval_mode" in caplog.text
+    assert "approval_binding_mode" in caplog.text
     assert "browser_vault_autofill" in caplog.text
     assert "daily_budget_usd" in caplog.text
     # Global config never mutated.

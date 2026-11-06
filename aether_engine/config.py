@@ -4,6 +4,7 @@ import logging
 import ntpath
 import os
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -381,11 +382,22 @@ class UserConfig:
             except (TypeError, ValueError):
                 return default
 
+        def _as_optional_float(value: Any) -> float | None:
+            # E8-06: same per-field guard for the optional budget —
+            # a corrupt value means "no budget recorded" (the field's
+            # own default), never a whole-config reset.
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
         return cls(
             default_provider=d.get("default_provider") or "google_gemini",
             default_model=def_model,
-            window_width=int(d.get("window_width", 420)),
-            window_height=int(d.get("window_height", 680)),
+            window_width=_as_int(d.get("window_width"), 420),
+            window_height=_as_int(d.get("window_height"), 680),
             provider_models=_as_dict(d.get("provider_models")),
             provider_excluded_models=_as_dict(d.get("provider_excluded_models")),
             custom_base_urls=_as_dict(d.get("custom_base_urls")),
@@ -443,7 +455,7 @@ class UserConfig:
             browser_vault_autofill=bool(d.get("browser_vault_autofill", False)),
             browser_envelopes_enabled=bool(d.get("browser_envelopes_enabled", True)),
             browser_category_modes=_clean_browser_category_modes(d.get("browser_category_modes")),
-            daily_budget_usd=float(d["daily_budget_usd"]) if d.get("daily_budget_usd") is not None else None,
+            daily_budget_usd=_as_optional_float(d.get("daily_budget_usd")),
             vad_threshold=_as_float(d.get("vad_threshold"), 0.5),
             silence_duration_ms=_as_int(d.get("silence_duration_ms"), 700),
             smart_turn_sensitivity=min(1.0, max(0.0, _as_float(
@@ -702,7 +714,15 @@ def save_config(cfg: UserConfig, path: Path | None = None) -> None:
     # save (disk full, crash mid-write) leaves the previous valid file
     # fully intact instead of a truncated fragment that the next load
     # would read as "no settings at all".
-    tmp_path = p.with_name(p.name + ".tmp")
+    # E8-01: the temp name is unique per save (mkstemp), never one
+    # fixed "config.json.tmp". Two savers that overlap — two engine
+    # processes sharing ~/.aether, or a future threaded caller — each
+    # stage into their OWN file, so neither can truncate or splice
+    # the other's write before its os.replace commits it.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=p.parent, prefix=f"{p.name}.", suffix=".tmp")
+    os.close(fd)  # mkstemp reserves the unique name; write via Path below
+    tmp_path = Path(tmp_name)
     try:
         with tmp_path.open("w", encoding="utf-8") as f:
             f.write(json.dumps(cfg.to_dict(), indent=2))

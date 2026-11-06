@@ -1,3 +1,11 @@
+"""Test-support double (E8-16): a scripted task that exercises the
+contract event/transition machinery without a real provider.
+
+This module used to live in the production package as
+``aether_engine/simulated_task.py``; nothing in production ever
+imported it — its only consumer is ``tests/test_simulated_task.py``
+— so it lives with the test support code now."""
+
 import asyncio
 import uuid
 from collections.abc import AsyncGenerator

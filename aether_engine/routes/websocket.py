@@ -2382,6 +2382,12 @@ async def ws_tasks(ws: WebSocket):
         Once tools have run, or on a second failure, the failure
         event is delivered as before. The resume path passes no
         factory: a resumed task has history, so §6.4 forbids it.
+
+        E8-03: the switch is also announced to the client with the
+        contract events the renderer handles — FALLBACK_STARTED when
+        the retry is accepted (payload names the fallback provider /
+        model and the failed pair), FALLBACK_COMPLETED just before
+        the retried task's TASK_COMPLETED is delivered.
         """
         # Epic 8, E8-A8.1a: attribute the provider calls made while
         # this task streams to the usage ledger. The session is known
@@ -2398,6 +2404,9 @@ async def ws_tasks(ws: WebSocket):
         try:
             attempt = 0
             current_reason = routing_reason
+            # E8-03: set when a §6.4 retry is accepted; cleared when
+            # its FALLBACK_COMPLETED has been announced (exactly once).
+            fallback_context: dict | None = None
             while True:
                 attempt += 1
                 primary_failed = False
@@ -2512,6 +2521,23 @@ async def ws_tasks(ws: WebSocket):
                             "task_id": ev.payload.get("task_id", "unknown"),
                         })
 
+                    if ev.type == EventType.TASK_COMPLETED and fallback_context is not None:
+                        # E8-03: announce the fallback's success
+                        # before the completion itself is delivered,
+                        # so the renderer's system messages bracket
+                        # the retried answer in order. The payload
+                        # carries `provider`/`model` — the fields
+                        # App.jsx reads for FALLBACK_COMPLETED.
+                        await ws.send_text(Event(
+                            type=EventType.FALLBACK_COMPLETED,
+                            request_id=req_id,
+                            payload={
+                                **fallback_context,
+                                "task_id": ev.payload.get("task_id", "unknown"),
+                            },
+                        ).to_json())
+                        fallback_context = None
+
                     await ws.send_text(ev.to_json())
 
                 if not (primary_failed and failure_event):
@@ -2540,6 +2566,25 @@ async def ws_tasks(ws: WebSocket):
                         logger.warning(
                             f"FALLBACK_TRIGGERED: {p_name}/{p_model} failed before any tool ran; "
                             f"retrying on {fallback_provider}/{fallback_model}")
+                        # E8-03: announce the switch to the client
+                        # (the renderer renders a system message) and
+                        # remember the pair so the retry's completion
+                        # can be announced as FALLBACK_COMPLETED.
+                        fallback_context = {
+                            "provider": fallback_provider,
+                            "model": fallback_model,
+                            "failed_provider": p_name,
+                            "failed_model": p_model,
+                        }
+                        await ws.send_text(Event(
+                            type=EventType.FALLBACK_STARTED,
+                            request_id=req_id,
+                            payload={
+                                **fallback_context,
+                                "task_id": failure_event.payload.get("task_id", "unknown"),
+                                "error": err_msg,
+                            },
+                        ).to_json())
                         current_reason = (
                             f"Fallback: {p_name}/{p_model} failed before any tool ran; "
                             f"retried on {fallback_provider}/{fallback_model}")

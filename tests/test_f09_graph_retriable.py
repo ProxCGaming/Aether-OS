@@ -229,6 +229,18 @@ def test_ws_pump_fallback_triggers_on_graph_retriable_failure(ws_env):
     assert len(graph_calls) == 2
     assert graph_calls[1].get("task_id") == "graph-task-1"
     assert EventType.TASK_FAILED not in [ev.type for ev in events]
+    # E8-03: the renderer-facing fallback contract events bracket the
+    # retry, in order, carrying the payload fields App.jsx consumes
+    # (FALLBACK_COMPLETED reads payload.provider).
+    event_types = [ev.type for ev in events]
+    assert event_types.index(EventType.FALLBACK_STARTED) < event_types.index(EventType.FALLBACK_COMPLETED)
+    assert event_types.index(EventType.FALLBACK_COMPLETED) < event_types.index(EventType.TASK_COMPLETED)
+    started = next(ev for ev in events if ev.type == EventType.FALLBACK_STARTED)
+    completed = next(ev for ev in events if ev.type == EventType.FALLBACK_COMPLETED)
+    assert started.payload["provider"] == "openai"
+    assert started.payload["model"] == "gpt-4o-mini"
+    assert completed.payload["provider"] == "openai"
+    assert completed.payload["model"] == "gpt-4o-mini"
     created = [ev for ev in events if ev.type == EventType.TASK_CREATED]
     assert len(created) == 2
     assert created[1].payload["routing"]["provider"] == "openai"

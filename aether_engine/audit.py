@@ -53,13 +53,29 @@ _PAYLOAD_KEYS = frozenset({"args", "payload", "manifest"})
 # than under a sensitive key (e.g. inside a list). Deliberately narrow:
 # well-known key prefixes only, so ordinary log text is untouched.
 _SECRET_PATTERNS = (
+    # A whole PEM block first (header + body + footer), so a pasted
+    # private key loses its body too; the header-only pattern below
+    # remains for a header that appears on its own.
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"sk-[A-Za-z0-9_\-]{8,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
+    # E8-12: Google API keys (AIza + 35) — the default provider's
+    # key shape, previously missing entirely.
+    re.compile(r"AIza[0-9A-Za-z_\-]{35}"),
+    # AWS access key ids: long-term (AKIA) and temporary (ASIA).
+    re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
+    # GitHub tokens: ghp_ (personal), gho_ (OAuth), ghu_/ghs_
+    # (GitHub Apps), ghr_ (refresh), plus the fine-grained PAT form.
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"xox[baprs]-[A-Za-z0-9\-]{8,}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
 )
+
+# E8-12: credentials embedded in a URL's userinfo
+# (scheme://user:password@host). Only the password segment is
+# scrubbed, so the URL stays readable in logs and bundles.
+_URL_CREDENTIAL_PATTERN = re.compile(
+    r"(\b[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s/@:]+:)[^\s/@]+@")
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -70,7 +86,7 @@ def _is_sensitive_key(key: str) -> bool:
 
 
 def _scrub_string(value: str) -> str:
-    scrubbed = value
+    scrubbed = _URL_CREDENTIAL_PATTERN.sub(rf"\1{_REDACTED}@", value)
     for pattern in _SECRET_PATTERNS:
         scrubbed = pattern.sub(_REDACTED, scrubbed)
     return scrubbed

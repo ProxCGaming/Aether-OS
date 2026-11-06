@@ -169,6 +169,13 @@ describe('scrubSecrets', () => {
     expect(scrubSecrets('-----BEGIN RSA PRIVATE KEY-----')).toBe('[REDACTED]');
     expect(scrubSecrets('ordinary log text')).toBe('ordinary log text');
   });
+
+  it('redacts the E8-12 shapes: Google keys, temp AWS keys, URL passwords', () => {
+    expect(scrubSecrets(`AIza${'A'.repeat(35)}`)).toBe('[REDACTED]');
+    expect(scrubSecrets(`ASIA${'B'.repeat(16)}`)).toBe('[REDACTED]');
+    expect(scrubSecrets('https://alice:secretpass@api.example/v1'))
+      .toBe('https://alice:[REDACTED]@api.example/v1');
+  });
 });
 
 describe('readLogTail / logFileStat helpers', () => {

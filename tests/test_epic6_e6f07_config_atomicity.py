@@ -113,9 +113,15 @@ def _arm_partial_write(monkeypatch, switch):
 
     def dying_open(self, mode="r", *args, **kwargs):
         stream = real_open(self, mode, *args, **kwargs)
+        # E8-01: save_config stages through a UNIQUE temp sibling
+        # (config.json.<random>.tmp, via mkstemp) instead of the one
+        # fixed config.json.tmp — the injection matches the temp
+        # pattern, not just the old fixed name.
+        is_config_temp = self.name in CONFIG_NAMES or (
+            self.name.startswith("config.json.") and self.name.endswith(".tmp"))
         if (
             switch["armed"]
-            and self.name in CONFIG_NAMES
+            and is_config_temp
             and any(c in mode for c in "wxa")
         ):
             return _DyingStream(stream)

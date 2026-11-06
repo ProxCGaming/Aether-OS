@@ -313,11 +313,22 @@ def restore_backup(zip_path: Path, *, home: Path | None = None) -> dict[str, Any
             raise ValueError(f"unsupported backup format: {manifest.get('format')!r}")
         names = set(zf.namelist())
         staged: list[tuple[Path, bytes]] = []
+        seen_targets: set[Path] = set()
         for entry in manifest.get("files", []):
             rel = entry["path"]
             target = (home / rel).resolve()
             if home.resolve() not in target.parents and target != home.resolve():
                 raise ValueError(f"backup path escapes the data home: {rel}")
+            # E8-05: a duplicate target (the same path listed twice,
+            # or two spellings resolving to one file) would stage
+            # both entries onto ONE temp file, and the commit loop's
+            # second os.replace would fail after the first had
+            # already landed — a mixed profile, breaking the
+            # all-or-nothing promise above. Refuse it here, during
+            # validation, before anything is written.
+            if target in seen_targets:
+                raise ValueError(f"backup manifest lists duplicate path: {rel}")
+            seen_targets.add(target)
             if rel not in names:
                 raise ValueError(f"backup member missing: {rel}")
             data = zf.read(rel)

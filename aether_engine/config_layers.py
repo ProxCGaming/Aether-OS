@@ -15,7 +15,8 @@ be a cloned repo the user did not author. It therefore may NOT touch
 any user setting that can loosen safety or redirect behaviour — all
 of ``PROJECT_FORBIDDEN_KEYS`` is stripped from the project layer
 before the merge and the attempt is logged. That covers, by category:
-approval policy (``approval_mode``, ``tool_policies``, ``path_rules``,
+approval policy (``approval_mode``, ``approval_binding_mode``,
+``tool_policies``, ``path_rules``,
 ``mcp_tool_risk_overrides``, ``ttsr_rules``); containment and shell
 rules (``workspace_roots``, ``extra_shell_deny_patterns``,
 ``extra_shell_ask_patterns`` — arrays replace, so a project could
@@ -64,6 +65,11 @@ PROJECT_FORBIDDEN_KEYS = frozenset({
     # F-01 (EGM C-B12): approval mode — a project must never turn
     # "ask" into "write" (WRITE-risk calls auto-allowed).
     "approval_mode",
+    # E8-02: approval binding mode — the other approval-strictness
+    # setting. A project must never restore the weaker "carry"
+    # binding (a hook-rewritten call keeping its original approval
+    # without re-asking) over the user's "rebind" default.
+    "approval_binding_mode",
     # Tool / skill / delegation surface.
     "agent_tools", "agent_skills",
     "supervisor_spawn_allowlist", "supervisor_delegation_cap",

@@ -35,17 +35,23 @@ const KEEP_ARCHIVES = 3;
 // that somehow contains a key-shaped value is scrubbed before it is
 // ever exported in a diagnostics bundle. Keep the two lists in step.
 const SECRET_PATTERNS = [
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
   /sk-[A-Za-z0-9_-]{8,}/g,
-  /AKIA[0-9A-Z]{16}/g,
-  /ghp_[A-Za-z0-9]{20,}/g,
+  // E8-12: Google API keys (AIza + 35) — the default provider's shape.
+  /AIza[0-9A-Za-z_-]{35}/g,
+  /(?:AKIA|ASIA)[0-9A-Z]{16}/g,
+  /gh[pousr]_[A-Za-z0-9]{20,}/g,
   /github_pat_[A-Za-z0-9_]{20,}/g,
   /xox[baprs]-[A-Za-z0-9-]{8,}/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/g,
 ];
+// E8-12: URL userinfo credentials — only the password segment goes.
+const URL_CREDENTIAL_PATTERN = /\b([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s/@:]+:)[^\s/@]+@/g;
 const REDACTED = '[REDACTED]';
 
 function scrubSecrets(text) {
   let out = String(text);
+  out = out.replace(URL_CREDENTIAL_PATTERN, `$1${REDACTED}@`);
   for (const pattern of SECRET_PATTERNS) {
     out = out.replace(pattern, REDACTED);
   }
