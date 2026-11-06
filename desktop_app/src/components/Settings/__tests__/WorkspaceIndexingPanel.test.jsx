@@ -385,3 +385,141 @@ describe('WorkspaceIndexingPanel load states (RUX-C-07)', () => {
     expect(screen.getByText('No indexed prose files found.')).toBeInTheDocument();
   });
 });
+
+describe('WorkspaceIndexingPanel action honesty (D2-15) and correlation (D2-16)', () => {
+  const mockWorkspace = '/home/user/workspace/my-project';
+  const otherWorkspace = '/home/user/workspace/other-project';
+
+  const mockStatusPayload = {
+    status: 'idle',
+    total_files: 10,
+    indexed_files: 4,
+    total_chunks: 18,
+    embedder: 'qwen3-embedding:0.6b',
+    paused: false,
+    indexed_docs: [
+      { file_path: 'README.md', file_size: 1024, status: 'indexed' },
+    ],
+    excluded_files: [],
+  };
+
+  function renderReady(payload = mockStatusPayload) {
+    const { wsRef, simulateMessage } = makeWsRef();
+    render(<WorkspaceIndexingPanel wsRef={wsRef} initialWorkspace={mockWorkspace} />);
+    act(() => {
+      simulateMessage({ type: 'WORKSPACE_INDEX_STATUS_RESPONSE', payload });
+    });
+    return { wsRef, simulateMessage };
+  }
+
+  test('a refused embedder switch rolls back the optimistic embedder and counts (D2-15)', () => {
+    const { simulateMessage } = renderReady();
+    const embedderSelect = screen.getByLabelText(/Embedding Model/i);
+    fireEvent.change(embedderSelect, { target: { value: 'qwen3-embedding:4b' } });
+    fireEvent.click(screen.getByRole('button', { name: /Confirm & Re-index/i }));
+
+    // Optimistic: the panel claims the new embedder (the metrics
+    // line renders the embedder as an exact text node) and zeroes
+    // the counts.
+    expect(screen.getByText('qwen3-embedding:4b')).toBeInTheDocument();
+    expect(screen.queryByText('18')).not.toBeInTheDocument();
+
+    act(() => {
+      simulateMessage({
+        type: 'WORKSPACE_INDEX_CONFIG_RESPONSE',
+        payload: { ok: false, error: 'Embedding model could not be saved: disk full' },
+      });
+    });
+
+    expect(screen.getByTestId('indexing-action-error')).toHaveTextContent(/could not be saved/);
+    // Rolled back to the last engine-confirmed state.
+    expect(screen.queryByText('qwen3-embedding:4b')).not.toBeInTheDocument();
+    expect(screen.getByText('qwen3-embedding:0.6b')).toBeInTheDocument();
+    expect(screen.getByText('18')).toBeInTheDocument();
+  });
+
+  test('a start the engine did not start rolls back the optimistic indexing state (D2-15)', () => {
+    const { simulateMessage } = renderReady();
+    fireEvent.click(screen.getByRole('button', { name: /Re-index Workspace/i }));
+    expect(screen.getByText('Indexing')).toBeInTheDocument();
+
+    act(() => {
+      simulateMessage({
+        type: 'WORKSPACE_INDEX_START_RESPONSE',
+        payload: { started: false, estimated_files: 0, estimated_bytes: 0, embedder: 'qwen3-embedding:0.6b', destination: '' },
+      });
+    });
+
+    expect(screen.getByTestId('indexing-action-error')).toBeInTheDocument();
+    expect(screen.getByText('Idle / Up-to-date')).toBeInTheDocument();
+  });
+
+  test('an unanswered pause rolls back instead of standing forever (D2-15)', () => {
+    renderReady();
+    jest.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole('button', { name: /Pause Indexing/i }));
+      // Optimistic: the button flips to Resume.
+      expect(screen.getByRole('button', { name: /Resume Indexing/i })).toBeInTheDocument();
+      // No PAUSE response ever arrives.
+      act(() => { jest.advanceTimersByTime(10001); });
+      expect(screen.getByTestId('indexing-action-error')).toHaveTextContent(/did not answer/i);
+      expect(screen.getByRole('button', { name: /Pause Indexing/i })).toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a late status reply for a previous workspace does not overwrite the selected one (D2-16)', () => {
+    const { wsRef, simulateMessage } = makeWsRef();
+    render(<WorkspaceIndexingPanel wsRef={wsRef} initialWorkspace="" />);
+    act(() => {
+      simulateMessage({
+        type: 'WORKSPACE_LIST_RESPONSE',
+        payload: {
+          workspaces: [
+            { path: mockWorkspace, name: 'my-project', is_active: true },
+            { path: otherWorkspace, name: 'other-project', is_active: false },
+          ],
+        },
+      });
+    });
+
+    const statusRequests = () =>
+      wsRef.current.send.mock.calls
+        .map((c) => JSON.parse(c[0]))
+        .filter((m) => m.type === 'WORKSPACE_INDEX_STATUS_REQUEST');
+    expect(statusRequests().length).toBeGreaterThanOrEqual(1);
+    const reqA = statusRequests()[statusRequests().length - 1];
+    expect(reqA.payload.workspace_root).toBe(mockWorkspace);
+
+    // Switch workspaces while A's status reply is still in flight.
+    fireEvent.change(screen.getByLabelText(/Workspace Root/i), { target: { value: otherWorkspace } });
+    const reqB = statusRequests()[statusRequests().length - 1];
+    expect(reqB.payload.workspace_root).toBe(otherWorkspace);
+    expect(reqB.request_id).not.toBe(reqA.request_id);
+
+    // A's late reply lands — it must NOT overwrite B's view.
+    act(() => {
+      simulateMessage({
+        type: 'WORKSPACE_INDEX_STATUS_RESPONSE',
+        request_id: reqA.request_id,
+        payload: { ...mockStatusPayload, embedder: 'embedder-a', indexed_files: 111, total_chunks: 111 },
+      });
+    });
+    expect(screen.queryByText('embedder-a')).not.toBeInTheDocument();
+
+    // B's own reply applies normally. (The name appears twice by
+    // design once applied: the metrics line and the embedder
+    // select's always-present current-value option.)
+    act(() => {
+      simulateMessage({
+        type: 'WORKSPACE_INDEX_STATUS_RESPONSE',
+        request_id: reqB.request_id,
+        payload: { ...mockStatusPayload, embedder: 'embedder-b', indexed_files: 7, total_chunks: 7 },
+      });
+    });
+    expect(screen.getAllByText('embedder-b').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('7').length).toBeGreaterThanOrEqual(1);
+  });
+});

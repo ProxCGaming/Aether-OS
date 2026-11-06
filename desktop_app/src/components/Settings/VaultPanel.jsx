@@ -108,6 +108,10 @@ export default function VaultPanel({ wsRef: propWsRef }) {
   const [totpForm, setTotpForm] = useState(EMPTY_TOTP_FORM);
   const [totpError, setTotpError] = useState('');
   const [countdown, setCountdown] = useState(0);
+  // D2-12: while the countdown sits at expiry waiting for the
+  // fresh codes, this counter keeps the timer chain alive (see the
+  // countdown effect below).
+  const [expiryRetries, setExpiryRetries] = useState(0);
 
   const sendEvent = useCallback(
     (type, payload = {}) => {
@@ -154,17 +158,25 @@ export default function VaultPanel({ wsRef: propWsRef }) {
   // Tick the served countdown down once a second; when the period
   // rolls over, ask the engine for the fresh codes instead of
   // guessing them here (codes are computed engine-side only).
+  // D2-12: the rollover request is re-asked on the same one-second
+  // cadence until a fresh response lands (each ask bumps
+  // expiryRetries, which re-arms this effect). The old chain
+  // scheduled no further timer once it had asked, so one dropped
+  // response — e.g. the socket mid-reconnect at the boundary —
+  // stalled the countdown and left the expired code on screen,
+  // presented as live, indefinitely.
   useEffect(() => {
     if (codes.length === 0) return undefined;
     const timer = setTimeout(() => {
       if (countdown <= 1) {
         requestCodes();
+        setExpiryRetries((n) => n + 1);
       } else {
         setCountdown(countdown - 1);
       }
     }, 1000);
     return () => clearTimeout(timer);
-  }, [codes, countdown, requestCodes]);
+  }, [codes, countdown, requestCodes, expiryRetries]);
 
   useEffect(() => {
     const socketInstance = wsRef?.current;
@@ -296,6 +308,33 @@ export default function VaultPanel({ wsRef: propWsRef }) {
     });
   };
 
+  // D2-11: both vault deletes are destructive — a credential is
+  // gone for good, and an authenticator entry can be the owner's
+  // only copy of a setup key. They confirm first, with the same
+  // window.confirm pattern MemoryManagement uses for its deletes;
+  // the vault was the one Settings surface with no confirmation.
+  const deleteEntry = (entry) => {
+    if (
+      !window.confirm(
+        `Delete the saved credential for ${entry.site} (${entry.username})? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    sendEvent('VAULT_ENTRY_DELETE_REQUEST', { id: entry.id });
+  };
+
+  const deleteTotpEntry = (row) => {
+    if (
+      !window.confirm(
+        `Delete the authenticator entry "${row.label}"? If this is your only copy of its setup key, you will lose two-factor access to that account.`
+      )
+    ) {
+      return;
+    }
+    sendEvent('VAULT_TOTP_DELETE_REQUEST', { id: row.entry_id });
+  };
+
   const startEditTotp = (row) => {
     // Secrets are never sent to this panel, so the setup-key field
     // starts blank: blank means "keep the stored one". Label and
@@ -393,7 +432,7 @@ export default function VaultPanel({ wsRef: propWsRef }) {
                 type="button"
                 data-testid={`vault-delete-${entry.id}`}
                 style={smallButtonStyle}
-                onClick={() => sendEvent('VAULT_ENTRY_DELETE_REQUEST', { id: entry.id })}
+                onClick={() => deleteEntry(entry)}
               >
                 <Trash2 size={13} /> Delete
               </button>
@@ -610,7 +649,7 @@ export default function VaultPanel({ wsRef: propWsRef }) {
                   type="button"
                   data-testid={`vault-totp-delete-${row.entry_id}`}
                   style={smallButtonStyle}
-                  onClick={() => sendEvent('VAULT_TOTP_DELETE_REQUEST', { id: row.entry_id })}
+                  onClick={() => deleteTotpEntry(row)}
                 >
                   <Trash2 size={13} /> Delete
                 </button>

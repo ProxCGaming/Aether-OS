@@ -251,6 +251,28 @@ describe('Projects per-workspace session counts (renderer slice, Q7)', () => {
     expect(screen.queryByText('/home/user/proj')).not.toBeInTheDocument();
     expect(screen.getByText('3 unbound sessions')).toBeInTheDocument();
   });
+
+  it('the remove confirmation does not invent a count the engine never reported (D2-22)', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<Projects wsRef={wsRef} />);
+    // No session_count on this row: the engine has not reported one.
+    seedList(getHandler, {
+      workspaces: [
+        { path: '/home/user/proj', name: 'proj', is_indexed: false, is_active: true, exists: true },
+      ],
+      unbound_session_count: 0,
+    });
+
+    fireEvent.click(screen.getByTitle('Remove workspace'));
+
+    // The confirmation must not assert "0 sessions" as fact; it
+    // still says what will happen, without the invented number.
+    expect(screen.queryByText(/0 sessions will move/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/will move to No workspace — nothing is deleted\./)
+    ).toBeInTheDocument();
+    expect(sentTypes(wsRef)).not.toContain('WORKSPACE_REMOVE_REQUEST');
+  });
 });
 
 describe('Projects load states (RUX-C-08)', () => {
@@ -323,5 +345,18 @@ describe('Projects load states (RUX-C-08)', () => {
       });
     });
     expect(screen.getByTestId('projects-action-error').textContent).toMatch(/could not be added/);
+  });
+
+  it('Add Folder explains itself when the Electron picker API is absent (D2-23)', () => {
+    const { wsRef } = makeWsRef();
+    delete window.electronAPI;
+    render(<Projects wsRef={wsRef} />);
+    fireEvent.click(screen.getByText('Add Folder'));
+    // Not a dead click: the panel names why nothing happened, and
+    // no add request is sent.
+    expect(screen.getByTestId('projects-action-error').textContent).toMatch(
+      /folder picker is not available/i
+    );
+    expect(sentTypes(wsRef)).not.toContain('WORKSPACE_ADD_REQUEST');
   });
 });

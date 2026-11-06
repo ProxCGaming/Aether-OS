@@ -30,6 +30,7 @@ export default function UsageSettingsPanel({
   const [totals, setTotals] = useState(initialTotals);
   const [breakdown, setBreakdown] = useState(initialBreakdown);
   const [budgetInput, setBudgetInput] = useState(dailyBudget != null ? String(dailyBudget) : '');
+  const [budgetInputError, setBudgetInputError] = useState('');
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isExceeded, setIsExceeded] = useState(budgetExceeded);
   const [currentTodaySpend, setCurrentTodaySpend] = useState(todaySpend);
@@ -115,6 +116,7 @@ export default function UsageSettingsPanel({
         } else if (data.type === 'DAILY_BUDGET_SET_RESPONSE') {
           const b = data.payload?.daily_budget_usd;
           setBudgetInput(b != null ? String(b) : '');
+          setBudgetInputError('');
           setSavedSuccess(true);
           setTimeout(() => setSavedSuccess(false), 2500);
         } else if (data.type === 'DAILY_BUDGET_EXCEEDED') {
@@ -166,9 +168,20 @@ export default function UsageSettingsPanel({
 
   const handleSaveBudget = (e) => {
     e.preventDefault();
+    // D2-10: an empty, invalid or non-positive input used to map
+    // to `null` here — and `null` is the CLEAR operation (the same
+    // send the Clear control makes). Save must refuse such input
+    // outright; removing the budget stays on the Clear control,
+    // where the user chose it deliberately.
     const parsed = parseFloat(budgetInput);
-    const validBudget = !isNaN(parsed) && parsed > 0 ? parsed : null;
-    sendBudgetSet(validBudget);
+    if (isNaN(parsed) || parsed <= 0) {
+      setBudgetInputError(
+        'Enter an amount above $0 to save a budget — or use Clear to remove the current one.'
+      );
+      return;
+    }
+    setBudgetInputError('');
+    sendBudgetSet(parsed);
   };
 
   const byModel = totals?.by_model || {};
@@ -255,7 +268,10 @@ export default function UsageSettingsPanel({
               data-testid="daily-budget-input"
               placeholder="e.g. 5.00"
               value={budgetInput}
-              onChange={(e) => setBudgetInput(e.target.value)}
+              onChange={(e) => {
+                setBudgetInput(e.target.value);
+                setBudgetInputError('');
+              }}
               style={{
                 width: '100%',
                 padding: '9px 12px 9px 26px',
@@ -301,6 +317,7 @@ export default function UsageSettingsPanel({
               disabled={Boolean(pendingBudgetEntry)}
               onClick={() => {
                 setBudgetInput('');
+                setBudgetInputError('');
                 sendBudgetSet(null);
               }}
               style={{
@@ -316,6 +333,15 @@ export default function UsageSettingsPanel({
             </button>
           )}
         </form>
+        {budgetInputError && (
+          <div
+            data-testid="daily-budget-input-error"
+            role="alert"
+            style={{ color: '#f87171', fontSize: '12px', marginTop: '10px' }}
+          >
+            {budgetInputError}
+          </div>
+        )}
       </div>
 
       {/* Current Context (N14) — the working model right now, from the

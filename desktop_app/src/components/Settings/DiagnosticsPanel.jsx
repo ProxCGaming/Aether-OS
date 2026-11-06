@@ -452,7 +452,16 @@ export default function DiagnosticsPanel({ activeMenu, activeSession = null }) {
                       Disconnect
                     </button>
                     <button
-                      onClick={() => sendMessage('MCP_SERVER_REMOVE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
+                      onClick={() => {
+                        // D2-28: removing a server deletes its
+                        // configuration — confirm first, with the
+                        // same window.confirm pattern as the other
+                        // Settings deletes (MemoryManagement);
+                        // Projects confirms removals too. This was
+                        // the one that fired immediately.
+                        if (!window.confirm(`Remove the MCP server "${name}"? Its configuration will be deleted.`)) return;
+                        sendMessage('MCP_SERVER_REMOVE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } });
+                      }}
                       style={{ background: 'rgba(242, 65, 91, 0.15)', color: '#FA5870', border: '1px solid rgba(242, 65, 91, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
                     >
                       Remove

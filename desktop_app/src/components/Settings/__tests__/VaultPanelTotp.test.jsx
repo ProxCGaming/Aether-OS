@@ -197,12 +197,58 @@ describe('VaultPanel Authenticator (Open Point 14)', () => {
     expect(screen.getByTestId('vault-totp-secret-input')).toHaveValue('');
   });
 
-  test('deleting an authenticator entry sends the delete request', () => {
+  // D2-11: deleting an authenticator entry can lock the owner out
+  // of the external account — it confirms first (the
+  // MemoryManagement window.confirm pattern). This test previously
+  // pinned the defective immediate-delete behaviour.
+  test('deleting an authenticator entry asks for confirmation, then sends the delete request', () => {
+    window.confirm = jest.fn(() => true);
     const { sent } = renderPanel();
     fireEvent.click(screen.getByTestId('vault-totp-delete-totp-1'));
+    expect(window.confirm).toHaveBeenCalled();
     const del = sent().find((m) => m.type === 'VAULT_TOTP_DELETE_REQUEST');
     expect(del).toBeTruthy();
     expect(del.payload).toEqual({ id: 'totp-1' });
+  });
+
+  test('declining the authenticator delete confirmation sends nothing (D2-11)', () => {
+    window.confirm = jest.fn(() => false);
+    const { sent } = renderPanel();
+    fireEvent.click(screen.getByTestId('vault-totp-delete-totp-1'));
+    expect(window.confirm).toHaveBeenCalled();
+    expect(sent().some((m) => m.type === 'VAULT_TOTP_DELETE_REQUEST')).toBe(false);
+  });
+
+  test('a dropped codes response at expiry keeps the refresh chain alive (D2-12)', () => {
+    jest.useFakeTimers();
+    const nearBoundary = {
+      generated_at: 1761900059,
+      codes: [{ ...CODES_PAYLOAD.codes[0], seconds_remaining: 1 }],
+    };
+    const { sent, simulateMessage } = renderPanel({ codes: nearBoundary });
+    const codeRequests = () =>
+      sent().filter((m) => m.type === 'VAULT_TOTP_CODES_REQUEST').length;
+    expect(codeRequests()).toBe(1);
+    act(() => { jest.advanceTimersByTime(1000); });
+    expect(codeRequests()).toBe(2);
+    // The fresh response never arrives (dropped / socket mid-
+    // reconnect). The old chain scheduled no further timer, so the
+    // expired code stayed on screen as if live, forever. The chain
+    // must keep asking.
+    act(() => { jest.advanceTimersByTime(3000); });
+    expect(codeRequests()).toBeGreaterThan(2);
+    // When a fresh response finally lands, the countdown re-arms.
+    act(() => {
+      simulateMessage({
+        type: 'VAULT_TOTP_CODES_RESPONSE',
+        payload: {
+          generated_at: 1761900061,
+          codes: [{ ...CODES_PAYLOAD.codes[0], code: '222222', seconds_remaining: 30 }],
+        },
+      });
+    });
+    expect(screen.getByTestId('vault-totp-countdown-totp-1')).toHaveTextContent('30');
+    expect(screen.getByTestId('vault-totp-code-totp-1')).toHaveTextContent('222222');
   });
 
   test('login-kind codes offer no edit or delete controls', () => {

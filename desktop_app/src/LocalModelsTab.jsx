@@ -110,6 +110,13 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
   const [details, setDetails] = useState({}); // rowKey -> { detail, error }
 
   const [downloaded, setDownloaded] = useState([]);
+  // D2-13: the inventory tracks whether the engine has ANSWERED.
+  // It used to initialise to [] with no load state, so "No models
+  // downloaded yet" rendered from the first frame — and for the
+  // whole time a refresh sat queued offline — impersonating an
+  // answered-empty inventory. 'ready' is only ever set by a real
+  // answer carrying the model list.
+  const [inventoryLoad, setInventoryLoad] = useState('loading'); // loading | queued | ready | error
   const [downloadProgress, setDownloadProgress] = useState({}); // engine key -> { percent, status }
   const [hubError, setHubError] = useState(null);
 
@@ -118,6 +125,27 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
   // the providers array by SettingsPanel) and kept live from
   // MODEL_DEFAULT_CHANGED broadcasts.
   const [activeDefault, setActiveDefault] = useState({ provider: defaultProvider, model: defaultModel });
+
+  // D2-14: a Set Active click is only a request until the engine
+  // confirms it. The pending model shows a "Setting…" state; an
+  // engine ERROR refusal (correlated by request_id) or a confirm
+  // window with no answer at all surfaces through hubError instead
+  // of the old behaviour — the row simply never changed and
+  // nothing told the user why.
+  const SET_ACTIVE_CONFIRM_TIMEOUT_MS = 10000;
+  const [setActivePending, setSetActivePending] = useState('');
+  const setActiveTimerRef = useRef(null);
+  const clearSetActivePending = useCallback(() => {
+    if (setActiveTimerRef.current) {
+      clearTimeout(setActiveTimerRef.current);
+      setActiveTimerRef.current = null;
+    }
+    setSetActivePending('');
+  }, []);
+
+  useEffect(() => () => {
+    if (setActiveTimerRef.current) clearTimeout(setActiveTimerRef.current);
+  }, []);
 
   // The engine's configured embedder (UserConfig.embedding_model,
   // seeded by SettingsPanel from the applied config) and the
@@ -210,10 +238,24 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
   ), [pendingHubEntry]);
 
   const refreshDownloaded = useCallback(() => {
-    sendRequest('MODEL_HUB_DOWNLOADED_REQUEST', {}, (payload) => {
-      if (payload && Array.isArray(payload.models)) setDownloaded(payload.models);
-      if (payload && payload.error) setHubError(payload.error);
+    const disposition = sendRequest('MODEL_HUB_DOWNLOADED_REQUEST', {}, (payload) => {
+      if (payload && Array.isArray(payload.models)) {
+        setDownloaded(payload.models);
+        setInventoryLoad('ready');
+      }
+      if (payload && payload.error) {
+        setHubError(payload.error);
+        // An errored answer before the first good one is the error
+        // state; once the inventory is on screen, a failed refresh
+        // keeps the rows and reports through the hub error banner.
+        setInventoryLoad((prev) => (prev === 'ready' ? prev : 'error'));
+      }
     });
+    if (disposition === 'queued') {
+      setInventoryLoad((prev) => (prev === 'ready' ? prev : 'queued'));
+    } else if (disposition) {
+      setInventoryLoad((prev) => (prev === 'ready' ? prev : 'loading'));
+    }
   }, [sendRequest]);
 
   const runSearch = useCallback(() => {
@@ -276,6 +318,10 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
           }));
         } else if (data.type === 'MODEL_DEFAULT_CHANGED') {
           setActiveDefault({ provider: payload.provider || '', model: payload.model || '' });
+          // A default change landing from anywhere resolves this
+          // tab's wait too (its own correlated answer is consumed
+          // by the pending handler above and never reaches here).
+          clearSetActivePending();
         } else if (data.type === 'WORKSPACE_INDEX_CONFIG_RESPONSE') {
           // The embedder switch is confirmed only now — the row
           // must not claim "Embedder" from the click alone.
@@ -301,7 +347,7 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
     return () => {
       if (wsRef.current) wsRef.current.removeEventListener('message', handleMessage);
     };
-  }, [wsRef, refreshDownloaded]);
+  }, [wsRef, refreshDownloaded, clearSetActivePending]);
 
   // ---- downloads -------------------------------------------------
 
@@ -379,8 +425,37 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
   // unreachable (it was the REF pattern's discarded fourth path);
   // the row derives its "Set Active queued" state from the queue
   // and the MODEL_DEFAULT_CHANGED broadcast confirms it for real.
+  // D2-14: the request now rides sendRequest, so the engine's
+  // answer is correlated by request_id: MODEL_DEFAULT_CHANGED
+  // confirms, an ERROR reply refuses (the engine refuses an empty
+  // model and an unsavable switch that way), and silence past the
+  // confirm window is reported instead of standing forever.
   const handleSetActive = (modelName) => {
-    sendAction('MODEL_SET_DEFAULT', { provider: 'ollama', model: modelName });
+    setHubError(null);
+    const disposition = sendRequest('MODEL_SET_DEFAULT', { provider: 'ollama', model: modelName }, (payload) => {
+      clearSetActivePending();
+      if (payload && payload.error) {
+        setHubError(payload.error);
+      } else if (payload) {
+        setActiveDefault({ provider: payload.provider || 'ollama', model: payload.model || modelName });
+      }
+    });
+    if (disposition === 'queued') {
+      // No local pending flag — the row derives "Set Active
+      // queued" from the real queue, and the one-shot handler
+      // above resolves the switch when the flushed request is
+      // answered after reconnect.
+      return;
+    }
+    setSetActivePending(modelName);
+    if (setActiveTimerRef.current) clearTimeout(setActiveTimerRef.current);
+    setActiveTimerRef.current = setTimeout(() => {
+      setActiveTimerRef.current = null;
+      setSetActivePending((prev) => (prev === modelName ? '' : prev));
+      setHubError(
+        `The engine did not confirm ${modelName} as the active model — it may be busy or offline. Try again.`
+      );
+    }, SET_ACTIVE_CONFIRM_TIMEOUT_MS);
   };
 
   // Set a downloaded embedding model as THE embedder (episodic
@@ -694,6 +769,10 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
             <button disabled data-testid={`set-active-queued-${rowKey(row)}`} title="Set-active queued — will apply when the engine reconnects" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(251, 191, 36, 0.12)', color: '#fbbf24', border: '1px solid rgba(251, 191, 36, 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
               Set Active Queued
             </button>
+          ) : setActivePending === row.id ? (
+            <button disabled data-testid={`set-active-pending-${rowKey(row)}`} title="Waiting for the engine to confirm the switch" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(255,255,255,0.06)', color: 'var(--text-secondary, #9090a0)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+              Setting…
+            </button>
           ) : (
             <button onClick={() => handleSetActive(row.id)} title="Set as the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)', color: 'var(--text-primary, #fff)', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
               Set Active
@@ -823,7 +902,19 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
             <RefreshCw size={14} />
           </button>
         </div>
-        {downloaded.length === 0 ? (
+        {inventoryLoad === 'loading' ? (
+          <div data-testid="downloaded-loading" style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <RefreshCw size={14} className="spin-animation" /> Loading downloaded models…
+          </div>
+        ) : inventoryLoad === 'queued' ? (
+          <div data-testid="downloaded-queued" style={{ color: '#fbbf24', fontSize: '14px' }}>
+            Downloaded list queued — will load when the engine reconnects.
+          </div>
+        ) : inventoryLoad === 'error' ? (
+          <div data-testid="downloaded-error" role="alert" style={{ color: '#f87171', fontSize: '14px' }}>
+            The downloaded model list could not be loaded — use Refresh above to try again.
+          </div>
+        ) : downloaded.length === 0 ? (
           <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px' }}>
             No models downloaded yet — download one from the catalogue above and it will appear here.
           </div>

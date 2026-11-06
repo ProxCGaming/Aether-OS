@@ -405,3 +405,73 @@ describe('ProviderSettings standby health (E5-F15 renderer polish)', () => {
     expect(el.style.color).toBe('rgb(144, 144, 160)');
   });
 });
+
+describe('ProviderSettings destructive-action honesty (D2-24, D2-26)', () => {
+  let mockSendMessage;
+  let mockWsRef;
+
+  beforeEach(() => {
+    mockSendMessage = jest.fn();
+    mockWsRef = {
+      current: {
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
+        readyState: 1,
+        send: jest.fn(),
+      },
+    };
+    useAetherSocket.mockReturnValue({ wsRef: mockWsRef, sendMessage: mockSendMessage });
+  });
+
+  afterEach(() => {
+    delete window.confirm;
+  });
+
+  // D2-24: Disconnect removed a provider — discarding its saved
+  // configuration/key association — with no confirmation, unlike
+  // every comparable destructive action in Settings.
+  test('Disconnect asks for confirmation and sends nothing when declined (D2-24)', () => {
+    window.confirm = jest.fn(() => false);
+    render(<ProviderSettings providers={[{ name: 'openai', display_name: 'OpenAI', has_key: true }]} />);
+    fireEvent.click(screen.getByText('Disconnect'));
+    expect(window.confirm).toHaveBeenCalled();
+    expect(mockSendMessage.mock.calls.some(([type]) => type === 'PROVIDER_REMOVE_REQUEST')).toBe(false);
+  });
+
+  test('Disconnect sends the remove request once confirmed (D2-24)', () => {
+    window.confirm = jest.fn(() => true);
+    render(<ProviderSettings providers={[{ name: 'openai', display_name: 'OpenAI', has_key: true }]} />);
+    fireEvent.click(screen.getByText('Disconnect'));
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'PROVIDER_REMOVE_REQUEST',
+      expect.objectContaining({ payload: { provider: 'openai' } })
+    );
+  });
+
+  // D2-26: "My API!" and "My API?" both slug to custom_my_api_ —
+  // saving the second silently overwrote the first.
+  const providersWithClash = [
+    { name: 'custom_openai', display_name: 'Add Custom', has_key: false },
+    { name: 'custom_my_api_', display_name: 'My API!', has_key: true },
+  ];
+
+  test('a custom display name that slugs onto a DIFFERENT provider is refused, not overwritten (D2-26)', () => {
+    render(<ProviderSettings providers={providersWithClash} />);
+    fireEvent.click(screen.getByText('Add Custom'));
+    fireEvent.change(screen.getByPlaceholderText(/Display Name/), { target: { value: 'My API?' } });
+    fireEvent.click(screen.getByText('Save Configuration'));
+    expect(mockSendMessage.mock.calls.some(([type]) => type === 'PROVIDER_SAVE_REQUEST')).toBe(false);
+    expect(screen.getByText(/different display name/i)).toBeInTheDocument();
+  });
+
+  test('a non-clashing custom display name still saves under its slug (D2-26 control)', () => {
+    render(<ProviderSettings providers={providersWithClash} />);
+    fireEvent.click(screen.getByText('Add Custom'));
+    fireEvent.change(screen.getByPlaceholderText(/Display Name/), { target: { value: 'Other API' } });
+    fireEvent.click(screen.getByText('Save Configuration'));
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'PROVIDER_SAVE_REQUEST',
+      expect.objectContaining({ payload: expect.objectContaining({ provider: 'custom_other_api' }) })
+    );
+  });
+});

@@ -670,4 +670,25 @@ describe('DiagnosticsPanel', () => {
     });
     expect(screen.getByText('Remove fake failed: REMOVE_SENTINEL')).toBeInTheDocument();
   });
+
+  // D2-28: MCP Remove fired immediately, unlike the confirmed
+  // deletes elsewhere in Settings (MemoryManagement window.confirm,
+  // Projects' inline confirmation).
+  it('MCP Remove asks for confirmation before sending (D2-28)', () => {
+    renderWithConnectedServer();
+    window.confirm = jest.fn(() => false);
+    fireEvent.click(screen.getByText('Remove'));
+    expect(window.confirm).toHaveBeenCalled();
+    expect(
+      mockSendMessage.mock.calls.some(([type]) => type === 'MCP_SERVER_REMOVE_REQUEST')
+    ).toBe(false);
+
+    window.confirm = jest.fn(() => true);
+    fireEvent.click(screen.getByText('Remove'));
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'MCP_SERVER_REMOVE_REQUEST',
+      expect.objectContaining({ payload: { name: 'fake' } })
+    );
+    delete window.confirm;
+  });
 });

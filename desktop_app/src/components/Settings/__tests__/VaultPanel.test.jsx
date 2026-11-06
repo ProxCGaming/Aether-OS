@@ -103,12 +103,26 @@ describe('VaultPanel (E8-6.3)', () => {
     expect(save.payload.password).toBe('');
   });
 
-  test('deleting an entry sends the delete request', () => {
+  // D2-11: deletion is destructive and now confirms first (the
+  // MemoryManagement window.confirm pattern). This test previously
+  // pinned the defective behaviour — a click sent the delete with
+  // no confirmation at all.
+  test('deleting an entry asks for confirmation, then sends the delete request', () => {
+    window.confirm = jest.fn(() => true);
     const { sent } = renderPanel();
     fireEvent.click(screen.getByTestId('vault-delete-entry-1'));
+    expect(window.confirm).toHaveBeenCalled();
     const del = sent().find((m) => m.type === 'VAULT_ENTRY_DELETE_REQUEST');
     expect(del).toBeTruthy();
     expect(del.payload).toEqual({ id: 'entry-1' });
+  });
+
+  test('declining the delete confirmation sends nothing (D2-11)', () => {
+    window.confirm = jest.fn(() => false);
+    const { sent } = renderPanel();
+    fireEvent.click(screen.getByTestId('vault-delete-entry-1'));
+    expect(window.confirm).toHaveBeenCalled();
+    expect(sent().some((m) => m.type === 'VAULT_ENTRY_DELETE_REQUEST')).toBe(false);
   });
 
   test('the TOTP field is labelled owner-only', () => {

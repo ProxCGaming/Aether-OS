@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Layers,
   Pause,
@@ -46,6 +46,23 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
 
   const [activeWorkspace, setActiveWorkspace] = useState(initialWorkspace);
   const [workspaces, setWorkspaces] = useState([]);
+  // D2-15: indexing actions (pause / re-index / embedder switch)
+  // write optimistic state before the engine answers. A refusal —
+  // or no answer at all — must roll that state back and say so;
+  // this is the panel's error surface for action outcomes.
+  const [actionError, setActionError] = useState('');
+  // D2-16: request_id -> workspace_root for every request this
+  // panel sends with a workspace, so a late response can be
+  // correlated to the workspace it belongs to (the engine echoes
+  // request_id; its status payload carries no workspace field).
+  const requestWorkspaceRef = useRef(new Map());
+  // The one optimistic action still awaiting the engine's answer:
+  // { kind: 'pause' | 'start' | 'embedder', workspace, snapshot,
+  // requestedPaused? } — the snapshot is the last confirmed status,
+  // restored verbatim on a refusal or a confirm timeout.
+  const pendingActionRef = useRef(null);
+  const actionTimerRef = useRef(null);
+  const activeWorkspaceRef = useRef(initialWorkspace);
   const [status, setStatus] = useState({
     status: 'idle',
     total_files: 0,
@@ -68,24 +85,87 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
 
   const sendEvent = useCallback(
     (type, payload = {}) => {
+      // Unique per request (the hub panels' format): the old
+      // Date.now() id could repeat within a millisecond, which
+      // would defeat the D2-16 correlation map below.
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       const msg = {
         type,
         schema_version: 1,
-        request_id: Date.now().toString(),
+        request_id: requestId,
         payload,
       };
+      if (typeof payload?.workspace_root === 'string' && payload.workspace_root) {
+        requestWorkspaceRef.current.set(requestId, payload.workspace_root);
+      }
       if (contextSendMessage) {
         contextSendMessage(type, {
           schema_version: 1,
-          request_id: msg.request_id,
+          request_id: requestId,
           payload,
         });
       } else if (wsRef?.current?.readyState === 1 || wsRef?.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify(msg));
       }
+      return requestId;
     },
     [contextSendMessage, wsRef]
   );
+
+  const requestStatus = useCallback(
+    (workspaceRoot) => {
+      if (!workspaceRoot) return;
+      sendEvent('WORKSPACE_INDEX_STATUS_REQUEST', { workspace_root: workspaceRoot });
+    },
+    [sendEvent]
+  );
+
+  // ---- D2-15 optimistic-action bookkeeping ----------------------
+  const ACTION_CONFIRM_TIMEOUT_MS = 10000;
+
+  const clearPendingAction = useCallback(() => {
+    pendingActionRef.current = null;
+    if (actionTimerRef.current) {
+      clearTimeout(actionTimerRef.current);
+      actionTimerRef.current = null;
+    }
+  }, []);
+
+  const rollbackPendingAction = useCallback(
+    (message) => {
+      const pending = pendingActionRef.current;
+      clearPendingAction();
+      if (pending) setStatus(pending.snapshot);
+      setActionError(message);
+    },
+    [clearPendingAction]
+  );
+
+  const armPendingAction = useCallback(
+    (action) => {
+      clearPendingAction();
+      pendingActionRef.current = action;
+      actionTimerRef.current = setTimeout(() => {
+        actionTimerRef.current = null;
+        const pending = pendingActionRef.current;
+        pendingActionRef.current = null;
+        if (!pending) return;
+        // The user has moved to another workspace: the optimistic
+        // state on screen is no longer this action's to restore.
+        if (pending.workspace !== activeWorkspaceRef.current) return;
+        setStatus(pending.snapshot);
+        setActionError(
+          'The engine did not answer — the change was not applied. The last confirmed state has been restored.'
+        );
+        requestStatus(pending.workspace);
+      }, ACTION_CONFIRM_TIMEOUT_MS);
+    },
+    [clearPendingAction, requestStatus]
+  );
+
+  useEffect(() => () => {
+    if (actionTimerRef.current) clearTimeout(actionTimerRef.current);
+  }, []);
 
   // Request initial workspace list if active workspace not specified
   useEffect(() => {
@@ -101,13 +181,14 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
 
   // Request status when activeWorkspace is ready
   useEffect(() => {
+    activeWorkspaceRef.current = activeWorkspace;
     if (activeWorkspace) {
       // A (re)fetch for this workspace is unanswered until its
       // status reply lands — including workspace switches.
       setStatusLoad('loading');
-      sendEvent('WORKSPACE_INDEX_STATUS_REQUEST', { workspace_root: activeWorkspace });
+      requestStatus(activeWorkspace);
     }
-  }, [activeWorkspace, sendEvent]);
+  }, [activeWorkspace, requestStatus]);
 
   // Listen for socket events
   useEffect(() => {
@@ -116,6 +197,19 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
     const handleMessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        // D2-16: which workspace does this response belong to?
+        // Tracked requests answer with the workspace they were
+        // sent for; a response tracked to a DIFFERENT workspace
+        // than the selected one is stale and must not merge into
+        // the current view. Untracked responses (no request_id, or
+        // one this panel never sent) keep the legacy apply-by-type
+        // behaviour.
+        const trackedWorkspace = data.request_id
+          ? requestWorkspaceRef.current.get(data.request_id)
+          : undefined;
+        if (data.request_id) requestWorkspaceRef.current.delete(data.request_id);
+        const forOtherWorkspace =
+          trackedWorkspace !== undefined && trackedWorkspace !== activeWorkspace;
         if (data.type === 'LOCAL_MODEL_LIST_RESPONSE') {
           const models = Array.isArray(data.payload?.models) ? data.payload.models : [];
           setDownloadedEmbedders(
@@ -136,10 +230,18 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
             setStatusLoad('ready');
           }
         } else if (data.type === 'WORKSPACE_INDEX_STATUS_RESPONSE') {
-          if (data.payload?.error) {
+          if (forOtherWorkspace) {
+            // A late answer for a workspace the user has left —
+            // dropping it is the whole D2-16 fix; the selected
+            // workspace's own fetch is still outstanding/answered
+            // separately.
+          } else if (data.payload?.error) {
             setStatusLoad('error');
           } else if (data.payload) {
             setStatusLoad('ready');
+            // An authoritative status for the selected workspace
+            // supersedes any earlier action error.
+            setActionError('');
             setStatus((prev) => ({
               ...prev,
               ...data.payload,
@@ -152,28 +254,92 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
             }
           }
         } else if (data.type === 'WORKSPACE_INDEX_PROGRESS') {
-          // Progress is only emitted for a workspace whose status
-          // the engine is tracking — it answers the gate too.
-          setStatusLoad('ready');
-          setProgress(data.payload);
-          if (data.payload.status) {
-            setStatus((prev) => ({ ...prev, status: data.payload.status }));
+          // Progress pushes carry their workspace in the payload
+          // (and the start request's id) — same correlation rule.
+          const progressWorkspace = data.payload?.workspace_root;
+          if (
+            forOtherWorkspace ||
+            (progressWorkspace && progressWorkspace !== activeWorkspace)
+          ) {
+            // Another workspace's run — not this view's progress.
+          } else {
+            // Progress is only emitted for a workspace whose status
+            // the engine is tracking — it answers the gate too.
+            setStatusLoad('ready');
+            setProgress(data.payload);
+            if (data.payload.status) {
+              setStatus((prev) => ({ ...prev, status: data.payload.status }));
+            }
           }
         } else if (data.type === 'WORKSPACE_INDEX_PAUSE_RESPONSE') {
-          const isPaused = Boolean(data.payload?.paused);
-          setStatus((prev) => ({
-            ...prev,
-            paused: isPaused,
-            status: isPaused ? 'paused' : 'idle',
-          }));
+          if (!forOtherWorkspace) {
+            const isPaused = Boolean(data.payload?.paused);
+            const pending = pendingActionRef.current;
+            if (pending?.kind === 'pause') {
+              if (isPaused === pending.requestedPaused) {
+                // Confirmed: the echo below applies the same value.
+                clearPendingAction();
+                setActionError('');
+                setStatus((prev) => ({
+                  ...prev,
+                  paused: isPaused,
+                  status: isPaused ? 'paused' : 'idle',
+                }));
+              } else {
+                // The engine's state is not what was asked for —
+                // the optimistic flip was not applied (D2-15).
+                rollbackPendingAction(
+                  'The engine did not apply the pause change — the last confirmed state has been restored.'
+                );
+              }
+            } else {
+              setStatus((prev) => ({
+                ...prev,
+                paused: isPaused,
+                status: isPaused ? 'paused' : 'idle',
+              }));
+            }
+          }
         } else if (data.type === 'WORKSPACE_INDEX_CONFIG_RESPONSE') {
-          if (data.payload?.ok) {
-            setStatusLoad('loading');
-            sendEvent('WORKSPACE_INDEX_STATUS_REQUEST', { workspace_root: activeWorkspace });
+          if (!forOtherWorkspace) {
+            if (data.payload?.ok) {
+              if (pendingActionRef.current?.kind === 'embedder') {
+                clearPendingAction();
+                setActionError('');
+              }
+              setStatusLoad('loading');
+              requestStatus(activeWorkspace);
+            } else if (pendingActionRef.current?.kind === 'embedder') {
+              // D2-15: the refused embedder switch must not stand —
+              // restore the embedder and the counts it zeroed.
+              rollbackPendingAction(
+                data.payload?.error ||
+                  'The engine refused the embedder change — the last confirmed state has been restored.'
+              );
+            } else {
+              setActionError(
+                data.payload?.error || 'The engine refused the indexing change.'
+              );
+            }
           }
         } else if (data.type === 'WORKSPACE_INDEX_START_RESPONSE') {
-          setStatusLoad('loading');
-          sendEvent('WORKSPACE_INDEX_STATUS_REQUEST', { workspace_root: activeWorkspace });
+          if (!forOtherWorkspace) {
+            const pending = pendingActionRef.current;
+            if (pending?.kind === 'start' && !data.payload?.started) {
+              // D2-15: indexing never started — the optimistic
+              // "indexing" state was never the engine's.
+              rollbackPendingAction(
+                'The engine did not start indexing — the last confirmed state has been restored.'
+              );
+            } else {
+              if (pending?.kind === 'start') {
+                clearPendingAction();
+                setActionError('');
+              }
+              setStatusLoad('loading');
+              requestStatus(activeWorkspace);
+            }
+          }
         }
       } catch {
         // ignore parse error
@@ -187,10 +353,19 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
         target.removeEventListener('message', handleMessage);
       }
     };
-  }, [wsRef, activeWorkspace, sendEvent]);
+  }, [wsRef, activeWorkspace, sendEvent, requestStatus, clearPendingAction, rollbackPendingAction]);
 
   const handleTogglePause = () => {
     const nextPause = !status.paused;
+    // D2-15: snapshot the confirmed state BEFORE the optimistic
+    // flip — a refused or unanswered pause restores it.
+    armPendingAction({
+      kind: 'pause',
+      workspace: activeWorkspace,
+      snapshot: status,
+      requestedPaused: nextPause,
+    });
+    setActionError('');
     sendEvent('WORKSPACE_INDEX_PAUSE_REQUEST', {
       workspace_root: activeWorkspace,
       pause: nextPause,
@@ -204,6 +379,12 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
   };
 
   const handleReindex = () => {
+    armPendingAction({
+      kind: 'start',
+      workspace: activeWorkspace,
+      snapshot: status,
+    });
+    setActionError('');
     sendEvent('WORKSPACE_INDEX_START_REQUEST', {
       workspace_root: activeWorkspace,
       confirm: true,
@@ -229,6 +410,16 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
   const handleConfirmEmbedderSwitch = () => {
     const newEmbedder = warningModal.pendingEmbedder;
     setWarningModal({ isOpen: false, pendingEmbedder: '' });
+
+    // D2-15: the optimistic write below (new embedder, zeroed
+    // counts) is only a claim until the CONFIG answer lands — keep
+    // the confirmed state to restore on a refusal or a timeout.
+    armPendingAction({
+      kind: 'embedder',
+      workspace: activeWorkspace,
+      snapshot: status,
+    });
+    setActionError('');
 
     // Send config update
     sendEvent('WORKSPACE_INDEX_CONFIG_REQUEST', {
@@ -333,6 +524,26 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
           </div>
         )}
       </div>
+
+      {/* D2-15: a refused or unanswered indexing action reports
+          here (and the optimistic state has already been rolled
+          back by the time this renders). */}
+      {actionError && (
+        <div
+          data-testid="indexing-action-error"
+          role="alert"
+          style={{
+            background: 'rgba(239,68,68,0.08)',
+            border: '1px solid rgba(239,68,68,0.3)',
+            borderRadius: '10px',
+            padding: '12px 16px',
+            color: '#fca5a5',
+            fontSize: '13px',
+          }}
+        >
+          {actionError}
+        </div>
+      )}
 
       {/* RUX-C-07: until the first real status reply lands, a load
           state stands where the status card would be — the

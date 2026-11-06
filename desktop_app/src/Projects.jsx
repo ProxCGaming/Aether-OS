@@ -100,7 +100,14 @@ export default function Projects({ wsRef, isConnected = null }) {
 
   const handleAddWorkspace = async () => {
     // Real folder picker via Electron IPC
-    if (!window.electronAPI?.showOpenDialog) return;
+    // D2-23: in a mount without the preload API this used to
+    // return silently — the surface's primary action was a dead
+    // click. Name the failure on the panel's action-error surface
+    // instead (a rejected picker promise reports the same way).
+    if (!window.electronAPI?.showOpenDialog) {
+      setActionError('The folder picker is not available in this window — adding a workspace folder needs the desktop app.');
+      return;
+    }
     try {
       const selectedPath = await window.electronAPI.showOpenDialog({
         properties: ['openDirectory'],
@@ -116,6 +123,7 @@ export default function Projects({ wsRef, isConnected = null }) {
       }
     } catch (e) {
       console.error('Failed to open folder picker:', e);
+      setActionError('The folder picker could not be opened.');
     }
   };
 
@@ -196,7 +204,13 @@ export default function Projects({ wsRef, isConnected = null }) {
               {confirmRemovePath === ws.path ? (
                 <>
                   <span style={{ color: '#fca5a5', fontSize: '12px', maxWidth: '300px' }}>
-                    {ws.session_count ?? 0} session{(ws.session_count ?? 0) === 1 ? '' : 's'} will move to No workspace — nothing is deleted.
+                    {/* D2-22: the count is stated only when the
+                        engine actually reported one (the list row
+                        below guards the same way) — an unreported
+                        count must not be confirmed as "0 sessions". */}
+                    {typeof ws.session_count === 'number'
+                      ? `${ws.session_count} session${ws.session_count === 1 ? '' : 's'} will move to No workspace — nothing is deleted.`
+                      : 'Sessions filed here will move to No workspace — nothing is deleted.'}
                   </span>
                   <button
                     onClick={() => handleRemoveWorkspace(ws.path)}

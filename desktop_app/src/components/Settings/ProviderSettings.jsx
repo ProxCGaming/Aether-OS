@@ -127,6 +127,23 @@ export default function ProviderSettings({ providers = [], health = {}, provider
       }
       finalProviderName = `custom_${name.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
       displayName = name;
+      // D2-26: the slug is lossy — "My API!" and "My API?" both
+      // become custom_my_api_. If a DIFFERENT provider already
+      // owns the generated name, saving would silently overwrite
+      // it; refuse here and make the user pick a distinct name.
+      // (The same display name re-saved is the same provider
+      // updating itself, and stays allowed.)
+      const clash = (Array.isArray(providers) ? providers : []).find(
+        (p) => p.name === finalProviderName
+      );
+      if (clash && (clash.display_name || '') !== name) {
+        setValidationState(prev => ({ ...prev, [providerName]: 'error' }));
+        setValidationMsg(prev => ({
+          ...prev,
+          [providerName]: `"${name}" would be saved under the same generated name as the existing provider "${clash.display_name || clash.name}" and overwrite it — choose a different display name.`,
+        }));
+        return;
+      }
     }
 
     setValidationState(prev => ({ ...prev, [providerName]: 'saving' }));
@@ -194,6 +211,16 @@ export default function ProviderSettings({ providers = [], health = {}, provider
 
   const handleDisconnect = (e, providerName) => {
     e.stopPropagation();
+    // D2-24: removing a provider discards its saved configuration
+    // and key association — confirm first, with the same
+    // window.confirm pattern as the other Settings deletes
+    // (MemoryManagement); this was the destructive action that
+    // fired with no confirmation at all.
+    const entry = (Array.isArray(providers) ? providers : []).find((p) => p.name === providerName);
+    const label = entry?.display_name || providerName;
+    if (!window.confirm(`Disconnect ${label}? Its saved API key and configuration will be removed.`)) {
+      return;
+    }
     sendMessage('PROVIDER_REMOVE_REQUEST', {
       schema_version: 1,
       request_id: Date.now().toString(),

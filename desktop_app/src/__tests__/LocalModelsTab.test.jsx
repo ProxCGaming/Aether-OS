@@ -574,3 +574,85 @@ describe('Downloaded model typing + embedder (catalogue sync)', () => {
     expect(within(row).queryByTestId('use-as-embedder-ollama:qwen3-embedding:0.6b')).not.toBeInTheDocument();
   });
 });
+
+// D2-13: the downloaded inventory initialised to [] with no load
+// state, so "No models downloaded yet" rendered from the first
+// frame — and for the whole time a refresh sat queued offline —
+// impersonating an answered-empty inventory.
+describe('Model Hub downloaded inventory load state (D2-13)', () => {
+  it('shows a loading state — never the empty text — before the first inventory answer', async () => {
+    await renderTab();
+    const section = screen.getByTestId('downloaded-section');
+    expect(within(section).getByTestId('downloaded-loading')).toBeInTheDocument();
+    expect(within(section).queryByText(/no models downloaded yet/i)).not.toBeInTheDocument();
+  });
+
+  it('reads as queued, not empty, while the inventory request sits in the offline queue', async () => {
+    const { wsRef } = makeWsRef();
+    const safeSend = jest.fn(() => 'queued');
+    render(<LocalModelsTab wsRef={wsRef} safeSend={safeSend} />);
+    const section = screen.getByTestId('downloaded-section');
+    expect(within(section).getByTestId('downloaded-queued')).toBeInTheDocument();
+    expect(within(section).queryByText(/no models downloaded yet/i)).not.toBeInTheDocument();
+  });
+
+  it('an error answer for the inventory is an error state, not an empty list', async () => {
+    const { wsRef, getHandler } = await renderTab();
+    respond(getHandler, wsRef, 'MODEL_HUB_DOWNLOADED_REQUEST', 'MODEL_HUB_DOWNLOADED_RESPONSE', {
+      error: 'hub store unavailable',
+    });
+    const section = screen.getByTestId('downloaded-section');
+    expect(within(section).getByTestId('downloaded-error')).toBeInTheDocument();
+    expect(within(section).queryByText(/no models downloaded yet/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/hub store unavailable/)).toBeInTheDocument();
+  });
+});
+
+// D2-14: "Set Active" fired MODEL_SET_DEFAULT and listened only
+// for the success broadcast — a refusal or a lost answer left the
+// row unchanged with nothing telling the user why.
+describe('Model Hub Set Active confirmation (D2-14)', () => {
+  async function renderDownloadedOllama() {
+    const ctx = await renderTab();
+    respond(ctx.getHandler, ctx.wsRef, 'MODEL_HUB_DOWNLOADED_REQUEST', 'MODEL_HUB_DOWNLOADED_RESPONSE', { models: [DL_OLLAMA], error: null });
+    return ctx;
+  }
+
+  it('shows a pending state after the click until the engine confirms', async () => {
+    const { wsRef, getHandler } = await renderDownloadedOllama();
+    const row = await screen.findByTestId('downloaded-row-ollama:qwen3:8b');
+    fireEvent.click(within(row).getByRole('button', { name: 'Set Active' }));
+    expect(within(row).getByTestId('set-active-pending-ollama:qwen3:8b')).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: 'Set Active' })).not.toBeInTheDocument();
+
+    respond(getHandler, wsRef, 'MODEL_SET_DEFAULT', 'MODEL_DEFAULT_CHANGED', { provider: 'ollama', model: 'qwen3:8b' });
+    await waitFor(() => expect(within(row).getByRole('button', { name: 'Active' })).toBeDisabled());
+  });
+
+  it('an engine ERROR refusal is surfaced and the row offers Set Active again', async () => {
+    const { wsRef, getHandler } = await renderDownloadedOllama();
+    const row = await screen.findByTestId('downloaded-row-ollama:qwen3:8b');
+    fireEvent.click(within(row).getByRole('button', { name: 'Set Active' }));
+    respond(getHandler, wsRef, 'MODEL_SET_DEFAULT', 'ERROR', {
+      error: 'Default model could not be saved: disk full',
+    });
+    await waitFor(() => expect(screen.getByText(/Default model could not be saved/)).toBeInTheDocument());
+    expect(within(row).getByRole('button', { name: 'Set Active' })).toBeInTheDocument();
+    expect(within(row).queryByTestId('set-active-pending-ollama:qwen3:8b')).not.toBeInTheDocument();
+  });
+
+  it('no answer inside the confirm window surfaces an error instead of silence', async () => {
+    await renderDownloadedOllama();
+    const row = await screen.findByTestId('downloaded-row-ollama:qwen3:8b');
+    jest.useFakeTimers();
+    try {
+      fireEvent.click(within(row).getByRole('button', { name: 'Set Active' }));
+      expect(within(row).getByTestId('set-active-pending-ollama:qwen3:8b')).toBeInTheDocument();
+      act(() => { jest.advanceTimersByTime(10001); });
+      expect(screen.getByText(/did not confirm/i)).toBeInTheDocument();
+      expect(within(row).getByRole('button', { name: 'Set Active' })).toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
