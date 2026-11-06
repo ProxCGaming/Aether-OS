@@ -751,12 +751,34 @@ class BrowserSession:
         challenge = await self._detect_after_action()
         return {"url": self.current_url, "challenge": challenge}
 
-    async def type_text(self, selector: str, text: str) -> dict[str, Any]:
+    async def type_text(
+        self,
+        selector: str,
+        text: str,
+        *,
+        require_site: str | None = None,
+    ) -> dict[str, Any]:
         self._require_agent()
         driver = await self._ensure_driver()
         # M05: re-detect on the live page BEFORE entering data —
         # a dynamically-appeared 2FA form must never receive text.
         await self._guard_challenge()
+        if require_site is not None:
+            # N-40: the credential vault's caller revalidates the
+            # page's site before decrypting, but the page can still
+            # navigate between that check and this fill (or between
+            # the username fill and the password fill). When the
+            # caller names the site the text is bound for, the LIVE
+            # page is re-checked against it here — at fill time, the
+            # last moment a refusal can still protect the value.
+            from aether_engine.vault.store import registrable_domain
+
+            live_url = await driver.current_url()
+            if registrable_domain(live_url or "") != require_site:
+                raise BrowserError(
+                    "The browser page is no longer on "
+                    f"{require_site}, so the text was not entered."
+                )
         try:
             await driver.fill(selector, text)
         except BrowserError:
@@ -1127,6 +1149,19 @@ class BrowserSessionManager:
             return {"success": False, **session.control_snapshot(), "error": str(exc)}
         return {"success": True, **session.control_snapshot()}
 
+    async def shutdown(self) -> None:
+        """Stop every session this manager owns (engine shutdown).
+
+        Each session's driver is closed through its own stop(), so
+        no Chromium process outlives the manager that launched it.
+        Sessions are forgotten as they are stopped.
+        """
+        sessions = list(self._sessions.values())
+        self._sessions.clear()
+        self._active_id = None
+        for session in sessions:
+            await session.stop()
+
 
 _manager: BrowserSessionManager | None = None
 
@@ -1139,6 +1174,29 @@ def get_browser_manager() -> BrowserSessionManager:
 
 
 def reset_browser_manager() -> None:
-    """Drop the process-wide manager (tests; engine shutdown)."""
+    """Drop the process-wide manager (tests; engine shutdown).
+
+    E7-16: the dropped manager's live sessions are stopped first —
+    dropping the singleton used to abandon a running Chromium in the
+    dedicated profile. This function is synchronous (test fixtures
+    call it as one): with an event loop running, the shutdown is
+    scheduled on it; without one, it runs to completion on a
+    short-lived loop. Either way the singleton is dropped first, so
+    no new session can be created against the dying manager.
+    """
     global _manager
-    _manager = None
+    manager, _manager = _manager, None
+    if manager is None or not manager._sessions:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        loop.create_task(manager.shutdown())
+        return
+    try:
+        asyncio.run(manager.shutdown())
+    except Exception:  # a failed stop must not break the reset
+        logger.debug("Browser manager shutdown during reset failed",
+                     exc_info=True)

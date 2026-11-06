@@ -238,17 +238,43 @@ def set_browser_policy_loader(
     _policy_loader = loader
 
 
+def _fail_closed_policy() -> BrowserPolicy:
+    """The policy for "the owner's settings could not be read".
+
+    Everything off, every category confirming: an unreadable policy
+    must tighten, never loosen (E7-17) — the shipped preset has the
+    master switch ON, so falling back to it after a loader failure
+    would silently re-enable a browser agent the owner may have
+    disabled, and re-enable envelopes they may have turned off.
+    """
+    return BrowserPolicy(
+        enabled=False,
+        vault_autofill=False,
+        envelopes_enabled=False,
+        categories=default_category_modes(),
+    )
+
+
 def current_browser_policy() -> BrowserPolicy:
-    """The live policy, or the shipped preset when no loader is
-    installed / the loader fails (the preset is the safe fallback)."""
+    """The live policy.
+
+    No loader installed (tests, tools, pre-wiring): the shipped
+    preset — nothing has been configured yet, so the preset IS the
+    owner's policy. A loader that is installed but fails, or returns
+    something that is not a BrowserPolicy: fail closed
+    (:func:`_fail_closed_policy`), because the owner's real settings
+    exist but could not be read, and the preset is looser than a
+    plausible owner setting on the master switch.
+    """
     if _policy_loader is None:
         return BrowserPolicy()
     try:
         policy = _policy_loader()
     except Exception:
-        logger.debug("Browser policy loader failed; using the preset", exc_info=True)
-        return BrowserPolicy()
-    return policy if isinstance(policy, BrowserPolicy) else BrowserPolicy()
+        logger.debug(
+            "Browser policy loader failed; failing closed", exc_info=True)
+        return _fail_closed_policy()
+    return policy if isinstance(policy, BrowserPolicy) else _fail_closed_policy()
 
 
 # ---------------------------------------------------------------------

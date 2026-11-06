@@ -330,7 +330,10 @@ class StubSession:
     async def read_live_page(self):
         return self.current_url, GITHUB_LOGIN
 
-    async def type_text(self, selector, text):
+    async def type_text(self, selector, text, require_site=None):
+        # require_site: the N-40 fill-time site binding the real
+        # BrowserSession.type_text accepts (the stub has no live
+        # page to re-check; it records the call as before).
         self.typed[selector] = text
 
     async def field_value(self, selector):

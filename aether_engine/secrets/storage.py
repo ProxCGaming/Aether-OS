@@ -102,7 +102,13 @@ class SecretStore:
             raise TypeError("API key must be a string.")
         self._init_db()
         encrypted_bytes = self.protector.protect(api_key.encode("utf-8"))
+        old_blob: bytes | None = None
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            row = conn.execute(
+                "SELECT api_key FROM providers WHERE name = ?", (provider,)
+            ).fetchone()
+            if row is not None:
+                old_blob = bytes(row[0])
             conn.execute(
                 """
                     INSERT INTO providers (name, api_key) VALUES (?, ?)
@@ -110,6 +116,19 @@ class SecretStore:
                     """,
                 (provider, encrypted_bytes),
             )
+        # N-31: a rotation replaces the row's blob, but on non-Windows
+        # the blob is a `keyring:<id>` reference — the OLD secret stays
+        # recoverable in the OS keyring until it is deleted, so a
+        # rotated-away (possibly compromised) key is never revoked.
+        # Delete the replaced blob once the new one is safely stored
+        # (same S2-N3 cleanup delete_provider performs). Identical
+        # bytes mean the live blob itself — never delete that.
+        if old_blob is not None and old_blob != encrypted_bytes:
+            self.protector.delete(old_blob)
+        # Phase 10.2, C2 completed (E7-15): a key WRITE is a secret
+        # operation like load/delete — audit it (provider name only),
+        # so a key substitution leaves the same trace as a reveal.
+        self._audit("SECRET_SAVED", provider)
 
     def load_provider(self, provider: str) -> str:
         if not self.db_path.exists():

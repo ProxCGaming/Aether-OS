@@ -23,8 +23,22 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-class SecretDecryptionError(Exception):
+class SecretProtectionError(Exception):
+    """Base class for protector failures, in either direction.
+
+    A caller wrapping a protect/decrypt pair catches this one type
+    and misses neither side (E7-14: the contract used to be
+    asymmetric — decrypt failures were typed, encrypt failures were
+    a bare RuntimeError the same ``except`` clause walked past).
+    """
+
+
+class SecretDecryptionError(SecretProtectionError):
     """Raised when a stored secret cannot be decrypted."""
+
+
+class SecretEncryptionError(SecretProtectionError):
+    """Raised when a secret cannot be encrypted for storage."""
 
 class BaseProtector(abc.ABC):
     @abc.abstractmethod
@@ -137,7 +151,8 @@ if sys.platform == "win32":
             0,
             ctypes.byref(blob_out),
         ):
-            raise RuntimeError(f"CryptProtectData failed: {_kernel32.GetLastError()}")
+            raise SecretEncryptionError(
+                f"CryptProtectData failed: {_kernel32.GetLastError()}")
         encrypted = ctypes.string_at(blob_out.pbData, blob_out.cbData)
         _kernel32.LocalFree(blob_out.pbData)
         return encrypted
@@ -161,4 +176,7 @@ if sys.platform == "win32":
             )
         plaintext = ctypes.string_at(blob_out.pbData, blob_out.cbData)
         _kernel32.LocalFree(blob_out.pbData)
-        return plaintext.rstrip(b'\x00')
+        # The blob's byte count IS the plaintext length — return it
+        # verbatim. A trailing-NUL strip here silently corrupted any
+        # secret whose true bytes end in \x00 (E7-14).
+        return plaintext

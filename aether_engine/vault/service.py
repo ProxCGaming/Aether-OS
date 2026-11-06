@@ -54,6 +54,7 @@ from ..event_bus import event_bus
 from .store import (
     CredentialVault,
     VaultEntryNotFound,
+    VaultError,
     get_credential_vault,
     registrable_domain,
 )
@@ -284,8 +285,13 @@ class VaultFillService:
             approved = await asyncio.wait_for(
                 future, timeout=self._approval_timeout_seconds)
         except TimeoutError:
-            self._pending_approvals.pop(request_id, None)
             return False, "approval_timeout"
+        finally:
+            # E7-10: EVERY exit removes the registration — resolve and
+            # timeout already popped, but a cancelled waiter (task
+            # stop, disconnect) used to leave its dead future in the
+            # dict for the life of this process-wide service.
+            self._pending_approvals.pop(request_id, None)
         return bool(approved), "" if approved else "approval_denied"
 
     def resolve_fill_approval(self, request_id: str, approved: bool) -> bool:
@@ -450,9 +456,18 @@ class VaultFillService:
                 "The credential vault could not be unlocked, so "
                 "nothing was filled.", **audit_ctx)
         try:
+            # N-40: the revalidation above cannot close the window
+            # between itself and these fills — the page can navigate
+            # while the username is being typed. Each fill therefore
+            # carries the approved entry's site, and the session
+            # re-checks the live page against it at fill time; a page
+            # that moved sites refuses the password fill.
             if username_selector:
-                await session.type_text(username_selector, entry["username"])
-            await session.type_text(password_selector, password)
+                await session.type_text(
+                    username_selector, entry["username"],
+                    require_site=entry["site"])
+            await session.type_text(
+                password_selector, password, require_site=entry["site"])
         except BrowserError:
             return self._refuse(
                 "fill_failed",
@@ -602,24 +617,34 @@ class VaultFillService:
                 "and no longer shows a password form, so nothing "
                 "was saved.")
 
-        for existing in self._vault.entries_for_site(url):
-            if existing["username"] != username_value:
-                continue
-            if existing["created_by"] == "user":
-                return refuse(
-                    "already_saved_by_user",
-                    f"The user already has a credential saved for "
-                    f"{domain} ({username_value}); it was left "
-                    "untouched.")
-            saved_id = self._vault.save_entry(
-                entry_id=existing["id"], site=domain,
-                username=username_value, password=password_value,
-                created_by="agent")
-            break
-        else:
-            saved_id = self._vault.save_entry(
-                site=domain, username=username_value,
-                password=password_value, created_by="agent")
+        # E7-18: the vault writes are part of this flow, so their
+        # failures are refusals too — "refusals are data" covers
+        # VaultValidationError / VaultEntryNotFound exactly like the
+        # page-side failures above; left outside a try, they reached
+        # the agent as raw tool failures instead.
+        try:
+            for existing in self._vault.entries_for_site(url):
+                if existing["username"] != username_value:
+                    continue
+                if existing["created_by"] == "user":
+                    return refuse(
+                        "already_saved_by_user",
+                        f"The user already has a credential saved for "
+                        f"{domain} ({username_value}); it was left "
+                        "untouched.")
+                saved_id = self._vault.save_entry(
+                    entry_id=existing["id"], site=domain,
+                    username=username_value, password=password_value,
+                    created_by="agent")
+                break
+            else:
+                saved_id = self._vault.save_entry(
+                    site=domain, username=username_value,
+                    password=password_value, created_by="agent")
+        except VaultError as exc:
+            return refuse(
+                "save_failed",
+                f"The credential could not be saved: {exc}")
 
         self._audit.log_event("VAULT_CREDENTIAL_SAVED", {
             "entry_id": saved_id, "site": domain,
@@ -651,6 +676,17 @@ def get_vault_service() -> VaultFillService:
 
 
 def reset_vault_service() -> None:
-    """Drop the singleton (tests; the next get rebuilds it)."""
+    """Drop the singleton (tests; the next get rebuilds it).
+
+    Pending ask-every-time approvals are cancelled first (E7-16's
+    shape): dropping the service used to abandon their futures, so a
+    fill awaiting an answer hung until its timeout for a service
+    that no longer existed.
+    """
     global _service
-    _service = None
+    service, _service = _service, None
+    if service is not None:
+        for future in service._pending_approvals.values():
+            if not future.done():
+                future.cancel()
+        service._pending_approvals.clear()

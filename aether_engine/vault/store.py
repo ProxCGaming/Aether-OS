@@ -22,16 +22,22 @@ Settings surface. The plaintext exists in exactly one method,
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urlparse
 
 from publicsuffix2 import get_tld
 
-from ..secrets.dpapi import BaseProtector, WindowsDPAPIProtector
+from ..audit import AuditLogger
+from ..secrets.dpapi import (
+    BaseProtector,
+    SecretDecryptionError,
+    WindowsDPAPIProtector,
+)
 from .totp import (
     PERIOD_SECONDS,
     TotpValidationError,
@@ -40,8 +46,7 @@ from .totp import (
     totp_code,
 )
 
-if TYPE_CHECKING:
-    from ..audit import AuditLogger
+logger = logging.getLogger(__name__)
 
 VAULT_DB_VERSION = 1
 
@@ -196,8 +201,19 @@ class CredentialVault:
             conn.execute(f"PRAGMA user_version = {VAULT_DB_VERSION}")
 
     def _audit(self, event_type: str, payload: dict[str, Any]) -> None:
-        if self._audit_logger is not None:
-            self._audit_logger.log_event(event_type, payload)
+        # E7-05: no injected logger must not mean no audit trail. The
+        # production singleton is built bare (get_credential_vault),
+        # so — exactly as SecretStore does — fall back to a real
+        # AuditLogger, created lazily on first use. Best-effort: a
+        # broken audit log must never break a vault operation.
+        try:
+            audit_logger = self._audit_logger
+            if audit_logger is None:
+                audit_logger = AuditLogger()
+                self._audit_logger = audit_logger
+            audit_logger.log_event(event_type, payload)
+        except Exception:  # noqa: BLE001, S110 — audit must never break the vault
+            pass
 
     # -- writes ---------------------------------------------------------
 
@@ -268,6 +284,18 @@ class CredentialVault:
                      created_by, now, now),
                 )
                 return new_id
+            # N-31: blobs this update replaces (a re-protected
+            # password/TOTP, or a cleared TOTP) must be deleted from
+            # the external store once the update commits — otherwise
+            # the rotated-away secret stays recoverable in the OS
+            # keyring forever, exactly as in SecretStore.save_provider.
+            replaced: list[tuple[Any, Any]] = []
+            if password is not None:
+                replaced.append(
+                    (existing["encrypted_password"], encrypted_password))
+            if totp_secret is not None:
+                replaced.append(
+                    (existing["encrypted_totp"], encrypted_totp))
             conn.execute(
                 "UPDATE vault_entries SET site = ?, username = ?,"
                 " encrypted_password = ?, encrypted_totp = ?,"
@@ -275,7 +303,10 @@ class CredentialVault:
                 (domain, username.strip(), encrypted_password,
                  encrypted_totp, 1 if ask_every_time else 0, now, entry_id),
             )
-            return entry_id
+        for old_blob, new_blob in replaced:
+            if old_blob is not None and old_blob != new_blob:
+                self.protector.delete(bytes(old_blob))
+        return entry_id
 
     def delete_entry(self, entry_id: str) -> bool:
         """Delete an entry; True when a row was actually removed."""
@@ -317,9 +348,14 @@ class CredentialVault:
         }
 
     def get_entry(self, entry_id: str) -> dict[str, Any]:
+        # E7-11: metadata-only by construction, like list_entries —
+        # select exactly the columns _public projects, never the
+        # secret columns this read exists to avoid touching.
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM vault_entries WHERE id = ?", (entry_id,),
+                "SELECT id, site, username, ask_every_time, created_at,"
+                " created_by, last_used_at FROM vault_entries"
+                " WHERE id = ?", (entry_id,),
             ).fetchone()
         if row is None:
             raise VaultEntryNotFound(f"No vault entry {entry_id!r}.")
@@ -348,10 +384,15 @@ class CredentialVault:
         domain = registrable_domain(url_or_host)
         if not domain:
             return []
+        # E7-11: this is the fill path's per-fill metadata read — it
+        # gets the same named-column discipline as list_entries, so
+        # the encrypted blobs are never fetched for a metadata
+        # question (metadata-only by construction, S2-M9).
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM vault_entries WHERE site = ?"
-                " ORDER BY username",
+                "SELECT id, site, username, ask_every_time, created_at,"
+                " created_by, last_used_at FROM vault_entries"
+                " WHERE site = ? ORDER BY username",
                 (domain,),
             ).fetchall()
         return [self._public(row) for row in rows]
@@ -452,13 +493,21 @@ class CredentialVault:
                      encrypted_secret, now, now),
                 )
                 return new_id
+            # N-31: a provided secret re-protects over the old blob —
+            # revoke the replaced blob once the update commits, as in
+            # save_entry. (secret=None keeps the stored blob: nothing
+            # is replaced and nothing is deleted.)
+            replaced_blob = (
+                existing["encrypted_secret"] if secret is not None else None)
             conn.execute(
                 "UPDATE vault_totp_entries SET label = ?, issuer = ?,"
                 " encrypted_secret = ?, updated_at = ? WHERE id = ?",
                 (label.strip(), (issuer or "").strip(),
                  encrypted_secret, now, entry_id),
             )
-            return entry_id
+        if replaced_blob is not None and replaced_blob != encrypted_secret:
+            self.protector.delete(bytes(replaced_blob))
+        return entry_id
 
     @staticmethod
     def _public_totp(row: sqlite3.Row) -> dict[str, Any]:
@@ -528,19 +577,36 @@ class CredentialVault:
         (VAULT_TOTP_ACCESSED, one line per entry). A stored login
         secret that is not valid Base32 is skipped: the login form
         historically stored the raw string unchecked, and this view
-        must neither crash on it nor fabricate a code from it.
+        must neither crash on it nor fabricate a code from it. The
+        same discipline covers a secret that can no longer be
+        decrypted (its keyring blob is gone): that entry alone is
+        skipped, with a log line naming it, and every other entry
+        still produces its code.
         """
         when = int(time.time()) if at_time is None else int(at_time)
         remaining = seconds_remaining(when)
         codes: list[dict[str, Any]] = []
         for row in self.list_totp_entries():
-            secret = self.get_totp_entry_secret(row["id"])
+            # E7-04: the skip-a-bad-entry rule covers decryption
+            # failures too — a row whose keyring blob is gone (the
+            # inverse of N-31) must not take down the whole view.
+            # The entry is skipped with a log line naming it (never
+            # the secret); the healthy entries still produce codes.
+            try:
+                secret = self.get_totp_entry_secret(row["id"])
+                code = totp_code(secret, when)
+            except (SecretDecryptionError, TotpValidationError):
+                logger.warning(
+                    "Skipping authenticator entry %s (%s): its stored "
+                    "secret could not be read.",
+                    row["id"], row["label"])
+                continue
             codes.append({
                 "entry_id": row["id"],
                 "kind": "authenticator",
                 "label": row["label"],
                 "issuer": row["issuer"],
-                "code": totp_code(secret, when),
+                "code": code,
                 "period": PERIOD_SECONDS,
                 "seconds_remaining": remaining,
             })
@@ -552,7 +618,16 @@ class CredentialVault:
             ).fetchall()]
         by_id = {e["id"]: e for e in self.list_entries()}
         for login_id in login_ids:
-            secret = self.get_totp_secret(login_id)
+            # E7-04: same per-entry discipline as the standalone loop
+            # above — an undecryptable login TOTP is skipped, never
+            # raised out of the whole view.
+            try:
+                secret = self.get_totp_secret(login_id)
+            except SecretDecryptionError:
+                logger.warning(
+                    "Skipping login entry %s: its stored TOTP secret "
+                    "could not be decrypted.", login_id)
+                continue
             if secret is None:
                 continue
             try:

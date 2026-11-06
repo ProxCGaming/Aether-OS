@@ -13,6 +13,12 @@ TCP listener (database, debugger, …) must never be reported as running,
 because the sandboxed preview iframe could not load it. ``framework`` is
 project metadata from ``package.json`` and is reported whether or not a
 server is currently running, so the UI can say what would be started.
+
+One responder is excluded by identity, not by port: the Aether engine
+itself. It listens on a candidate port (8000) whenever the app is running
+— which is the only time detection is requested — so answering HTTP is
+not enough; the default probe also checks the responder's OpenAPI
+document and refuses a server that identifies as the engine (E7-02).
 """
 
 from __future__ import annotations
@@ -43,19 +49,62 @@ _FRAMEWORK_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
+# The engine's OpenAPI title (aether_engine/app.py: FastAPI(title=…)).
+# A dev server never serves an OpenAPI document under this title, so it
+# is a safe identity check for "this responder is the engine itself".
+_ENGINE_OPENAPI_TITLE = b"AETHER Engine"
+
+
+def _identifies_as_engine(port: int) -> bool:
+    """True when the server on ``port`` identifies as the Aether engine.
+
+    Fetches ``/openapi.json`` and looks for the engine's title in the
+    document's opening bytes (``info`` is the second key FastAPI
+    emits). Any failure — unreachable, not JSON, no title — means the
+    responder is NOT identified as the engine.
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=_PROBE_TIMEOUT_SECONDS) as sock:
+            sock.settimeout(_PROBE_TIMEOUT_SECONDS)
+            sock.sendall(
+                b"GET /openapi.json HTTP/1.0\r\nHost: localhost\r\n"
+                b"Connection: close\r\n\r\n")
+            body = b""
+            while len(body) < 8192:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                body += chunk
+                if _ENGINE_OPENAPI_TITLE in body:
+                    break
+    except OSError:
+        return False
+    # Accept both the compact and the spaced JSON separator: the title
+    # must be an "info.title" value, not a stray occurrence in a page.
+    return (b'"title":"' + _ENGINE_OPENAPI_TITLE + b'"') in body or (
+        b'"title": "' + _ENGINE_OPENAPI_TITLE + b'"') in body
+
+
 def _default_probe(port: int) -> bool:
-    """True when 127.0.0.1:<port> answers an HTTP request.
+    """True when 127.0.0.1:<port> answers an HTTP request and is a
+    plausible dev server.
 
     TCP-connect first, then a minimal ``GET /`` — only an ``HTTP/``
     status line counts. Any socket error means "not a dev server".
+    A responder that identifies as the Aether engine itself is not a
+    dev server either (E7-02): the engine occupies its port whenever
+    the app runs, so it would otherwise be a guaranteed false
+    positive pointing the preview at the engine's own address.
     """
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=_PROBE_TIMEOUT_SECONDS) as sock:
             sock.settimeout(_PROBE_TIMEOUT_SECONDS)
             sock.sendall(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
-            return sock.recv(64).startswith(b"HTTP/")
+            if not sock.recv(64).startswith(b"HTTP/"):
+                return False
     except OSError:
         return False
+    return not _identifies_as_engine(port)
 
 
 def _candidate_dirs(workspace_root: str | Path | None, project_path: str | Path | None) -> list[Path]:
