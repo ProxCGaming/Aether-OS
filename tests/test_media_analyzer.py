@@ -48,9 +48,19 @@ async def _fake_aembedding(model=None, input=None, **_kwargs):
 
 @pytest.fixture(autouse=True)
 def _reset_embedding_circuit_breaker():
+    # These tests stub the embedding MODEL call (litellm.aembedding);
+    # the fail-fast state episodic keeps around that call — the
+    # breaker timestamp AND the endpoint-suspect flag — is
+    # process-global and must start clean (same recipe as
+    # test_episodic_embedder_lifecycle._reset_embed_state). Resetting
+    # only the breaker leaves a leaked suspect flag in charge: every
+    # embed then dies at the 2s TCP probe of 127.0.0.1:11434 before
+    # the stubbed model call is ever reached (MERGE-REG-1).
     episodic._embed_unavailable_until = 0.0
+    episodic._embed_endpoint_suspect = False
     yield
     episodic._embed_unavailable_until = 0.0
+    episodic._embed_endpoint_suspect = False
 
 
 @pytest.fixture
