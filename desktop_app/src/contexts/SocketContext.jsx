@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
+import { createUiLogger, installUiLogging, messageTypeOf } from '../logUi';
 
 const SocketContext = createContext(null);
 
@@ -157,6 +158,23 @@ export const SocketProvider = ({ children }) => {
     setHeldMessages(heldQueueRef.current.map(describeQueuedMessage));
   }, []);
 
+  // Unified logging (5 Nov 2026): the renderer's app.log logger,
+  // lazy-init alongside the facade for the same reason — the
+  // facade's send/subscribe paths call it, so it must exist before
+  // any child can send. The send closure reaches the append-ui-log
+  // bridge only when it exists; without it (web/dev) the logger is
+  // inert (src/logUi.js). Window error forwarding is attached in
+  // the mount effect below, not here: listeners are a side effect,
+  // object creation is not.
+  const uiLoggerRef = useRef(null);
+  if (uiLoggerRef.current === null) {
+    uiLoggerRef.current = createUiLogger((entry) => {
+      if (window.electronAPI && typeof window.electronAPI.appendUiLog === 'function') {
+        try { window.electronAPI.appendUiLog(entry); } catch { /* logging never breaks the app */ }
+      }
+    });
+  }
+
   // Lazy-init during render (the documented exception to "don't write refs
   // during render"): AppContent mounts at the same time as this provider
   // and its mount effect runs BEFORE this provider's effect (child effects
@@ -168,6 +186,8 @@ export const SocketProvider = ({ children }) => {
         return statusRef.current ? WebSocket.OPEN : WebSocket.CLOSED;
       },
       send: (data) => {
+        // Message-TYPE trace (allowlist only, types never payloads).
+        uiLoggerRef.current.logMessageType('out', messageTypeOf(data));
         if (statusRef.current && window.electronAPI && window.electronAPI.sendEngineMessage) {
           window.electronAPI.sendEngineMessage(data);
           return 'sent';
@@ -198,6 +218,10 @@ export const SocketProvider = ({ children }) => {
               }
               deliveredIdentities.set(key, now);
             }
+            // Message-TYPE trace on delivery (allowlist only) —
+            // after dedup, so a redelivered packet is not traced
+            // twice for one delivery.
+            uiLoggerRef.current.logMessageType('in', messageTypeOf(data));
             handler({ data });
           });
           wsListeners.current.set(handler, cleanup);
@@ -252,6 +276,7 @@ export const SocketProvider = ({ children }) => {
           const parsed = JSON.parse(data);
           if (parsed.type === '_ws_status') {
             if (parsed.status === 'connected') {
+              uiLoggerRef.current.logWsEvent('open');
               statusRef.current = true;
               setIsConnected(true);
               // Wave 2 slice 4: reconnectCount is the refetch signal
@@ -265,6 +290,10 @@ export const SocketProvider = ({ children }) => {
               }
               checkQueue();
             } else {
+              // The renderer's record of the disconnect — the
+              // "engine closed" event the 5 Nov QA could not find
+              // in any log (main records its own socket too).
+              uiLoggerRef.current.logWsEvent('close');
               statusRef.current = false;
               setIsConnected(false);
               sawDisconnectRef.current = true;
@@ -299,6 +328,14 @@ export const SocketProvider = ({ children }) => {
       });
       wsListeners.current.clear();
     };
+  }, []);
+
+  // Unified logging: window errors + unhandled rejections forward
+  // to app.log for the life of the provider (i.e. the app). The
+  // facade logger above is the object the handlers report into.
+  useEffect(() => {
+    const { uninstall } = installUiLogging(uiLoggerRef.current);
+    return uninstall;
   }, []);
 
   const sendMessage = useCallback((type, payload = {}) => {

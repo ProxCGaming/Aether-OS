@@ -45,6 +45,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   clearFloatingTransferState: () => ipcRenderer.invoke('clear-floating-transfer-state'),
   openFloatingChat: (sessionId) => ipcRenderer.invoke('open-floating-chat', sessionId),
   openLogsFolder: () => ipcRenderer.invoke('open-logs-folder'),
+  // Unified logging (5 Nov 2026): renderer [ui] lines go out
+  // fire-and-forget (send, not invoke — logging never blocks the
+  // UI); the log viewer / bundle export / controls use invokes.
+  appendUiLog: (entry) => ipcRenderer.send('append-ui-log', entry),
+  readLogs: () => ipcRenderer.invoke('read-logs'),
+  getDesktopDiagnostics: () => ipcRenderer.invoke('get-desktop-diagnostics'),
+  clearLogs: () => ipcRenderer.invoke('clear-logs'),
+  setLogLevel: (level) => ipcRenderer.invoke('set-log-level', level),
   closeFloatingChat: () => ipcRenderer.invoke('close-floating-chat'),
   triggerSnip: () => ipcRenderer.invoke('trigger-snip'),
   onTriggerSnip: (callback) => {

@@ -71,14 +71,29 @@ def install_crash_logging() -> Path:
 
 def build_diagnostics(*, user_config: Any, health: dict, kg_count: int,
                       episodic_count: int, audit_log_path: Path,
-                      providers: list[str]) -> dict[str, Any]:
+                      providers: list[str],
+                      crash_log_path: Path | None = None) -> dict[str, Any]:
     """Assemble the redacted bundle. Counts only — no memory content."""
     tail: list[str] = []
     try:
         lines = Path(audit_log_path).read_text(encoding="utf-8", errors="replace").splitlines()
-        tail = lines[-50:]
+        tail = lines[-200:]
     except OSError:
         tail = []
+    # Bundle v2 (unified logging, 5 Nov 2026): the crash log's tail
+    # joins the bundle. Unlike the audit log — redacted at write
+    # time, so its tail ships as written — crash tracebacks are NOT
+    # redacted at write time, so every line passes through _redact
+    # here (the bare-string secret patterns) before it can leave the
+    # machine. A missing crash log is a healthy sign, not an error:
+    # the tail is simply empty.
+    crash_tail: list[str] = []
+    try:
+        crash_path = Path(crash_log_path) if crash_log_path is not None else logs_dir() / "crash.log"
+        crash_lines = crash_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        crash_tail = [_redact(line) for line in crash_lines[-200:]]
+    except OSError:
+        crash_tail = []
     # E10-F07: UserConfig is a dataclass exposing to_dict(); it has
     # no model_dump. Serialise through the API it actually has. A
     # failure here propagates — the export handler turns it into an
@@ -94,4 +109,5 @@ def build_diagnostics(*, user_config: Any, health: dict, kg_count: int,
         "provider_health": health,
         "memory": {"kg_facts": kg_count, "episodes": episodic_count},
         "audit_tail": tail,
+        "crash_tail": crash_tail,
     }

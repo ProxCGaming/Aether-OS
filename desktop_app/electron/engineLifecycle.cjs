@@ -138,12 +138,39 @@ function createEngineLifecycle(deps) {
     : null;
   let engineLogReady = false;
   let engineLogBroken = false;
+  // Unified logging (5 Nov 2026): engine.log rotates like app.log —
+  // 5 MB cap, 3 archives — so a long-lived install cannot grow the
+  // file forever. Size is tracked in memory (seeded from disk once
+  // the file is ready) so the hot path stays one append per line.
+  const ENGINE_LOG_MAX_BYTES = 5 * 1024 * 1024;
+  const ENGINE_LOG_KEEP_ARCHIVES = 3;
+  let engineLogBytes = 0;
+
+  function rotateEngineLogIfNeeded() {
+    if (engineLogBytes <= ENGINE_LOG_MAX_BYTES) return;
+    for (let i = ENGINE_LOG_KEEP_ARCHIVES - 1; i >= 1; i -= 1) {
+      const from = `${engineLogFilePath}.${i}`;
+      const to = `${engineLogFilePath}.${i + 1}`;
+      try {
+        if (fs.existsSync(from)) fs.renameSync(from, to);
+      } catch { /* best-effort: a failed shift must not lose the live file */ }
+    }
+    try {
+      if (fs.existsSync(engineLogFilePath)) {
+        fs.renameSync(engineLogFilePath, `${engineLogFilePath}.1`);
+      }
+    } catch { /* best-effort: if the live file cannot move, keep appending to it */ }
+    engineLogBytes = 0;
+  }
 
   function appendToEngineLog(message) {
     if (!engineLogFilePath || engineLogBroken) return;
     try {
       if (!engineLogReady) {
         fs.mkdirSync(path.dirname(engineLogFilePath), { recursive: true });
+        try {
+          engineLogBytes = fs.statSync(engineLogFilePath).size;
+        } catch { engineLogBytes = 0; }
         engineLogReady = true;
       }
       const stamp = new Date(now()).toISOString();
@@ -151,7 +178,10 @@ function createEngineLifecycle(deps) {
         .split('\n')
         .map((line) => `${stamp} ${line}`)
         .join('\n');
-      fs.appendFileSync(engineLogFilePath, `${body}\n`);
+      const chunk = `${body}\n`;
+      engineLogBytes += Buffer.byteLength(chunk, 'utf8');
+      rotateEngineLogIfNeeded();
+      fs.appendFileSync(engineLogFilePath, chunk);
     } catch {
       engineLogBroken = true;
     }

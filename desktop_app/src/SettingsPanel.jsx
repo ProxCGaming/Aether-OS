@@ -12,6 +12,7 @@ import './chat.css';
 import ProviderSettings from './components/Settings/ProviderSettings';
 import MemoryManagement from './components/Settings/MemoryManagement';
 import DiagnosticsPanel from './components/Settings/DiagnosticsPanel';
+import LogsPanel from './components/Settings/LogsPanel';
 import WorkspaceIndexingPanel from './components/Settings/WorkspaceIndexingPanel';
 import BrowserPolicyPanel from './components/Settings/BrowserPolicyPanel';
 import UsageSettingsPanel from './components/Settings/UsageSettingsPanel';
@@ -483,14 +484,31 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             : `Restore failed: ${data.payload.error}`);
         } else if (data.type === 'DIAGNOSTICS_EXPORT_RESPONSE') {
           if (data.payload.success) {
-            const blob = new Blob([JSON.stringify(data.payload.bundle, null, 2)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `aether-diagnostics-${new Date().toISOString().slice(0, 10)}.json`;
-            a.click();
-            URL.revokeObjectURL(url);
-            setVersionCheck('Diagnostics exported — the file contains no API keys and no memory content.');
+            // Bundle v2 (unified logging, 5 Nov 2026): the engine
+            // bundle gains the desktop half — app.log / engine.log /
+            // crash-electron tails + inventory, secret-scrubbed in
+            // main — merged under `desktop` before the download.
+            // Without the bridge (web/dev), or if the desktop half
+            // fails, the engine bundle downloads exactly as before:
+            // an export must never be lost to its own enrichment.
+            const engineBundle = data.payload.bundle;
+            const downloadBundle = (bundle) => {
+              const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `aether-diagnostics-${new Date().toISOString().slice(0, 10)}.json`;
+              a.click();
+              URL.revokeObjectURL(url);
+              setVersionCheck('Diagnostics exported — the file contains no API keys and no memory content.');
+            };
+            if (window.electronAPI && typeof window.electronAPI.getDesktopDiagnostics === 'function') {
+              window.electronAPI.getDesktopDiagnostics()
+                .then((desktop) => downloadBundle(desktop ? { ...engineBundle, desktop } : engineBundle))
+                .catch(() => downloadBundle(engineBundle));
+            } else {
+              downloadBundle(engineBundle);
+            }
           } else {
             setVersionCheck(`Diagnostics export failed: ${data.payload.error}`);
           }
@@ -1131,6 +1149,24 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                 )}
               </div>
             </div>
+
+            {/* Unified logging (5 Nov 2026): the Logs & Diagnostics
+                cards (status / viewer / controls) live below the
+                diagnostics-run card, which is unchanged. */}
+            <LogsPanel
+              isConnected={isConnected}
+              sendSettingsAction={sendSettingsAction}
+              onExportBundle={() => {
+                // Same request + queued honesty as the Advanced
+                // tab's export button; the response handler merges
+                // the desktop half into the bundle before download.
+                const disposition = sendSettingsAction('DIAGNOSTICS_EXPORT_REQUEST', {});
+                if (disposition === 'queued') {
+                  setVersionCheck('Diagnostics export queued — the file will download when the engine reconnects.');
+                }
+                return disposition;
+              }}
+            />
           </div>
         )}
 

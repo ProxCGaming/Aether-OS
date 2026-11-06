@@ -17,6 +17,7 @@ try {
 const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification, globalShortcut, nativeImage, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const WebSocket = require('ws');
 const { createWindowStateStore } = require('./electron/windowState.cjs');
 const { createEngineLifecycle } = require('./electron/engineLifecycle.cjs');
@@ -35,7 +36,14 @@ const {
   validateAccelerator,
   validateShowOpenDialogOptions,
   validateSessionId,
+  validateUiLogEntry,
 } = require('./electron/ipcValidation.cjs');
+const {
+  createAppLog,
+  scrubSecrets,
+  readLogTail,
+  logFileStat,
+} = require('./electron/appLog.cjs');
 const {
   buildContentSecurityPolicy,
   withCspResponseHeaders,
@@ -52,6 +60,74 @@ const {
 const floatingTransferState = createTransferStateStore();
 
 const isDev = process.env.NODE_ENV === 'development';
+
+// Unified logging (5 Nov 2026): the shell's durable log. Every
+// [main] line below goes through mainLog/mainWarn/mainError, which
+// keep the existing console passthrough AND append to
+// <userData>/logs/app.log via electron/appLog.cjs; renderer [ui]
+// lines arrive through the append-ui-log IPC and land in the same
+// file. Lazily created like the engine lifecycle, and the logger
+// itself can never throw (see appLog.cjs), so a logging failure
+// can never take the app down.
+let appLog = null;
+function getAppLog() {
+  if (!appLog) {
+    appLog = createAppLog({
+      fs,
+      userDataPath: app.getPath('userData'),
+    });
+  }
+  return appLog;
+}
+
+function formatLogArgs(args) {
+  return args
+    .map((arg) => {
+      if (arg instanceof Error) return arg.stack || arg.message || String(arg);
+      if (typeof arg === 'string') return arg;
+      try { return JSON.stringify(arg); } catch { return String(arg); }
+    })
+    .join(' ');
+}
+
+function mainLog(...args) {
+  console.log(...args);
+  try { getAppLog().info('main', formatLogArgs(args)); } catch { /* logging never breaks the app */ }
+}
+
+function mainWarn(...args) {
+  console.warn(...args);
+  try { getAppLog().warn('main', formatLogArgs(args)); } catch { /* logging never breaks the app */ }
+}
+
+function mainError(...args) {
+  console.error(...args);
+  try { getAppLog().error('main', formatLogArgs(args)); } catch { /* logging never breaks the app */ }
+}
+
+// The paths the log IPC reads. app.log + engine.log live in
+// <userData>/logs (the lifecycle's file); crash-electron.log is
+// the shell crash log from the block at the top of this file,
+// next to the engine's own logs in ~/.aether/logs.
+function appLogFilePath() {
+  return getAppLog().filePath();
+}
+
+function engineLogFilePath() {
+  return path.join(app.getPath('userData'), 'logs', 'engine.log');
+}
+
+function crashElectronLogPath() {
+  return path.join(os.homedir(), '.aether', 'logs', 'crash-electron.log');
+}
+
+function logInventory() {
+  return [
+    logFileStat(fs, appLogFilePath(), 'app.log'),
+    logFileStat(fs, engineLogFilePath(), 'engine.log'),
+    logFileStat(fs, crashElectronLogPath(), 'crash-electron.log'),
+  ].filter(Boolean);
+}
 
 // S3-M2: shell hardening — electron/securityPolicy.cjs owns every
 // decision; the code below is only wiring. The trust options are
@@ -70,7 +146,7 @@ function installSecurityPolicy() {
   // app's own page. The <webview> preview guests (M01) use their
   // own 'aether-preview' partition session and are untouched.
   session.defaultSession.setPermissionRequestHandler(
-    createPermissionRequestHandler(options, (msg) => console.warn(msg))
+    createPermissionRequestHandler(options, (msg) => mainWarn(msg))
   );
   session.defaultSession.setPermissionCheckHandler(
     createPermissionCheckHandler(options)
@@ -107,7 +183,7 @@ app.on('web-contents-created', (_event, contents) => {
   if (!shouldGuardWebContents(contents)) return;
   contents.on('will-navigate', (navEvent, url) => {
     if (!guardWillNavigate(navEvent, url, securityPolicyOptions())) {
-      console.warn(`[security] Blocked navigation away from the app: ${url}`);
+      mainWarn(`[security] Blocked navigation away from the app: ${url}`);
     }
   });
   contents.setWindowOpenHandler(() => windowOpenDecision());
@@ -194,7 +270,7 @@ function getEngineLifecycle() {
       resourcesPath: process.resourcesPath,
       userDataPath: app.getPath('userData'),
       baseEnv: process.env,
-      log: (...args) => console.log(...args),
+      log: (...args) => mainLog(...args),
     });
   }
   return engineLifecycle;
@@ -231,7 +307,7 @@ function startEngineAndTrack() {
       return result;
     })
     .catch((err) => {
-      console.error('Engine lifecycle start failed:', err);
+      mainError('Engine lifecycle start failed:', err);
       setEngineStartupState('failed');
       return null;
     });
@@ -249,7 +325,7 @@ function getToken() {
       try {
         return fs.readFileSync(spawnedTokenPath, 'utf8').trim();
       } catch (err) {
-        console.error('Failed to read spawned-engine token:', err);
+        mainError('Failed to read spawned-engine token:', err);
       }
     }
   }
@@ -264,7 +340,7 @@ function getToken() {
     const tokenPath = path.join(__dirname, '..', '.run', 'engine.token');
     return fs.readFileSync(tokenPath, 'utf8').trim();
   } catch (err) {
-    console.error('Failed to read token:', err);
+    mainError('Failed to read token:', err);
     return null;
   }
 }
@@ -287,7 +363,7 @@ function connectEngine() {
     : new WebSocket(wsUrl);
 
   wsClient.on('open', () => {
-    console.log('Main process connected to Engine WebSocket.');
+    mainLog('Main process connected to Engine WebSocket.');
     broadcastEngineMessage({ type: '_ws_status', status: 'connected' });
   });
 
@@ -313,14 +389,15 @@ function connectEngine() {
     }
   });
 
-  wsClient.on('close', () => {
-    console.log('Engine WebSocket closed.');
+  wsClient.on('close', (code, reason) => {
+    const reasonText = reason ? reason.toString() : '';
+    mainLog(`Engine WebSocket closed (code=${code}, reason=${reasonText || 'none'}).`);
     broadcastEngineMessage({ type: '_ws_status', status: 'disconnected' });
     setTimeout(connectEngine, 3000); // auto reconnect
   });
   
   wsClient.on('error', (err) => {
-    console.error('WebSocket error:', err);
+    mainError('WebSocket error:', err);
   });
 }
 
@@ -485,7 +562,7 @@ function registerSnipGlobalShortcut(shortcut) {
   try {
     registered = globalShortcut.register(currentSnipShortcut, triggerSnipFlow) !== false;
   } catch (err) {
-    console.error('Failed to register snip shortcut:', err);
+    mainError('Failed to register snip shortcut:', err);
   }
   if (!registered) {
     currentSnipShortcut = previous;
@@ -500,6 +577,12 @@ function registerSnipGlobalShortcut(shortcut) {
 
 app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return;
+  // Unified logging: the launch marker opens this session's slice
+  // of app.log (version + platform + pid, per the spec).
+  try {
+    getAppLog().launchMarker({ version: app.getVersion(), platform: process.platform, pid: process.pid });
+  } catch { /* logging never breaks startup */ }
+  mainLog('App ready.');
   installSecurityPolicy();
   createWindow();
   // E10-F06: if no engine already answers on the engine port, start
@@ -513,7 +596,7 @@ app.whenReady().then(() => {
   try {
     globalShortcut.register('Alt+Space', toggleMainWindow);
   } catch (err) {
-    console.error('Failed to register summon hotkey:', err);
+    mainError('Failed to register summon hotkey:', err);
   }
   // Epic 8, E8-4.1: global screen snip hotkey (Settings-changeable;
   // Open Point 13 default Ctrl+S, Cmd+S on macOS). The renderer
@@ -528,6 +611,7 @@ app.whenReady().then(() => {
 });
 
 app.on('will-quit', () => {
+  mainLog('App quitting (will-quit).');
   globalShortcut.unregisterAll();
   // E10-F06: the spawned engine belongs to this app instance; it
   // must not outlive it. stop() issues the SIGTERM synchronously;
@@ -567,7 +651,7 @@ function isTrustedIpcSender(event, channel) {
     appIndexPath: path.join(__dirname, 'dist', 'index.html'),
   });
   if (!trusted) {
-    console.warn(`[ipc] Refused '${channel}' from untrusted sender: ${getSenderUrl(event) || '(no URL)'}`);
+    mainWarn(`[ipc] Refused '${channel}' from untrusted sender: ${getSenderUrl(event) || '(no URL)'}`);
   }
   return trusted;
 }
@@ -667,11 +751,101 @@ ipcMain.handle('open-engine-log', async (event) => {
   return shell.openPath(logPath);
 });
 
+// Unified logging IPC (5 Nov 2026): the renderer's [ui] lines and
+// the Settings → Diagnostics log viewer / bundle export.
+//
+// append-ui-log is fire-and-forget (ipcMain.on, like engine-send):
+// a renderer logging a line must never block on the write. It is
+// rate-capped — a renderer stuck in an error loop must not be able
+// to flood the file faster than rotation can bound it — and every
+// entry passes validateUiLogEntry, so the renderer can only ever
+// write as source 'ui' with a known level and a bounded message.
+const UI_LOG_RATE_LIMIT = 120; // entries…
+const UI_LOG_RATE_WINDOW_MS = 1000; // …per rolling window
+let uiLogWindowStart = 0;
+let uiLogWindowCount = 0;
+
+ipcMain.on('append-ui-log', (event, entry) => {
+  if (!isTrustedIpcSender(event, 'append-ui-log')) return;
+  const nowMs = Date.now();
+  if (nowMs - uiLogWindowStart >= UI_LOG_RATE_WINDOW_MS) {
+    uiLogWindowStart = nowMs;
+    uiLogWindowCount = 0;
+  }
+  uiLogWindowCount += 1;
+  if (uiLogWindowCount > UI_LOG_RATE_LIMIT) return; // dropped silently: logging about logging helps no one
+  const check = validateUiLogEntry(entry);
+  if (!check.ok) {
+    mainWarn(`[ipc] Refused append-ui-log entry: ${check.error}`);
+    return;
+  }
+  try { getAppLog().log(check.value.source, check.value.level, check.value.message); } catch { /* never throws by design */ }
+});
+
+// The viewer's data: the tails of both durable logs plus the file
+// inventory (name/size/last-write per source). Raw lines — this is
+// the user's own machine; redaction applies to the EXPORT below.
+ipcMain.handle('read-logs', (event) => {
+  if (!isTrustedIpcSender(event, 'read-logs')) return null;
+  return {
+    appTail: readLogTail(fs, appLogFilePath(), 500),
+    engineTail: readLogTail(fs, engineLogFilePath(), 500),
+    inventory: logInventory(),
+    level: getAppLog().getLevel(),
+  };
+});
+
+// Bundle v2, desktop half: everything getDesktopDiagnostics adds
+// to the engine bundle at export time. The three tails pass
+// through the secret-pattern scrubber (the JS mirror of the
+// engine audit redactor's bare-string patterns, appLog.cjs) —
+// the bundle is built to be handed to another person.
+ipcMain.handle('get-desktop-diagnostics', (event) => {
+  if (!isTrustedIpcSender(event, 'get-desktop-diagnostics')) return null;
+  return {
+    app_version: app.getVersion(),
+    platform: process.platform,
+    app_log_tail: readLogTail(fs, appLogFilePath(), 500).map((line) => scrubSecrets(line)),
+    engine_log_tail: readLogTail(fs, engineLogFilePath(), 500).map((line) => scrubSecrets(line)),
+    crash_electron_tail: readLogTail(fs, crashElectronLogPath(), 200).map((line) => scrubSecrets(line)),
+    log_inventory: logInventory(),
+  };
+});
+
+// Clear logs (Settings → Diagnostics, behind the panel's two-step
+// confirmation): app.log via the logger (it owns the size cache),
+// engine.log by plain truncate (the lifecycle appends without a
+// size cache, so truncation cannot desync it). Crash logs are NOT
+// cleared — they are the record of last resort.
+ipcMain.handle('clear-logs', (event) => {
+  if (!isTrustedIpcSender(event, 'clear-logs')) return { ok: false, error: 'Refused: untrusted sender.' };
+  const appCleared = getAppLog().clear();
+  let engineCleared = true;
+  try {
+    fs.mkdirSync(path.dirname(engineLogFilePath()), { recursive: true });
+    fs.writeFileSync(engineLogFilePath(), '');
+  } catch {
+    engineCleared = false;
+  }
+  if (appCleared && engineCleared) {
+    return { ok: true };
+  }
+  return { ok: false, error: 'Some log files could not be cleared.' };
+});
+
+// The [main]/[ui] level threshold (Settings → Diagnostics select).
+ipcMain.handle('set-log-level', (event, level) => {
+  if (!isTrustedIpcSender(event, 'set-log-level')) return { ok: false, level: getAppLog().getLevel() };
+  const ok = getAppLog().setLevel(level);
+  if (ok) mainLog(`Log level set to ${getAppLog().getLevel()} from Settings.`);
+  return { ok, level: getAppLog().getLevel() };
+});
+
 ipcMain.on('engine-send', (event, msg) => {
   if (!isTrustedIpcSender(event, 'engine-send')) return;
   const check = validateEngineMessage(msg);
   if (!check.ok) {
-    console.warn(`[ipc] Refused engine-send message: ${check.error}`);
+    mainWarn(`[ipc] Refused engine-send message: ${check.error}`);
     return;
   }
   if (wsClient && wsClient.readyState === WebSocket.OPEN) {
@@ -683,7 +857,7 @@ ipcMain.handle('open-floating-chat', (event, sessionId) => {
   if (!isTrustedIpcSender(event, 'open-floating-chat')) return;
   const check = validateSessionId(sessionId);
   if (!check.ok) {
-    console.warn(`[ipc] Refused open-floating-chat: ${check.error}`);
+    mainWarn(`[ipc] Refused open-floating-chat: ${check.error}`);
     return;
   }
   createFloatingChat(check.value);
@@ -733,7 +907,7 @@ ipcMain.handle('show-open-dialog', async (event, options) => {
   if (!isTrustedIpcSender(event, 'show-open-dialog')) return null;
   const check = validateShowOpenDialogOptions(options);
   if (!check.ok) {
-    console.warn(`[ipc] Refused show-open-dialog options: ${check.error}`);
+    mainWarn(`[ipc] Refused show-open-dialog options: ${check.error}`);
     return null;
   }
   const win = BrowserWindow.fromWebContents(event.sender);
@@ -770,12 +944,12 @@ ipcMain.handle('register-snip-shortcut', (event, shortcut) => {
   }
   const check = validateAccelerator(shortcut);
   if (!check.ok) {
-    console.warn(`[ipc] Refused snip shortcut: ${check.error}`);
+    mainWarn(`[ipc] Refused snip shortcut: ${check.error}`);
     return { ok: false, shortcut: currentSnipShortcut };
   }
   const ok = registerSnipGlobalShortcut(check.value);
   if (!ok) {
-    console.warn(`[ipc] Snip shortcut '${check.value}' could not be registered; '${currentSnipShortcut}' is still active.`);
+    mainWarn(`[ipc] Snip shortcut '${check.value}' could not be registered; '${currentSnipShortcut}' is still active.`);
   }
   return { ok, shortcut: currentSnipShortcut };
 });

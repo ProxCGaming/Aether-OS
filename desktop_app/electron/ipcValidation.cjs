@@ -266,6 +266,36 @@ function validateSessionId(sessionId) {
   return { ok: true, value: sessionId };
 }
 
+const UI_LOG_LEVELS = new Set(['DEBUG', 'INFO', 'WARN', 'ERROR']);
+const UI_LOG_MAX_MESSAGE_CHARS = 2000;
+
+/**
+ * append-ui-log: one renderer log entry on its way to app.log.
+ * The renderer may only ever speak as source 'ui' (main's own
+ * lines are written by main itself), the level must be one of the
+ * logger's fixed set, and the message is a single string truncated
+ * to UI_LOG_MAX_MESSAGE_CHARS — truncation, not refusal, so a
+ * runaway error string still leaves a trace instead of vanishing.
+ * Anything else about the entry (extra keys a compromised frame
+ * might attach) is dropped: the returned value is a clean copy.
+ */
+function validateUiLogEntry(entry) {
+  if (!isPlainObject(entry)) return { ok: false, error: 'Log entry must be an object.' };
+  if (entry.source !== 'ui') return { ok: false, error: "Log entry source must be 'ui'." };
+  if (typeof entry.level !== 'string' || !UI_LOG_LEVELS.has(entry.level.toUpperCase())) {
+    return { ok: false, error: 'Log entry level must be one of DEBUG, INFO, WARN, ERROR.' };
+  }
+  if (typeof entry.message !== 'string') return { ok: false, error: 'Log entry message must be a string.' };
+  return {
+    ok: true,
+    value: {
+      source: 'ui',
+      level: entry.level.toUpperCase(),
+      message: entry.message.slice(0, UI_LOG_MAX_MESSAGE_CHARS),
+    },
+  };
+}
+
 module.exports = {
   DEV_ORIGIN,
   getSenderUrl,
@@ -276,4 +306,7 @@ module.exports = {
   validateAccelerator,
   validateShowOpenDialogOptions,
   validateSessionId,
+  validateUiLogEntry,
+  UI_LOG_LEVELS,
+  UI_LOG_MAX_MESSAGE_CHARS,
 };

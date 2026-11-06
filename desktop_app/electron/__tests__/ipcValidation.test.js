@@ -31,6 +31,8 @@ const {
   validateAccelerator,
   validateShowOpenDialogOptions,
   validateSessionId,
+  validateUiLogEntry,
+  UI_LOG_MAX_MESSAGE_CHARS,
 } = require('../ipcValidation.cjs');
 
 // The app's own pages, exactly as main.cjs loads them:
@@ -301,6 +303,11 @@ const EXPECTED_CHANNELS = [
   // 'engine-state' broadcast is a webContents.send, not a handler,
   // so it is not a registered channel here.
   'get-engine-state', 'retry-engine-start', 'open-engine-log',
+  // Unified logging channels (5 Nov 2026) — same sender guard;
+  // append-ui-log is an ipcMain.on (fire-and-forget), the rest are
+  // handles for the Diagnostics log viewer / bundle export.
+  'append-ui-log', 'read-logs', 'get-desktop-diagnostics',
+  'clear-logs', 'set-log-level',
 ];
 
 function registrationSlices(source) {
@@ -346,10 +353,41 @@ describe('S3-M3 main.cjs wiring contract', () => {
     expect(byChannel['register-snip-shortcut']).toContain('validateAccelerator');
     expect(byChannel['show-open-dialog']).toContain('validateShowOpenDialogOptions');
     expect(byChannel['open-floating-chat']).toContain('validateSessionId');
+    expect(byChannel['append-ui-log']).toContain('validateUiLogEntry');
   });
 
   it('capture-screen keeps its existing geometry validation', () => {
     const byChannel = Object.fromEntries(registrationSlices(mainSource).map((s) => [s.channel, s.body]));
     expect(byChannel['capture-screen']).toContain('computeCaptureGeometry');
+  });
+});
+
+describe('validateUiLogEntry (append-ui-log)', () => {
+  it('accepts a well-formed ui entry and returns a clean copy', () => {
+    const check = validateUiLogEntry({ source: 'ui', level: 'warn', message: 'socket closed', extra: 'dropped' });
+    expect(check.ok).toBe(true);
+    expect(check.value).toEqual({ source: 'ui', level: 'WARN', message: 'socket closed' });
+  });
+
+  it('refuses any source other than ui', () => {
+    expect(validateUiLogEntry({ source: 'main', level: 'INFO', message: 'x' }).ok).toBe(false);
+    expect(validateUiLogEntry({ source: 'engine', level: 'INFO', message: 'x' }).ok).toBe(false);
+    expect(validateUiLogEntry({ level: 'INFO', message: 'x' }).ok).toBe(false);
+  });
+
+  it('refuses unknown levels and non-string messages', () => {
+    expect(validateUiLogEntry({ source: 'ui', level: 'SHOUTY', message: 'x' }).ok).toBe(false);
+    expect(validateUiLogEntry({ source: 'ui', level: 'INFO', message: 42 }).ok).toBe(false);
+    expect(validateUiLogEntry({ source: 'ui', level: 'INFO' }).ok).toBe(false);
+    expect(validateUiLogEntry(null).ok).toBe(false);
+    expect(validateUiLogEntry('a string').ok).toBe(false);
+    expect(validateUiLogEntry([{ source: 'ui', level: 'INFO', message: 'x' }]).ok).toBe(false);
+  });
+
+  it('truncates an over-long message instead of refusing it', () => {
+    const long = 'x'.repeat(UI_LOG_MAX_MESSAGE_CHARS + 500);
+    const check = validateUiLogEntry({ source: 'ui', level: 'ERROR', message: long });
+    expect(check.ok).toBe(true);
+    expect(check.value.message).toHaveLength(UI_LOG_MAX_MESSAGE_CHARS);
   });
 });
