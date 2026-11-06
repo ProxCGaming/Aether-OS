@@ -49,6 +49,15 @@ MCP_RESOURCE_MAX_CHARS = 20000
 # is user-supplied text from an untrusted server, never unbounded.
 MCP_PROMPT_MAX_CHARS = 20000
 
+# N-02 (S1): post-cancel grace for a timed-out tool call. After the
+# per-call timeout fires, the session task is cancelled and awaited so
+# its outcome is retrieved — but a dead server's SDK task can ignore
+# cancellation (the exact case the timeout exists for), so that await
+# is bounded by this grace and the timeout outcome is raised within
+# timeout + grace regardless. A well-behaved task unwinds in
+# milliseconds once cancelled; the grace is only a backstop.
+MCP_TOOL_CALL_CANCEL_GRACE_SECONDS = 5
+
 # E3-F05: stdio resource governance. Stdio servers are spawned through
 # stdio_launcher.py, which applies worker-equivalent caps before the
 # server's code runs (POSIX: rlimits via exec; Windows: a supervising
@@ -919,7 +928,20 @@ class MCPClientManager:
         except TimeoutError:
             inner.cancel()
             try:
-                await inner
+                # N-02 (S1): this await is itself bounded by the
+                # cancel grace — an unbounded await here wedges the
+                # call forever when the SDK task ignores cancellation
+                # and never reaches the failed-marking below. The
+                # shield is load-bearing, not decoration: a bare
+                # wait_for(inner) delegates our cancellation to the
+                # inner task, so a task that swallows CancelledError
+                # stretches the "bounded" wait exactly like the
+                # unbounded await did; the shield's future completes
+                # the wait at the grace deadline regardless.
+                await asyncio.wait_for(
+                    asyncio.shield(inner),
+                    timeout=MCP_TOOL_CALL_CANCEL_GRACE_SECONDS,
+                )
             except BaseException as await_err:  # noqa: BLE001 — the timed-out task's outcome (incl. CancelledError) is intentionally discarded
                 logger.debug(
                     "MCP tool call task ended after timeout cancel: %s", await_err
