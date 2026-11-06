@@ -128,10 +128,13 @@ export function PayloadDrawer({ title, data, icon: Icon, defaultOpen = false, em
     countLabel = `${data.length} chars`;
   }
 
-  const handleCopy = (e) => {
+  const handleCopy = async (e) => {
     e.stopPropagation();
     try {
-      navigator.clipboard.writeText(formattedText);
+      // D1-C8: writeText is async — the old synchronous try/catch
+      // could not see its rejection and showed "Copied" for a copy
+      // that never happened. Await it; only then claim success.
+      await navigator.clipboard.writeText(formattedText);
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
     } catch (err) {}
@@ -752,7 +755,13 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
     } else {
       const text = item.text?.trim() || '';
       // Filter out redundant supervisor delegation texts or echoed assistant conversational outputs
-      if (!text || text.startsWith('[Supervisor] -> Delegating') || text.startsWith('Hello! The current time')) {
+      // D1-C10: the '[Supervisor] -> Delegating' drop is structural
+      // (it duplicates the NODE_ACTIVITY handoff rendering). A
+      // hard-coded greeting prefix used to sit beside it — content
+      // sniffing that hid any legitimate thought beginning with
+      // those words and would silently stop working the day the
+      // echoed phrasing changed; it is gone.
+      if (!text || text.startsWith('[Supervisor] -> Delegating')) {
         return;
       }
       if (currentGroup && !currentGroup.rawDelta && currentGroup.activity?.from_node === item.node) {
@@ -767,6 +776,33 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
       }
     }
   });
+
+  // D1-C1: bind pending tool cards to pending approvals by CALL
+  // ORDER, not by tool name alone. The wire carries no per-call
+  // id (TOOL_ACTIVITY and TOOL_APPROVAL_REQUEST payloads share
+  // only tool_name / args / task_id), and the engine raises
+  // approvals in call order — it interrupts on each call before
+  // running the next — so the k-th still-pending card for a tool
+  // owns the k-th undecided approval for that tool. The old
+  // name-only `find` bound EVERY card to the first approval: a
+  // card displaying call B's arguments approved call A.
+  const approvalByCardKey = new Map();
+  {
+    const queuesByTool = new Map();
+    (pendingApprovals || []).forEach((a) => {
+      const queue = queuesByTool.get(a.tool_name) || [];
+      queue.push(a);
+      queuesByTool.set(a.tool_name, queue);
+    });
+    treeNodes.forEach((item) => {
+      if (item.type === 'tool' && item.payload?.status === 'pending') {
+        const queue = queuesByTool.get(item.payload?.tool_name);
+        if (queue && queue.length > 0) {
+          approvalByCardKey.set(item.key, queue.shift());
+        }
+      }
+    });
+  }
 
   if (treeNodes.length === 0 && !isThinking && !hasError) return null;
 
@@ -867,7 +903,7 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
                 );
               }
               if (item.type === 'tool') {
-                const approval = pendingApprovals.find(a => a.tool_name === item.payload?.tool_name);
+                const approval = approvalByCardKey.get(item.key) || null;
                 return (
                   <ToolActivityCard 
                     key={item.key} 
@@ -1058,8 +1094,29 @@ export function ScratchpadPanel({ scratchpad }) {
   );
 }
 
-function ContextMenu({ menu, onClose, onShowToast, setInput }) {
+function ContextMenu({ menu, onClose, onShowToast }) {
   if (!menu) return null;
+
+  // D1-C3: Cut/Paste commit into the element the menu opened on.
+  // Writing through the prototype value setter and dispatching
+  // an `input` event routes the new value through the onChange
+  // of whichever React component owns THAT field — the composer,
+  // the approval-args editor, any field. The menu used to call
+  // the composer's own setInput unconditionally, so cutting
+  // text in the args editor overwrote the composer draft and
+  // left the editor itself untouched.
+  const commitElementValue = (el, nextVal) => {
+    const proto = el.tagName === 'TEXTAREA'
+      ? window.HTMLTextAreaElement.prototype
+      : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) {
+      setter.call(el, nextVal);
+    } else {
+      el.value = nextVal;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  };
 
   const handleCopySelection = async (e) => {
     e.stopPropagation();
@@ -1099,7 +1156,7 @@ function ContextMenu({ menu, onClose, onShowToast, setInput }) {
         try {
           await navigator.clipboard.writeText(cutText);
           const nextVal = val.slice(0, start) + val.slice(end);
-          setInput(nextVal);
+          commitElementValue(el, nextVal);
           onShowToast('Cut to clipboard');
           setTimeout(() => {
             el.selectionStart = el.selectionEnd = start;
@@ -1124,7 +1181,7 @@ function ContextMenu({ menu, onClose, onShowToast, setInput }) {
           const end = el.selectionEnd || 0;
           const val = el.value || '';
           const nextVal = val.slice(0, start) + text + val.slice(end);
-          setInput(nextVal);
+          commitElementValue(el, nextVal);
           onShowToast('Pasted from clipboard');
           setTimeout(() => {
             el.selectionStart = el.selectionEnd = start + text.length;
@@ -1527,6 +1584,11 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
 }
 
 
+// D1-C6: how long the browser card may show an optimistic
+// control state the engine has not confirmed before falling
+// back to the last engine-confirmed state.
+const BROWSER_CONTROL_CONFIRM_MS = 5000;
+
 export default function DraggableChatWindow({ 
   messages, 
   onSendMessage, 
@@ -1549,7 +1611,6 @@ export default function DraggableChatWindow({
   slashCommands = [],
   isSidebarCollapsed = false,
   onExportSession = () => {},
-  sessionId = null,
   rewindManifest = null,
   onRewindRequest = null,
   onForkRequest = null,
@@ -1585,7 +1646,6 @@ export default function DraggableChatWindow({
   dictationState = null,
   readAloudState = null,
   onDictationStart = null,
-  onDictationChunk = null,
   onDictationStop = null,
   onReadAloudStart = null,
   onReadAloudStop = null
@@ -1636,9 +1696,12 @@ export default function DraggableChatWindow({
 
   const dictationStreamRef = useRef(null);
   const baseInputRef = useRef('');
-  const readAloudAudioCtxRef = useRef(null);
-  const readAloudSourcesRef = useRef(new Set());
-  const readAloudPlayHeadRef = useRef(0);
+  // D1-C11: whether a mic press is currently active (see
+  // handleMicStart / handleMicEnd).
+  const micPressActiveRef = useRef(false);
+  // D1-C7: this component's old private read-aloud refs
+  // (AudioContext / sources / play-head) are gone — its sources
+  // set was never populated; playback lives in App.
 
   useEffect(() => {
     if (dictationState?.error) {
@@ -1694,6 +1757,7 @@ export default function DraggableChatWindow({
       if (typeof e.stopPropagation === 'function') e.stopPropagation();
     }
     if (isDictating) return;
+    micPressActiveRef.current = true;
     setDictationError(null);
     baseInputRef.current = input;
 
@@ -1721,6 +1785,14 @@ export default function DraggableChatWindow({
       if (typeof e.preventDefault === 'function') e.preventDefault();
       if (typeof e.stopPropagation === 'function') e.stopPropagation();
     }
+    // D1-C11: one press ends dictation once. The button binds
+    // mouseUp AND mouseLeave AND touchEnd, so a press ending
+    // with the pointer sliding off the button fired the stop
+    // twice; the first end consumes the press and later ones
+    // are no-ops (a bare mouseLeave that was never a press
+    // included).
+    if (!micPressActiveRef.current) return;
+    micPressActiveRef.current = false;
     if (dictationStreamRef.current) {
       try {
         dictationStreamRef.current.getTracks().forEach((t) => t.stop());
@@ -1747,28 +1819,20 @@ export default function DraggableChatWindow({
     }
   };
 
-  const stopReadAloudPlayback = () => {
-    readAloudSourcesRef.current.forEach((src) => {
-      try { src.stop(); } catch {}
-    });
-    readAloudSourcesRef.current.clear();
-    if (readAloudAudioCtxRef.current) {
-      readAloudPlayHeadRef.current = readAloudAudioCtxRef.current.currentTime;
-    } else {
-      readAloudPlayHeadRef.current = 0;
-    }
-  };
+  // D1-C7: a local stopReadAloudPlayback used to sit here,
+  // stopping a sources set that was never populated (chunks are
+  // decoded and played in App) — an inert duplicate of App's
+  // stopAppReadAloud. The real stop is App's, reached through
+  // onReadAloudStop / onReadAloudStart in the toggle below.
 
   const handleToggleReadAloud = (msg, idx) => {
     const mid = msg.id || String(idx);
     setReadAloudError(null);
 
     if (playingMessageId === mid) {
-      stopReadAloudPlayback();
       setPlayingMessageId(null);
       if (onReadAloudStop) onReadAloudStop(mid);
     } else {
-      stopReadAloudPlayback();
       setPlayingMessageId(mid);
       if (onReadAloudStart) {
         onReadAloudStart(mid, msg.content || '');
@@ -1815,21 +1879,38 @@ export default function DraggableChatWindow({
   }, [browserActivity, browserSession, localControlState]);
 
   const handleBrowserControlClick = React.useCallback((action) => {
-    if (action === 'pause') {
-      setLocalControlState('paused');
-    } else if (action === 'resume') {
-      setLocalControlState('agent');
-    } else if (action === 'take_control') {
-      setLocalControlState('user');
-    } else if (action === 'return_control') {
-      setLocalControlState('agent');
-    } else if (action === 'stop') {
-      setLocalControlState('stopped');
+    const optimisticState = {
+      pause: 'paused',
+      resume: 'agent',
+      take_control: 'user',
+      return_control: 'agent',
+      stop: 'stopped',
+    }[action];
+    // D1-C6: while offline the request is queued, not executed —
+    // the card keeps showing the engine-confirmed state rather
+    // than claiming a state that has not even been sent yet.
+    if (optimisticState && !chatOffline) {
+      setLocalControlState(optimisticState);
     }
     if (onBrowserControl) {
       onBrowserControl(action);
     }
-  }, [onBrowserControl]);
+  }, [onBrowserControl, chatOffline]);
+
+  // D1-C6: an optimistic control state is a claim made ahead of
+  // the engine. Bound it: if the engine's own state (the
+  // browserSession prop) has not confirmed it within the
+  // window, the card falls back to the last engine-confirmed
+  // state instead of presenting the guess as settled fact
+  // indefinitely — worst case, "Stopped" over a browser that is
+  // still running. A confirmation clears localControlState
+  // through the prop-change reset above, which also cancels
+  // this timer via the cleanup.
+  useEffect(() => {
+    if (localControlState === null) return undefined;
+    const timer = setTimeout(() => setLocalControlState(null), BROWSER_CONTROL_CONFIRM_MS);
+    return () => clearTimeout(timer);
+  }, [localControlState]);
 
 
   useEffect(() => {
@@ -1910,6 +1991,17 @@ export default function DraggableChatWindow({
 
   const toastTimeoutRef = useRef(null);
   const messagesEndRef = useRef(null);
+  // D1-C5: whether the reader is at (or near) the bottom of the
+  // feed. Auto-scroll follows new messages only while this
+  // holds; a user who scrolled up to read history is left where
+  // they are.
+  const stickToBottomRef = useRef(true);
+  const feedScrollRef = useRef(null);
+  const handleFeedScroll = () => {
+    const el = feedScrollRef.current;
+    if (!el) return;
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 120;
+  };
   const nodeRef = useRef(null);
   const textareaRef = useRef(null);
   const slashPopupRef = useRef(null);
@@ -1931,26 +2023,35 @@ export default function DraggableChatWindow({
     const handleGlobalClick = (e) => {
       setContextMenu(null);
       setOpenStepMenu(null);
+      // D1-C4: each popover's dismissal is INDEPENDENT. The old
+      // brace nesting made the cost/context closes conditional
+      // on the click also landing outside the export container,
+      // and the step-picker close conditional on both of those —
+      // so those popovers survived clicks that should have
+      // dismissed them.
       if (exportMenuRef.current && !exportMenuRef.current.contains(e.target)) {
         setShowExportMenu(false);
+      }
       if (costMenuRef.current && !costMenuRef.current.contains(e.target)) {
         setShowCostPopover(false);
       }
       if (contextMenuRef.current && !contextMenuRef.current.contains(e.target)) {
         setShowContextPopover(false);
+      }
       if (stepPickerRef.current && !stepPickerRef.current.contains(e.target)) {
         setShowStepPicker(false);
       }
-      }
-      }
     };
-    const handleGlobalKeyDown = (e) => {
+    const handleGlobalKeyDown = (e) => {
       if (e.key === 'Escape') {
         setContextMenu(null);
         setShowExportMenu(false);
         setShowCostPopover(false);
+        // D1-C4: Escape omitted these two popovers entirely.
+        setShowContextPopover(false);
+        setShowStepPicker(false);
       }
-    };
+    };
     window.addEventListener('click', handleGlobalClick);
     window.addEventListener('scroll', handleGlobalClick, true);
     window.addEventListener('keydown', handleGlobalKeyDown);
@@ -2094,7 +2195,7 @@ export default function DraggableChatWindow({
   };
 
   useEffect(() => {
-    if (!isMinimized) {
+    if (!isMinimized && stickToBottomRef.current) {
       scrollToBottom();
     }
   }, [messages, isThinking, isMinimized]);
@@ -2104,6 +2205,8 @@ export default function DraggableChatWindow({
     // While a task runs, submitting steers it (Epic 1, E1-07) - App
     // decides START_TASK vs STEER_TASK; the input must not dead-end.
     if (input.trim() || attachments.length > 0) {
+      // Sending your own message returns the feed to the bottom.
+      stickToBottomRef.current = true;
       if (attachments.length > 0) {
         onSendMessage(input.trim(), attachments);
       } else {
@@ -2628,7 +2731,7 @@ export default function DraggableChatWindow({
         {/* Chat Feed */}
         {!isMinimized && (
           <>
-            <div className="chat-scroll" style={{
+            <div className="chat-scroll" ref={feedScrollRef} onScroll={handleFeedScroll} style={{
               flex: 1,
               padding: '20px',
               overflowY: 'auto',
@@ -2649,10 +2752,16 @@ export default function DraggableChatWindow({
                 )
               )}
 
+              {/* D1-C9: rows are keyed by the message's stable id
+                  (index only as a fallback for the rare id-less
+                  local bubble) — index keys handed one message's
+                  row state (e.g. an expanded pipeline) to
+                  whichever message landed at that index after
+                  the list was cut by an edit, rewind or fork. */}
               {messages.map((msg, i) => {
                 if (msg.role === 'system') {
                   return (
-                    <div key={i} data-message-id={msg.id || undefined} style={{ 
+                    <div key={msg.id || i} data-message-id={msg.id || undefined} style={{ 
                       display: 'flex', 
                       alignItems: 'center', 
                       gap: '12px', 
@@ -2671,7 +2780,7 @@ export default function DraggableChatWindow({
 
                 if (msg.role === 'tool_approval') {
                   return (
-                    <div key={i} data-message-id={msg.id || undefined} style={{ 
+                    <div key={msg.id || i} data-message-id={msg.id || undefined} style={{ 
                       margin: '8px 0', 
                       background: 'rgba(0, 0, 0, 0.4)', 
                       border: '1px solid rgba(239, 68, 68, 0.3)',
@@ -2782,7 +2891,7 @@ export default function DraggableChatWindow({
 
                 if (msg.role === 'plugin_approval') {
                   return (
-                    <div key={i} data-message-id={msg.id || undefined} style={{ 
+                    <div key={msg.id || i} data-message-id={msg.id || undefined} style={{ 
                       margin: '8px 0', 
                       background: 'rgba(0, 0, 0, 0.4)', 
                       border: '1px solid rgba(59, 130, 246, 0.3)',
@@ -2838,7 +2947,7 @@ export default function DraggableChatWindow({
                   : null;
 
                 return (
-                  <div key={i} data-message-id={msg.id || undefined} className={`chat-message ${msg.role === 'user' ? 'user' : 'agent'}`} style={{
+                  <div key={msg.id || i} data-message-id={msg.id || undefined} className={`chat-message ${msg.role === 'user' ? 'user' : 'agent'}`} style={{
                     display: 'flex',
                     flexDirection: msg.role === 'user' ? 'row-reverse' : 'row',
                     gap: '12px',
@@ -3466,7 +3575,6 @@ export default function DraggableChatWindow({
           menu={contextMenu} 
           onClose={() => setContextMenu(null)} 
           onShowToast={showToast}
-          setInput={setInput}
         />
       </div>
   );

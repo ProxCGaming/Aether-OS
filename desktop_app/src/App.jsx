@@ -5,7 +5,7 @@ import { SocketProvider, useAetherSocket } from './contexts/SocketContext';
 // interactivity don't wait on it. The Suspense fallback paints the
 // same background colour, so the graph simply fades in when ready.
 const ForceGraph3D = React.lazy(() => import('react-force-graph-3d'));
-import { Send, Settings, CheckCircle2, Circle, Bot, User, Trash2, X, Plus, TerminalSquare, MessageSquare, LayoutDashboard, Folder, FolderInput, BarChart2, Minus, Square, LogIn, Menu, Pencil, Upload, Layers } from 'lucide-react';
+import { Settings, Trash2, X, Plus, MessageSquare, LayoutDashboard, Folder, FolderInput, Minus, Square, LogIn, Menu, Pencil, Upload, Layers } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
 import SettingsPanel from './SettingsPanel';
 import { resolveSnipHotkey } from './snipHotkey';
@@ -127,6 +127,16 @@ function AppContent() {
   const [status, setStatus] = useState('Initializing');
   const [isThinking, setIsThinking] = useState(false);
   const [chatMessages, setChatMessages] = useState([]);
+  // D1-A1: the engine-message handler is registered once (mount-only
+  // effect), so anything it reads must come through a ref — render
+  // state captured by that closure is frozen at its mount-time
+  // value. isThinkingRef mirrors isThinking for the handler's
+  // SESSION_GET_RESPONSE merge-back; chatMessagesRef mirrors the
+  // visible list for the handler's THINKING branch (D1-A11).
+  const isThinkingRef = useRef(false);
+  useEffect(() => { isThinkingRef.current = isThinking; }, [isThinking]);
+  const chatMessagesRef = useRef([]);
+  useEffect(() => { chatMessagesRef.current = chatMessages; }, [chatMessages]);
   const [isChatDetached, setIsChatDetached] = useState(false);
   
   // Settings State
@@ -236,6 +246,12 @@ function AppContent() {
   }, []);
 
   const [sessions, setSessions] = useState([]);
+  // D1-A1/A2: mirror of the session list for the once-registered
+  // message handler — SESSION_DELETE_RESPONSE computes the
+  // post-delete list and the follow-up switch from this ref,
+  // outside any state updater.
+  const sessionsRef = useRef([]);
+  useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
   // Epic 1 UI batch: per-session plan mode (E1-09 UI). Keyed by session
   // id; the '__pending' key holds the choice made before the first
   // session exists and is adopted by the session when it is created.
@@ -446,7 +462,7 @@ function AppContent() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [slashCommands, setSlashCommands] = useState([]);
   const [importStatus, setImportStatus] = useState(null);
-  const [_exportStatus, setExportStatus] = useState(null);
+  const [exportStatus, setExportStatus] = useState(null);
   // Epic 8, E8-2.1: Artifacts canvas state (auto-derived, per-session, view-only)
   const [isCanvasOpen, setIsCanvasOpen] = useState(false);
   const [canvasArtifacts, setCanvasArtifacts] = useState([]);
@@ -803,7 +819,7 @@ function AppContent() {
         return;
       }
         if (data.type === 'hello') {
-          setStatus(`Online / ${data.payload.active_model || 'Agent'}`);
+          setStatus(`Online / ${data.payload?.active_model || 'Agent'}`);
         } else if (data.type === 'TASK_CREATED') {
           // E6-F10: TASK_CREATED is the start event the engine
           // actually emits (graph + fast-chat runners); TASK_STARTED
@@ -893,12 +909,18 @@ function AppContent() {
                 pendingThinkingRef.current[bufferKey] = appendThoughtDelta(pendingThinkingRef.current[bufferKey] || [], thinkNode, thinkDelta);
               }
             } else {
-              setChatMessages(prev => {
-                const updated = applyThinking(prev);
-                if (updated) return updated;
+              // D1-A11: no side effects inside a state updater
+              // (StrictMode double-invokes them, which double-appended
+              // the buffered delta). The decision is made against the
+              // ref mirror of the visible list; the mirror is updated
+              // synchronously so back-to-back deltas compose.
+              const updated = applyThinking(chatMessagesRef.current);
+              if (updated) {
+                chatMessagesRef.current = updated;
+                setChatMessages(updated);
+              } else {
                 pendingThinkingRef.current[bufferKey] = appendThoughtDelta(pendingThinkingRef.current[bufferKey] || [], thinkNode, thinkDelta);
-                return prev;
-              });
+              }
             }
           }
         } else if (data.type === 'SCRATCHPAD') {
@@ -916,11 +938,11 @@ function AppContent() {
             setScratchpadBySession(prev => ({ ...prev, [padSession]: padEntry }));
           }
         } else if (data.type === 'TASK_PROGRESS') {
-          let delta = data.payload.text_delta;
+          let delta = data.payload?.text_delta;
           if (delta !== undefined && delta !== null && typeof delta !== 'string') {
             delta = JSON.stringify(delta, null, 2);
           }
-          const node = data.payload.node;
+          const node = data.payload?.node;
           const isThought = node && node !== 'assistant' && node !== 'agent';
           
           // Filter out supervisor delegation strings that duplicate NODE_ACTIVITY
@@ -1030,9 +1052,15 @@ function AppContent() {
               const updatedThoughts = [...currentThoughts];
               
               if (data.payload.status !== 'pending') {
-                const pendingIdx = updatedThoughts.findLastIndex(t => 
-                  t.type === 'TOOL_ACTIVITY' && 
-                  t.payload?.tool_name === data.payload.tool_name && 
+                // D1-A6: results land in call order, so a result
+                // belongs to the FIRST still-pending call of this
+                // tool — the previous findLastIndex handed it to the
+                // LAST one and cross-wired the arguments of
+                // overlapping same-tool calls (parallel read_files
+                // are routine).
+                const pendingIdx = updatedThoughts.findIndex(t =>
+                  t.type === 'TOOL_ACTIVITY' &&
+                  t.payload?.tool_name === data.payload.tool_name &&
                   t.payload?.status === 'pending'
                 );
                 if (pendingIdx !== -1) {
@@ -1073,6 +1101,10 @@ function AppContent() {
           }
         } else if (data.type === 'TASK_COMPLETED') {
           setIsThinking(false);
+          // D1-A5: approvals belong to the task that requested them;
+          // once it ends they must stop being shortcut-actionable
+          // (the Ctrl+Enter/Ctrl+Shift+Enter listener reads this ref).
+          pendingApprovalsRef.current = [];
           // E8-1.1a: the finished task's manifest is complete now.
           requestRewindManifest(data.payload?.session_id || activeTaskSessionRef.current || activeSessionRef.current);
           // E8-A8.1a: reconcile the cost surfaces with the ledger
@@ -1131,6 +1163,9 @@ function AppContent() {
           }
         } else if (data.type === 'TASK_FAILED' || data.type === 'TASK_CANCELLED') {
           setIsThinking(false);
+          // D1-A5: see TASK_COMPLETED — a dead task's approvals must
+          // not stay armed for the keyboard shortcuts.
+          pendingApprovalsRef.current = [];
           // E8-1.1a: failed/cancelled tasks still recorded points.
           requestRewindManifest(data.payload?.session_id || activeTaskSessionRef.current || activeSessionRef.current);
           if (data.payload?.task_id || data.request_id) {
@@ -1186,9 +1221,13 @@ function AppContent() {
             setSessionSearchResults(Array.isArray(data.payload.results) ? data.payload.results : []);
           }
         } else if (data.type === 'SESSION_LIST_RESPONSE') {
-          setSessions(data.payload.sessions || []);
-          if (data.payload.sessions?.length > 0 && !activeSessionRef.current) {
-            handleSessionSwitch(data.payload.sessions[0].id);
+          // D1-A9: a payload-less frame must not throw here — the
+          // dispatch of every later message depends on this listener
+          // surviving malformed-but-parseable frames.
+          const sessionList = data.payload?.sessions || [];
+          setSessions(sessionList);
+          if (sessionList.length > 0 && !activeSessionRef.current) {
+            handleSessionSwitch(sessionList[0].id);
           } else if (isFloating && initialSession) {
             handleSessionSwitch(initialSession);
           }
@@ -1284,7 +1323,11 @@ function AppContent() {
               
               // If we are currently running a task in this session, the DB won't have its incomplete messages yet.
               // We must merge it back from our cache or `prev` so the UI doesn't lose the stream.
-              if (activeTaskSessionRef.current === activeSessionRef.current && isThinking) {
+              // D1-A1: `isThinking` here was the mount-time render
+              // value (always false) inside this once-registered
+              // handler, so the stranded bubble was silently dropped;
+              // the live value comes from the ref mirror.
+              if (activeTaskSessionRef.current === activeSessionRef.current && isThinkingRef.current) {
                  const activeMsg = prev.find(m => m.role === 'agent' && !m.isFinal);
                  if (activeMsg) {
                     return [...backendMessages, activeMsg];
@@ -1357,7 +1400,15 @@ function AppContent() {
                 handleRewindUndoExpire();
               }, Math.max(0, expiresAt - Date.now()));
             } else if (data.payload.error) {
-              console.warn('Rewind refused:', data.payload.error);
+              // D1-A8: a refusal the user caused must be visible
+              // where they caused it — a system line in the chat,
+              // not only a console warning.
+              setChatMessages(prev => [...prev, {
+                id: `rewind-refused-${Date.now()}`,
+                role: 'system',
+                content: `Rewind refused: ${data.payload.error}`,
+                isFinal: true,
+              }]);
             }
           }
         } else if (data.type === 'TASK_REWIND_UNDO_RESPONSE') {
@@ -1511,6 +1562,9 @@ function AppContent() {
           }]);
         } else if (data.type === 'SESSION_CREATE_RESPONSE') {
           const newId = data.payload.session_id;
+          // D1-A5: a fresh session orphans the previous task's
+          // undecided approvals — they must not stay armed.
+          pendingApprovalsRef.current = [];
           setActiveSession(newId);
           // A plan-mode choice made before the session existed (the
           // '__pending' key) is adopted by the new session.
@@ -1536,19 +1590,24 @@ function AppContent() {
         wsRef.current.send(JSON.stringify({ type: 'CONFIG_GET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
           }
         } else if (data.type === 'SESSION_DELETE_RESPONSE') {
-          const deletedId = data.payload.session_id;
-          setSessions(prev => {
-            const next = prev.filter(s => s.id !== deletedId);
-            if (activeSession === deletedId) {
-              if (next.length > 0) {
-                handleSessionSwitch(next[0].id);
-              } else {
-                setActiveSession(null);
-                setChatMessages([]);
-              }
+          const deletedId = data.payload?.session_id;
+          // D1-A1/A2: the old branch read the mount-time
+          // `activeSession` (so deleting the viewed session never
+          // switched away from it) and ran the switch plus further
+          // setState calls INSIDE the setSessions updater — updaters
+          // must be pure; StrictMode double-invokes them, which fired
+          // the switch and its socket send twice. Compute from the
+          // ref mirrors, set the list, then act.
+          const next = sessionsRef.current.filter(s => s.id !== deletedId);
+          setSessions(next);
+          if (activeSessionRef.current === deletedId) {
+            if (next.length > 0) {
+              handleSessionSwitch(next[0].id);
+            } else {
+              setActiveSession(null);
+              setChatMessages([]);
             }
-            return next;
-          });
+          }
         } else if (data.type === 'SESSION_EXPORT_RESPONSE') {
           if (data.payload?.error) {
             setExportStatus({ type: 'error', message: `Export failed: ${data.payload.error}` });
@@ -1578,7 +1637,14 @@ function AppContent() {
             sendSessionListRequest();
             handleSessionSwitch(data.payload.new_session_id);
           } else if (data.payload?.error) {
-            console.warn('Fork refused:', data.payload.error);
+            // D1-A8: same rule as the rewind refusal — visible in
+            // the chat the user is looking at, not console-only.
+            setChatMessages(prev => [...prev, {
+              id: `fork-refused-${Date.now()}`,
+              role: 'system',
+              content: `Fork refused: ${data.payload.error}`,
+              isFinal: true,
+            }]);
           }
         } else if (data.type === 'SESSION_IMPORT_RESPONSE') {
           if (data.payload?.ok) {
@@ -1640,7 +1706,11 @@ function AppContent() {
           }
           const list = data.payload?.artifacts || [];
           setCanvasArtifacts(list);
-          const savedId = activeSession ? localStorage.getItem(`aether_canvas_selected_${activeSession}`) : null;
+          // D1-A1: the current session comes from the ref — the
+          // state variable in this once-registered closure is the
+          // mount-time session.
+          const currentSessionId = activeSessionRef.current;
+          const savedId = currentSessionId ? localStorage.getItem(`aether_canvas_selected_${currentSessionId}`) : null;
           if (savedId && list.some(a => a.id === savedId)) {
             setSelectedArtifactId(savedId);
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -1653,7 +1723,7 @@ function AppContent() {
             }
           }
         } else if (data.type === 'ARTIFACT_RECORDED') {
-          if (data.payload?.session_id === activeSession) {
+          if (data.payload?.session_id === activeSessionRef.current) {
             setCanvasArtifacts(prev => {
               const filtered = prev.filter(a => a.id !== data.payload.artifact_id);
               const artObj = {
@@ -1879,6 +1949,14 @@ function AppContent() {
                     const startAt = Math.max(ctx.currentTime, readAloudPlayHeadRef.current);
                     source.start(startAt);
                     readAloudPlayHeadRef.current = startAt + (audioBuffer.duration || 0);
+                  }, () => {
+                    // D1-A4: a decode failure was an unhandled
+                    // rejection — silent while the button kept
+                    // showing "playing". Surface it as this
+                    // message's read-aloud error state instead.
+                    setReadAloudState(prev => (prev && (!p.message_id || prev.messageId === p.message_id)
+                      ? { ...prev, status: 'error', error: 'Read-aloud audio could not be decoded.' }
+                      : prev));
                   });
                 }
               }
@@ -1887,7 +1965,14 @@ function AppContent() {
             }
           }
           if (p.is_final) {
-            // Finished playback
+            // D1-A4: the engine's final chunk ends the stream — the
+            // state returns to idle so the message's button stops
+            // presenting Stop/playing for audio that has ended.
+            // (Already-scheduled sources still play out; App's stop
+            // path remains authoritative for an explicit stop.)
+            setReadAloudState(prev => (prev && (!p.message_id || prev.messageId === p.message_id)
+              ? { ...prev, status: 'idle' }
+              : prev));
           }
         } else if (data.type === 'READ_ALOUD_STOP_RESPONSE') {
           stopAppReadAloud();
@@ -2052,6 +2137,13 @@ function AppContent() {
       setStatus('Offline / Engine Disconnected');
       // If the engine crashes or drops connection, forcefully terminate any pending tasks so the UI doesn't hang spinning forever.
       setIsThinking(false);
+      // D1-A5 note: undecided approvals are deliberately NOT
+      // cleared here. A disconnect does not make an approval dead —
+      // the shipped RUX-A-05 contract queues an offline decision
+      // through safeSend instead of dropping it. Approvals are
+      // cleared where their task is known to have ended:
+      // TASK_COMPLETED / TASK_FAILED / TASK_CANCELLED, session
+      // create, and session switch.
       setChatMessages(prev => {
         let newMessages = [...prev];
         const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
@@ -2170,19 +2262,23 @@ function AppContent() {
   // DEV_SERVER_DETECT_RESPONSE handlers fill the canvas whenever
   // they land; the selection itself is local state and stays honest.
   const handleToggleCanvas = useCallback(() => {
-    setIsCanvasOpen(prev => {
-      const next = !prev;
-      if (next && canvasArtifacts.length > 0 && !selectedArtifactId) {
-        const firstId = canvasArtifacts[0].id;
-        setSelectedArtifactId(firstId);
-        if (activeSession) {
-          localStorage.setItem(`aether_canvas_selected_${activeSession}`, firstId);
-        }
-        safeSend('ARTIFACT_GET_REQUEST', { artifact_id: firstId });
+    // D1-A11: the side effects (selecting the first artifact,
+    // persisting the selection, requesting it) ran INSIDE the
+    // state updater; updaters must be pure and StrictMode
+    // double-invokes them — the artifact request went out twice
+    // per toggle. Compute the next value from current state, set
+    // it, then act.
+    const next = !isCanvasOpen;
+    setIsCanvasOpen(next);
+    if (next && canvasArtifacts.length > 0 && !selectedArtifactId) {
+      const firstId = canvasArtifacts[0].id;
+      setSelectedArtifactId(firstId);
+      if (activeSession) {
+        localStorage.setItem(`aether_canvas_selected_${activeSession}`, firstId);
       }
-      return next;
-    });
-  }, [canvasArtifacts, selectedArtifactId, activeSession, safeSend]);
+      safeSend('ARTIFACT_GET_REQUEST', { artifact_id: firstId });
+    }
+  }, [isCanvasOpen, canvasArtifacts, selectedArtifactId, activeSession, safeSend]);
 
   const handleSelectArtifact = useCallback((artifactId) => {
     setSelectedArtifactId(artifactId);
@@ -2288,6 +2384,9 @@ function AppContent() {
   };
 
   const handleSessionSwitch = (id) => {
+    // D1-A5: the previous session's undecided approvals are not
+    // actionable from the session being switched to.
+    pendingApprovalsRef.current = [];
     // E8-1.1a: never show one session's rewind points in another;
     // the fresh manifest is fetched on SESSION_GET_RESPONSE.
     setRewindManifest(null);
@@ -2696,15 +2795,20 @@ function AppContent() {
   };
 
   const handleStopTask = () => {
-    if (wsRef.current && wsRef.current.send) {
-      wsRef.current.send(JSON.stringify({
-        type: 'CANCEL_TASK',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: {}
-      }));
+    // D1-A7 (Pass B verdict scope): like every other user action
+    // this goes through safeSend, and the disposition is honoured.
+    // 'sent' — the cancel reached the engine, so the task UI stands
+    // down. 'queued' — the connection is down and the cancel sits in
+    // the offline queue, where (CANCEL_TASK being destructive) it is
+    // held for reconfirmation on reconnect rather than flushing
+    // verbatim; the task is still running, so isThinking stays set
+    // and the eventual TASK_CANCELLED (or the disconnect transition)
+    // is what clears it — the UI must not claim "stopped" for a task
+    // that is still running.
+    const disposition = safeSend('CANCEL_TASK', {});
+    if (disposition === 'sent') {
+      setIsThinking(false);
     }
-    setIsThinking(false);
   };
 
   // Epic 1 UI batch: the truncate machinery shared by edit-and-resend
@@ -3111,6 +3215,16 @@ function AppContent() {
                 <div style={{ margin: '0 24px 12px', padding: '8px 10px', background: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '6px', color: '#fca5a5', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span>{importStatus.message}</span>
                   <button onClick={() => setImportStatus(null)} style={{ background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', padding: 0 }}><X size={12} /></button>
+                </div>
+              )}
+              {/* D1-A3: export outcomes render beside import's — the
+                  export status state used to be write-only, so a
+                  refused export looked exactly like a successful one
+                  (no file, no message). */}
+              {exportStatus && (
+                <div data-testid="session-export-status" style={{ margin: '0 24px 12px', padding: '8px 10px', background: exportStatus.type === 'error' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.12)', border: `1px solid ${exportStatus.type === 'error' ? 'rgba(239, 68, 68, 0.3)' : 'rgba(16, 185, 129, 0.3)'}`, borderRadius: '6px', color: exportStatus.type === 'error' ? '#fca5a5' : '#a7f3d0', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>{exportStatus.message}</span>
+                  <button onClick={() => setExportStatus(null)} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0 }}><X size={12} /></button>
                 </div>
               )}
               
