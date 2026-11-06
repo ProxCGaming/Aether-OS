@@ -44,9 +44,9 @@ class TestFallbackRules:
     def test_get_fallback_candidates(self):
         health_mgr = ProviderHealthManager()
         models = [
-            ModelEntry(provider="google_gemini", id="gemini-2.5-flash", label="Gemini", priority=1),
-            ModelEntry(provider="openai", id="gpt-4o-mini", label="OpenAI Mini", priority=1),
-            ModelEntry(provider="anthropic", id="claude-3-5-haiku", label="Claude Haiku", priority=1),
+            ModelEntry(provider="google_gemini", id="gemini-2.5-flash", label="Gemini", capabilities=["chat"], priority=1),
+            ModelEntry(provider="openai", id="gpt-4o-mini", label="OpenAI Mini", capabilities=["chat"], priority=1),
+            ModelEntry(provider="anthropic", id="claude-3-5-haiku", label="Claude Haiku", capabilities=["chat"], priority=1),
         ]
         registry = ModelRegistry(models)
 
@@ -76,9 +76,9 @@ class TestFallbackRules:
         """Confirm failed provider and unhealthy providers are both excluded."""
         health_mgr = ProviderHealthManager()
         models = [
-            ModelEntry(provider="a", id="model-a", label="A", priority=1),
-            ModelEntry(provider="b", id="model-b", label="B", priority=1),
-            ModelEntry(provider="c", id="model-c", label="C", priority=1),
+            ModelEntry(provider="a", id="model-a", label="A", capabilities=["chat"], priority=1),
+            ModelEntry(provider="b", id="model-b", label="B", capabilities=["chat"], priority=1),
+            ModelEntry(provider="c", id="model-c", label="C", capabilities=["chat"], priority=1),
         ]
         registry = ModelRegistry(models)
 

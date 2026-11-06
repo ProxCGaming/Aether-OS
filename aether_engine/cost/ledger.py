@@ -327,6 +327,47 @@ def get_usage_ledger() -> UsageLedger:
     return GLOBAL_USAGE_LEDGER
 
 
+# ---------------------------------------------------------------------------
+# Daily-budget config cache (E5-C)
+# ---------------------------------------------------------------------------
+# check_daily_budget used to load_config() — a disk read, a JSON parse
+# and a full UserConfig construction — on EVERY recorded provider call,
+# just to read one number. The budget now caches against the config
+# file's identity stamp (path + inode + mtime + size): an unchanged
+# file costs one stat() per call, and any save is picked up on the
+# very next call, because save_config replaces the file atomically
+# and therefore changes the stamp. No stale-budget window opens: the
+# cache can only ever serve the value of the file as it currently
+# exists on disk.
+_daily_budget_cache: tuple[str, tuple[int, int, int] | None, float | None] | None = None
+
+
+def _configured_daily_budget() -> float | None:
+    """The configured daily budget, cached against the config file.
+
+    Returns None when no budget is configured or the config cannot be
+    read — the same outcomes the previous per-call load produced.
+    """
+    global _daily_budget_cache
+    from aether_engine.config import CONFIG_PATH, load_config
+
+    try:
+        st = CONFIG_PATH.stat()
+        stamp: tuple[int, int, int] | None = (st.st_ino, st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = None
+    cached = _daily_budget_cache
+    if cached is not None and cached[0] == str(CONFIG_PATH) and cached[1] == stamp:
+        return cached[2]
+    try:
+        cfg = load_config()
+        budget = getattr(cfg, "daily_budget_usd", None)
+    except Exception:  # noqa: BLE001
+        budget = None
+    _daily_budget_cache = (str(CONFIG_PATH), stamp, budget)
+    return budget
+
+
 def check_daily_budget(
     *,
     ledger: UsageLedger | None = None,
@@ -341,12 +382,7 @@ def check_daily_budget(
     """
     led = ledger or get_usage_ledger()
     if daily_budget_usd is None:
-        try:
-            from aether_engine.config import load_config
-            cfg = load_config()
-            daily_budget_usd = getattr(cfg, "daily_budget_usd", None)
-        except Exception:  # noqa: BLE001
-            daily_budget_usd = None
+        daily_budget_usd = _configured_daily_budget()
 
     if daily_budget_usd is None or daily_budget_usd <= 0:
         return False

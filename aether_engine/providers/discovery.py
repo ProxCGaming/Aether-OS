@@ -148,9 +148,14 @@ async def fetch_available_models(
 
 async def _discover_gemini_models(api_key: str) -> tuple[list[str], list[dict[str, str]]]:
     """Fetch available models from Google Gemini API and filter for content generation."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    # E5-E: the API key travels in the x-goog-api-key header, never in
+    # the URL — keys in query strings land in HTTP-client debug logs,
+    # proxy logs and error reports. Every other discoverer in this
+    # module already authenticates via a header.
+    url = "https://generativelanguage.googleapis.com/v1beta/models"
+    headers = {"x-goog-api-key": api_key}
     async with httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT) as client:
-        resp = await client.get(url)
+        resp = await client.get(url, headers=headers)
         if resp.status_code != 200:
             raise DiscoveryError(
                 code=resp.status_code,
@@ -250,8 +255,10 @@ async def _discover_openai_models(api_key: str) -> tuple[list[str], list[dict[st
 
     discovered: list[str] = []
     excluded: list[dict[str, str]] = []
-    # Target chat / reasoning prefixes
-    target_prefixes = ("gpt-4", "gpt-3.5", "o1", "o3", "chatgpt")
+    # Target chat / reasoning prefixes (E5-A: gpt-5 / o4 included —
+    # without them the provider's current flagship families could
+    # never appear via discovery)
+    target_prefixes = ("gpt-5", "gpt-4", "gpt-3.5", "o1", "o3", "o4", "chatgpt")
     exclude_keywords = ("audio", "realtime", "embed", "moderation", "tts", "dall-e", "instruct", "transcription")
 
     for m in raw_models:
@@ -269,9 +276,9 @@ async def _discover_openai_models(api_key: str) -> tuple[list[str], list[dict[st
 
     def _openai_sort_key(m_id: str) -> tuple:
         lower = m_id.lower()
-        if lower.startswith("gpt-4o"):
+        if lower.startswith(("gpt-5", "gpt-4o")):
             return (1, lower)
-        if lower.startswith(("o1", "o3")):
+        if lower.startswith(("o1", "o3", "o4")):
             return (2, lower)
         if lower.startswith("gpt-4"):
             return (3, lower)
@@ -346,7 +353,10 @@ async def _discover_openrouter_models(api_key: str) -> tuple[list[str], list[dic
     discovered: list[str] = []
     excluded: list[dict[str, str]] = []
     exclude_openrouter = ("image", "embedding", "audio", "whisper", "tts", "moderation", "diffusion")
-    for m in raw_models[:50]:  # Limit top 50
+    # E5-K: filter FIRST, then cap — slicing the raw list before the
+    # exclusion filter meant chat models ranked past the first 50 raw
+    # entries were never discovered (nor even listed as excluded).
+    for m in raw_models:
         model_id = m.get("id", "")
         if not model_id:
             continue
@@ -364,7 +374,7 @@ async def _discover_openrouter_models(api_key: str) -> tuple[list[str], list[dic
             continue
         discovered.append(model_id)
 
-    return discovered, excluded
+    return discovered[:50], excluded  # Limit top 50 chat models
 
 
 async def _discover_anthropic_custom_models(
