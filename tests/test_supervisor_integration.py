@@ -165,12 +165,19 @@ class RateLimitedProvider:
 
 @pytest.mark.asyncio
 async def test_supervisor_typed_provider_error_propagates():
-    """S1-N5/F09 reconciliation: a typed provider failure (the
-    providers.base taxonomy) on both attempts must NOT degrade to an
-    end result — it propagates so the graph fails the task and the
+    """S1-N5/F09 reconciliation + N-22: a typed provider failure
+    (the providers.base taxonomy) must NOT degrade to an end
+    result — it propagates so the graph fails the task and the
     pump can read the retriable classification (F09). Only
-    unexpected, non-provider failures degrade (previous test)."""
+    unexpected, non-provider failures degrade (previous test).
+
+    N-22 correction: propagation now happens after the FIRST call.
+    The previous shape swallowed the typed failure in the adapter's
+    blanket ``except Exception`` and made a second, billed
+    tool-less call before the retry's own typed-error guard let it
+    propagate — a second call that cannot fix an auth failure and
+    actively worsens a rate limit."""
     provider = RateLimitedProvider()
     with pytest.raises(RateLimitError):
         await _generate(provider=provider)
-    assert provider.calls == 2
+    assert provider.calls == 1

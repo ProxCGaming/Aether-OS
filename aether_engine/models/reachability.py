@@ -143,10 +143,22 @@ class ModelReachabilityChecker:
             async def _probe():
                 async for chunk in prov.call_stream([{"role": "user", "content": "hi"}]):
                     return True
-                return True
+                return False
 
-            await asyncio.wait_for(_probe(), timeout=timeout)
+            responded = await asyncio.wait_for(_probe(), timeout=timeout)
             latency_ms = (time.time() - start) * 1000.0
+            if not responded:
+                # E5-J: a stream that opens and yields zero chunks
+                # proves nothing — record it unreachable instead of
+                # reachable-with-a-latency-sample.
+                self.record_reachability(
+                    cache_key, model_id, reachable=False,
+                    latency_ms=latency_ms,
+                    error_detail="Probe stream ended without producing any output")
+                logger.warning(
+                    f"Model unreachable: {cache_key}/{model_id} — "
+                    "probe stream produced no output")
+                return False
             self.record_reachability(cache_key, model_id, reachable=True, latency_ms=latency_ms)
             logger.info(f"Model reachable: {cache_key}/{model_id} ({latency_ms:.1f}ms)")
             return True

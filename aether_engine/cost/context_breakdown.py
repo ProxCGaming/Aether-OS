@@ -498,9 +498,12 @@ def get_context_breakdown(
         ]
     }
     """
+    # N-28: the requested model is reported as itself. A former
+    # substring rewrite ("2.5" anywhere in the name → gemini-3.5-
+    # flash) misreported gemini-2.5-pro, qwen2.5-* and every other
+    # "2.5" model under the wrong name, with the wrong tokenizer
+    # and context limit.
     resolved_model = model or "gemini-3.5-flash"
-    if "2.5" in resolved_model:
-        resolved_model = "gemini-3.5-flash"
 
     context_limit = get_model_context_limit(resolved_model)
     is_graph = _determine_is_graph_task(session_id, task_id, is_graph_task)

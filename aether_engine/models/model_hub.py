@@ -49,6 +49,12 @@ SEARCH_MAX_LIMIT = 100
 # whole point of binding a live API.
 DETAIL_CACHE_TTL_SECONDS = 300.0
 
+# E5-G: the detail cache is also size-bounded — a long session
+# browsing the catalogue must not grow it monotonically. Expired
+# entries are dropped on every insert; beyond that the oldest
+# entries are evicted first.
+DETAIL_CACHE_MAX_ENTRIES = 128
+
 # ---------------------------------------------------------------------------
 # Families
 # ---------------------------------------------------------------------------
@@ -470,6 +476,18 @@ class ModelHub:
                 "models": [],
                 "error": f"Unknown model source '{source}'.",
             }
+        # E5-Q: the "Never raises" contract starts here — a non-int
+        # limit from a caller used to raise TypeError while building
+        # params, before the guarded region below. Validate first
+        # and answer with an error payload, like every other bad
+        # input this function reports.
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            return {
+                "models": [],
+                "error": f"Invalid search limit: {limit!r}.",
+            }
         params: dict[str, Any] = {
             "sort": "downloads",
             "direction": -1,
@@ -478,7 +496,8 @@ class ModelHub:
         }
         if query:
             params["search"] = query
-        tag = _FAMILY_TO_PIPELINE_TAG.get(family or "")
+        tag = _FAMILY_TO_PIPELINE_TAG.get(family) \
+            if isinstance(family, str) else None
         if tag:
             params["pipeline_tag"] = tag
         try:
@@ -592,8 +611,28 @@ class ModelHub:
                 "error": "Hugging Face catalogue returned an unreadable response.",
             }
         detail = normalise_hf_detail(data)
-        self._detail_cache[key] = (time.monotonic(), detail)
+        self._cache_detail(key, detail)
         return {"detail": detail, "error": None}
+
+    def _cache_detail(
+        self, key: tuple[str, str], detail: dict[str, Any],
+    ) -> None:
+        """Insert into the detail cache, keeping it bounded (E5-G):
+        expired entries are dropped first, then the oldest entries
+        are evicted so the cache never exceeds
+        ``DETAIL_CACHE_MAX_ENTRIES``."""
+        now = time.monotonic()
+        expired = [
+            k for k, (cached_at, _) in self._detail_cache.items()
+            if now - cached_at >= self._cache_ttl
+        ]
+        for k in expired:
+            del self._detail_cache[k]
+        self._detail_cache.pop(key, None)
+        while len(self._detail_cache) >= DETAIL_CACHE_MAX_ENTRIES:
+            oldest = next(iter(self._detail_cache))
+            del self._detail_cache[oldest]
+        self._detail_cache[key] = (now, detail)
 
 
 class _HfHttpError(Exception):

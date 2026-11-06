@@ -91,6 +91,26 @@ class LatencySummary:
     decode_tps_p95: float | None = None
 
 
+def _summarise_rows(
+    provider_name: str, model_name: str, rows: list,
+) -> LatencySummary:
+    """Percentile summary over already-fetched sample rows."""
+    ttfts = [r["ttft_ms"] for r in rows if r["ttft_ms"] is not None]
+    totals = [r["total_ms"] for r in rows if r["total_ms"] is not None]
+    rates = [r["decode_tps"] for r in rows if r["decode_tps"] is not None]
+    return LatencySummary(
+        provider=provider_name,
+        model=model_name,
+        samples=len(rows),
+        ttft_p50_ms=_percentile(ttfts, 50),
+        ttft_p95_ms=_percentile(ttfts, 95),
+        total_p50_ms=_percentile(totals, 50),
+        total_p95_ms=_percentile(totals, 95),
+        decode_tps_p50=_percentile(rates, 50),
+        decode_tps_p95=_percentile(rates, 95),
+    )
+
+
 class LatencyStore:
     """SQLite-backed per-model latency samples (schema version 1)."""
 
@@ -198,42 +218,64 @@ class LatencyStore:
             conn.commit()
         return row
 
+    _WINDOW_QUERY = """
+        SELECT ttft_ms, total_ms, decode_tps FROM latency_samples
+        WHERE provider_name = ? AND model_name = ?
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ?
+        """
+
     def summary(self, provider_name: str, model_name: str) -> LatencySummary | None:
         """Percentiles over the model's newest :data:`WINDOW`
         samples, or None when the model has no samples at all."""
         self.init_db()
         with self._get_conn() as conn:
             rows = conn.execute(
-                """
-                SELECT ttft_ms, total_ms, decode_tps FROM latency_samples
-                WHERE provider_name = ? AND model_name = ?
-                ORDER BY timestamp DESC, id DESC
-                LIMIT ?
-                """,
+                self._WINDOW_QUERY,
                 (provider_name, model_name, WINDOW),
             ).fetchall()
         if not rows:
             return None
-        ttfts = [r["ttft_ms"] for r in rows if r["ttft_ms"] is not None]
-        totals = [r["total_ms"] for r in rows if r["total_ms"] is not None]
-        rates = [r["decode_tps"] for r in rows if r["decode_tps"] is not None]
-        return LatencySummary(
-            provider=provider_name,
-            model=model_name,
-            samples=len(rows),
-            ttft_p50_ms=_percentile(ttfts, 50),
-            ttft_p95_ms=_percentile(ttfts, 95),
-            total_p50_ms=_percentile(totals, 50),
-            total_p95_ms=_percentile(totals, 95),
-            decode_tps_p50=_percentile(rates, 50),
-            decode_tps_p95=_percentile(rates, 95),
-        )
+        return _summarise_rows(provider_name, model_name, rows)
+
+    def summaries(
+        self, keys: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], LatencySummary | None]:
+        """Batch form of :meth:`summary` over ONE connection.
+
+        E5-H: the routing tie-break scores every candidate in a
+        selection; the per-model method cost one fresh connection
+        per candidate. This reads all of them on a single
+        connection instead — same windows, same percentiles.
+        """
+        self.init_db()
+        result: dict[tuple[str, str], LatencySummary | None] = {}
+        with self._get_conn() as conn:
+            for provider_name, model_name in keys:
+                rows = conn.execute(
+                    self._WINDOW_QUERY,
+                    (provider_name, model_name, WINDOW),
+                ).fetchall()
+                result[(provider_name, model_name)] = (
+                    _summarise_rows(provider_name, model_name, rows)
+                    if rows else None
+                )
+        return result
 
     def ttft_p50_ms(self, provider_name: str, model_name: str) -> float | None:
         """The routing tie-break input: the model's measured median
         time-to-first-token, or None when it has no TTFT samples."""
         summary = self.summary(provider_name, model_name)
         return summary.ttft_p50_ms if summary else None
+
+    def ttft_p50_ms_many(
+        self, keys: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], float | None]:
+        """Batch form of :meth:`ttft_p50_ms` (see :meth:`summaries`)."""
+        return {
+            key: (summary.ttft_p50_ms if summary else None)
+            for key, summary in self.summaries(keys).items()
+        }
 
 
 GLOBAL_LATENCY_STORE: LatencyStore | None = None

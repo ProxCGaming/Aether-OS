@@ -319,6 +319,14 @@ class AetherSupervisorModel(BaseChatModel):
         offered = self._offered_tools(config, dict_messages, available)
         try:
             content, tool_calls = await self._call_provider(provider, dict_messages, offered or None)
+        except ProviderError:
+            # N-22: a typed provider failure (auth, rate-limit,
+            # timeout) is the graph/pump's signal, not a tool-mode
+            # problem — the text-prompt retry cannot fix it and only
+            # adds a second billed call (and worsens a rate limit).
+            # Propagate immediately, exactly as the retry path below
+            # already treats typed failures on the second attempt.
+            raise
         except Exception as e:  # noqa: BLE001 — provider boundary: mirrors the supervisor node, which retries tool failures as a plain text call.
             logger.warning(f"Supervisor adapter call with tools failed: {e}; falling back to text prompt")
             try:

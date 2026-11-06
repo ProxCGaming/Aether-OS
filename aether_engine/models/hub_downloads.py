@@ -48,7 +48,11 @@ from typing import Any
 
 from aether_common.contracts import Event, EventType, TaskState
 from aether_engine.models.local_models import OllamaManager
-from aether_engine.models.model_hub import ModelHub, label_runnability
+from aether_engine.models.model_hub import (
+    ModelHub,
+    group_variants,
+    label_runnability,
+)
 
 logger = logging.getLogger("aether_engine.models.hub_downloads")
 
@@ -70,6 +74,29 @@ def _load_huggingface_hub() -> Any | None:
     except ImportError:
         return None
     return huggingface_hub
+
+
+def _speech_file_set(
+    files: list[tuple[str, int | None]],
+) -> list[tuple[str, int | None]]:
+    """The files the in-app runtime actually loads (E5-P).
+
+    When the repo's loadable set is a CTranslate2 variant
+    (faster-whisper: ``model.bin`` plus its companions, as grouped
+    by :func:`group_variants`), the download is exactly that set —
+    duplicate weight serialisations the runtime never reads (a
+    safetensors / PyTorch copy next to ``model.bin``) are skipped.
+    Repos without a CTranslate2 set (Kokoro: checkpoint + config +
+    voice files, for which the codebase has no narrower authority)
+    keep every file.
+    """
+    variants = group_variants(
+        [{"rfilename": name, "size": size} for name, size in files])
+    for variant in variants:
+        if variant["kind"] == "ctranslate2":
+            wanted = set(variant["files"])
+            return [(n, s) for n, s in files if n in wanted]
+    return files
 
 
 def _is_hub_speech_repo(repo_id: str) -> bool:
@@ -332,6 +359,7 @@ class ModelHubDownloads:
                 retriable=False,
             )
             return
+        files = _speech_file_set(files)
 
         total_bytes = (
             sum(size for _, size in files)
@@ -424,8 +452,12 @@ class ModelHubDownloads:
         return Path.home() / ".cache" / "huggingface" / "hub"
 
     def _hf_repo_dir(self, repo_id: str) -> Path:
-        return self._hf_cache_root() / (
-            "models--" + repo_id.replace("/", "--"))
+        # E5-D: backslashes are normalised too — on Windows they
+        # are path separators, so an id like ``..\..\victim`` must
+        # collapse into ONE inert cache-dir name, never a traversal
+        # out of the cache root.
+        dirname = "models--" + repo_id.replace("/", "--").replace("\\", "--")
+        return self._hf_cache_root() / dirname
 
     @staticmethod
     def _repo_id_from_cache_dirname(dirname: str) -> str:
@@ -563,7 +595,29 @@ class ModelHubDownloads:
                 "error": f"Ollama could not delete '{model_id}'.",
             }
         if source == "hf":
+            # E5-D: the rmtree target is validated HERE, in the
+            # function that feeds rmtree — the id must name a hub
+            # speech repo (the only HF inventory the hub manages)
+            # and the resolved dir must sit directly inside the
+            # cache root. Anything else is a refusal, never a path
+            # built from unvalidated segments.
+            if not _is_hub_speech_repo(model_id):
+                return {
+                    "success": False,
+                    "deleted": False,
+                    "error": f"'{model_id}' is not a speech model in "
+                             f"the Hugging Face store — nothing the "
+                             f"hub manages matches it.",
+                }
             repo_dir = self._hf_repo_dir(model_id)
+            if repo_dir.resolve().parent != self._hf_cache_root().resolve():
+                return {
+                    "success": False,
+                    "deleted": False,
+                    "error": f"Refusing to delete '{model_id}': its "
+                             f"cache path escapes the Hugging Face "
+                             f"cache root.",
+                }
             if not repo_dir.is_dir():
                 return {
                     "success": True,

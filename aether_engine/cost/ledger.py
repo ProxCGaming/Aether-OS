@@ -228,8 +228,12 @@ class UsageLedger:
         """Ledger query behind USAGE_LEDGER_QUERY_REQUEST.
 
         Returns ``{"entries": [...], "totals": {...}}``. Totals are
-        aggregated from the returned entries themselves, so a surface
-        can always reconcile what it displays against the rows.
+        SQL aggregates over the SAME filter as the entries, so a
+        surface can always reconcile what it displays against the
+        rows — without the query materialising and re-aggregating
+        the whole history in Python (N-27: the unfiltered history
+        grows forever, and per-row Python aggregation made every
+        query pay for all of it).
         """
         self.init_db()
         clauses: list[str] = []
@@ -248,37 +252,54 @@ class UsageLedger:
             params.append(end_ts)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._get_conn() as conn:
-            rows = conn.execute(
-                f"SELECT * FROM usage_ledger {where} ORDER BY timestamp ASC, rowid ASC",
+            entries = [dict(r) for r in conn.execute(
+                f"SELECT * FROM usage_ledger {where} "
+                f"ORDER BY timestamp ASC, rowid ASC",
                 params,
-            ).fetchall()
-        entries = [dict(r) for r in rows]
-
-        by_model: dict[str, dict[str, Any]] = {}
-        by_agent: dict[str, dict[str, Any]] = {}
-        total_cost = 0.0
-        total_in = 0
-        total_out = 0
-        for entry in entries:
-            total_cost += entry["cost_usd"]
-            total_in += entry["input_tokens"]
-            total_out += entry["output_tokens"]
-            for bucket, key in ((by_model, entry["model_name"]),
-                                (by_agent, entry["agent_name"] or "unknown")):
-                agg = bucket.setdefault(
-                    key, {"cost_usd": 0.0, "input_tokens": 0,
-                          "output_tokens": 0, "calls": 0})
-                agg["cost_usd"] += entry["cost_usd"]
-                agg["input_tokens"] += entry["input_tokens"]
-                agg["output_tokens"] += entry["output_tokens"]
-                agg["calls"] += 1
+            )]
+            totals_row = conn.execute(
+                f"SELECT COALESCE(SUM(cost_usd), 0.0) AS cost, "
+                f"COALESCE(SUM(input_tokens), 0) AS tin, "
+                f"COALESCE(SUM(output_tokens), 0) AS tout "
+                f"FROM usage_ledger {where}",
+                params,
+            ).fetchone()
+            by_model: dict[str, dict[str, Any]] = {}
+            for r in conn.execute(
+                f"SELECT model_name AS k, SUM(cost_usd) AS cost, "
+                f"SUM(input_tokens) AS tin, SUM(output_tokens) AS tout, "
+                f"COUNT(*) AS calls FROM usage_ledger {where} "
+                f"GROUP BY model_name",
+                params,
+            ):
+                by_model[r["k"]] = {
+                    "cost_usd": float(r["cost"]),
+                    "input_tokens": int(r["tin"]),
+                    "output_tokens": int(r["tout"]),
+                    "calls": int(r["calls"]),
+                }
+            by_agent: dict[str, dict[str, Any]] = {}
+            for r in conn.execute(
+                f"SELECT CASE WHEN agent_name IS NULL OR agent_name = '' "
+                f"THEN 'unknown' ELSE agent_name END AS k, "
+                f"SUM(cost_usd) AS cost, SUM(input_tokens) AS tin, "
+                f"SUM(output_tokens) AS tout, COUNT(*) AS calls "
+                f"FROM usage_ledger {where} GROUP BY k",
+                params,
+            ):
+                by_agent[r["k"]] = {
+                    "cost_usd": float(r["cost"]),
+                    "input_tokens": int(r["tin"]),
+                    "output_tokens": int(r["tout"]),
+                    "calls": int(r["calls"]),
+                }
 
         return {
             "entries": entries,
             "totals": {
-                "total_cost_usd": total_cost,
-                "input_tokens": total_in,
-                "output_tokens": total_out,
+                "total_cost_usd": float(totals_row["cost"]),
+                "input_tokens": int(totals_row["tin"]),
+                "output_tokens": int(totals_row["tout"]),
                 "by_model": by_model,
                 "by_agent": by_agent,
             },
@@ -458,6 +479,29 @@ def record_provider_call(
                 estimated = True
             else:
                 in_tokens, out_tokens = 0, 0
+        elif in_tokens is None or out_tokens is None:
+            # N-25: exactly one side was reported. Fill ONLY the
+            # missing side from the same estimator (the reported
+            # side stays exact), and label the row estimated either
+            # way — coercing the unknown side to 0 and labelling
+            # the row "priced" silently under-counted every total
+            # the ledger feeds.
+            counts = pricing.estimate_token_counts(
+                model=pricing_model or model_name,
+                messages=messages,
+                output_text=output_text,
+            )
+            if counts is not None:
+                est_in, est_out = counts
+                if in_tokens is None:
+                    in_tokens = est_in
+                if out_tokens is None:
+                    out_tokens = est_out
+            if in_tokens is None:
+                in_tokens = 0
+            if out_tokens is None:
+                out_tokens = 0
+            estimated = True
 
         result = pricing.price_call(
             pricing_model or model_name,

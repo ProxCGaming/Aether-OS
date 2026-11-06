@@ -152,10 +152,23 @@ class RoutingPolicy:
                 else get_latency_store()
             )
             scores: dict[int, float] = {}
-            for idx, entry in enumerate(candidates):
-                value = store.ttft_p50_ms(entry.provider, entry.id)
-                if value is not None:
-                    scores[idx] = value
+            # E5-H: score every candidate over ONE store read —
+            # the per-candidate call cost a fresh SQLite connect
+            # per candidate per selection. Stores without the
+            # batch read (test doubles) keep the per-candidate path.
+            batch = getattr(store, "ttft_p50_ms_many", None)
+            if callable(batch):
+                values = batch(
+                    [(e.provider, e.id) for e in candidates])
+                for idx, entry in enumerate(candidates):
+                    value = values.get((entry.provider, entry.id))
+                    if value is not None:
+                        scores[idx] = value
+            else:
+                for idx, entry in enumerate(candidates):
+                    value = store.ttft_p50_ms(entry.provider, entry.id)
+                    if value is not None:
+                        scores[idx] = value
         except Exception:  # noqa: BLE001 — measured latency is an input, never a gate.
             return candidates[0], False
         if len(scores) < 2:

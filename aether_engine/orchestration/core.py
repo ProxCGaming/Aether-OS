@@ -320,8 +320,19 @@ async def validate_provider_key_shared(
             _validate_provider_key(provider_name, api_key, base_url=base_url, persist_models=persist_models)
         )
         _inflight_validations[cache_key] = task
-        task.add_done_callback(lambda _t, k=cache_key: _inflight_validations.pop(k, None))
-    return dict(await task)
+
+        def _drop_finished(_t, k=cache_key, t=task):
+            # N-23: evict only OUR task — a newer validation may
+            # have been registered for the same key after this one
+            # finished, and an unconditional pop would evict it.
+            if _inflight_validations.get(k) is t:
+                _inflight_validations.pop(k, None)
+
+        task.add_done_callback(_drop_finished)
+    # N-23: shield the shared run — cancelling one waiter (socket
+    # drop, Test-panel timeout) must not cancel the validation every
+    # other deduped waiter is attached to.
+    return dict(await asyncio.shield(task))
 
 
 async def _validate_provider_key_inner(
@@ -506,7 +517,18 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
                 require_vision=require_vision,
             )
             for entry in candidates:
-                fb_api_key = _load_provider_key(entry.provider, secret_store, config)
+                try:
+                    fb_api_key = _load_provider_key(entry.provider, secret_store, config)
+                except ProviderNotFoundError:
+                    # N-14: an unkeyed chain entry is skipped, not
+                    # chain-fatal — aborting here silently dropped
+                    # every later candidate (and the outer handler's
+                    # log misdescribed the partial result as "no
+                    # fallbacks" at all).
+                    logger.warning(
+                        "Skipping fallback candidate %s/%s: no stored API key",
+                        entry.provider, entry.id)
+                    continue
                 fb_base_url = config.custom_base_urls.get(entry.provider)
                 fallback_models.append(FallbackModel(
                     model=resolve_litellm_model(

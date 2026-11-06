@@ -160,6 +160,24 @@ def validate_startup_configuration(
                     was_fallback=True,
                     fallback_reason=reason,
                 )
+        # E5-L: no healthy alternative exists. The desired provider
+        # stays active — there is nothing better to select — but the
+        # result must SAY it is offline. Falling through to the
+        # model check returned the "everything is consistent" shape
+        # (was_fallback=False, no reason) for a provider already
+        # known to be unavailable.
+        reason = (
+            f"Default provider '{desired_provider}' is offline and "
+            f"no healthy alternative is configured; it remains "
+            f"active and calls will fail until it recovers.")
+        logger.warning(reason)
+        return StartupValidationResult(
+            active_provider=desired_provider,
+            active_model=desired_model,
+            configured_providers=configured_providers,
+            was_fallback=True,
+            fallback_reason=reason,
+        )
 
     # Provider is healthy; verify model exists for this provider
     provider_models = reg.get_models_for_provider(desired_provider)

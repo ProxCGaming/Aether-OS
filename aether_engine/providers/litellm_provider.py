@@ -82,6 +82,29 @@ def warm_litellm() -> None:
     """Force the deferred litellm import (background startup warm-up)."""
     _load_litellm()
 
+
+def _retriable_litellm_errors(litellm_module) -> tuple[type[Exception], ...]:
+    """The LiteLLM error classes the stream loop treats as retriable.
+
+    E5-O: the tuple is built from names that exist, never via
+    ``getattr(litellm, "MidStreamFallbackError", Exception)`` — on
+    a LiteLLM without that name the idiom put ``Exception`` itself
+    in the except tuple, silently widening the clause into a
+    catch-all that shadowed the generic classification below it.
+    An absent optional name simply means the clause does not
+    cover that class.
+    """
+    errors: list[type[Exception]] = [
+        litellm_module.RateLimitError,
+        litellm_module.Timeout,
+        litellm_module.APIConnectionError,
+        litellm_module.ServiceUnavailableError,
+    ]
+    mid_stream = getattr(litellm_module, "MidStreamFallbackError", None)
+    if isinstance(mid_stream, type) and issubclass(mid_stream, Exception):
+        errors.append(mid_stream)
+    return tuple(errors)
+
 # ---------------------------------------------------------------------------
 # LiteLLM model-name mapping
 # ---------------------------------------------------------------------------
@@ -672,8 +695,8 @@ class LiteLLMProvider(BaseProvider):
             )
 
         last_error: Exception | None = None
+        retriable_errors = _retriable_litellm_errors(litellm)
         for model_idx, (current_model, current_api_key, current_base_url, current_provider) in enumerate(models_to_try):
-            is_fallback = model_idx > 0
             try:
                 kwargs = self._build_call_kwargs(messages, tools)
                 # Override model and credentials for fallback attempts
@@ -957,9 +980,7 @@ class LiteLLMProvider(BaseProvider):
                     )
                     continue
                 raise ProviderError(f"Model not found: {e}", retriable=True) from e
-            except (litellm.RateLimitError, litellm.Timeout,
-                    litellm.APIConnectionError, litellm.ServiceUnavailableError,
-                    getattr(litellm, "MidStreamFallbackError", Exception)) as e:
+            except retriable_errors as e:
                 # Retriable errors — try next fallback model if available
                 last_error = e
                 if _fallback_blocked() is not None and model_idx < len(models_to_try) - 1:
@@ -994,12 +1015,22 @@ class LiteLLMProvider(BaseProvider):
                 raise
             except Exception as e:
                 err_str = str(e)
-                if ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower()) and (is_fallback or model_idx < len(models_to_try) - 1) and _fallback_blocked() is None:
-                    logger.warning(
-                        f"Model '{current_model}' failed with rate limit/quota error: {e}. Trying next fallback..."
-                    )
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                     last_error = e
-                    continue
+                    if _fallback_blocked() is None and model_idx < len(models_to_try) - 1:
+                        logger.warning(
+                            f"Model '{current_model}' failed with rate limit/quota error: {e}. Trying next fallback..."
+                        )
+                        continue
+                    # N-24: the S1-N5 rule the typed path above
+                    # already follows — no `is_fallback or` disjunct.
+                    # A 429 on the LAST model (or with fallbacks
+                    # blocked) keeps its RateLimitError classification
+                    # instead of continuing out of the loop and being
+                    # re-raised as the generic "All models failed"
+                    # NetworkError, which health/cooldown recording
+                    # and callers branch on wrongly.
+                    raise RateLimitError(f"Rate limit exceeded: {e}") from e
                 # Non-retriable unknown errors — don't try fallbacks
                 raise ProviderError(f"Unexpected LiteLLM error: {e}", retriable=False) from e
 

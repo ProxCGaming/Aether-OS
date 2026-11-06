@@ -1,5 +1,6 @@
 """Ollama local models manager and Engine task-driven download pipeline."""
 import asyncio
+import glob
 import json
 import logging
 import shutil
@@ -241,12 +242,17 @@ class OllamaManager:
         manifests_root = self.models_dir / "manifests"
         if not manifests_root.is_dir():
             return None
-        leaf = model_name.rsplit("/", 1)[-1]
-        if ":" in leaf:
+        # E5-R: the dead `leaf` derivation is gone (the split below
+        # works from model_name itself), and the name/tag are
+        # glob-escaped — metacharacters in a caller-supplied model
+        # name (``f[o]o``, ``f*o``) must not silently alter which
+        # manifest the lookup matches.
+        if ":" in model_name.rsplit("/", 1)[-1]:
             name, tag = model_name.rsplit(":", 1)
         else:
             name, tag = model_name, "latest"
-        matches = sorted(manifests_root.glob(f"**/{name}/{tag}"))
+        matches = sorted(manifests_root.glob(
+            f"**/{glob.escape(name)}/{glob.escape(tag)}"))
         return matches[0] if matches else None
 
     def _place_model_in_destination(self, model_name: str, dest: Path) -> str | None:
@@ -433,7 +439,11 @@ class OllamaManager:
         # no recorded path may point at a place the model is not.
         dest_path = Path(dest)
         if dest_path.resolve() != self.models_dir.resolve():
-            placement_error = self._place_model_in_destination(model_name, dest_path)
+            # N-10: the placement copy is per-blob shutil.copy2 over
+            # multi-GB files — it runs on a worker thread, never on
+            # the event loop this task stream is feeding.
+            placement_error = await asyncio.to_thread(
+                self._place_model_in_destination, model_name, dest_path)
             if placement_error is not None:
                 yield _failed(
                     f"Ollama pulled {model_name}, but the chosen "
