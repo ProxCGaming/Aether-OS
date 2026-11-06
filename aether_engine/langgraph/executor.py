@@ -46,10 +46,12 @@ from aether_engine.langgraph.compaction import (
     resolve_summariser_provider,
 )
 
-# Wave 5: the manifest tracker and the run-config helpers live in
-# their own modules (langgraph.manifest / langgraph.run_config) and
-# are re-exported here — this module's namespace is the historical
-# import/patch surface for both families (see __all__ below).
+# Wave 5: the manifest tracker, the run-config helpers and the
+# stream-interpretation helpers live in their own modules
+# (langgraph.manifest / langgraph.run_config / langgraph.streaming)
+# and are re-exported here — this module's namespace is the
+# historical import/patch surface for all three families (see
+# __all__ below).
 from aether_engine.langgraph.manifest import (
     _WRITE_TOOL_NAMES,
     _advance_manifest_to_checkpoint,
@@ -70,6 +72,12 @@ from aether_engine.langgraph.steering import (
     has_pending_steers,
     steer_state_update,
 )
+from aether_engine.langgraph.streaming import (
+    _SUPERSTEP_LABELS,
+    _is_retriable_error,
+    _superstep_label,
+    merge_segment_items,
+)
 from aether_engine.memory import session_store
 from aether_engine.memory.facade import backend_or_none
 from aether_engine.providers.base import (
@@ -85,11 +93,12 @@ from aether_engine.tools.registry import ToolRegistry
 logger = logging.getLogger("aether_engine.langgraph.executor")
 
 # The namespace is contractual: the suites import and patch names
-# here (compile_graph, DEFAULT_CHECKPOINT_DB, the manifest and
-# run-config helpers re-exported above), routes/websocket.py and
-# langgraph/fast_chat.py import through here, and rewind.service
-# reads DEFAULT_CHECKPOINT_DB off this module. __all__ pins the
-# full surface so the Wave 5 splits cannot silently shrink it.
+# here (compile_graph, DEFAULT_CHECKPOINT_DB, the manifest,
+# run-config and streaming helpers re-exported above),
+# routes/websocket.py and langgraph/fast_chat.py import through
+# here, and rewind.service reads DEFAULT_CHECKPOINT_DB off this
+# module. __all__ pins the full surface so the Wave 5 splits
+# cannot silently shrink it.
 __all__ = [
     "DEFAULT_CHECKPOINT_DB",
     "EVENT_QUEUE_MAXSIZE",
@@ -144,6 +153,7 @@ __all__ = [
     "logger",
     "logging",
     "make_provider_summariser",
+    "merge_segment_items",
     "message_dicts",
     "multimodal_user_content",
     "resolve_summariser_provider",
@@ -193,43 +203,6 @@ async def _reap_runner(task: asyncio.Task) -> None:
             # forwarded to the consumer as graph_error.
             logger.debug("Graph runner ended with an error during reap",
                          exc_info=True)
-
-_SUPERSTEP_LABELS = {
-    "supervisor": "Supervisor",
-    "planner": "Planner",
-    "coder": "Coder",
-    "researcher": "Researcher",
-    "execute_tool": "Tool execution",
-}
-
-
-def _superstep_label(event: dict, step_index: int) -> str:
-    for key in event:
-        if not key.startswith("__"):
-            pretty = _SUPERSTEP_LABELS.get(
-                key, key.replace("_", " ").capitalize())
-            return f"After {pretty}"
-    return f"Step {step_index}"
-
-
-def _is_retriable_error(exc: Exception) -> bool:
-    """Check if an exception is retriable (should trigger fallback)."""
-    if isinstance(exc, ProviderError):
-        return exc.retriable
-    if isinstance(exc, (RateLimitError, TimeoutError, NetworkError)):
-        return True
-    # Check for common retriable error strings
-    err_str = str(exc).lower()
-    retriable_indicators = [
-        "503", "502", "504", "500",
-        "serviceunavailable", "service unavailable",
-        "rate limit", "rate_limit", "429",
-        "timeout", "timed out",
-        "connection", "connecterror", "remotedisconnected",
-        "network", "unreachable",
-    ]
-    return any(indicator in err_str for indicator in retriable_indicators)
-
 
 def _messages_have_images(messages: Any) -> bool:
     """True when any message carries an image part (M17 resume check).
@@ -1179,56 +1152,12 @@ async def resume_langgraph_task(
             async def _consume_segment(segment_input):
                 nonlocal interrupted, messages_seen, delegation_seen
 
-                async def _merged_items():
-                    # E1-F16: this segment's graph updates merged with
-                    # the task's bus queue: bus items arrive as
-                    # ("bus", Event) and are forwarded untouched —
-                    # THINKING, SCRATCHPAD and artifact/media notices
-                    # reach the resume consumer in arrival order, as
-                    # they do on the run path — while graph updates
-                    # keep the translation below, unchanged. A graph
-                    # failure re-raises at the point the merge reaches
-                    # it, exactly where a direct astream raise landed.
-                    merged: asyncio.Queue = asyncio.Queue(
-                        maxsize=EVENT_QUEUE_MAXSIZE)
-
-                    async def _pump_graph():
-                        stream = graph.astream(
-                            segment_input, config=config,
-                            stream_mode="updates")
-                        try:
-                            async for graph_event in stream:
-                                await merged.put(("graph", graph_event))
-                        except Exception as exc:  # noqa: BLE001 — re-raised by the merge at the matching point below.
-                            await merged.put(("graph_error", exc))
-                        finally:
-                            stream_aclose = getattr(stream, "aclose", None)
-                            if stream_aclose is not None:
-                                await stream_aclose()
-                            await merged.put(("graph_done", None))
-
-                    async def _pump_bus():
-                        while True:
-                            bus_event = await bus_queue.get()
-                            await merged.put(("bus", bus_event))
-
-                    pumps = [
-                        asyncio.create_task(_pump_graph()),
-                        asyncio.create_task(_pump_bus()),
-                    ]
-                    try:
-                        while True:
-                            kind, data = await merged.get()
-                            if kind == "graph_done":
-                                return
-                            if kind == "graph_error":
-                                raise data
-                            yield kind, data
-                    finally:
-                        for pump in pumps:
-                            pump.cancel()
-
-                async for kind, data in _merged_items():
+                # E1-F16: the segment's graph updates merged with
+                # the task's bus queue — merge_segment_items (in
+                # langgraph.streaming) is that merge; the graph
+                # translation below is this path's own and stays.
+                async for kind, data in merge_segment_items(
+                        graph, segment_input, config, bus_queue):
                     if kind == "bus":
                         yield data
                         continue
