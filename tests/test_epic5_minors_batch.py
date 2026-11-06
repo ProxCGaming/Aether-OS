@@ -326,12 +326,15 @@ class TestStandbyHealthState:
         manager.reset_provider("p")
         assert manager.get_state("p").status == "standby"
 
-    def test_provider_list_reports_standby_for_unconfigured_cards(
+    @pytest.mark.asyncio
+    async def test_provider_list_reports_standby_for_unconfigured_cards(
             self, ws_env, monkeypatch):
-        from aether_engine.orchestration.core import _build_provider_list
+        from aether_engine.orchestration.core import (
+            _build_provider_list_async,
+        )
 
         store = SimpleNamespace(list_providers=list)
-        cards = _build_provider_list(store)
+        cards = await _build_provider_list_async(store, discover=False)
         assert cards, "expected provider cards"
         for card in cards:
             assert card["has_key"] is False

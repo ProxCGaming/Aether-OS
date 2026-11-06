@@ -209,61 +209,6 @@ async def _build_provider_list_async(store: SecretStore, discover: bool = True) 
         
     return result
 
-def _build_provider_list(store: SecretStore) -> list:
-    """Synchronous fallback for building provider status list."""
-    result = []
-    stored = set(store.list_providers())
-    cfg = engine_state.user_config
-    for p in CLOUD_PROVIDERS:
-        models = cfg.provider_models.get(p.name)
-        base_url = cfg.custom_base_urls.get(p.name, "")
-        if not models:
-            models = [m.id for m in engine_state.model_registry.get_models_for_provider(p.name)]
-        if not models:
-            models = list(p.models)
-        result.append({
-            "name": p.name,
-            "display_name": p.display_name,
-            "icon": p.icon,
-            "key_url": p.key_url,
-            "supports_custom_url": getattr(p, "supports_custom_url", False),
-            "base_url": base_url,
-            "models": models,
-            "excluded_models": cfg.provider_excluded_models.get(p.name, []),
-            "has_key": p.name in stored,
-            "is_default": cfg.default_provider == p.name,
-            "default_model": cfg.default_model if cfg.default_provider == p.name else (models[0] if models else ""),
-            "health": engine_state.health_manager.get_state(p.name).status,
-        })
-
-    # --- Dynamic custom providers (user-added, not in CLOUD_PROVIDERS) ---
-    known_names = {p.name for p in CLOUD_PROVIDERS}
-    all_custom = set(cfg.custom_base_urls.keys()) | set(cfg.provider_models.keys()) | stored
-    for pname in sorted(all_custom - known_names):
-        models = cfg.provider_models.get(pname, [])
-        base_url = cfg.custom_base_urls.get(pname, "")
-        fallback_name = pname.removeprefix("custom_")
-        display_name = cfg.custom_provider_names.get(pname, fallback_name.replace("_", " ").title())
-        provider_type = cfg.custom_provider_types.get(pname, "openai_compatible")
-        if not models:
-            models = [m.id for m in engine_state.model_registry.get_models_for_provider(pname)]
-        result.append({
-            "name": pname,
-            "display_name": display_name,
-            "icon": "⊕" if provider_type == "openai_compatible" else "◈",
-            "key_url": "",
-            "supports_custom_url": True,
-            "base_url": base_url,
-            "models": models,
-            "excluded_models": cfg.provider_excluded_models.get(pname, []),
-            "has_key": pname in stored or provider_type == "openai_compatible",
-            "is_default": cfg.default_provider == pname,
-            "default_model": cfg.default_model if cfg.default_provider == pname else (models[0] if models else ""),
-            "health": engine_state.health_manager.get_state(pname).status,
-            "provider_type": provider_type,
-        })
-    return result
-
 async def _validate_provider_key(
     provider_name: str,
     api_key: str,

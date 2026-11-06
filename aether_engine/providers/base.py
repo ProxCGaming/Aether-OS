@@ -47,7 +47,6 @@ class ToolCall:
     name: str
     args: dict[str, Any] = field(default_factory=dict)
     call_id: str | None = None
-    thought_signature: Any | None = None
 
 
 @dataclass
