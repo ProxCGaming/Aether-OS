@@ -106,6 +106,20 @@ def _log_ws_message_type(msg_type: Any) -> None:
     else:
         logger.debug("WS message received: %s", name)
 
+
+def _coerce_sample_rate(value: Any) -> int:
+    """Coerce a client-supplied dictation sample rate (E1-01).
+
+    The rate rides an untrusted payload: a non-numeric value must
+    fall back to the 16 kHz default the message would have carried
+    had it omitted the field, never raise into the receive loop and
+    kill the session.
+    """
+    try:
+        return int(value or 16000)
+    except (TypeError, ValueError):
+        return 16000
+
 # Phase 10.3, B1: the only task class with a real engine seam — see
 # AUXILIARY_TASK_CLASSES in aether_engine/config.py (single source of truth).
 # The Settings UI dropped the other six helper tasks in Phase 9 (commit
@@ -1322,27 +1336,37 @@ async def ws_tasks(ws: WebSocket):
     async def _send_media_search_result(req_id_, query_, collection_, limit_):
         """Answer a MEDIA_SEARCH_REQUEST from a background task (RUX-B-08)."""
         from aether_engine.tools.media_recall import search_media_entries
+        error = None
         if query_:
             try:
                 recall = await search_media_entries(
                     query_, limit=limit_, collection=collection_)
+                results = recall["results"]
+                degraded = bool(recall["degraded"])
             except Exception as e:  # noqa: BLE001 — a failed recall must not kill the connection; the loop staying alive is the point of the move
+                # E1-03: staying alive is not enough — the requester
+                # must be ANSWERED. A failed recall is a degraded,
+                # empty result carrying the error, in the same shape
+                # the renderer already renders.
                 logger.warning(f"Media search for {query_!r} raised: {e}")
-                return
-            results = recall["results"]
-            degraded = bool(recall["degraded"])
+                results = []
+                degraded = True
+                error = str(e)
         else:
             results = []
             degraded = False
+        payload = {
+            "query": query_,
+            "media": results,
+            "degraded": degraded,
+        }
+        if error is not None:
+            payload["error"] = error
         try:
             await ws.send_text(Event(
                 type=EventType.MEDIA_SEARCH_RESPONSE,
                 request_id=req_id_,
-                payload={
-                    "query": query_,
-                    "media": results,
-                    "degraded": degraded,
-                },
+                payload=payload,
             ).to_json())
         except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-search; nothing else to do
             logger.debug(f"Could not send media search response: {e}")
@@ -1350,15 +1374,17 @@ async def ws_tasks(ws: WebSocket):
     async def _send_local_model_list_result(req_id_):
         """Answer a LOCAL_MODEL_LIST_REQUEST from a background task (RUX-B-08)."""
         try:
-            models = await engine_state.ollama_manager.list_models()
+            payload = {"models": await engine_state.ollama_manager.list_models()}
         except Exception as e:  # noqa: BLE001 — a dead daemon must not kill the connection; the loop staying alive is the point of the move
+            # E1-03: answer with an empty list + the error instead of
+            # leaving the requester waiting on a reply that never comes.
             logger.warning(f"Local model list raised: {e}")
-            return
+            payload = {"models": [], "error": str(e)}
         try:
             await ws.send_text(Event(
                 type=EventType.LOCAL_MODEL_LIST_RESPONSE,
                 request_id=req_id_,
-                payload={"models": models},
+                payload=payload,
             ).to_json())
         except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-list; nothing else to do
             logger.debug(f"Could not send local model list response: {e}")
@@ -1366,15 +1392,20 @@ async def ws_tasks(ws: WebSocket):
     async def _send_local_model_delete_result(req_id_, model_name_):
         """Answer a LOCAL_MODEL_DELETE_REQUEST from a background task (RUX-B-08)."""
         try:
-            deleted = await engine_state.ollama_manager.delete_model(model_name_)
+            payload = {
+                "model": model_name_,
+                "deleted": await engine_state.ollama_manager.delete_model(model_name_),
+            }
         except Exception as e:  # noqa: BLE001 — a dead daemon must not kill the connection; the loop staying alive is the point of the move
+            # E1-03: answer with deleted=False + the error instead of
+            # leaving the requester waiting on a reply that never comes.
             logger.warning(f"Local model delete for {model_name_} raised: {e}")
-            return
+            payload = {"model": model_name_, "deleted": False, "error": str(e)}
         try:
             await ws.send_text(Event(
                 type=EventType.LOCAL_MODEL_DELETE_RESPONSE,
                 request_id=req_id_,
-                payload={"model": model_name_, "deleted": deleted},
+                payload=payload,
             ).to_json())
         except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-delete; nothing else to do
             logger.debug(f"Could not send local model delete response: {e}")
@@ -1385,8 +1416,10 @@ async def ws_tasks(ws: WebSocket):
             result = await engine_state.model_hub.search(
                 source=source_, query=query_, family=family_)
         except Exception as e:  # noqa: BLE001 — a failed catalogue call must not kill the connection; the loop staying alive is the point of the move
+            # E1-03: answer in the hub's own {models, error} shape
+            # instead of leaving the requester waiting forever.
             logger.warning(f"Model hub search raised: {e}")
-            return
+            result = {"models": [], "error": str(e)}
         try:
             await ws.send_text(Event(
                 type=EventType.MODEL_HUB_SEARCH_RESPONSE,
@@ -1402,8 +1435,10 @@ async def ws_tasks(ws: WebSocket):
             result = await engine_state.model_hub.detail(
                 source=source_, repo_id=repo_id_)
         except Exception as e:  # noqa: BLE001 — a failed catalogue call must not kill the connection; the loop staying alive is the point of the move
+            # E1-03: answer in the hub's own {detail, error} shape
+            # instead of leaving the requester waiting forever.
             logger.warning(f"Model hub detail raised: {e}")
-            return
+            result = {"detail": None, "error": str(e)}
         try:
             await ws.send_text(Event(
                 type=EventType.MODEL_HUB_DETAIL_RESPONSE,
@@ -1419,8 +1454,11 @@ async def ws_tasks(ws: WebSocket):
             result = await engine_state.hub_downloads.delete(
                 source=source_, model_id=model_id_)
         except Exception as e:  # noqa: BLE001 — a failed delete must not kill the connection; the loop staying alive is the point of the move
+            # E1-03: answer in the delete result's own
+            # {success, deleted, error} shape instead of leaving the
+            # requester waiting forever.
             logger.warning(f"Model hub delete raised: {e}")
-            return
+            result = {"success": False, "deleted": False, "error": str(e)}
         try:
             await ws.send_text(Event(
                 type=EventType.MODEL_HUB_DELETE_RESPONSE,
@@ -2575,15 +2613,29 @@ async def ws_tasks(ws: WebSocket):
                     raise
             except Exception as e:  # noqa: BLE001 — a failed earlier launch answered for itself; this launch still runs
                 logger.debug(f"Earlier task launch ended with an error before a chained launch: {e}")
+        # E1-13: validate the launch's content BEFORE cancelling the
+        # live runner. A prompt-less, attachment-less start names no
+        # task at all — answer it with an error and leave the live
+        # task untouched, instead of replacing it with a fabricated
+        # "Say hello" task (the old default below). Attachments alone
+        # are real content and still launch, with an honest empty
+        # prompt.
+        _raw_prompt = msg.payload.get("prompt")
+        prompt = _raw_prompt.strip() if isinstance(_raw_prompt, str) else ""
+        attachments = msg.payload.get("attachments") or []
+        if not prompt and not attachments:
+            await ws.send_text(Event(
+                type=EventType.ERROR,
+                request_id=req_id,
+                payload={"error": "START_TASK requires a non-empty prompt or attachments; nothing was started."},
+            ).to_json())
+            return
         if task_runner and not task_runner.done():
             task_runner.cancel()
             try:
                 await task_runner
             except asyncio.CancelledError:
                 pass
-
-        prompt = msg.payload.get("prompt", "").strip() or "Say hello"
-        attachments = msg.payload.get("attachments") or []
         cfg = engine_state.user_config
         requested_model = msg.payload.get("model")
         session_id = msg.payload.get("session_id")
@@ -2992,7 +3044,22 @@ async def ws_tasks(ws: WebSocket):
             # a message.
             # -----------------------------------------------------------
             if msg.type == EventType.STEER_TASK:
-                steer_prompt = (msg.payload.get("prompt") or "").strip()
+                _raw_steer_prompt = msg.payload.get("prompt")
+                steer_prompt = (
+                    _raw_steer_prompt.strip()
+                    if isinstance(_raw_steer_prompt, str) else "")
+                if not steer_prompt:
+                    # E1-13: an empty steer names nothing to steer
+                    # with. It must be answered with an error — never
+                    # fall through to START_TASK, where it used to
+                    # degrade into a spurious "Say hello" task that
+                    # cancelled the user's live task.
+                    await ws.send_text(Event(
+                        type=EventType.ERROR,
+                        request_id=req_id,
+                        payload={"error": "STEER_TASK requires a non-empty prompt; nothing was steered or started."},
+                    ).to_json())
+                    continue
                 steer_session = msg.payload.get("session_id") or task_session_id
                 steer_active = bool(
                     steer_session
@@ -3055,6 +3122,18 @@ async def ws_tasks(ws: WebSocket):
                 if task_runner and not task_runner.done():
                     task_runner.cancel()
                     logger.info("Cancellation requested for active task runner.")
+                if launch_pending and not (task_runner and not task_runner.done()):
+                    # A launch cancelled in its pre-work never
+                    # creates the pump, so the pump's own
+                    # TASK_CANCELLED audit record
+                    # (execute_task_generator's CancelledError
+                    # handler) never fires for this cancel. Write
+                    # the same record here so every honoured cancel
+                    # leaves exactly one audit entry; when a runner
+                    # is active, its pump writes the record instead
+                    # and this branch must not double-log.
+                    engine_state.audit_logger.log_event(
+                        "TASK_CANCELLED", {"task_id": "unknown"})
                 if launch_pending or (task_runner and not task_runner.done()):
                     await ws.send_text(Event(
                         type=EventType.TASK_CANCELLED,
@@ -3948,8 +4027,16 @@ async def ws_tasks(ws: WebSocket):
                 from aether_engine.tools.approval_cache import get_default_cache
 
                 grant_id = msg.payload.get("id")
+                # E1-01: the id rides an untrusted payload — a
+                # non-numeric id is a rejected revoke (answered
+                # below with revoked=False), never a ValueError that
+                # kills the session.
+                try:
+                    grant_pk = int(grant_id) if grant_id is not None else None
+                except (TypeError, ValueError):
+                    grant_pk = None
                 cache = get_default_cache()
-                revoked = bool(grant_id) and await asyncio.to_thread(cache.revoke, int(grant_id))
+                revoked = bool(grant_id) and grant_pk is not None and await asyncio.to_thread(cache.revoke, grant_pk)
                 if revoked:
                     engine_state.audit_logger.log_event("APPROVAL_GRANT_REVOKED", {"grant_id": grant_id})
                 grants = await asyncio.to_thread(cache.list_grants)
@@ -4046,7 +4133,23 @@ async def ws_tasks(ws: WebSocket):
                 from aether_engine.cost.ledger import get_usage_ledger
 
                 raw_budget = msg.payload.get("daily_budget_usd")
-                budget = float(raw_budget) if raw_budget is not None else None
+                try:
+                    budget = float(raw_budget) if raw_budget is not None else None
+                except (TypeError, ValueError):
+                    # E1-01: a non-numeric budget is rejected with an
+                    # answer naming the unchanged value — never a
+                    # ValueError that kills the session, and the bad
+                    # value is neither applied nor saved.
+                    await ws.send_text(Event(
+                        type=EventType.DAILY_BUDGET_SET_RESPONSE,
+                        request_id=req_id,
+                        payload={
+                            "daily_budget_usd": engine_state.user_config.daily_budget_usd,
+                            "ok": False,
+                            "error": f"Invalid daily budget value: {raw_budget!r} (expected a number)",
+                        },
+                    ).to_json())
+                    continue
                 if budget is not None and budget <= 0:
                     budget = None
                 engine_state.user_config.daily_budget_usd = budget
@@ -4774,6 +4877,19 @@ async def ws_tasks(ws: WebSocket):
 
             elif msg.type == EventType.CONFIG_UPDATE_REQUEST:
                 config_data = msg.payload.get("config", {})
+                if not isinstance(config_data, dict):
+                    # E1-01: a non-object config (a string passes the
+                    # "disable_fallbacks" membership test below as a
+                    # substring, then TypeErrors on indexing) is
+                    # refused with an answer, in the same vocabulary
+                    # as the E6-F05 refusal — nothing applied, nothing
+                    # saved, session alive.
+                    await ws.send_text(Event(
+                        type=EventType.CONFIG_UPDATE_RESPONSE,
+                        request_id=req_id,
+                        payload={"success": False, "error": "Config update must be a JSON object of settings."},
+                    ).to_json())
+                    continue
                 # E6-F05: the fields handed over by Epics 1 and 2
                 # (spawn policy, prewalk, output schemas, compaction
                 # thresholds, path rules) are validated strictly —
@@ -5558,7 +5674,13 @@ async def ws_tasks(ws: WebSocket):
                 # trailing slash, a symlink, a dotted path) is refused
                 # and the reply points at the existing entry instead
                 # of adding a twin.
-                ws_path = msg.payload.get("path", "").strip()
+                # E1-01: the path rides an untrusted payload — a
+                # non-string path coerces to empty (answered below
+                # as "Path empty") instead of raising AttributeError
+                # into the receive loop. Same guard in the REMOVE
+                # and SET_ACTIVE branches below.
+                _raw_ws_path = msg.payload.get("path")
+                ws_path = _raw_ws_path.strip() if isinstance(_raw_ws_path, str) else ""
                 roots = engine_state.user_config.workspace_roots
                 existing = find_workspace_root(roots, ws_path)
                 if ws_path and existing is None:
@@ -5614,7 +5736,8 @@ async def ws_tasks(ws: WebSocket):
                 # entry, and the reply names the canonical root that
                 # was actually removed (slice 3 unbinds that root's
                 # sessions by this value).
-                ws_path = msg.payload.get("path", "").strip()
+                _raw_ws_path = msg.payload.get("path")
+                ws_path = _raw_ws_path.strip() if isinstance(_raw_ws_path, str) else ""
                 removed = remove_workspace_root(
                     engine_state.user_config.workspace_roots, ws_path)
                 if removed is not None:
@@ -5753,7 +5876,8 @@ async def ws_tasks(ws: WebSocket):
                 # Slice 2: the request addresses the canonical
                 # identity — any spelling of the folder activates its
                 # one stored (canonical) entry.
-                ws_path = msg.payload.get("path", "").strip()
+                _raw_ws_path = msg.payload.get("path")
+                ws_path = _raw_ws_path.strip() if isinstance(_raw_ws_path, str) else ""
                 roots = engine_state.user_config.workspace_roots
                 existing = find_workspace_root(roots, ws_path)
                 if existing is not None:
@@ -5999,7 +6123,7 @@ async def ws_tasks(ws: WebSocket):
                     req_id,
                     _dictation_engine.unavailable_reason(),
                     msg.payload.get("audio") or "",
-                    int(msg.payload.get("sample_rate") or 16000),
+                    _coerce_sample_rate(msg.payload.get("sample_rate")),
                     bool(msg.payload.get("is_final", False))))
 
             elif msg.type == EventType.DICTATION_STOP_REQUEST:
@@ -6010,7 +6134,7 @@ async def ws_tasks(ws: WebSocket):
                 _enqueue_dictation(_send_dictation_stop_result(
                     req_id,
                     msg.payload.get("audio"),
-                    int(msg.payload.get("sample_rate") or 16000)))
+                    _coerce_sample_rate(msg.payload.get("sample_rate"))))
 
             elif msg.type == EventType.READ_ALOUD_START_REQUEST:
                 await _stop_read_aloud()

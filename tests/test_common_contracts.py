@@ -69,6 +69,25 @@ class TestCommonContracts(unittest.TestCase):
         with self.assertRaises(InvalidEventPayloadError):
             Event.from_json("not-valid-json {[[")
 
+    def test_non_object_frames_raise_invalid_payload(self):
+        # E8-04: a syntactically valid JSON frame whose top level is
+        # not an object must draw the typed contract error (which the
+        # receive loop turns into an ERROR reply), never an
+        # AttributeError that tears the connection down.
+        for raw in ("123", '"x"', "[1, 2]", "null", "true"):
+            with self.assertRaises(InvalidEventPayloadError, msg=raw):
+                Event.from_json(raw)
+
+    def test_non_object_payload_raises_invalid_payload(self):
+        # E8-04: payload is part of the contract — anything that is
+        # not a JSON object (including explicit null) is rejected.
+        for payload in ([1, 2], "text", 42, None):
+            frame = json.dumps({
+                "type": "PING", "payload": payload,
+                "schema_version": SCHEMA_VERSION})
+            with self.assertRaises(InvalidEventPayloadError, msg=repr(payload)):
+                Event.from_json(frame)
+
     def test_provider_event_types_roundtrip(self):
         """Phase 3: new provider management event types serialize correctly."""
         provider_types = [

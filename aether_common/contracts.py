@@ -639,6 +639,16 @@ class Event:
         except json.JSONDecodeError as e:
             raise InvalidEventPayloadError(f"Malformed JSON: {e}")
 
+        # E8-04: a frame whose top level is not a JSON object (a
+        # scalar, an array, null) is a contract violation, not an
+        # AttributeError — consumers guard on the typed errors below
+        # and answer with an ERROR reply; anything else escaping
+        # tears the connection down.
+        if not isinstance(data, dict):
+            raise InvalidEventPayloadError(
+                f"Event frame must be a JSON object, got {type(data).__name__}"
+            )
+
         ver = data.get("schema_version")
         if ver != SCHEMA_VERSION:
             raise SchemaVersionMismatchError(
@@ -650,12 +660,22 @@ class Event:
         except (KeyError, ValueError) as e:
             raise InvalidEventPayloadError(f"Invalid or missing event type: {e}")
 
+        # E8-04: the payload is part of the contract — every consumer
+        # treats it as a dict, so a non-object payload (including an
+        # explicit null) is rejected here instead of surfacing later
+        # as an AttributeError inside a handler.
+        payload = data.get("payload", {})
+        if not isinstance(payload, dict):
+            raise InvalidEventPayloadError(
+                f"Event payload must be a JSON object, got {type(payload).__name__}"
+            )
+
         req_id = data.get("request_id") or data.get("event_id")
         ev_id = data.get("event_id") or req_id
 
         return cls(
             type=ev_type,
-            payload=data.get("payload", {}),
+            payload=payload,
             schema_version=ver,
             ts=data.get("ts", time.time()),
             request_id=req_id,
