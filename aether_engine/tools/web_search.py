@@ -23,6 +23,8 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlencode
 
+from aether_engine.tools.registry import Tool, ToolRisk
+
 logger = logging.getLogger("aether_engine.tools.web_search")
 
 PROVIDERS = ("ddgs", "exa", "brave", "tavily", "firecrawl")
@@ -171,3 +173,37 @@ def search_web_dispatch(
     if result.startswith("Search failed") and fallback_to_ddgs:
         return f"[{provider} search failed; fell back to ddgs as configured]\n" + _search_ddgs(query, max_results)
     return result
+
+
+def create_web_tools() -> list[Tool]:
+    def _search_web(query: str, max_results: int = 5) -> str:
+        # Epic 2, E2-10: dispatch through the provider seam (ddgs by
+        # default, or the user's configured keyed provider).
+        provider, fallback = current_search_config()
+        return search_web_dispatch(
+            query, max_results=max_results, provider=provider, fallback_to_ddgs=fallback
+        )
+
+    from aether_engine.tools.web_fetch import create_fetch_url_tool
+
+    return [
+        Tool(
+            name="search_web",
+            description=(
+                "Search the web for information. Returns search "
+                "results (titles, URLs, snippets) — use fetch_url to read a "
+                "result page in full."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query"},
+                    "max_results": {"type": "integer", "description": "Maximum number of results to return (default 5)"}
+                },
+                "required": ["query"],
+            },
+            execute_fn=_search_web,
+            risk=ToolRisk.READ_ONLY,
+        ),
+        create_fetch_url_tool(),
+    ]
