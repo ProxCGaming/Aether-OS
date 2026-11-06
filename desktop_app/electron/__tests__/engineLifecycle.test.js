@@ -29,7 +29,25 @@ const RESOURCES = path.join(path.sep, 'fake', 'resources');
 const USER_DATA = path.join(path.sep, 'fake', 'userData');
 const PAYLOAD_EXE = path.join(RESOURCES, 'engine', 'python', 'bin', 'python3');
 const PAYLOAD_APP = path.join(RESOURCES, 'engine', 'app');
+const PAYLOAD_MANIFEST = path.join(RESOURCES, 'engine', 'payload-manifest.json');
 const RUN_DIR = path.join(USER_DATA, 'engine-run');
+
+// A manifest the assembler's write_manifest would produce for a
+// complete payload (D4-18: the launcher now verifies it at spawn).
+function validManifest(platform) {
+  return JSON.stringify({
+    format: 1,
+    platform,
+    python_version: '3.12.16',
+    runtime_source: 'python-build-standalone 20261026 (test)',
+    runtime_dir: 'python',
+    app_dir: 'app',
+    app_packages: ['aether_engine', 'aether_common', 'aether_worker'],
+    entry_module: 'aether_engine.main',
+    assembled_at: '2026-11-06T00:00:00Z',
+    assembled_by: 'scripts/assemble_engine_payload.py',
+  });
+}
 
 function fakeChild(pid, { dieOnTerm = false } = {}) {
   const child = new EventEmitter();
@@ -56,7 +74,17 @@ function makeLifecycle(overrides = {}) {
     children: [],
     mkdirCalls: [],
     logs: [],
+    // D4-18: a planted payload app dir implies its package dirs,
+    // as a real assembled payload has them.
+    manifestContent: overrides.manifest === undefined
+      ? validManifest(overrides.platform || 'linux')
+      : overrides.manifest,
   };
+  if (state.existing.has(PAYLOAD_APP)) {
+    for (const pkg of ['aether_engine', 'aether_common', 'aether_worker']) {
+      state.existing.add(path.join(PAYLOAD_APP, pkg));
+    }
+  }
   let nextPid = 4100;
   const deps = {
     spawn: jest.fn((exe, args, options) => {
@@ -90,6 +118,12 @@ function makeLifecycle(overrides = {}) {
     fs: {
       existsSync: (p) => state.existing.has(p),
       mkdirSync: (p, opts) => { state.mkdirCalls.push({ p, opts }); },
+      readFileSync: (p) => {
+        if (p === PAYLOAD_MANIFEST && state.manifestContent !== null) {
+          return state.manifestContent;
+        }
+        throw new Error(`ENOENT: ${p}`);
+      },
     },
     platform: overrides.platform || 'linux',
     isPackaged: overrides.isPackaged !== false,
@@ -101,7 +135,7 @@ function makeLifecycle(overrides = {}) {
       healthTimeoutMs: 150,
       healthPollMs: 5,
       restartDelayMs: 5,
-      killGraceMs: 25,
+      killGraceMs: overrides.killGraceMs ?? 25,
       spawnRetryDelayMs: 5,
       maxRestarts: overrides.maxRestarts ?? 2,
     },
@@ -328,7 +362,14 @@ describe('engineLifecycle engine log file (Wave 1 slice 3)', () => {
     const exe = path.join(resourcesPath, 'engine', 'python', 'bin', 'python3');
     fs.mkdirSync(path.dirname(exe), { recursive: true });
     fs.writeFileSync(exe, '');
-    fs.mkdirSync(path.join(resourcesPath, 'engine', 'app'), { recursive: true });
+    // D4-18: a real payload carries its package dirs and manifest.
+    for (const pkg of ['aether_engine', 'aether_common', 'aether_worker']) {
+      fs.mkdirSync(path.join(resourcesPath, 'engine', 'app', pkg), { recursive: true });
+    }
+    fs.writeFileSync(
+      path.join(resourcesPath, 'engine', 'payload-manifest.json'),
+      validManifest('linux'),
+    );
     const children = [];
     let up = false;
     const lifecycle = createEngineLifecycle({
@@ -367,6 +408,11 @@ describe('engineLifecycle engine log file (Wave 1 slice 3)', () => {
     const logPath = path.join(userData, 'logs', 'engine.log');
     expect(lifecycle.logFilePath()).toBe(logPath);
     await expect(lifecycle.start()).resolves.toEqual({ mode: 'spawned' });
+    // D4-01: appends are buffered and flushed asynchronously, so
+    // poll for the flush instead of reading synchronously (the
+    // assertions on content are unchanged).
+    await until(() => fs.existsSync(logPath)
+      && fs.readFileSync(logPath, 'utf8').includes('bundled engine is healthy'));
     const content = fs.readFileSync(logPath, 'utf8');
     expect(content).toMatch(
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \[engine\] spawned bundled engine/,
@@ -406,5 +452,188 @@ describe('engineLifecycle engine log file (Wave 1 slice 3)', () => {
     const { lifecycle } = makeRealLifecycle(userData);
     await expect(lifecycle.start()).resolves.toEqual({ mode: 'spawned' });
     expect(lifecycle.isSpawned()).toBe(true);
+  });
+});
+
+describe('engineLifecycle payload manifest verification (D4-18)', () => {
+  it('refuses a payload whose manifest is missing — a partial tree never spawns', async () => {
+    const { lifecycle, deps, state } = makeLifecycle({
+      existing: [PAYLOAD_EXE, PAYLOAD_APP],
+      manifest: null,
+    });
+    await expect(lifecycle.start()).resolves.toEqual({ mode: 'none' });
+    expect(deps.spawn).not.toHaveBeenCalled();
+    expect(state.logs.join('\n')).toMatch(/manifest/);
+  });
+
+  it('refuses a payload whose manifest is not parseable JSON', async () => {
+    const { lifecycle, deps } = makeLifecycle({
+      existing: [PAYLOAD_EXE, PAYLOAD_APP],
+      manifest: '{not json',
+    });
+    await expect(lifecycle.start()).resolves.toEqual({ mode: 'none' });
+    expect(deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a payload assembled for a different platform', async () => {
+    const { lifecycle, deps } = makeLifecycle({
+      existing: [PAYLOAD_EXE, PAYLOAD_APP],
+      manifest: validManifest('win32'), // lifecycle platform is linux
+    });
+    await expect(lifecycle.start()).resolves.toEqual({ mode: 'none' });
+    expect(deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a payload whose manifest lists an app package the tree lacks', async () => {
+    const manifest = JSON.parse(validManifest('linux'));
+    manifest.app_packages = ['aether_engine', 'aether_common', 'ghost_package'];
+    const { lifecycle, deps } = makeLifecycle({
+      existing: [PAYLOAD_EXE, PAYLOAD_APP],
+      manifest: JSON.stringify(manifest),
+    });
+    await expect(lifecycle.start()).resolves.toEqual({ mode: 'none' });
+    expect(deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a payload whose manifest names a different entry module', async () => {
+    const manifest = JSON.parse(validManifest('linux'));
+    manifest.entry_module = 'some.other.module';
+    const { lifecycle, deps } = makeLifecycle({
+      existing: [PAYLOAD_EXE, PAYLOAD_APP],
+      manifest: JSON.stringify(manifest),
+    });
+    await expect(lifecycle.start()).resolves.toEqual({ mode: 'none' });
+    expect(deps.spawn).not.toHaveBeenCalled();
+  });
+});
+
+describe('engineLifecycle terminateChild (D4-18)', () => {
+  it('waits on the process it was given, not the current child', async () => {
+    const { lifecycle, state } = makeLifecycle({
+      existing: [PAYLOAD_EXE, PAYLOAD_APP],
+      killGraceMs: 800,
+    });
+    await lifecycle.start(); // a current child exists and stays alive
+    const stranger = fakeChild(9999, { dieOnTerm: true });
+    const startedAt = Date.now();
+    await lifecycle.terminateChild(stranger);
+    const elapsed = Date.now() - startedAt;
+    // The stranger exited on SIGTERM: no escalation, no grace wait.
+    expect(stranger.killCalls).toEqual(['SIGTERM']);
+    expect(elapsed).toBeLessThan(400);
+    expect(state.logs.join('\n')).not.toMatch(/did not exit/);
+    await lifecycle.stop();
+  });
+});
+
+describe('main.cjs shell hardening wiring (Wave 3)', () => {
+  it('clamps restored window bounds against the connected displays (D4-02)', () => {
+    expect(mainSrc).toContain('ensureVisibleOnDisplays');
+    expect(mainSrc).toContain('screen.getAllDisplays()');
+  });
+
+  it('reconnects through the guarded reconnect helper, not a bare timer (D4-09)', () => {
+    expect(mainSrc).toContain('scheduleEngineReconnect()');
+    expect(mainSrc).not.toContain('setTimeout(connectEngine, 3000); // auto reconnect');
+    expect(mainSrc).toContain('reconnectGeneration');
+  });
+
+  it('does not open a tokenless socket against the engine (D4-09 / N-42 family)', () => {
+    expect(mainSrc).toContain('No engine token is available yet');
+  });
+
+  it('checks the Alt+Space registration result and logs a refusal (D4-10)', () => {
+    expect(mainSrc).toContain("globalShortcut.register('Alt+Space', toggleMainWindow)");
+    expect(mainSrc).toContain('Summon hotkey (Alt+Space) could not be registered');
+  });
+
+  it('opens the folder the on-screen logs actually live in (E10-02)', () => {
+    const start = mainSrc.indexOf("ipcMain.handle('open-logs-folder'");
+    expect(start).toBeGreaterThan(-1);
+    const body = mainSrc.slice(start, mainSrc.indexOf('ipcMain.handle', start + 10));
+    expect(body).toContain("app.getPath('userData')");
+    expect(body).not.toContain("'.aether', 'logs'");
+  });
+
+  it('reports the app-log broken state to the viewer (E10-01)', () => {
+    expect(mainSrc).toContain('logBroken');
+  });
+
+  it('validates open-path against the workspace + attachments roots (N-42)', () => {
+    expect(mainSrc).toContain('openPathRoots()');
+    const start = mainSrc.indexOf("ipcMain.handle('open-path'");
+    const body = mainSrc.slice(start);
+    expect(body).toContain('validateOpenPathArg(filePath, { roots');
+  });
+
+  it('keeps the engine files behind the guarded ws reconnect module', () => {
+    expect(mainSrc).toContain("require('./electron/wsReconnect.cjs')");
+    expect(mainSrc).toContain("require('./electron/crashLog.cjs')");
+  });
+});
+
+describe('engineLifecycle engine log buffering (D4-01)', () => {
+  it('buffers engine output and flushes asynchronously — no per-chunk sync append on the main loop', async () => {
+    const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'aether-ud-'));
+    const resourcesPath = fs.mkdtempSync(path.join(os.tmpdir(), 'aether-res-'));
+    const exe = path.join(resourcesPath, 'engine', 'python', 'bin', 'python3');
+    fs.mkdirSync(path.dirname(exe), { recursive: true });
+    fs.writeFileSync(exe, '');
+    for (const pkg of ['aether_engine', 'aether_common', 'aether_worker']) {
+      fs.mkdirSync(path.join(resourcesPath, 'engine', 'app', pkg), { recursive: true });
+    }
+    fs.writeFileSync(
+      path.join(resourcesPath, 'engine', 'payload-manifest.json'),
+      validManifest('linux'),
+    );
+    const appendFileCalls = [];
+    const appendFileSyncCalls = [];
+    const spyFs = {
+      ...fs,
+      appendFile: (p, data, cb) => { appendFileCalls.push(p); fs.appendFile(p, data, cb); },
+      appendFileSync: (p, data) => { appendFileSyncCalls.push(p); fs.appendFileSync(p, data); },
+    };
+    let up = false;
+    const child = fakeChild(7777);
+    const lifecycle = createEngineLifecycle({
+      spawn: jest.fn(() => { up = true; return child; }),
+      httpGet: jest.fn(async () => {
+        if (!up) throw new Error('ECONNREFUSED');
+        return 200;
+      }),
+      fs: spyFs,
+      platform: 'linux',
+      isPackaged: true,
+      resourcesPath,
+      userDataPath: userData,
+      baseEnv: {},
+      log: () => {},
+      tuning: {
+        healthTimeoutMs: 150,
+        healthPollMs: 5,
+        restartDelayMs: 5,
+        killGraceMs: 25,
+        spawnRetryDelayMs: 5,
+        maxRestarts: 2,
+        engineLogFlushMs: 10,
+      },
+    });
+    const logPath = path.join(userData, 'logs', 'engine.log');
+    await expect(lifecycle.start()).resolves.toEqual({ mode: 'spawned' });
+    // A burst of engine output lines (the chatty case that used to
+    // cost one blocking append per chunk).
+    for (let i = 0; i < 6; i += 1) {
+      child.stdout.emit('data', Buffer.from(`engine output line ${i}\n`));
+    }
+    await until(() => fs.existsSync(logPath)
+      && fs.readFileSync(logPath, 'utf8').includes('engine output line 5'));
+    // The whole burst reached the file through the async path…
+    expect(appendFileCalls.filter((p) => p === logPath).length).toBeGreaterThan(0);
+    // …and never through a synchronous append.
+    expect(appendFileSyncCalls.filter((p) => p === logPath)).toEqual([]);
+    // stop() drains the buffer: nothing written before shutdown is lost.
+    child.stdout.emit('data', Buffer.from('final line before shutdown\n'));
+    await lifecycle.stop();
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('final line before shutdown');
   });
 });

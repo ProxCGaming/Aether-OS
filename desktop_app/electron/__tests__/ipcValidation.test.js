@@ -187,6 +187,57 @@ describe('S3-M3 validateOpenPathArg (open-path)', () => {
   });
 });
 
+describe('N-42 validateOpenPathArg with open-intent context', () => {
+  // shell.openPath hands the path to the OS default handler, which
+  // EXECUTES .exe/script types on Windows: "any non-empty string"
+  // turned any renderer compromise into local file execution.
+  // With the app's context (its workspace/attachment roots and an
+  // existence probe), the validator refuses executables outright,
+  // anything outside the roots, and anything that does not exist.
+  const roots = ['/home/user/project', 'C:\\Users\\arindam\\docs'];
+  const exists = (p) => !p.includes('ghost');
+  const ctx = { roots, exists };
+
+  it('refuses executable and script types, in any case', () => {
+    for (const p of [
+      '/home/user/project/payload.exe',
+      '/home/user/project/run.BAT',
+      '/home/user/project/script.ps1',
+      '/home/user/project/installer.msi',
+      '/home/user/project/link.lnk',
+      '/home/user/project/tool.jar',
+    ]) {
+      expect(validateOpenPathArg(p, ctx).ok).toBe(false);
+    }
+  });
+
+  it('refuses paths outside the app roots, including prefix siblings', () => {
+    expect(validateOpenPathArg('/etc/passwd', ctx).ok).toBe(false);
+    expect(validateOpenPathArg('/home/user/project2/file.pdf', ctx).ok).toBe(false);
+    expect(validateOpenPathArg('/home/user/other/file.pdf', ctx).ok).toBe(false);
+  });
+
+  it('accepts an existing document inside a root', () => {
+    expect(validateOpenPathArg('/home/user/project/docs/report.pdf', ctx))
+      .toEqual({ ok: true, value: '/home/user/project/docs/report.pdf' });
+    expect(validateOpenPathArg('C:\\Users\\arindam\\docs\\file.txt', ctx).ok).toBe(true);
+  });
+
+  it('refuses a path that does not exist', () => {
+    expect(validateOpenPathArg('/home/user/project/ghost.pdf', ctx).ok).toBe(false);
+  });
+
+  it('refuses relative paths, with or without context', () => {
+    expect(validateOpenPathArg('docs/report.pdf', ctx).ok).toBe(false);
+    expect(validateOpenPathArg('report.pdf').ok).toBe(false);
+  });
+
+  it('refuses executable types even without context (shape rules always apply)', () => {
+    expect(validateOpenPathArg('/home/user/payload.exe').ok).toBe(false);
+    expect(validateOpenPathArg('C:\\temp\\run.cmd').ok).toBe(false);
+  });
+});
+
 describe('S3-M3 validateAccelerator (register-snip-shortcut)', () => {
   it('accepts the accelerators the app and Settings legitimately use', () => {
     for (const good of [

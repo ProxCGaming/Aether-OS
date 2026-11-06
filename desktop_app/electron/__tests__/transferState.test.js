@@ -66,6 +66,34 @@ describe('transferState store (main-process memory)', () => {
     expect(store.get()).toEqual({ messages: [{ role: 'user', content: 'a' }], input: 'd' });
   });
 
+  it('get deep-copies the messages themselves, not just the array (D4-07)', () => {
+    // The get() comment promises "a caller mutating the result
+    // cannot corrupt the stored history". With a shallow copy the
+    // array is new but the message OBJECTS are shared references —
+    // editing one's fields edits the stored history.
+    const store = createTransferStateStore();
+    store.set({
+      messages: [{ role: 'user', content: 'a', meta: { pinned: false } }],
+      input: 'd',
+    });
+    const out = store.get();
+    out.messages[0].content = 'tampered';
+    out.messages[0].meta.pinned = true;
+    expect(store.get()).toEqual({
+      messages: [{ role: 'user', content: 'a', meta: { pinned: false } }],
+      input: 'd',
+    });
+  });
+
+  it('set copies on the way in — later edits to the caller object cannot leak in (D4-07)', () => {
+    const store = createTransferStateStore();
+    const state = { messages: [{ role: 'user', content: 'a' }], input: 'd' };
+    store.set(state);
+    state.messages[0].content = 'tampered';
+    state.messages.push({ role: 'user', content: 'injected' });
+    expect(store.get()).toEqual({ messages: [{ role: 'user', content: 'a' }], input: 'd' });
+  });
+
   it('rejects non-object state and keeps the previous value', () => {
     const store = createTransferStateStore();
     store.set({ messages: [], input: 'keep' });

@@ -118,15 +118,74 @@ function validateEngineMessage(msg) {
   return { ok: false, error: 'Engine message must be a string or a JSON-serialisable object.' };
 }
 
+// File types shell.openPath must never be asked to open: the OS
+// default handler EXECUTES these (or installs/runs their payload),
+// so opening one is code execution, not document viewing. Opening
+// externally exists for artifacts the app produced — documents,
+// media, archives — never for programs.
+const OPEN_PATH_EXECUTABLE_EXTENSIONS = new Set([
+  '.exe', '.com', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.jse',
+  '.wsf', '.wsh', '.msi', '.msp', '.scr', '.lnk', '.jar', '.app',
+  '.command', '.sh', '.bash', '.zsh',
+]);
+
+function pathExtensionOf(p) {
+  const base = p.split(/[\\/]/).pop() || '';
+  const dot = base.lastIndexOf('.');
+  return dot > 0 ? base.slice(dot).toLowerCase() : '';
+}
+
+// True when `candidate` equals `root` or lives under it, comparing
+// whole segments: '/home/user/project2' is NOT under
+// '/home/user/project'. Both '/' and '\' count as separators and
+// the comparison is case-insensitive (Windows paths, the primary
+// platform, are).
+function isPathUnderRoot(candidate, root) {
+  const parts = (s) => s.replace(/\\/g, '/').split('/').filter((seg) => seg.length > 0);
+  const cand = parts(candidate);
+  const base = parts(root);
+  if (cand.length < base.length) return false;
+  return base.every((seg, i) => seg.toLowerCase() === cand[i].toLowerCase());
+}
+
 /**
- * open-path: a single non-empty path string. Keeps the handler's
- * existing error wording for the missing-path case.
+ * open-path: a single path string naming something the user means
+ * to OPEN (an artifact, an attachment, an exported file).
+ *
+ * Shape rules (always applied, N-42): non-empty, no NUL, ABSOLUTE
+ * (relative paths resolve against an unpredictable CWD in the main
+ * process), and never an executable/script type.
+ *
+ * Intent rules (applied when the caller supplies them — main.cjs
+ * does): `roots` confines the open to the trees the app works with
+ * (selected workspace + the engine's attachment store), and
+ * `exists` (an fs probe) refuses a path that is not there.
+ * Keeps the handler's existing error wording for the missing-path
+ * case.
  */
-function validateOpenPathArg(filePath) {
+function validateOpenPathArg(filePath, options = {}) {
   if (typeof filePath !== 'string' || filePath.trim().length === 0) {
     return { ok: false, error: 'No file path was provided.' };
   }
   if (filePath.includes('\0')) return { ok: false, error: 'Invalid file path.' };
+  const isAbsolute = filePath.startsWith('/')
+    || filePath.startsWith('\\\\')
+    || /^[A-Za-z]:[\\/]/.test(filePath);
+  if (!isAbsolute) {
+    return { ok: false, error: 'Only absolute file paths can be opened.' };
+  }
+  if (OPEN_PATH_EXECUTABLE_EXTENSIONS.has(pathExtensionOf(filePath))) {
+    return { ok: false, error: 'Executable files cannot be opened this way.' };
+  }
+  const { roots, exists } = options || {};
+  if (Array.isArray(roots) && roots.length > 0) {
+    if (!roots.some((root) => typeof root === 'string' && isPathUnderRoot(filePath, root))) {
+      return { ok: false, error: 'That file is outside the folders this app opens from.' };
+    }
+  }
+  if (typeof exists === 'function' && !exists(filePath)) {
+    return { ok: false, error: 'That file does not exist.' };
+  }
   return { ok: true, value: filePath };
 }
 

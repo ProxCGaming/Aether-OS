@@ -10,9 +10,13 @@ line, ``#`` comments and blank lines ignored):
   - The job fails ONLY when a failed/errored test is NOT listed in
     the baseline. Pre-existing, environment-dependent failures that
     are already recorded never redden CI.
-  - A baseline entry whose test now passes is reported as an
+  - A baseline entry whose test RAN and now passes is reported as an
     informational note (so the baseline can be trimmed when a fix
     lands) — it NEVER fails the job.
+  - A baseline entry whose test is ABSENT from the report never ran
+    (deselected, file deleted, collection error): it is reported as
+    NOT RUN, never as passing — trimming it would silently un-guard
+    a real known failure (D4-15).
 
 Fail closed, like the hook: a missing/unreadable XML report, or a
 report containing no test cases at all, exits non-zero — an
@@ -75,20 +79,32 @@ def node_id(classname: str, name: str, root: Path) -> str:
     return classname + "::" + name
 
 
-def collect_failures(xml_path: Path, root: Path) -> tuple[set[str], int]:
-    """Return (failed node ids, total testcase count) from JUnit XML.
+def collect_results(xml_path: Path, root: Path) -> tuple[set[str], int, set[str]]:
+    """Return (failed node ids, total testcase count, all node ids).
 
     A testcase counts as failed when it carries a <failure> or an
     <error> child — the XML counterpart of the hook's FAILED + ERROR
-    summary lines.
+    summary lines. The third set is every id the report contains,
+    pass or fail: the judge may only call a baseline entry "now
+    passing" when its test is in this set (D4-15) — an entry absent
+    from the report never ran at all.
     """
     tree = ET.parse(xml_path)
     failures: set[str] = set()
+    ran: set[str] = set()
     total = 0
     for case in tree.getroot().iter("testcase"):
         total += 1
+        node = node_id(case.get("classname", ""), case.get("name", ""), root)
+        ran.add(node)
         if case.find("failure") is not None or case.find("error") is not None:
-            failures.add(node_id(case.get("classname", ""), case.get("name", ""), root))
+            failures.add(node)
+    return failures, total, ran
+
+
+def collect_failures(xml_path: Path, root: Path) -> tuple[set[str], int]:
+    """Return (failed node ids, total testcase count) from JUnit XML."""
+    failures, total, _ran = collect_results(xml_path, root)
     return failures, total
 
 
@@ -113,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         print("ci_pytest_subset: pytest produced no report — failing closed.", file=sys.stderr)
         return 2
     try:
-        failures, total = collect_failures(xml_path, REPO_ROOT)
+        failures, total, ran = collect_results(xml_path, REPO_ROOT)
     except ET.ParseError as exc:
         print(f"ci_pytest_subset: cannot parse {xml_path}: {exc}", file=sys.stderr)
         print("ci_pytest_subset: failing closed.", file=sys.stderr)
@@ -124,7 +140,13 @@ def main(argv: list[str] | None = None) -> int:
 
     baseline = load_baseline(baseline_path)
     new_failures = sorted(failures - baseline)
-    now_passing = sorted(baseline - failures)
+    # D4-15: split the old `baseline - failures` bucket by whether
+    # the test actually RAN. An entry that ran and passed may be
+    # trimmed; an entry absent from the report never ran, and
+    # reporting it as "now passing" invites trimming a guard for a
+    # failure that is still real.
+    now_passing = sorted((baseline & ran) - failures)
+    not_run = sorted(baseline - ran)
 
     print(
         f"ci_pytest_subset: {total} test cases, {len(failures)} failed/errored, "
@@ -135,6 +157,11 @@ def main(argv: list[str] | None = None) -> int:
         for entry in now_passing:
             print(f"  NOW PASSING {entry}")
         print("ci_pytest_subset: note: consider trimming those entries from scripts/pytest-known-failures.txt.")
+    if not_run:
+        print("ci_pytest_subset: note: baseline entries whose tests did not run in this report")
+        print("ci_pytest_subset: (deselected, deleted, or lost to a collection error) — NOT passing; keep them:")
+        for entry in not_run:
+            print(f"  NOT RUN {entry}")
     if new_failures:
         print("ci_pytest_subset: FAILED — failures not in the known baseline:", file=sys.stderr)
         for entry in new_failures:

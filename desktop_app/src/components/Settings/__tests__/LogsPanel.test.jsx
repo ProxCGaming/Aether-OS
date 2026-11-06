@@ -207,3 +207,69 @@ describe('LogsPanel controls', () => {
     await waitFor(() => expect(bridge.setLogLevel).toHaveBeenCalledWith('DEBUG'));
   });
 });
+
+describe('LogsPanel Wave 3 honesty fixes', () => {
+  it('a refused level change is corrected by the next poll (E10-03)', async () => {
+    jest.useFakeTimers();
+    const bridge = installBridge({
+      setLogLevel: jest.fn().mockRejectedValue(new Error('bridge gone')),
+    });
+    render(<LogsPanel isConnected />);
+    await act(async () => {});
+    const select = screen.getByLabelText('Log level');
+    expect(select.value).toBe('INFO'); // seeded from the first read
+
+    fireEvent.change(select, { target: { value: 'DEBUG' } });
+    await act(async () => {});
+    // The IPC rejected, so the change was refused — the select
+    // still shows the user's (unapplied) choice for now…
+    expect(select.value).toBe('DEBUG');
+
+    // …but the next read-logs poll reports the applied level, and
+    // the select must follow it instead of displaying a refused
+    // level indefinitely (the one-shot seed used to block this).
+    await act(async () => { jest.advanceTimersByTime(3000); });
+    expect(bridge.readLogs.mock.calls.length).toBeGreaterThan(1);
+    expect(select.value).toBe('INFO');
+  });
+
+  it('unprefixed engine lines inherit the previous timestamp in the All merge (E10-04)', async () => {
+    installBridge({
+      readLogs: jest.fn().mockResolvedValue({
+        appTail: ['2026-11-05T10:02:00.000Z [main] INFO middle app line'],
+        engineTail: [
+          '2026-11-05T10:00:30.000Z [engine] first engine line',
+          'raw engine continuation without a prefix',
+          '2026-11-05T10:04:00.000Z [engine] last engine line',
+        ],
+        inventory: [],
+        level: 'INFO',
+      }),
+    });
+    render(<LogsPanel isConnected />);
+    const lines = await screen.findByTestId('logs-lines');
+    const text = lines.textContent;
+    // Continuation semantics: the raw line belongs with the line
+    // above it — it must not sort to the top of the merged view as
+    // if it were the oldest entry (its parsed ts used to be '').
+    expect(text.indexOf('first engine line')).toBeLessThan(text.indexOf('raw engine continuation'));
+    expect(text.indexOf('raw engine continuation')).toBeLessThan(text.indexOf('middle app line'));
+    expect(text.indexOf('middle app line')).toBeLessThan(text.indexOf('last engine line'));
+  });
+
+  it('says so when app.log writes are failing (E10-01 surfacing)', async () => {
+    installBridge({
+      readLogs: jest.fn().mockResolvedValue({ ...READ_LOGS, logBroken: true }),
+    });
+    render(<LogsPanel isConnected />);
+    await screen.findByTestId('logs-lines');
+    expect(screen.getByTestId('logs-broken-note')).toHaveTextContent(/not being recorded/);
+  });
+
+  it('shows no broken note when logging is healthy', async () => {
+    installBridge();
+    render(<LogsPanel isConnected />);
+    await screen.findByTestId('logs-lines');
+    expect(screen.queryByTestId('logs-broken-note')).not.toBeInTheDocument();
+  });
+});

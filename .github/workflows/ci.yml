@@ -66,6 +66,13 @@ on:
   push:
   pull_request:
 
+# Least privilege (D4-12): every job here only reads the repo and
+# uploads artifacts, so the GITHUB_TOKEN gets exactly that — the
+# same pattern release.yml already uses — instead of whatever the
+# repo's default token grant happens to be.
+permissions:
+  contents: read
+
 jobs:
   deps:
     name: locked deps (uv.lock + venv)
@@ -123,6 +130,7 @@ jobs:
         run: >-
           uv run python -m pytest -q
           --cov=aether_engine
+          --cov=aether_common
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
           --cov-report=html:htmlcov

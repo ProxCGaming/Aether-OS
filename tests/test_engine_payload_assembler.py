@@ -166,3 +166,83 @@ def test_unknown_platform_is_refused(tmp_path, fake_runtime):
         assembler.assemble(
             "amiga", tmp_path / "payload", runtime_dir=fake_runtime, skip_deps=True,
         )
+
+
+# --- D4-03: the runtime download is bounded and integrity-checked -------
+
+
+def _fake_urlopen(monkeypatch, payload: bytes):
+    """Replace urllib's urlopen; return a dict capturing the call."""
+    import io
+
+    calls: dict = {}
+
+    def fake_open(req, **kwargs):
+        calls["url"] = getattr(req, "full_url", req)
+        calls["kwargs"] = kwargs
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr(assembler.urllib.request, "urlopen", fake_open)
+    return calls
+
+
+def test_download_runtime_uses_a_timeout(tmp_path, monkeypatch):
+    # Every other step in this script is timeout-bounded; the one
+    # network step was the exception — a stalled connection hung a
+    # release build forever.
+    calls = _fake_urlopen(monkeypatch, b"runtime-bytes")
+    dest = tmp_path / "runtime.tar.gz"
+    assembler._download_runtime("linux", dest)
+    assert calls["kwargs"].get("timeout") == assembler.DOWNLOAD_TIMEOUT_SECONDS
+    assert assembler.DOWNLOAD_TIMEOUT_SECONDS > 0
+    assert dest.read_bytes() == b"runtime-bytes"
+
+
+def test_download_runtime_verifies_the_pinned_checksum(tmp_path, monkeypatch):
+    import hashlib
+
+    payload = b"the-real-runtime-archive"
+    digest = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setattr(assembler, "RUNTIME_SHA256", {"linux": digest})
+    _fake_urlopen(monkeypatch, payload)
+    dest = tmp_path / "runtime.tar.gz"
+    # A matching checksum lets the download complete.
+    assembler._download_runtime("linux", dest)
+    assert dest.read_bytes() == payload
+
+
+def test_download_runtime_refuses_a_checksum_mismatch(tmp_path, monkeypatch):
+    # The downloaded bytes become the interpreter inside every
+    # shipped installer; bytes that do not match the pin must never
+    # be extracted or shipped.
+    monkeypatch.setattr(assembler, "RUNTIME_SHA256", {"linux": "0" * 64})
+    _fake_urlopen(monkeypatch, b"tampered-runtime-archive")
+    with pytest.raises(assembler.AssemblerError, match="checksum|sha256"):
+        assembler._download_runtime("linux", tmp_path / "runtime.tar.gz")
+
+
+# --- D4-14: assemble() must not delete a tree that is not a payload -----
+
+
+def test_assemble_refuses_to_delete_a_tree_that_is_not_a_payload(tmp_path, fake_runtime):
+    out = tmp_path / "important"
+    out.mkdir()
+    (out / "keep.txt").write_text("precious", encoding="utf-8")
+    with pytest.raises(assembler.AssemblerError, match="refusing to delete"):
+        assembler.assemble(
+            "linux", out, runtime_dir=fake_runtime, skip_deps=True,
+        )
+    # The refusal happens BEFORE any deletion: the tree is untouched.
+    assert (out / "keep.txt").read_text(encoding="utf-8") == "precious"
+
+
+def test_assemble_replaces_an_existing_payload_tree(tmp_path, fake_runtime):
+    out = tmp_path / "engine-payload"
+    out.mkdir()
+    (out / "payload-manifest.json").write_text("{}", encoding="utf-8")
+    (out / "stale.txt").write_text("old build", encoding="utf-8")
+    manifest = assembler.assemble(
+        "linux", out, runtime_dir=fake_runtime, skip_deps=True, skip_verify=True,
+    )
+    assert manifest["platform"] == "linux"
+    assert not (out / "stale.txt").exists()

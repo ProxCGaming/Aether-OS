@@ -62,17 +62,50 @@ describe('createUiLogger', () => {
     expect(send).toHaveBeenNthCalledWith(2, { source: 'ui', level: 'DEBUG', message: 'ws message in: TASK_PROGRESS' });
   });
 
-  it('maps socket events to levels and includes the detail', () => {
+  it('maps the two real socket events to levels and includes the detail', () => {
     const send = jest.fn();
     const logger = createUiLogger(send);
     logger.logWsEvent('open');
     logger.logWsEvent('close', 'code 1006');
-    logger.logWsEvent('error', 'boom');
     logger.logWsEvent('mystery');
-    expect(send).toHaveBeenCalledTimes(3);
+    expect(send).toHaveBeenCalledTimes(2);
     expect(send).toHaveBeenNthCalledWith(1, { source: 'ui', level: 'INFO', message: 'engine socket open' });
     expect(send).toHaveBeenNthCalledWith(2, { source: 'ui', level: 'WARN', message: 'engine socket close: code 1006' });
-    expect(send).toHaveBeenNthCalledWith(3, { source: 'ui', level: 'ERROR', message: 'engine socket error: boom' });
+  });
+
+  it('the error kind is gone: it was a record path production could never fire (E10-05)', () => {
+    // The IPC transport carries no error status, so no caller
+    // could ever emit 'error' — the map promised a third lifecycle
+    // record that did not exist. Trimmed to the two real kinds.
+    const send = jest.fn();
+    const logger = createUiLogger(send);
+    logger.logWsEvent('error', 'boom');
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('forwards the same error again once the dedupe window expires', () => {
+    jest.useFakeTimers();
+    try {
+      const send = jest.fn();
+      const logger = createUiLogger(send);
+      logger.reportError('kaboom', 'Error: kaboom\n    at x');
+      logger.reportError('kaboom', 'Error: kaboom\n    at x');
+      expect(send).toHaveBeenCalledTimes(1);
+      jest.advanceTimersByTime(1001);
+      logger.reportError('kaboom', 'Error: kaboom\n    at x');
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('truncates the ws detail at 300 chars and the error body at 1800', () => {
+    const send = jest.fn();
+    const logger = createUiLogger(send);
+    logger.logWsEvent('close', 'x'.repeat(400));
+    expect(send.mock.calls[0][0].message).toBe(`engine socket close: ${'x'.repeat(300)}`);
+    logger.reportError('e'.repeat(2500), null);
+    expect(send.mock.calls[1][0].message).toHaveLength(1800);
   });
 
   it('dedupes a repeated error inside the window but not a different one', () => {

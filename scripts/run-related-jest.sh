@@ -18,7 +18,15 @@ echo "$output"
 if [ "$status" -eq 0 ]; then
   exit 0
 fi
-if echo "$output" | grep -q "No tests found"; then
+# D4-16: jest's combined output can contain "No tests found" (from
+# one pattern's lookup) while a genuinely related test FAILED in the
+# same run — grepping for the phrase alone laundered that failure
+# into a pass. Honour the phrase only when nothing ran at all: no
+# suite results (no PASS/FAIL suite lines, no "Tests:" summary with
+# results) and no failed tests.
+if echo "$output" | grep -q "No tests found" \
+  && ! echo "$output" | grep -qE "^(PASS|FAIL) " \
+  && ! echo "$output" | grep -qE "Tests:.*[1-9][0-9]* (failed|passed)"; then
   exit 0
 fi
 exit 1

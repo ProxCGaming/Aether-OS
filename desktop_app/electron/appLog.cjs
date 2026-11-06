@@ -8,8 +8,10 @@
 // durable file was the engine lifecycle's engine.log (see
 // engineLifecycle.cjs — this module deliberately mirrors its sink
 // discipline: lazy directory creation, a write failure is swallowed
-// and disables file logging, and logging must NEVER throw into app
-// logic).
+// rather than thrown, and logging must NEVER throw into app
+// logic). One deliberate divergence since E10-01: a failure here
+// no longer disables file logging for the session — the next line
+// retries (see appendLine).
 //
 // app.log lives next to engine.log in <userData>/logs/ and carries
 // every [main] and [ui] line in one format:
@@ -126,8 +128,17 @@ function createAppLog(deps = {}) {
     fs.renameSync(logFilePath, archivePath(1));
   }
 
+  // E10-01: consecutive write failures before the sink reports
+  // itself broken. One transient failure (a locked file during an
+  // AV scan of a fresh install, a rotation rename racing another
+  // process) must neither disable logging NOR be reported as an
+  // outage — the next line simply retries. A directory that cannot
+  // even be created is broken immediately: no retry can fix it.
+  const MAX_CONSECUTIVE_WRITE_FAILURES = 3;
+  let consecutiveWriteFailures = 0;
+
   function appendLine(line) {
-    if (!logFilePath || broken) return;
+    if (!logFilePath) return;
     try {
       if (!ready) {
         fs.mkdirSync(path.dirname(logFilePath), { recursive: true });
@@ -147,8 +158,16 @@ function createAppLog(deps = {}) {
       }
       fs.appendFileSync(logFilePath, line);
       currentSize += bytes;
+      consecutiveWriteFailures = 0;
+      broken = false;
     } catch {
-      broken = true;
+      // The failure costs this one line. The next line re-stats
+      // the file (its size may have changed under us) and tries
+      // again; only a SUSTAINED failure is reported broken (the
+      // state main.cjs surfaces to the Logs panel via read-logs).
+      consecutiveWriteFailures += 1;
+      broken = !ready || consecutiveWriteFailures >= MAX_CONSECUTIVE_WRITE_FAILURES;
+      currentSize = null; // force a re-stat on the next attempt
     }
   }
 

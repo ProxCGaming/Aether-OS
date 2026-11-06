@@ -123,7 +123,13 @@ function createEngineLifecycle(deps) {
   let restartTimer = null;
   let stopping = false;
   let startPromise = null;
-  let exitWaiters = [];
+  // D4-18: exit state is tracked PER PROCESS. The old shape kept
+  // one waiter list + one exited flag for the global `child`, so
+  // terminateChild(proc) waited on whichever process happened to be
+  // current — a non-current process's termination could return
+  // early on another process's exit, or wait out the full grace on
+  // a process that had already exited.
+  const exitedProcs = new WeakSet();
 
   // Engine log file (Wave 1 slice 3): every lifecycle line ALSO
   // lands in <userData>/logs/engine.log. The injected log sink is
@@ -141,10 +147,27 @@ function createEngineLifecycle(deps) {
   // Unified logging (5 Nov 2026): engine.log rotates like app.log —
   // 5 MB cap, 3 archives — so a long-lived install cannot grow the
   // file forever. Size is tracked in memory (seeded from disk once
-  // the file is ready) so the hot path stays one append per line.
+  // the file is ready).
   const ENGINE_LOG_MAX_BYTES = 5 * 1024 * 1024;
   const ENGINE_LOG_KEEP_ARCHIVES = 3;
   let engineLogBytes = 0;
+  // D4-01 (remainder): appends are BUFFERED and flushed
+  // asynchronously. This sink receives every stdout/stderr chunk of
+  // the engine; the old shape paid one blocking appendFileSync per
+  // chunk on the main-process event loop — the process that owns
+  // the windows and the WS relay — so a chatty engine could jank
+  // the shell. Lines now accumulate and flush as one async write
+  // per window; the flush chain is serialised so chunks land in
+  // order. Two synchronous exceptions, both rare and deliberate:
+  // crossing the rotation cap drains + rotates immediately (so a
+  // rename never races an in-flight async append), and stop()
+  // drains whatever remains (shutdown must not lose the last
+  // lines — the ones a crash post-mortem needs).
+  const ENGINE_LOG_FLUSH_MS = 250;
+  const engineLogFlushMs = tuning.engineLogFlushMs ?? ENGINE_LOG_FLUSH_MS;
+  let engineLogBuffer = '';
+  let engineLogFlushTimer = null;
+  let engineLogFlushInFlight = false;
 
   function rotateEngineLogIfNeeded() {
     if (engineLogBytes <= ENGINE_LOG_MAX_BYTES) return;
@@ -163,28 +186,115 @@ function createEngineLifecycle(deps) {
     engineLogBytes = 0;
   }
 
-  function appendToEngineLog(message) {
-    if (!engineLogFilePath || engineLogBroken) return;
+  function prepareEngineLog() {
+    if (engineLogReady) return true;
     try {
-      if (!engineLogReady) {
-        fs.mkdirSync(path.dirname(engineLogFilePath), { recursive: true });
-        try {
-          engineLogBytes = fs.statSync(engineLogFilePath).size;
-        } catch { engineLogBytes = 0; }
-        engineLogReady = true;
+      fs.mkdirSync(path.dirname(engineLogFilePath), { recursive: true });
+      try {
+        engineLogBytes = fs.statSync(engineLogFilePath).size;
+      } catch { engineLogBytes = 0; }
+      engineLogReady = true;
+      return true;
+    } catch {
+      engineLogBroken = true;
+      return false;
+    }
+  }
+
+  // Write the buffered chunk NOW, synchronously. Used only where
+  // async ordering cannot be tolerated: the rotation boundary and
+  // the shutdown drain.
+  function flushEngineLogSync() {
+    if (!engineLogBuffer) return;
+    const chunk = engineLogBuffer;
+    engineLogBuffer = '';
+    if (!prepareEngineLog()) return;
+    rotateEngineLogIfNeeded();
+    try {
+      if (typeof fs.appendFileSync === 'function') {
+        fs.appendFileSync(engineLogFilePath, chunk);
       }
-      const stamp = new Date(now()).toISOString();
-      const body = String(message)
-        .split('\n')
-        .map((line) => `${stamp} ${line}`)
-        .join('\n');
-      const chunk = `${body}\n`;
-      engineLogBytes += Buffer.byteLength(chunk, 'utf8');
-      rotateEngineLogIfNeeded();
-      fs.appendFileSync(engineLogFilePath, chunk);
     } catch {
       engineLogBroken = true;
     }
+  }
+
+  function flushEngineLogAsync() {
+    engineLogFlushTimer = null;
+    if (engineLogFlushInFlight || !engineLogBuffer) return;
+    if (!prepareEngineLog()) {
+      engineLogBuffer = '';
+      return;
+    }
+    rotateEngineLogIfNeeded();
+    const chunk = engineLogBuffer;
+    engineLogBuffer = '';
+    if (typeof fs.appendFile !== 'function') {
+      // A minimal fs (tests) without async append: one sync write
+      // per flush window is still not one per chunk.
+      try { fs.appendFileSync(engineLogFilePath, chunk); } catch { engineLogBroken = true; }
+      return;
+    }
+    engineLogFlushInFlight = true;
+    try {
+      fs.appendFile(engineLogFilePath, chunk, () => {
+        engineLogFlushInFlight = false;
+        // Lines that arrived during the write flush next; a write
+        // error is swallowed exactly like the sync sink's were —
+        // logging must never throw into lifecycle logic.
+        if (engineLogBuffer) scheduleEngineLogFlush();
+      });
+    } catch {
+      engineLogFlushInFlight = false;
+      engineLogBroken = true;
+    }
+  }
+
+  function scheduleEngineLogFlush() {
+    if (engineLogFlushTimer !== null || engineLogFlushInFlight) return;
+    engineLogFlushTimer = timers.setTimeout(flushEngineLogAsync, engineLogFlushMs);
+  }
+
+  function appendToEngineLog(message) {
+    if (!engineLogFilePath || engineLogBroken) return;
+    // One-time setup (mkdir + size seed) happens synchronously at
+    // the first append, as it did before buffering: the rotation
+    // decision for every chunk depends on the real on-disk size,
+    // which a deferred seed would misjudge for the first window.
+    if (!prepareEngineLog()) return;
+    const stamp = new Date(now()).toISOString();
+    const body = String(message)
+      .split('\n')
+      .map((line) => `${stamp} ${line}`)
+      .join('\n');
+    const chunk = `${body}\n`;
+    engineLogBytes += Buffer.byteLength(chunk, 'utf8');
+    engineLogBuffer += chunk;
+    if (engineLogBytes > ENGINE_LOG_MAX_BYTES && !engineLogFlushInFlight) {
+      // Rotation boundary: drain + rotate synchronously so the
+      // rename can never race an async append in flight. (When a
+      // flush IS in flight, its completion schedules the next one,
+      // which rotates before writing — same invariant, one window
+      // later.)
+      if (engineLogFlushTimer !== null) {
+        timers.clearTimeout(engineLogFlushTimer);
+        engineLogFlushTimer = null;
+      }
+      flushEngineLogSync();
+    } else {
+      scheduleEngineLogFlush();
+    }
+  }
+
+  // Shutdown: cancel any pending flush and drain the buffer
+  // synchronously, so the session's last lines are on disk before
+  // the process goes away.
+  function drainEngineLog() {
+    if (engineLogFlushTimer !== null) {
+      timers.clearTimeout(engineLogFlushTimer);
+      engineLogFlushTimer = null;
+    }
+    flushEngineLogSync();
   }
 
   // The one sink every lifecycle message in this module goes
@@ -210,6 +320,60 @@ function createEngineLifecycle(deps) {
     }
   }
 
+  // D4-18: the manifest is the payload's own account of itself —
+  // the assembler's write_manifest output (format / platform /
+  // python_version / runtime_dir / app_dir / app_packages /
+  // entry_module). A payload is accepted only when the manifest is
+  // present, parseable, and describes THIS platform, THIS layout
+  // and the entry module the launcher will run — and every app
+  // package it names is actually in the tree. Before this check, a
+  // partial or corrupted resources/engine that kept the exe and
+  // app-dir paths spawned happily and failed later, opaquely.
+  function verifyPayloadManifest(root, appDir) {
+    let manifest;
+    try {
+      manifest = JSON.parse(fs.readFileSync(path.join(root, MANIFEST_FILE), 'utf8'));
+    } catch (err) {
+      logLine(`[engine] payload manifest is missing or unreadable: ${err}`);
+      return false;
+    }
+    if (!manifest || typeof manifest !== 'object') {
+      logLine('[engine] payload manifest is not an object; refusing the payload');
+      return false;
+    }
+    const mismatches = [];
+    if (manifest.platform !== platform) {
+      mismatches.push(`platform (manifest: ${manifest.platform}, this app: ${platform})`);
+    }
+    if (manifest.runtime_dir !== RUNTIME_DIR) {
+      mismatches.push(`runtime_dir (manifest: ${manifest.runtime_dir})`);
+    }
+    if (manifest.app_dir !== APP_DIR) {
+      mismatches.push(`app_dir (manifest: ${manifest.app_dir})`);
+    }
+    if (manifest.entry_module !== ENTRY_MODULE) {
+      mismatches.push(`entry_module (manifest: ${manifest.entry_module})`);
+    }
+    if (!Array.isArray(manifest.app_packages) || manifest.app_packages.length === 0) {
+      mismatches.push('app_packages (missing or empty)');
+    }
+    if (mismatches.length > 0) {
+      logLine(`[engine] payload manifest does not describe this payload: ${mismatches.join('; ')}; refusing the payload`);
+      return false;
+    }
+    for (const pkg of manifest.app_packages) {
+      try {
+        if (!fs.existsSync(path.join(appDir, pkg))) {
+          logLine(`[engine] payload manifest lists app package '${pkg}' but it is missing from the payload; refusing the payload`);
+          return false;
+        }
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  }
+
   function resolvePayload() {
     if (!isPackaged || !resourcesPath) return null;
     const exeRel = PYTHON_EXE_BY_PLATFORM[platform];
@@ -222,6 +386,7 @@ function createEngineLifecycle(deps) {
     } catch {
       return null;
     }
+    if (!verifyPayloadManifest(root, appDir)) return null;
     return { root, pythonExe, appDir };
   }
 
@@ -282,7 +447,10 @@ function createEngineLifecycle(deps) {
     }
     if (typeof proc.on === 'function') {
       proc.on('error', (err) => logLine(`[engine] process error: ${err}`));
-      proc.on('exit', (code, signal) => onChildExit(proc, code, signal));
+      proc.on('exit', (code, signal) => {
+        exitedProcs.add(proc);
+        onChildExit(proc, code, signal);
+      });
     }
     logLine(`[engine] spawned bundled engine (pid ${proc.pid}) from ${payload.root}`);
     return proc;
@@ -291,9 +459,6 @@ function createEngineLifecycle(deps) {
   function onChildExit(proc, code, signal) {
     if (proc !== child) return; // stale process from an earlier spawn
     childExited = true;
-    const waiters = exitWaiters;
-    exitWaiters = [];
-    waiters.forEach((resolve) => resolve());
     if (stopping) return;
     logLine(`[engine] bundled engine exited (code=${code}, signal=${signal})`);
     if (mode === 'spawned') {
@@ -346,22 +511,35 @@ function createEngineLifecycle(deps) {
     }
   }
 
-  function waitForExit(ms) {
-    if (!child || childExited) return Promise.resolve(true);
+  // Wait for THIS process to exit (D4-18): resolves true when proc
+  // exits within ms, false on timeout. Each call listens on proc
+  // itself — never on the global child's state.
+  function waitForExitFor(proc, ms) {
+    if (!proc) return Promise.resolve(true);
+    if (proc === child && childExited) return Promise.resolve(true);
+    if (exitedProcs.has(proc)) return Promise.resolve(true);
     return new Promise((resolve) => {
-      const timer = timers.setTimeout(() => resolve(false), ms);
-      exitWaiters.push(() => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
         timers.clearTimeout(timer);
-        resolve(true);
-      });
+        resolve(value);
+      };
+      const timer = timers.setTimeout(() => finish(false), ms);
+      if (typeof proc.once === 'function') {
+        proc.once('exit', () => finish(true));
+      } else if (typeof proc.on === 'function') {
+        proc.on('exit', () => finish(true));
+      }
     });
   }
 
   async function terminateChild(proc) {
-    if (!proc || (proc === child && childExited)) return;
+    if (!proc || (proc === child && childExited) || exitedProcs.has(proc)) return;
     const isCurrent = proc === child;
     try { proc.kill('SIGTERM'); } catch { /* already gone */ }
-    const exited = await waitForExit(killGraceMs);
+    const exited = await waitForExitFor(proc, killGraceMs);
     if (exited) return;
     if (platform === 'win32') {
       // The engine spawns its own worker children; only a tree kill
@@ -380,7 +558,7 @@ function createEngineLifecycle(deps) {
       }
     } else {
       try { proc.kill('SIGKILL'); } catch { /* already gone */ }
-      await waitForExit(killGraceMs);
+      await waitForExitFor(proc, killGraceMs);
     }
     if (isCurrent && !childExited) {
       logLine('[engine] bundled engine did not exit within the kill grace period');
@@ -443,6 +621,9 @@ function createEngineLifecycle(deps) {
       timers.clearTimeout(restartTimer);
       restartTimer = null;
     }
+    // D4-01: drain the buffered engine log before going down —
+    // the final lines are the ones a crash post-mortem reads.
+    drainEngineLog();
     const proc = child;
     if (proc) {
       await terminateChild(proc);
@@ -466,6 +647,7 @@ function createEngineLifecycle(deps) {
     killSync,
     probe,
     resolvePayload,
+    terminateChild,
     tokenFilePath,
     logFilePath: () => engineLogFilePath,
     runDir,

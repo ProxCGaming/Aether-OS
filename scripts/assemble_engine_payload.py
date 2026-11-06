@@ -64,6 +64,7 @@ Stdlib only (plus the ``uv`` binary for the dependency step).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -95,6 +96,24 @@ RUNTIME_URL_TEMPLATE = (
     "https://github.com/astral-sh/python-build-standalone/releases/"
     "download/{tag}/cpython-{version}+{tag}-{triple}-install_only.tar.gz"
 )
+
+# The download is the script's one network step: bounded like every
+# subprocess step (60s/300s/1800s below) so a stalled connection
+# fails the build instead of hanging it forever (D4-03).
+DOWNLOAD_TIMEOUT_SECONDS = 300
+
+# SHA-256 of the pinned release asset per platform, from
+# python-build-standalone's published checksums for RUNTIME_PIN.
+# The downloaded bytes become the interpreter inside every shipped
+# installer, so when a digest is pinned here the download is
+# verified against it before anything is extracted (D4-03).
+# EMPTY today: the digests for the 20261026 assets have not been
+# transcribed from the release page yet — an unpinned platform
+# downloads over TLS alone, exactly as before this check existed.
+# Fill an entry in the same commit that bumps RUNTIME_PIN, from
+# the release's checksum listing, never from the downloaded bytes
+# themselves.
+RUNTIME_SHA256: dict[str, str] = {}
 
 HOST_PLATFORMS = {"win32": "win32", "linux": "linux", "darwin": "darwin"}
 
@@ -154,8 +173,19 @@ def _download_runtime(platform: str, dest_archive: Path) -> str:
     )
     req = urllib.request.Request(url, headers={"User-Agent": "aether-payload-assembler"})
     print(f"Downloading portable runtime: {url}")
-    with urllib.request.urlopen(req) as resp, open(dest_archive, "wb") as fh:
-        shutil.copyfileobj(resp, fh)
+    digest = hashlib.sha256()
+    with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_SECONDS) as resp, \
+            open(dest_archive, "wb") as fh:
+        while chunk := resp.read(1024 * 1024):
+            digest.update(chunk)
+            fh.write(chunk)
+    expected = RUNTIME_SHA256.get(platform)
+    if expected is not None and digest.hexdigest() != expected.lower():
+        raise AssemblerError(
+            f"Runtime download for {platform} failed its sha256 checksum check: "
+            f"expected {expected.lower()}, got {digest.hexdigest()}. "
+            "Refusing to extract or ship unverified bytes."
+        )
     return f"python-build-standalone {RUNTIME_PIN} ({triple})"
 
 
@@ -322,6 +352,24 @@ def assemble(
     if platform not in layout["pythonExe"]:
         raise AssemblerError(f"Unknown platform: {platform}")
     if out_dir.exists():
+        # D4-14: the output tree is deleted before assembly. Refuse
+        # when the existing tree does not look like a payload this
+        # script made — a mistyped --output must never recursively
+        # delete an unrelated tree. A previous payload is recognised
+        # by its manifest (or by carrying the layout's assembled-dir
+        # name); an empty directory holds nothing to lose.
+        has_entries = any(out_dir.iterdir())
+        looks_like_payload = (
+            (out_dir / layout["manifestFile"]).is_file()
+            or out_dir.name == Path(layout["assembledDir"]).name
+        )
+        if has_entries and not looks_like_payload:
+            raise AssemblerError(
+                f"refusing to delete {out_dir}: it exists, is not empty, and "
+                f"carries no {layout['manifestFile']} — it does not look like "
+                "an assembled engine payload. Move it aside or pass a "
+                "different --output."
+            )
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
     runtime_source = acquire_runtime(

@@ -50,7 +50,13 @@ export function messageTypeOf(data) {
 const ERROR_DEDUP_WINDOW_MS = 1000;
 const MAX_ERROR_CHARS = 1800;
 
-const WS_EVENT_LEVELS = { open: 'INFO', close: 'WARN', error: 'ERROR' };
+// The two socket lifecycle kinds that exist (E10-05): the IPC
+// transport carries open/close status only — there is no error
+// status for a third kind to be fed from, and a former 'error'
+// entry presented as a live record path while no caller could
+// ever emit it. The practical case is still captured: an error is
+// followed by a close.
+const WS_EVENT_LEVELS = { open: 'INFO', close: 'WARN' };
 
 export function createUiLogger(send) {
   const emit = (level, message) => {
@@ -81,7 +87,7 @@ export function createUiLogger(send) {
   return {
     // Facade socket lifecycle: open is routine (INFO), a close is
     // the event every "engine closed" mystery needs on record
-    // (WARN), an error is an ERROR.
+    // (WARN). Those are the only two kinds the transport reports.
     logWsEvent(kind, detail) {
       const level = WS_EVENT_LEVELS[kind];
       if (!level) return;

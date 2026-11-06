@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import LoadStateRow from './LoadStateRow';
 // The About section's version source: the desktop package
 // manifest, one of the mirrors of the engine's APP_VERSION.
@@ -38,6 +38,28 @@ function parseLine(raw, fallbackSource) {
     return { raw, ts: '', source: fallbackSource, level: 'INFO', message: raw };
   }
   return { raw, ts: match[1], source: match[2], level: match[3] || 'INFO', message: match[4] };
+}
+
+// Parse one source's tail, giving lines that carry no timestamp
+// prefix the timestamp of the line above them (E10-04): raw engine
+// stdout lands in engine.log BETWEEN the lifecycle's ISO-prefixed
+// lines, as continuations of the output above. They used to parse
+// to ts '' and sort before every timestamped line in the merged
+// view — to the top of the panel's default tab, however recent
+// they were. A continuation at the very top of a tail has no line
+// above it in the tail; it keeps '' and stays at the head of its
+// own source, which is the honest placement for it.
+function parseTail(lines, fallbackSource) {
+  let lastTs = '';
+  return (lines || []).map((line) => {
+    const parsed = parseLine(line, fallbackSource);
+    if (parsed.ts) {
+      lastTs = parsed.ts;
+    } else if (lastTs) {
+      parsed.ts = lastTs;
+    }
+    return parsed;
+  });
 }
 
 function formatSize(bytes) {
@@ -105,7 +127,6 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
   const [clearArmed, setClearArmed] = useState(false);
   const [clearStatus, setClearStatus] = useState('');
   const [exportNote, setExportNote] = useState('');
-  const levelSeededRef = useRef(false);
 
   const fetchLogs = useCallback(async () => {
     if (!logsAvailable) return;
@@ -114,10 +135,11 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
       if (result) {
         setData(result);
         setLoadState('ready');
-        if (!levelSeededRef.current && result.level) {
-          levelSeededRef.current = true;
-          setLogLevel(result.level);
-        }
+        // E10-03: the applied level is re-read on EVERY poll, not
+        // seeded once — a level change whose IPC failed (bridge
+        // teardown mid-change) leaves the select showing an
+        // unapplied level, and the next poll is the correction.
+        if (result.level) setLogLevel(result.level);
       }
     } catch {
       // A failed refresh keeps whatever is on screen; only a
@@ -138,10 +160,7 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
         if (cancelled || !result) return;
         setData(result);
         setLoadState('ready');
-        if (!levelSeededRef.current && result.level) {
-          levelSeededRef.current = true;
-          setLogLevel(result.level);
-        }
+        if (result.level) setLogLevel(result.level);
       } catch {
         if (!cancelled) {
           setLoadState((prev) => (prev === 'ready' ? prev : 'error'));
@@ -167,8 +186,8 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
 
   const entries = useMemo(() => {
     if (!data) return [];
-    const appEntries = (data.appTail || []).map((line) => parseLine(line, 'main'));
-    const engineEntries = (data.engineTail || []).map((line) => parseLine(line, 'engine'));
+    const appEntries = parseTail(data.appTail, 'main');
+    const engineEntries = parseTail(data.engineTail, 'engine');
     if (tab === 'app') return appEntries;
     if (tab === 'engine') return engineEntries;
     return [...appEntries, ...engineEntries].sort((a, b) => {
@@ -243,8 +262,9 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
         const result = await api.setLogLevel(level);
         if (result && result.level) setLogLevel(result.level);
       } catch {
-        // The select keeps the user's choice; main reports the
-        // applied level on the next read-logs poll.
+        // The select keeps the user's choice until the next
+        // read-logs poll reports the level main actually has
+        // applied (fetchLogs applies result.level on every poll).
       }
     }
   };
@@ -287,6 +307,11 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
           />
         ) : (
           <div data-testid="logs-inventory" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {data && data.logBroken ? (
+              <p data-testid="logs-broken-note" style={{ fontSize: '13px', color: '#fca5a5', margin: 0 }}>
+                app.log writes are failing — new shell lines are not being recorded. Restarting the app usually clears it; the lines already on disk are unaffected.
+              </p>
+            ) : null}
             {sourceRows.map((row) => {
               const item = inventoryByName[row.file];
               return (

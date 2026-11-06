@@ -26,19 +26,35 @@ function normalizeTransferState(raw) {
   };
 }
 
+// The stored state crossed the IPC boundary as JSON, so its
+// values are plain JSON data; a JSON round-trip is an exact deep
+// copy of that shape (and throws on anything outside it, which
+// set() treats as a refusal rather than storing a live reference).
+function deepCopy(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 function createTransferStateStore() {
   let state = null;
   return {
     get() {
       if (!state) return null;
       // Hand out a copy so a caller mutating the result cannot
-      // corrupt the stored history.
-      return { messages: [...state.messages], input: state.input };
+      // corrupt the stored history. D4-07: the copy is DEEP — a
+      // shallow array copy still shared the message objects, so
+      // editing a returned message edited the stored history.
+      return { messages: deepCopy(state.messages), input: state.input };
     },
     set(raw) {
       const normalized = normalizeTransferState(raw);
       if (!normalized) return false;
-      state = normalized;
+      try {
+        // Copy on the way in too: the caller keeps no live
+        // reference into the store.
+        state = { messages: deepCopy(normalized.messages), input: normalized.input };
+      } catch {
+        return false;
+      }
       return true;
     },
     clear() {

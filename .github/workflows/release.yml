@@ -1,6 +1,12 @@
 # Release workflow for Aether-OS — the CD half of CI/CD.
 #
 # What it does:
+#   - First, a gate job runs the test suites for the tagged commit
+#     (pytest judged by the same F-18 subset rule CI uses, plus the
+#     full Jest suite). The publish job needs the gate (D4-05):
+#     ci.yml and this workflow trigger independently on the same
+#     tag, so without the gate a tag on a red commit — or one whose
+#     CI simply has not finished — would still publish installers.
 #   - On a pushed version tag (v*), or manually via workflow_dispatch:
 #     build the desktop installers with desktop_app's `npm run dist`
 #     (electron-builder) — NSIS on windows-latest, AppImage on
@@ -41,6 +47,46 @@ permissions:
   contents: read
 
 jobs:
+  gate:
+    name: Test gates (pytest + Jest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Check uv.lock is up to date with pyproject.toml
+        run: uv lock --check
+      - name: Create venv (Python 3.12)
+        run: uv venv .venv --python 3.12
+      - name: Install dependencies (locked)
+        run: uv sync --locked
+      - name: Run pytest
+        # Same judging as CI's python job: pytest's exit code is
+        # deliberately discarded and the JUnit report is judged by
+        # the F-18 subset rule, so "the gate passed" here means
+        # exactly what a green CI python job means.
+        run: >-
+          uv run python -m pytest -q
+          --junitxml=pytest-results.xml
+          || true
+      - name: Judge pytest against the known-failures baseline
+        run: uv run python scripts/ci_pytest_subset.py pytest-results.xml
+      # Electron 44 bundles Node 24 — same major line as CI's Jest job.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: desktop_app/package-lock.json
+      - name: Install desktop dependencies
+        working-directory: desktop_app
+        run: npm ci
+      - name: Run Jest
+        working-directory: desktop_app
+        run: npm run test:coverage
+
   build-windows:
     name: Build installer (Windows NSIS)
     # NOTE (5 Nov 2026): desktop_app/package.json sets
@@ -62,25 +108,21 @@ jobs:
           node-version: "24"
           cache: npm
           cache-dependency-path: desktop_app/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # D4-17: the version rule lives once, in
+      # scripts/check_version_consistency.py — both build jobs call
+      # it instead of carrying verbatim bash copies that can drift.
       - name: Check version consistency
         shell: bash
         run: |
-          expected="${{ inputs.tag }}"
           if [ "${{ github.event_name }}" = "push" ]; then
-            expected="${GITHUB_REF_NAME}"
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ inputs.tag }}"
           fi
-          expected="${expected#v}"
-          pkg="$(node -p "require('./package.json').version")"
-          engine="$(sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p' ../aether_engine/version.py)"
-          echo "tag/input: '${expected}'  package.json: '${pkg}'  version.py: '${engine}'"
-          if [ -n "$expected" ] && [ "$expected" != "$pkg" ]; then
-            echo "::error::Tag v${expected} does not match desktop_app/package.json version ${pkg} (single-sourced from aether_engine/version.py). Bump the version everywhere or fix the tag."
-            exit 1
-          fi
-          if [ "$pkg" != "$engine" ]; then
-            echo "::error::desktop_app/package.json (${pkg}) and aether_engine/version.py (${engine}) disagree — the version mirrors have drifted."
-            exit 1
-          fi
+          python ../scripts/check_version_consistency.py "$tag"
       - name: Install dependencies
         run: npm ci
       # E10-F06: assemble the bundled engine payload (portable
@@ -88,9 +130,6 @@ jobs:
       # package.json's extraResources carries into the installer.
       # Without this step the installer ships the shell alone and
       # the app has no engine to connect to.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Install uv
         uses: astral-sh/setup-uv@v7
       - name: Assemble bundled engine payload
@@ -129,25 +168,19 @@ jobs:
           node-version: "24"
           cache: npm
           cache-dependency-path: desktop_app/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # D4-17: shared version check — see the Windows job.
       - name: Check version consistency
         shell: bash
         run: |
-          expected="${{ inputs.tag }}"
           if [ "${{ github.event_name }}" = "push" ]; then
-            expected="${GITHUB_REF_NAME}"
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ inputs.tag }}"
           fi
-          expected="${expected#v}"
-          pkg="$(node -p "require('./package.json').version")"
-          engine="$(sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p' ../aether_engine/version.py)"
-          echo "tag/input: '${expected}'  package.json: '${pkg}'  version.py: '${engine}'"
-          if [ -n "$expected" ] && [ "$expected" != "$pkg" ]; then
-            echo "::error::Tag v${expected} does not match desktop_app/package.json version ${pkg} (single-sourced from aether_engine/version.py). Bump the version everywhere or fix the tag."
-            exit 1
-          fi
-          if [ "$pkg" != "$engine" ]; then
-            echo "::error::desktop_app/package.json (${pkg}) and aether_engine/version.py (${engine}) disagree — the version mirrors have drifted."
-            exit 1
-          fi
+          python ../scripts/check_version_consistency.py "$tag"
       - name: Install dependencies
         run: npm ci
       # E10-F06: assemble the bundled engine payload (portable
@@ -155,9 +188,6 @@ jobs:
       # package.json's extraResources carries into the installer.
       # Without this step the installer ships the shell alone and
       # the app has no engine to connect to.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Install uv
         uses: astral-sh/setup-uv@v7
       - name: Assemble bundled engine payload
@@ -187,7 +217,7 @@ jobs:
     name: GitHub Release
     # Tag pushes only — manual dispatch runs stop at the artifacts.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [build-windows, build-linux]
+    needs: [gate, build-windows, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write

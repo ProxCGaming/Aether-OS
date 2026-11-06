@@ -41,8 +41,12 @@ describe('startup gate IPC wiring', () => {
 
   it('opening the log resolves the path from the lifecycle, never the renderer', () => {
     const handlerStart = mainSrc.indexOf("ipcMain.handle('open-engine-log'");
-    const handler = mainSrc.slice(handlerStart, handlerStart + 900);
+    const handler = mainSrc.slice(handlerStart, handlerStart + 1600);
     expect(handler).toContain('engineLifecycle.logFilePath()');
-    expect(handler).toContain('shell.openPath(logPath)');
+    // N-42 (Wave 3): the lifecycle path is validated before the
+    // open, like every shell.openPath call — the value opened is
+    // the validator's output, not the raw path.
+    expect(handler).toContain('validateOpenPathArg(logPath');
+    expect(handler).toContain('shell.openPath(check.value)');
   });
 });

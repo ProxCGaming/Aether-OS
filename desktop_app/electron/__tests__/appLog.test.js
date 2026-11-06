@@ -149,6 +149,76 @@ describe('createAppLog never throws', () => {
   });
 });
 
+describe('createAppLog write-failure recovery (E10-01)', () => {
+  it('a transient append failure does not disable logging for the session', () => {
+    // The realistic trigger is a transiently locked file (AV scan
+    // on a fresh install). One failure must cost one line, not the
+    // rest of the session's log.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aether-applog-'));
+    const userDataPath = path.join(dir, 'userData');
+    const logPath = path.join(userDataPath, 'logs', 'app.log');
+    let appendCalls = 0;
+    const flakyFs = {
+      ...fs,
+      appendFileSync: (...args) => {
+        appendCalls += 1;
+        if (appendCalls === 1) throw new Error('file locked by AV scan');
+        return fs.appendFileSync(...args);
+      },
+    };
+    const logger = createAppLog({ fs: flakyFs, userDataPath, now: () => FIXED_NOW });
+    logger.info('main', 'lost to the transient failure');
+    expect(logger.isBroken()).toBe(false);
+    logger.info('main', 'recorded after recovery');
+    expect(readLines(logPath)).toEqual([`${STAMP} [main] INFO recorded after recovery`]);
+    expect(logger.isBroken()).toBe(false);
+  });
+
+  it('a transient rotation-rename failure recovers on a later write', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aether-applog-'));
+    const userDataPath = path.join(dir, 'userData');
+    const logPath = path.join(userDataPath, 'logs', 'app.log');
+    let renameFailed = false;
+    const flakyFs = {
+      ...fs,
+      renameSync: (from, to) => {
+        if (!renameFailed && from === logPath) {
+          renameFailed = true;
+          throw new Error('file locked by AV scan');
+        }
+        return fs.renameSync(from, to);
+      },
+    };
+    const logger = createAppLog({
+      fs: flakyFs, userDataPath, now: () => FIXED_NOW, maxBytes: 100, keepArchives: 2,
+    });
+    logger.info('main', 'first line with padding xxxxxxxx');
+    logger.info('main', 'second line triggers rotation'); // rename throws here
+    expect(logger.isBroken()).toBe(false);
+    logger.info('main', 'third line lands after recovery');
+    expect(readLines(logPath)).toContain(`${STAMP} [main] INFO third line lands after recovery`);
+    expect(logger.isBroken()).toBe(false);
+  });
+
+  it('a persistent failure still never throws, and isBroken reports it', () => {
+    const failingFs = {
+      ...fs,
+      mkdirSync: () => { throw new Error('disk gone'); },
+    };
+    const logger = createAppLog({ fs: failingFs, userDataPath: '/nowhere', now: () => FIXED_NOW });
+    expect(() => logger.info('main', 'into the void')).not.toThrow();
+    expect(logger.isBroken()).toBe(true);
+  });
+
+  it('rotation with keepArchives = 0 deletes the live file instead of archiving', () => {
+    const { logger, logPath } = makeLog({ maxBytes: 60, keepArchives: 0 });
+    logger.info('main', 'a line long enough to matter xxxxxxxxxx');
+    logger.info('main', 'another line forcing rotation xxxxxxxx');
+    expect(fs.existsSync(`${logPath}.1`)).toBe(false);
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('another line forcing rotation');
+  });
+});
+
 describe('createAppLog clear', () => {
   it('truncates the live file, drops archives and leaves a marker', () => {
     const { logger, logPath } = makeLog({ maxBytes: 80, keepArchives: 2 });

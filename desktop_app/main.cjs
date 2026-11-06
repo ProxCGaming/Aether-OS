@@ -1,26 +1,30 @@
 
 // Epic 10: shell crash log — uncaught errors land next to the
 // engine's own crash log in ~/.aether/logs for the diagnostics view.
+// Wave 3 (D4-01): the writer lives in electron/crashLog.cjs and
+// ROTATES (5 MB, 3 archives) — the inline appendFileSync that used
+// to live here grew the file without bound on a crash-looping
+// install. It still never throws.
 try {
   const fs0 = require('fs');
   const path0 = require('path');
   const os0 = require('os');
-  const crashDir = path0.join(os0.homedir(), '.aether', 'logs');
-  fs0.mkdirSync(crashDir, { recursive: true });
-  const crashPath = path0.join(crashDir, 'crash-electron.log');
-  const writeCrash = (kind, err) => {
-    try { fs0.appendFileSync(crashPath, `\n=== ${kind} ===\n${(err && err.stack) || err}\n`); } catch { /* never crash on logging */ }
-  };
+  const { createCrashLogWriter } = require('./electron/crashLog.cjs');
+  const writeCrash = createCrashLogWriter({
+    fs: fs0,
+    crashDir: path0.join(os0.homedir(), '.aether', 'logs'),
+  });
   process.on('uncaughtException', (err) => writeCrash('UNCAUGHT', err));
   process.on('unhandledRejection', (err) => writeCrash('UNHANDLED_REJECTION', err));
 } catch { /* logging setup is best-effort */ }
-const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification, globalShortcut, nativeImage, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification, globalShortcut, nativeImage, session, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const WebSocket = require('ws');
-const { createWindowStateStore } = require('./electron/windowState.cjs');
+const { createWindowStateStore, ensureVisibleOnDisplays } = require('./electron/windowState.cjs');
 const { createEngineLifecycle } = require('./electron/engineLifecycle.cjs');
+const { createReconnectGuard } = require('./electron/wsReconnect.cjs');
 const http = require('http');
 const { spawn: spawnChildProcess } = require('child_process');
 const { shouldNotify, notificationContent } = require('./electron/notify.cjs');
@@ -345,6 +349,19 @@ function getToken() {
   }
 }
 
+// D4-09: reconnect scheduling is generation-guarded
+// (electron/wsReconnect.cjs). The old shape — a bare
+// setTimeout(connectEngine, 3000) in the close handler — never
+// stored or cleared the handle, so a superseded socket's close
+// could schedule a competing reconnect and a pending timer could
+// fire after quit had begun.
+const reconnectGuard = createReconnectGuard({ reconnect: () => connectEngine() });
+let reconnectGeneration = 0;
+
+function scheduleEngineReconnect() {
+  reconnectGuard.schedule(reconnectGeneration);
+}
+
 function connectEngine() {
   // Phase 10.2 B1: the token is sent ONLY as an Authorization header.
   // It must never appear in the URL query string (URLs land in logs,
@@ -354,20 +371,36 @@ function connectEngine() {
   const token = getToken();
   const wsUrl = 'ws://127.0.0.1:8000/ws/tasks';
 
+  // Beginning a (re)connect supersedes every earlier socket and
+  // clears any pending reconnect timer.
+  reconnectGeneration = reconnectGuard.nextGeneration();
+
   if (wsClient) {
     wsClient.close();
   }
 
-  wsClient = token
-    ? new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${token}` } })
-    : new WebSocket(wsUrl);
+  if (!token) {
+    // D4-09: the engine REQUIRES registration of its token —
+    // a legacy engine without one refuses tokenless sockets with
+    // 1008, so opening one only bought a guaranteed reject + close
+    // + retry cycle. Do not open a socket we know will be refused;
+    // wait for the token (it lands when the engine finishes
+    // starting) and retry on the guard's schedule.
+    wsClient = null;
+    mainWarn('No engine token is available yet; will retry.');
+    scheduleEngineReconnect();
+    return;
+  }
 
-  wsClient.on('open', () => {
+  const socket = new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${token}` } });
+  wsClient = socket;
+
+  socket.on('open', () => {
     mainLog('Main process connected to Engine WebSocket.');
     broadcastEngineMessage({ type: '_ws_status', status: 'connected' });
   });
 
-  wsClient.on('message', (data) => {
+  socket.on('message', (data) => {
     const msgStr = data.toString();
     broadcastEngineMessage(msgStr);
     // Epic 6, E6-01: OS notifications for task completion /
@@ -389,14 +422,18 @@ function connectEngine() {
     }
   });
 
-  wsClient.on('close', (code, reason) => {
+  socket.on('close', (code, reason) => {
     const reasonText = reason ? reason.toString() : '';
     mainLog(`Engine WebSocket closed (code=${code}, reason=${reasonText || 'none'}).`);
+    // D4-09: a superseded socket's close is stale news — it must
+    // not tell the renderer the (new) connection dropped, and it
+    // must not schedule a reconnect of its own.
+    if (wsClient !== socket) return;
     broadcastEngineMessage({ type: '_ws_status', status: 'disconnected' });
-    setTimeout(connectEngine, 3000); // auto reconnect
+    scheduleEngineReconnect();
   });
-  
-  wsClient.on('error', (err) => {
+
+  socket.on('error', (err) => {
     mainError('WebSocket error:', err);
   });
 }
@@ -412,7 +449,15 @@ function broadcastEngineMessage(msg) {
 }
 
 function createWindow() {
-  const bounds = getWindowStateStore().load();
+  // D4-02: the saved POSITION is only honoured if the window would
+  // actually be visible on a currently-connected display — a
+  // monitor unplugged since the last run used to reopen the app
+  // off-screen, present but unreachable. The size always survives;
+  // only an unusable position is dropped (Electron then centres).
+  let bounds = getWindowStateStore().load();
+  try {
+    bounds = ensureVisibleOnDisplays(bounds, screen.getAllDisplays().map((d) => d.workArea));
+  } catch { /* display probing must never block window creation */ }
   mainWindow = new BrowserWindow({
     width: bounds.width,
     height: bounds.height,
@@ -593,8 +638,15 @@ app.whenReady().then(() => {
     .finally(() => connectEngine());
   createTray();
   // Epic 6, E6-01: global summon hotkey (Alt+Space toggles the window).
+  // D4-10: Electron's register() does NOT throw when the OS refuses
+  // the accelerator (another app owns it) — it returns false. The
+  // result is checked now, like the snip hotkey's is; a refused
+  // summon hotkey is a feature silently missing otherwise.
   try {
-    globalShortcut.register('Alt+Space', toggleMainWindow);
+    const summonOk = globalShortcut.register('Alt+Space', toggleMainWindow);
+    if (!summonOk) {
+      mainWarn('Summon hotkey (Alt+Space) could not be registered; another app may be using it.');
+    }
   } catch (err) {
     mainError('Failed to register summon hotkey:', err);
   }
@@ -612,6 +664,8 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   mainLog('App quitting (will-quit).');
+  // D4-09: no reconnect may be scheduled into a quitting app.
+  reconnectGuard.cancel();
   globalShortcut.unregisterAll();
   // E10-F06: the spawned engine belongs to this app instance; it
   // must not outlive it. stop() issues the SIGTERM synchronously;
@@ -695,10 +749,11 @@ ipcMain.handle('open-logs-folder', async (event) => {
   if (!isTrustedIpcSender(event, 'open-logs-folder')) {
     throw new Error('Refused to open the logs folder: untrusted sender.');
   }
-  const path = require('path');
-  const os = require('os');
-  const fs = require('fs');
-  const dir = path.join(os.homedir(), '.aether', 'logs');
+  // E10-02: the folder the on-screen logs actually live in —
+  // <userData>/logs, where app.log and engine.log are. The old
+  // target (~/.aether/logs) holds only the crash logs, so the
+  // button opened a folder without either file the panel shows.
+  const dir = path.join(app.getPath('userData'), 'logs');
   fs.mkdirSync(dir, { recursive: true });
   const { shell } = require('electron');
   await shell.openPath(dir);
@@ -747,8 +802,15 @@ ipcMain.handle('open-engine-log', async (event) => {
   } catch (err) {
     return `Could not prepare the engine log: ${(err && err.message) || err}`;
   }
+  // N-42: even this main-computed path goes through the open-path
+  // validator, confined to the userData tree it provably lives in.
+  const check = validateOpenPathArg(logPath, {
+    roots: [app.getPath('userData')],
+    exists: (p) => fs.existsSync(p),
+  });
+  if (!check.ok) return check.error;
   const { shell } = require('electron');
-  return shell.openPath(logPath);
+  return shell.openPath(check.value);
 });
 
 // Unified logging IPC (5 Nov 2026): the renderer's [ui] lines and
@@ -792,6 +854,10 @@ ipcMain.handle('read-logs', (event) => {
     engineTail: readLogTail(fs, engineLogFilePath(), 500),
     inventory: logInventory(),
     level: getAppLog().getLevel(),
+    // E10-01: the appLog sink's health, surfaced in the panel —
+    // a session whose file logging is failing must SAY so
+    // somewhere the user can see it.
+    logBroken: getAppLog().isBroken(),
   };
 });
 
@@ -814,9 +880,12 @@ ipcMain.handle('get-desktop-diagnostics', (event) => {
 
 // Clear logs (Settings → Diagnostics, behind the panel's two-step
 // confirmation): app.log via the logger (it owns the size cache),
-// engine.log by plain truncate (the lifecycle appends without a
-// size cache, so truncation cannot desync it). Crash logs are NOT
-// cleared — they are the record of last resort.
+// engine.log by plain truncate. Since D4-01 the lifecycle buffers
+// engine.log lines for up to one flush window, so lines buffered
+// at the moment of the truncate can still land just after it, and
+// its rotation counter over-counts by the truncated size until the
+// next run (rotation then fires early — the safe direction).
+// Crash logs are NOT cleared — they are the record of last resort.
 ipcMain.handle('clear-logs', (event) => {
   if (!isTrustedIpcSender(event, 'clear-logs')) return { ok: false, error: 'Refused: untrusted sender.' };
   const appCleared = getAppLog().clear();
@@ -998,12 +1067,45 @@ ipcMain.handle('capture-screen', async (event, rect) => {
   }
 });
 
+// The trees 'open-path' may open from (N-42): the workspace roots
+// the user selected in the app (user_config in ~/.aether — the
+// engine's config file; read from disk here because main owns no
+// config cache), plus the app's own data tree (exports, logs,
+// attachments land there) and the home/temp trees the OS shell
+// integration legitimately targets. Anything outside every root
+// is refused before shell.openPath is reached.
+function openPathRoots() {
+  const roots = [];
+  try {
+    const configPath = path.join(os.homedir(), '.aether', 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const userCfg = cfg && typeof cfg === 'object' ? cfg.user_config : null;
+    if (userCfg && typeof userCfg === 'object') {
+      const candidates = [];
+      if (typeof userCfg.workspace_path === 'string') candidates.push(userCfg.workspace_path);
+      if (Array.isArray(userCfg.project_workspace_roots)) candidates.push(...userCfg.project_workspace_roots);
+      if (Array.isArray(userCfg.workspace_roots)) candidates.push(...userCfg.workspace_roots);
+      for (const candidate of candidates) {
+        if (typeof candidate === 'string' && candidate.trim().length > 0) roots.push(candidate);
+      }
+    }
+  } catch { /* no config yet, or unreadable — the fixed roots below still apply */ }
+  try { roots.push(app.getPath('userData')); } catch { /* pre-ready: skip */ }
+  roots.push(os.homedir());
+  roots.push(os.tmpdir());
+  return roots;
+}
+
 // N06: open a file with the OS default application (the canvas
 // "Open externally" action). Resolves to '' on success or the
 // shell's error string — the renderer surfaces it, never a picker.
+// N-42: validation is no longer shape-only — the path must be
+// absolute, must exist, must sit under one of the app's own roots
+// (openPathRoots), and is never an executable/script type
+// (electron/ipcValidation.cjs).
 ipcMain.handle('open-path', async (event, filePath) => {
   if (!isTrustedIpcSender(event, 'open-path')) return 'Refused: untrusted sender.';
-  const check = validateOpenPathArg(filePath);
+  const check = validateOpenPathArg(filePath, { roots: openPathRoots(), exists: (p) => fs.existsSync(p) });
   if (!check.ok) return check.error;
   const { shell } = require('electron');
   return shell.openPath(check.value);

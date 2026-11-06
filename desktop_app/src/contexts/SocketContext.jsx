@@ -173,9 +173,13 @@ export const SocketProvider = ({ children }) => {
         return statusRef.current ? WebSocket.OPEN : WebSocket.CLOSED;
       },
       send: (data) => {
-        // Message-TYPE trace (allowlist only, types never payloads).
-        uiLoggerRef.current.logMessageType('out', messageTypeOf(data));
         if (statusRef.current && window.electronAPI && window.electronAPI.sendEngineMessage) {
+          // Message-TYPE trace (allowlist only, types never
+          // payloads) — at the moment the message actually crosses
+          // the transport (E10-07). A message queued here is traced
+          // later, by the flush that sends it, so every message is
+          // traced exactly once, when it crosses.
+          uiLoggerRef.current.logMessageType('out', messageTypeOf(data));
           window.electronAPI.sendEngineMessage(data);
           return 'sent';
         }
@@ -226,10 +230,11 @@ export const SocketProvider = ({ children }) => {
               deliveredIdentities.set(key, now);
               armSweep();
             }
-            // Message-TYPE trace on delivery (allowlist only) —
-            // after dedup, so a redelivered packet is not traced
-            // twice for one delivery.
-            uiLoggerRef.current.logMessageType('in', messageTypeOf(data));
+            // No message-type trace here (E10-06): this wrapper
+            // runs once per SUBSCRIBER, so tracing here wrote one
+            // line per subscriber for a single packet. The 'in'
+            // trace lives at the transport (the mount effect's
+            // onEngineMessage callback), once per packet.
             handler({ data });
           });
           const cleanup = () => {
@@ -266,6 +271,11 @@ export const SocketProvider = ({ children }) => {
           // many further reconnects as happen in between.
           heldQueueRef.current.push(msg);
         } else if (window.electronAPI && window.electronAPI.sendEngineMessage) {
+          // E10-07: the flush is a real transport send — trace it
+          // like one. Queued traffic (including everything that
+          // crossed during an outage) used to leave no 'out'
+          // record at all.
+          uiLoggerRef.current.logMessageType('out', messageTypeOf(msg));
           window.electronAPI.sendEngineMessage(msg);
         } else {
           stranded.push(msg);
@@ -286,6 +296,10 @@ export const SocketProvider = ({ children }) => {
       unsub = window.electronAPI.onEngineMessage((data) => {
         try {
           const parsed = JSON.parse(data);
+          // E10-06: the 'in' message-type trace lives HERE, at the
+          // transport — one line per packet, however many
+          // subscribers the delivery wrappers fan it out to.
+          uiLoggerRef.current.logMessageType('in', messageTypeOf(data));
           if (parsed.type === '_ws_status') {
             if (parsed.status === 'connected') {
               uiLoggerRef.current.logWsEvent('open');
@@ -430,7 +444,11 @@ export const SocketProvider = ({ children }) => {
     syncHeld();
     if (release.length === 0) return;
     if (statusRef.current && window.electronAPI && window.electronAPI.sendEngineMessage) {
-      release.forEach((msg) => window.electronAPI.sendEngineMessage(msg));
+      release.forEach((msg) => {
+        // E10-07: a confirmed release is a transport send; trace it.
+        uiLoggerRef.current.logMessageType('out', messageTypeOf(msg));
+        window.electronAPI.sendEngineMessage(msg);
+      });
     } else {
       messageQueue.current = [...release, ...messageQueue.current];
       syncPending();

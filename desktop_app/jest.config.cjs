@@ -14,10 +14,18 @@ module.exports = {
   // Coverage (S5-M11): measurement only — no coverageThreshold, so a
   // coverage run reports but never fails on a percentage. Run it with
   // `npm run test:coverage` (see README "Test" section).
+  // D4-13: the main-process layer is measured too — electron/*.cjs
+  // and the root main.cjs / preload.cjs are the most privileged code
+  // in the app and were exactly what the old src/**-only set never
+  // reported on.
   collectCoverageFrom: [
     'src/**/*.{js,jsx}',
     '!src/__tests__/**',
     '!src/setupTests.js',
+    'electron/**/*.cjs',
+    'main.cjs',
+    'preload.cjs',
+    '!electron/__tests__/**',
   ],
   coverageDirectory: 'coverage',
   coverageReporters: ['text', 'lcov', 'html'],
