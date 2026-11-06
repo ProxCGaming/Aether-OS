@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { SocketProvider, useAetherSocket } from './contexts/SocketContext';
+import { useEngineMessages } from './hooks/useEngineMessages';
+import { useSessionStore } from './hooks/useSessionStore';
+import { useVoiceBridge } from './hooks/useVoiceBridge';
 // Epic 9: the 3D graph (three.js + force-graph, ~1 MB) is the ambient
 // background, not the app shell — load it lazily so first paint and
 // interactivity don't wait on it. The Suspense fallback paints the
@@ -16,7 +19,6 @@ import StartupGate, { deriveStartupPhase } from './components/StartupGate';
 import CommandPalette from './components/CommandPalette';
 import ArtifactsCanvas from './components/ArtifactsCanvas';
 import GlobalArtifactsView from './components/GlobalArtifactsView';
-import { groupEntriesByTask } from './components/CostHeaderPopover';
 import RewindConfirmModal from './components/RewindConfirmModal';
 import PendingQueueIndicator from './components/PendingQueueIndicator';
 import HeldActionsPrompt from './components/HeldActionsPrompt';
@@ -39,32 +41,6 @@ const initGraphData = {
     { source: 'SYSTEM_STATE', target: 'LOG_INIT' }
   ]
 };
-
-// Epic 1, E1-16: THINKING deltas accumulate into a message's thoughts
-// array — consecutive deltas from the same node merge into one entry,
-// preserving arrival order. Reasoning lives ONLY in thoughts; it is
-// never written into a message's content.
-function appendThoughtDelta(thoughts, node, delta) {
-  const next = [...(thoughts || [])];
-  if (next.length > 0 && next[next.length - 1].node === node && typeof next[next.length - 1].text === 'string') {
-    next[next.length - 1] = { ...next[next.length - 1], text: next[next.length - 1].text + delta };
-  } else {
-    next.push({ node, text: delta });
-  }
-  return next;
-}
-
-// Append buffered thought entries onto existing thoughts, merging the
-// seam entry when both sides end/start with the same node.
-function mergeThoughtEntries(base, extra) {
-  let merged = [...(base || [])];
-  for (const entry of extra || []) {
-    if (entry && typeof entry.text === 'string') {
-      merged = appendThoughtDelta(merged, entry.node, entry.text);
-    }
-  }
-  return merged;
-}
 
 // S3-M7: the floating-window transfer state (full chat history +
 // draft input) lives in Electron main-process memory, reached only
@@ -117,6 +93,12 @@ const SETTINGS_SECTIONS = [
   { id: 'Advanced', label: 'Advanced' },
   { id: 'About', label: 'About' },
 ];
+
+// D3-19: how long an artifact-content request may go unanswered
+// before the canvas loading state resolves itself (the load may
+// still land later; the response simply clears content in). Same
+// 35s window as the D3-03 list rule.
+const ARTIFACT_LOAD_NO_ANSWER_MS = 35000;
 
 function AppContent() {
   // Phase 10.3 C1: the engine-message facade lives in SocketContext, not
@@ -245,51 +227,6 @@ function AppContent() {
     }
   }, []);
 
-  const [sessions, setSessions] = useState([]);
-  // D1-A1/A2: mirror of the session list for the once-registered
-  // message handler — SESSION_DELETE_RESPONSE computes the
-  // post-delete list and the follow-up switch from this ref,
-  // outside any state updater.
-  const sessionsRef = useRef([]);
-  useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
-  // Epic 1 UI batch: per-session plan mode (E1-09 UI). Keyed by session
-  // id; the '__pending' key holds the choice made before the first
-  // session exists and is adopted by the session when it is created.
-  const [planModeBySession, setPlanModeBySession] = useState({});
-  // Epic 1, E1-17: latest scratchpad per session ({kind, content,
-  // agent}), keyed like planModeBySession ('__pending' before the
-  // first session exists, adopted on SESSION_CREATE_RESPONSE).
-  const [scratchpadBySession, setScratchpadBySession] = useState({});
-  // Epic 1, E1-16: THINKING deltas that arrive before a streaming
-  // agent bubble exists are buffered per session key here and flushed
-  // into the bubble's thoughts when it appears (TASK_STARTED /
-  // TASK_COMPLETED), so reasoning is never dropped.
-  const pendingThinkingRef = useRef({});
-  // Epic 1 UI batch (E1-08): session search + inline rename state.
-  const [sessionSearchQuery, setSessionSearchQuery] = useState('');
-  const [sessionSearchResults, setSessionSearchResults] = useState(null);
-  const sessionSearchTimerRef = useRef(null);
-  const sessionSearchQueryRef = useRef('');
-  const [editingSessionId, setEditingSessionId] = useState(null);
-  const [editingSessionTitle, setEditingSessionTitle] = useState('');
-  const [activeSession, setActiveSession] = useState(initialSession || null);
-  const activeSessionRef = useRef(initialSession || null);
-  useEffect(() => { activeSessionRef.current = activeSession; }, [activeSession]);
-  // Per-workspace sessions (grill Q5/Q6/Q10): the engine's workspace
-  // rows (WORKSPACE_LIST), which the session list filters by; the
-  // list view — 'workspace' (the active root), 'all', or 'unbound';
-  // and the move machinery (per-row menu + multi-select bulk loop).
-  // The refs mirror what the once-registered message handler and
-  // the list-request helper read.
-  const [workspaces, setWorkspaces] = useState([]);
-  const [sessionListView, setSessionListView] = useState('workspace');
-  const sessionListViewRef = useRef('workspace');
-  const activeWorkspacePathRef = useRef(null);
-  const [sessionSelectMode, setSessionSelectMode] = useState(false);
-  const [selectedSessionIds, setSelectedSessionIds] = useState([]);
-  const [moveMenuFor, setMoveMenuFor] = useState(null);
-  const [moveStatus, setMoveStatus] = useState(null);
-  const moveBatchRef = useRef(null);
   // Epic 8, E8-1.1a: the active session's rewind manifest — the LAST
   // task's recorded points (label, checkpoint, files written so far),
   // fetched via REWIND_MANIFEST_GET when a session is shown and when
@@ -314,42 +251,10 @@ function AppContent() {
     if (reconnectCount > 0 && activeSessionRef.current) {
       requestRewindManifest(activeSessionRef.current);
     }
+    // activeSessionRef is a stable ref owned by the session store
+    // (created below); it cannot be listed here without a TDZ error.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reconnectCount, requestRewindManifest]);
-  // Per-workspace sessions: the one place SESSION_LIST_REQUEST is
-  // built, so every refresh honours the current list view. The
-  // payload encodes the store's three filter states — no payload at
-  // all for "all" (exactly the pre-slice wire shape), a path for
-  // the active workspace, explicit null for unbound only.
-  const sendSessionListRequest = useCallback(() => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    const msg = { type: 'SESSION_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() };
-    const view = sessionListViewRef.current;
-    if (view === 'unbound') {
-      msg.payload = { workspace: null };
-    } else if (view === 'workspace' && activeWorkspacePathRef.current) {
-      msg.payload = { workspace: activeWorkspacePathRef.current };
-    }
-    wsRef.current.send(JSON.stringify(msg));
-  }, [wsRef]);
-  const requestWorkspaceList = useCallback(() => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({
-      type: 'WORKSPACE_LIST_REQUEST',
-      schema_version: 1,
-      request_id: Date.now().toString(),
-      payload: {},
-    }));
-  }, [wsRef]);
-  // Derived workspace lookups, shared by the palette items, the
-  // search-result labels, and the sidebar filter chips. A binding
-  // is a root path; its label is the workspace's display name, or
-  // "No workspace" for an unbound (null) binding.
-  const activeWorkspaceRow = workspaces.find(w => w.is_active) || null;
-  const workspaceLabelFor = (path) => {
-    if (!path) return 'No workspace';
-    const row = workspaces.find(w => w.path === path);
-    return row ? row.name : path;
-  };
   // Epic 8, E8-1.1b: rewind execution state. rewindConfirm holds the
   // point awaiting confirmation ({entry, filesNotReverted}) for the
   // RewindConfirmModal; rewindUndo holds the staged rewind's undo
@@ -436,6 +341,9 @@ function AppContent() {
     const sessionId = rewindUndo?.sessionId || activeSessionRef.current;
     clearRewindUndo();
     if (sessionId) requestRewindManifest(sessionId);
+    // activeSessionRef: stable store-owned ref, unlistable here
+    // (TDZ — the store is created below). See the reconnect effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rewindUndo, clearRewindUndo, requestRewindManifest]);
   // Epic 8, E8-1.2: fork the active session at a step boundary. The
   // step menu hands over the boundary it resolved (a manifest
@@ -456,7 +364,48 @@ function AppContent() {
       step_index: step_index ?? null,
       new_title: null,
     });
+    // activeSessionRef: stable store-owned ref, unlistable here
+    // (TDZ — the store is created below). See the reconnect effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [safeSend]);
+  // Wave 5, Annex C row 5 (session-store seam): the session list /
+  // selection state machine lives in hooks/useSessionStore.js. It is
+  // created here — after the rewind state its switch action resets
+  // exists — and its names are destructured back so the rest of the
+  // shell (handlers, effects, render) reads as before.
+  const {
+    sessions, setSessions, sessionsRef,
+    planModeBySession, setPlanModeBySession,
+    scratchpadBySession, setScratchpadBySession,
+    pendingThinkingRef,
+    sessionSearchQuery, setSessionSearchQuery,
+    sessionSearchResults, setSessionSearchResults,
+    sessionSearchQueryRef,
+    editingSessionId,
+    editingSessionTitle, setEditingSessionTitle,
+    activeSession, setActiveSession, activeSessionRef,
+    workspaces, setWorkspaces,
+    sessionListView,
+    sessionSelectMode, setSessionSelectMode,
+    selectedSessionIds, setSelectedSessionIds,
+    moveMenuFor, setMoveMenuFor,
+    moveStatus, setMoveStatus, moveBatchRef,
+    pendingSessionSwitchRef, pendingSessionSwitchIdRef,
+    sessionSwitchPendingId, setSessionSwitchPendingId,
+    sessionCacheRef, activeTaskSessionRef,
+    sendSessionListRequest, requestWorkspaceList,
+    activeWorkspaceRow, workspaceLabelFor,
+    handleSessionSwitch, handleNewChat, handleDeleteSession,
+    handleStartRenameSession, handleCancelRenameSession,
+    handleCommitRenameSession,
+    handleSessionListViewChange, toggleSessionSelected,
+    startSessionMoves,
+  } = useSessionStore({
+    wsRef, safeSend, initialSession, pendingApprovalsRef,
+    setChatMessages, setRewindManifest, setRewindConfirm,
+    clearRewindUndo, rewindUndo,
+  });
+
   const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Artifacts', 'Projects', 'Settings'
   const [initialInput, setInitialInput] = useState('');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -471,6 +420,41 @@ function AppContent() {
   // Epic 8, E8-2.2: latest dev-server probe result for the canvas
   // Preview tab (DEV_SERVER_DETECT_RESPONSE payload, or null).
   const [devServerInfo, setDevServerInfo] = useState(null);
+
+  // D3-19: the artifact-content loading lifecycle behind
+  // ArtifactsCanvas's isLoading prop. A load starts when an
+  // ARTIFACT_GET_REQUEST goes out for the selected artifact and ends
+  // when the ARTIFACT_GET_RESPONSE lands, when the selection/session
+  // context changes underneath it, or when the engine never
+  // answers — the no-answer window mirrors the D3-03
+  // LIST_NO_ANSWER_MS rule (MediaLibrary / GlobalArtifactsView,
+  // after Onboarding's SAVE_NO_ANSWER_MS), so the loading state can
+  // never stick for a whole visit.
+  const [artifactContentLoading, setArtifactContentLoading] = useState(false);
+  const artifactLoadTimerRef = useRef(null);
+  const artifactLoadTargetRef = useRef(null);
+  const markArtifactLoadStarted = useCallback((artifactId) => {
+    artifactLoadTargetRef.current = artifactId || null;
+    if (artifactLoadTimerRef.current) clearTimeout(artifactLoadTimerRef.current);
+    setArtifactContentLoading(true);
+    artifactLoadTimerRef.current = setTimeout(() => {
+      artifactLoadTimerRef.current = null;
+      // Only the load this timer was armed for may expire itself; a
+      // newer selection re-arms (and re-targets) instead.
+      if (artifactLoadTargetRef.current === (artifactId || null)) {
+        artifactLoadTargetRef.current = null;
+        setArtifactContentLoading(false);
+      }
+    }, ARTIFACT_LOAD_NO_ANSWER_MS);
+  }, []);
+  const markArtifactLoadFinished = useCallback(() => {
+    if (artifactLoadTimerRef.current) {
+      clearTimeout(artifactLoadTimerRef.current);
+      artifactLoadTimerRef.current = null;
+    }
+    artifactLoadTargetRef.current = null;
+    setArtifactContentLoading(false);
+  }, []);
   const importFileInputRef = useRef(null);
   // Epic 8, E8-A8.1a: cost ledger surfaces. costTasks is the
   // popover's per-task/per-model shape, built from ledger rows
@@ -486,201 +470,27 @@ function AppContent() {
   const [dailyBudget, setDailyBudget] = useState(null);
   const [budgetAlert, setBudgetAlert] = useState(null);
 
-  // Epic 8, E8-5.1a: voice mode. voiceState mirrors the engine
-  // session — {status: 'starting'|'active'|'error', sessionId,
-  // partialText, assistantText, announcementText, error,
-  // webrtcConfig} — or null when
-  // voice mode is off. Partial transcripts are provisional display
-  // only; finals commit into chatMessages (the engine persists the
-  // same turns to the session store). The ref mirror exists
-  // because the engine-message handler is registered once and must
-  // not close over render-scoped state.
-  const [voiceState, setVoiceState] = useState(null);
-  const [voiceAudioChunk, setVoiceAudioChunk] = useState(null);
-  // E8-5.1b: bumped on every VOICE_BARGE_IN; the overlay cuts its
-  // scheduled playback when this changes.
-  const [voicePlaybackCut, setVoicePlaybackCut] = useState(0);
-  // F-12b: RTC signalling for the live voice session. The engine's
-  // answer and its ICE candidates are seq-numbered props for the
-  // overlay (the voiceAudioChunk pattern); the overlay's offer and
-  // local candidates go up through the callbacks below.
-  const [voiceRtcAnswer, setVoiceRtcAnswer] = useState(null);
-  const [voiceRtcRemoteCandidate, setVoiceRtcRemoteCandidate] = useState(null);
-  const voiceStateRef = useRef(null);
-  const voiceChunkSeqRef = useRef(0);
-  const voiceRtcSeqRef = useRef(0);
-
-  const applyVoiceState = useCallback((next) => {
-    voiceStateRef.current = next;
-    setVoiceState(next);
-  }, []);
-
-  const sendVoiceRequest = useCallback((type, payload) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type,
-        schema_version: 1,
-        request_id: `voice_${Date.now()}`,
-        payload,
-      }));
-      return true;
-    }
-    return false;
-  }, [wsRef]);
-
-  const commitVoiceAssistant = useCallback((state) => {
-    const text = (state && state.assistantText) || '';
-    if (text.trim()) {
-      setChatMessages(prev => [...prev, {
-        id: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        role: 'agent', content: text, thoughts: [], isFinal: true,
-      }]);
-    }
-  }, []);
-
-  const handleVoiceStart = useCallback(() => {
-    const current = voiceStateRef.current;
-    if (current && current.status !== 'error') return;
-    setVoiceRtcAnswer(null);
-    setVoiceRtcRemoteCandidate(null);
-    const sessionId = activeSessionRef.current;
-    if (!sendVoiceRequest('VOICE_SESSION_START_REQUEST', { session_id: sessionId })) {
-      applyVoiceState({
-        status: 'error', sessionId, partialText: '', assistantText: '',
-        announcementText: '',
-        error: 'voice unavailable: the engine is not connected', webrtcConfig: null,
-      });
-      return;
-    }
-    applyVoiceState({
-      status: 'starting', sessionId, partialText: '',
-      assistantText: '', announcementText: '', error: null, webrtcConfig: null,
-    });
-  }, [applyVoiceState, sendVoiceRequest]);
-
-  const handleVoiceStop = useCallback(() => {
-    const current = voiceStateRef.current;
-    if (!current) return;
-    // Tear the UI down immediately (the overlay unmount stops the
-    // mic); the engine stops its pipeline on the request — or on
-    // disconnect if the request never arrives. The reply streamed
-    // so far commits as a normal message.
-    commitVoiceAssistant(current);
-    sendVoiceRequest('VOICE_SESSION_STOP_REQUEST', {
-      session_id: current.sessionId || activeSessionRef.current,
-    });
-    setVoiceRtcAnswer(null);
-    setVoiceRtcRemoteCandidate(null);
-    applyVoiceState(null);
-  }, [applyVoiceState, commitVoiceAssistant, sendVoiceRequest]);
-
-  const handleVoiceDismissError = useCallback(() => {
-    setVoiceRtcAnswer(null);
-    setVoiceRtcRemoteCandidate(null);
-    applyVoiceState(null);
-  }, [applyVoiceState]);
-
-  // F-12b: the overlay offers (it holds the microphone); the
-  // engine answers. A refused negotiation flips the session to the
-  // error state — the overlay must never sit live with no media.
-  const handleVoiceRtcOffer = useCallback((offer) => {
-    const current = voiceStateRef.current;
-    if (!current) return;
-    sendVoiceRequest('VOICE_RTC_OFFER_REQUEST', {
-      session_id: current.sessionId || activeSessionRef.current,
-      sdp: offer,
-    });
-  }, [sendVoiceRequest]);
-
-  const handleVoiceRtcIceCandidate = useCallback((candidate) => {
-    const current = voiceStateRef.current;
-    if (!current) return;
-    sendVoiceRequest('VOICE_RTC_ICE_REQUEST', {
-      session_id: current.sessionId || activeSessionRef.current,
-      candidate,
-    });
-  }, [sendVoiceRequest]);
-
-  // N09: the overlay reports the highest engine chunk_seq it has
-  // FINISHED playing; the engine's heard-word accounting reads
-  // these reports, never its own emission count. Fire-and-forget —
-  // no response rides back.
-  const handleVoicePlaybackProgress = useCallback((playedSeq) => {
-    const current = voiceStateRef.current;
-    if (!current) return;
-    sendVoiceRequest('VOICE_PLAYBACK_PROGRESS', {
-      session_id: current.sessionId || activeSessionRef.current,
-      played_seq: playedSeq,
-    });
-  }, [sendVoiceRequest]);
-
-  // Epic 8, E8-5.3: Push-to-talk dictation + assistant message read-aloud
-  const [dictationState, setDictationState] = useState(null);
-  const [readAloudState, setReadAloudState] = useState(null);
-  const readAloudAudioCtxRef = useRef(null);
-  const readAloudSourcesRef = useRef(new Set());
-  const readAloudPlayHeadRef = useRef(0);
-
-  const handleDictationStart = useCallback(() => {
-    const sessionId = activeSessionRef.current;
-    if (!sendVoiceRequest('DICTATION_START_REQUEST', { session_id: sessionId })) {
-      setDictationState({
-        status: 'error',
-        error: 'voice unavailable: the engine is not connected',
-        text: '',
-      });
-      return;
-    }
-    setDictationState({ status: 'starting', error: null, text: '' });
-  }, [sendVoiceRequest]);
-
-  const handleDictationStop = useCallback(() => {
-    const sessionId = activeSessionRef.current;
-    sendVoiceRequest('DICTATION_STOP_REQUEST', { session_id: sessionId });
-    setDictationState(prev => (prev ? { ...prev, status: 'idle' } : null));
-  }, [sendVoiceRequest]);
-
-  const stopAppReadAloud = useCallback(() => {
-    readAloudSourcesRef.current.forEach((src) => {
-      try { src.stop(); } catch {}
-    });
-    readAloudSourcesRef.current.clear();
-    if (readAloudAudioCtxRef.current) {
-      readAloudPlayHeadRef.current = readAloudAudioCtxRef.current.currentTime;
-    } else {
-      readAloudPlayHeadRef.current = 0;
-    }
-  }, []);
-
-  const handleReadAloudStart = useCallback((messageId, text) => {
-    stopAppReadAloud();
-    if (!sendVoiceRequest('READ_ALOUD_START_REQUEST', { message_id: messageId, text })) {
-      setReadAloudState({
-        messageId,
-        status: 'error',
-        error: 'voice unavailable: the engine is not connected',
-      });
-      return;
-    }
-    setReadAloudState({ messageId, status: 'starting', error: null });
-  }, [sendVoiceRequest, stopAppReadAloud]);
-
-  const handleReadAloudStop = useCallback((messageId) => {
-    stopAppReadAloud();
-    sendVoiceRequest('READ_ALOUD_STOP_REQUEST', { message_id: messageId });
-    setReadAloudState(null);
-  }, [sendVoiceRequest, stopAppReadAloud]);
-
-  // Leaving the voice session's chat ends voice mode without
-  // committing the provisional bubbles here — the engine already
-  // persisted the finals to that session's store.
-  useEffect(() => {
-    const current = voiceStateRef.current;
-    if (current && current.sessionId && current.sessionId !== activeSession) {
-      sendVoiceRequest('VOICE_SESSION_STOP_REQUEST', { session_id: current.sessionId });
-      applyVoiceState(null);
-    }
-  }, [activeSession, applyVoiceState, sendVoiceRequest]);
+  // Wave 5, Annex C row 5 (voice bridge): the voice state-machine
+  // glue lives in hooks/useVoiceBridge.js — voice session state,
+  // RTC signalling, dictation and read-aloud. The names are
+  // destructured back so the message handler, the disconnect
+  // effect and the render read as before.
+  const {
+    voiceState, voiceAudioChunk, voicePlaybackCut,
+    voiceRtcAnswer, voiceRtcRemoteCandidate,
+    dictationState, readAloudState,
+    voiceStateRef, voiceChunkSeqRef, voiceRtcSeqRef,
+    readAloudAudioCtxRef, readAloudSourcesRef, readAloudPlayHeadRef,
+    applyVoiceState, setVoiceAudioChunk, setVoicePlaybackCut,
+    setVoiceRtcAnswer, setVoiceRtcRemoteCandidate,
+    setDictationState, setReadAloudState,
+    commitVoiceAssistant, stopAppReadAloud,
+    handleVoiceStart, handleVoiceStop, handleVoiceDismissError,
+    handleVoiceRtcOffer, handleVoiceRtcIceCandidate,
+    handleVoicePlaybackProgress,
+    handleDictationStart, handleDictationStop,
+    handleReadAloudStart, handleReadAloudStop,
+  } = useVoiceBridge({ wsRef, activeSessionRef, activeSession, setChatMessages });
 
   // Takes the session explicitly (or reads the ref) because the
   // engine-message handler is registered once and must not close
@@ -695,7 +505,7 @@ function AppContent() {
         payload: { session_id: target }
       }));
     }
-  }, [wsRef]);
+  }, [wsRef, activeSessionRef]);
 
   const requestContextBreakdown = useCallback((sessionId, model) => {
     const target = sessionId || activeSessionRef.current;
@@ -710,7 +520,7 @@ function AppContent() {
         }
       }));
     }
-  }, [wsRef]);
+  }, [wsRef, activeSessionRef]);
 
   // Epic 8, E8-6.1: dedicated-profile agent browser session state.
   // Keyed by CHAT session id (the desktop's keying model). The
@@ -740,7 +550,7 @@ function AppContent() {
     const browserSessionId = chatSessionId ? browserSessionIdsRef.current[chatSessionId] : null;
     if (browserSessionId) payload.session_id = browserSessionId;
     safeSend('BROWSER_TASK_PAUSE_REQUEST', payload);
-  }, [safeSend]);
+  }, [safeSend, activeSessionRef]);
   
   // S3-M7: purge the legacy localStorage copy of the transfer state
   // left behind by older builds, so the plaintext chat history does
@@ -782,1290 +592,13 @@ function AppContent() {
   }, [isFloating, chatMessages]);
 
   const graphRef = useRef();
-  const pendingSessionSwitchRef = useRef(null);
-  // Wave 2 slice 2 (RUX-A-01): a session switch now goes out via
-  // safeSend, whose request_id is minted inside the facade — the
-  // switch can no longer register its own id in pendingSessionSwitchRef
-  // ahead of the send. The target session id is registered here
-  // instead, and the SESSION_GET_RESPONSE handler honours a reply
-  // whose session matches it (a reply for any other session is still
-  // ignored, so echoed broadcasts cannot hijack the view).
-  const pendingSessionSwitchIdRef = useRef(null);
-  // RUX-C-13: the reactive half of the pending switch — the id of
-  // a session whose history has been requested but not yet
-  // answered AND which has no cached copy to show. While it is
-  // set, the chat pane renders a switching/loading state instead
-  // of "No active session": an uncached session in flight is not
-  // an empty session. Cleared by the honoured SESSION_GET reply.
-  const [sessionSwitchPendingId, setSessionSwitchPendingId] = useState(null);
-  const sessionCacheRef = useRef({});
-  const activeTaskSessionRef = useRef(null);
 
-  // Phase 10.3 C1: subscribe to engine messages through the single
-  // SocketContext facade (wsRef). No mock wsRef, no direct onEngineMessage
-  // subscription, no local dedup — all of that lives in the facade now.
-  // Connection state (isConnected) also comes from the facade; see the
-  // transition effect below.
+
+  // Shell subscriptions that shared the handler's registration
+  // effect: chat detach/attach notifications and the Dashboard
+  // memory poll. They ride separate channels from the engine
+  // socket, so they keep their own mount effect.
   useEffect(() => {
-    const handleMessage = (event) => {
-      let data;
-      try {
-        data = JSON.parse(event.data);
-      } catch {
-        // S3-N1: one malformed frame must not kill the central
-        // message handler — log and drop it (the SocketContext
-        // facade's parse pattern, applied at this layer too).
-        console.warn('Dropping malformed engine message');
-        return;
-      }
-        if (data.type === 'hello') {
-          setStatus(`Online / ${data.payload?.active_model || 'Agent'}`);
-        } else if (data.type === 'TASK_CREATED') {
-          // E6-F10: TASK_CREATED is the start event the engine
-          // actually emits (graph + fast-chat runners); TASK_STARTED
-          // is never sent, so counting only the branch below left
-          // the Dashboard's Active Tasks at 0 for real tasks. A
-          // created task counts until its terminal event (handled by
-          // the TASK_COMPLETED / TASK_FAILED / TASK_CANCELLED branch,
-          // which deletes the same id). Counting only — the
-          // streaming-bubble lifecycle below keys off the client's
-          // own START_TASK echo, unchanged.
-          if (data.payload?.task_id || data.request_id) {
-            setActiveTaskIds(prev => new Set(prev).add(data.payload?.task_id || data.request_id));
-          }
-        } else if (data.type === 'START_TASK' || data.type === 'TASK_STARTED') {
-          // Track active task for Dashboard
-          if (data.payload?.task_id || data.request_id) {
-            setActiveTaskIds(prev => new Set(prev).add(data.payload?.task_id || data.request_id));
-          }
-          activeTaskSessionRef.current = data.payload?.session_id || activeSessionRef.current;
-          // E8-1.1a: a new task supersedes the session's manifest;
-          // fetch now (points land as it runs) and again at the
-          // terminal event, which carries the complete trail.
-          requestRewindManifest(activeTaskSessionRef.current);
-          setIsThinking(true);
-          setChatMessages(prev => {
-            // E1-16: flush any THINKING deltas buffered before this
-            // bubble existed into its thoughts. Deltas that arrived
-            // before the task (and its session id) was known sit
-            // under '__pending', so fall back to that key.
-            const thinkKey = data.payload?.session_id || activeSessionRef.current || '__pending';
-            let buffered = pendingThinkingRef.current[thinkKey] || [];
-            if (!buffered.length && thinkKey !== '__pending') {
-              buffered = pendingThinkingRef.current.__pending || [];
-              if (buffered.length) delete pendingThinkingRef.current.__pending;
-            }
-            const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
-            if (lastAgentIdx === -1) {
-              if (buffered.length) delete pendingThinkingRef.current[thinkKey];
-              return [...prev, { role: 'agent', content: '', thoughts: buffered, isFinal: false }];
-            }
-            if (buffered.length) {
-              delete pendingThinkingRef.current[thinkKey];
-              const newMessages = [...prev];
-              const last = newMessages[lastAgentIdx];
-              newMessages[lastAgentIdx] = { ...last, thoughts: mergeThoughtEntries(last.thoughts || [], buffered) };
-              return newMessages;
-            }
-            return prev;
-          });
-        } else if (data.type === 'STEERING_APPLIED') {
-          // Epic 1, E1-07: the engine applied a queued steer to the
-          // running task — clear the bubble's queued flag.
-          const appliedId = data.payload?.message_id || data.request_id;
-          if (appliedId) {
-            const clearQueued = (list) => (list || []).map(m =>
-              m.id === appliedId ? { ...m, queued: false, steering: false } : m);
-            setChatMessages(prev => clearQueued(prev));
-            Object.keys(sessionCacheRef.current).forEach((sid) => {
-              sessionCacheRef.current[sid] = clearQueued(sessionCacheRef.current[sid]);
-            });
-          }
-        } else if (data.type === 'THINKING') {
-          // Epic 1, E1-16: model reasoning streams into the streaming
-          // bubble's thoughts ONLY — never into content, never into
-          // the persisted answer body. If no bubble is streaming yet,
-          // the delta is buffered per session and flushed when the
-          // bubble appears (TASK_STARTED) or finalises (TASK_COMPLETED).
-          const thinkDelta = data.payload?.text_delta;
-          if (typeof thinkDelta === 'string' && thinkDelta.length > 0) {
-            const thinkNode = data.payload?.node || 'thinking';
-            const targetSession = activeTaskSessionRef.current || activeSessionRef.current;
-            const bufferKey = targetSession || '__pending';
-            const applyThinking = (list) => {
-              const idx = list.findLastIndex(m => m.role === 'agent' && !m.isFinal);
-              if (idx === -1) return null;
-              const newList = [...list];
-              const last = newList[idx];
-              newList[idx] = { ...last, thoughts: appendThoughtDelta(last.thoughts || [], thinkNode, thinkDelta) };
-              return newList;
-            };
-            if (targetSession && targetSession !== activeSessionRef.current) {
-              const cached = sessionCacheRef.current[targetSession] || [];
-              const updated = applyThinking(cached);
-              if (updated) {
-                sessionCacheRef.current[targetSession] = updated;
-              } else {
-                pendingThinkingRef.current[bufferKey] = appendThoughtDelta(pendingThinkingRef.current[bufferKey] || [], thinkNode, thinkDelta);
-              }
-            } else {
-              // D1-A11: no side effects inside a state updater
-              // (StrictMode double-invokes them, which double-appended
-              // the buffered delta). The decision is made against the
-              // ref mirror of the visible list; the mirror is updated
-              // synchronously so back-to-back deltas compose.
-              const updated = applyThinking(chatMessagesRef.current);
-              if (updated) {
-                chatMessagesRef.current = updated;
-                setChatMessages(updated);
-              } else {
-                pendingThinkingRef.current[bufferKey] = appendThoughtDelta(pendingThinkingRef.current[bufferKey] || [], thinkNode, thinkDelta);
-              }
-            }
-          }
-        } else if (data.type === 'SCRATCHPAD') {
-          // Epic 1, E1-17: display-only scratchpad (diagram/sketch/
-          // notes) from the engine. Keep only the latest per session;
-          // the panel in DraggableChatWindow renders it.
-          const padContent = data.payload?.content;
-          if (typeof padContent === 'string' && padContent.length > 0) {
-            const padSession = data.payload?.session_id || activeTaskSessionRef.current || activeSessionRef.current || '__pending';
-            const padEntry = {
-              kind: data.payload?.kind || 'text',
-              content: padContent,
-              agent: data.payload?.agent || null,
-            };
-            setScratchpadBySession(prev => ({ ...prev, [padSession]: padEntry }));
-          }
-        } else if (data.type === 'TASK_PROGRESS') {
-          let delta = data.payload?.text_delta;
-          if (delta !== undefined && delta !== null && typeof delta !== 'string') {
-            delta = JSON.stringify(delta, null, 2);
-          }
-          const node = data.payload?.node;
-          const isThought = node && node !== 'assistant' && node !== 'agent';
-          
-          // Filter out supervisor delegation strings that duplicate NODE_ACTIVITY
-          if (isThought && delta && typeof delta === 'string' && delta.trim().startsWith('[Supervisor] -> Delegating')) {
-            return;
-          }
-          
-          if (delta) {
-            const updateMessages = (prev) => {
-              const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
-              if (lastAgentIdx !== -1) {
-                const newMessages = [...prev];
-                const last = newMessages[lastAgentIdx];
-                if (isThought) {
-                  const currentThoughts = last.thoughts || [];
-                  const updatedThoughts = [...currentThoughts];
-                  if (updatedThoughts.length > 0 && updatedThoughts[updatedThoughts.length - 1].node === node) {
-                    const currentText = updatedThoughts[updatedThoughts.length - 1].text || '';
-                    if (delta.length > 10 && currentText.endsWith(delta)) {
-                      return prev;
-                    }
-                    updatedThoughts[updatedThoughts.length - 1].text += delta;
-                  } else {
-                    updatedThoughts.push({ node, text: delta });
-                  }
-                  newMessages[lastAgentIdx] = { ...last, thoughts: updatedThoughts };
-                } else {
-                  newMessages[lastAgentIdx] = { ...last, content: (last.content || '') + delta };
-                }
-                return newMessages;
-              } else {
-                const veryLast = prev[prev.length - 1];
-                if (veryLast && veryLast.role === 'agent' && veryLast.isFinal) {
-                  // Drop ghost progress packets that arrive after a task is completed/cancelled
-                  return prev;
-                }
-                if (isThought) {
-                  return [...prev, { role: 'agent', content: '', thoughts: [{ node, text: delta }], isFinal: false }];
-                } else {
-                  return [...prev, { role: 'agent', content: delta, thoughts: [], isFinal: false }];
-                }
-              }
-            };
-            
-            if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
-              const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
-              sessionCacheRef.current[activeTaskSessionRef.current] = updateMessages(cached);
-            } else {
-              setChatMessages(updateMessages);
-            }
-          }
-        } else if (data.type === 'NODE_ACTIVITY') {
-          // Tool calls are exclusively rendered and managed via TOOL_ACTIVITY
-          if (data.payload?.action === 'tool_request' || data.payload?.action === 'tool_result') {
-            return;
-          }
-          const updateMessages = (prev) => {
-            const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
-            if (lastAgentIdx !== -1) {
-              const newMessages = [...prev];
-              const last = newMessages[lastAgentIdx];
-              const currentThoughts = last.thoughts || [];
-              const updatedThoughts = [...currentThoughts];
-              
-              if (data.payload.status !== 'pending') {
-                const pendingIdx = updatedThoughts.findLastIndex(t => 
-                  t.type === 'NODE_ACTIVITY' && 
-                  t.payload?.from_node === data.payload.from_node && 
-                  t.payload?.to_node === data.payload.to_node && 
-                  t.payload?.status === 'pending'
-                );
-                if (pendingIdx !== -1) {
-                  updatedThoughts[pendingIdx] = { 
-                    ...updatedThoughts[pendingIdx], 
-                    payload: { ...updatedThoughts[pendingIdx].payload, ...data.payload }
-                  };
-                  newMessages[lastAgentIdx] = { ...last, thoughts: updatedThoughts };
-                  return newMessages;
-                }
-              }
-              
-              updatedThoughts.push({
-                type: 'NODE_ACTIVITY',
-                payload: data.payload,
-                node: data.payload.from_node || data.payload.node
-              });
-              
-              newMessages[lastAgentIdx] = { ...last, thoughts: updatedThoughts };
-              return newMessages;
-            }
-            return prev;
-          };
-          
-          if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
-            const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
-            sessionCacheRef.current[activeTaskSessionRef.current] = updateMessages(cached);
-          } else {
-            setChatMessages(updateMessages);
-          }
-        } else if (data.type === 'TOOL_ACTIVITY') {
-          const updateMessages = (prev) => {
-            const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
-            if (lastAgentIdx !== -1) {
-              const newMessages = [...prev];
-              const last = newMessages[lastAgentIdx];
-              const currentThoughts = last.thoughts || [];
-              const updatedThoughts = [...currentThoughts];
-              
-              if (data.payload.status !== 'pending') {
-                // D1-A6: results land in call order, so a result
-                // belongs to the FIRST still-pending call of this
-                // tool — the previous findLastIndex handed it to the
-                // LAST one and cross-wired the arguments of
-                // overlapping same-tool calls (parallel read_files
-                // are routine).
-                const pendingIdx = updatedThoughts.findIndex(t =>
-                  t.type === 'TOOL_ACTIVITY' &&
-                  t.payload?.tool_name === data.payload.tool_name &&
-                  t.payload?.status === 'pending'
-                );
-                if (pendingIdx !== -1) {
-                  const prevArgs = updatedThoughts[pendingIdx].payload?.tool_args;
-                  const newArgs = data.payload.tool_args;
-                  const finalArgs = (newArgs && Object.keys(newArgs).length > 0) ? newArgs : (prevArgs || {});
-                  
-                  updatedThoughts[pendingIdx] = { 
-                    ...updatedThoughts[pendingIdx], 
-                    payload: {
-                      ...updatedThoughts[pendingIdx].payload,
-                      ...data.payload,
-                      tool_args: finalArgs
-                    }
-                  };
-                  newMessages[lastAgentIdx] = { ...last, thoughts: updatedThoughts };
-                  return newMessages;
-                }
-              }
-              
-              updatedThoughts.push({
-                type: 'TOOL_ACTIVITY',
-                payload: data.payload,
-                node: data.payload.node
-              });
-              
-              newMessages[lastAgentIdx] = { ...last, thoughts: updatedThoughts };
-              return newMessages;
-            }
-            return prev;
-          };
-          
-          if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
-            const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
-            sessionCacheRef.current[activeTaskSessionRef.current] = updateMessages(cached);
-          } else {
-            setChatMessages(updateMessages);
-          }
-        } else if (data.type === 'TASK_COMPLETED') {
-          setIsThinking(false);
-          // D1-A5: approvals belong to the task that requested them;
-          // once it ends they must stop being shortcut-actionable
-          // (the Ctrl+Enter/Ctrl+Shift+Enter listener reads this ref).
-          pendingApprovalsRef.current = [];
-          // E8-1.1a: the finished task's manifest is complete now.
-          requestRewindManifest(data.payload?.session_id || activeTaskSessionRef.current || activeSessionRef.current);
-          // E8-A8.1a: reconcile the cost surfaces with the ledger
-          // now the task's calls are all recorded (also covers the
-          // fast-chat path, whose calls publish no live bus events).
-          requestCostBreakdown(data.payload?.session_id || activeSessionRef.current);
-          requestContextBreakdown(data.payload?.session_id || activeSessionRef.current);
-          // Remove from active tasks for Dashboard
-          if (data.payload?.task_id || data.request_id) {
-            setActiveTaskIds(prev => { const next = new Set(prev); next.delete(data.payload?.task_id || data.request_id); return next; });
-          }
-          if (data.payload?.session_id && !activeSessionRef.current) {
-            setActiveSession(data.payload.session_id);
-            if (wsRef.current) {
-              sendSessionListRequest();
-        wsRef.current.send(JSON.stringify({ type: 'CONFIG_GET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
-            }
-          }
-          let result = data.payload.response || data.payload.result || data.payload.output;
-
-          // E1-16: THINKING deltas still buffered (no streaming bubble
-          // ever appeared) join the final message's thoughts here —
-          // reasoning is preserved, and still kept out of content.
-          const completionKey = activeTaskSessionRef.current || data.payload?.session_id || activeSessionRef.current || '__pending';
-          const bufferedThoughts = pendingThinkingRef.current[completionKey] || [];
-          if (bufferedThoughts.length) delete pendingThinkingRef.current[completionKey];
-
-          const updateCompletedMessages = (prev) => {
-            let newMessages = [...prev];
-            const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
-            
-            if (lastAgentIdx !== -1) {
-              const last = newMessages[lastAgentIdx];
-              const finalContent = (result !== undefined && result !== null) ? (typeof result !== 'string' ? JSON.stringify(result, null, 2) : result) : last.content;
-              const baseThoughts = (last.thoughts && last.thoughts.length > 0) ? last.thoughts : (data.payload.thoughts || []);
-              const finalThoughts = bufferedThoughts.length ? mergeThoughtEntries(baseThoughts, bufferedThoughts) : baseThoughts;
-              
-              newMessages[lastAgentIdx] = { ...last, content: finalContent, thoughts: finalThoughts, isFinal: true };
-              return newMessages.map((m, i) => 
-                (m.role === 'agent' && !m.isFinal && i !== lastAgentIdx) ? { ...m, isFinal: true, hasError: true, content: "**Task Cancelled**: Superseded by new request." } : m
-              );
-            } else {
-              const veryLast = newMessages[newMessages.length - 1];
-              if (veryLast && veryLast.role === 'agent' && veryLast.isFinal) return newMessages;
-              const finalContent = (result !== undefined && result !== null) ? (typeof result !== 'string' ? JSON.stringify(result, null, 2) : result) : '';
-              const createdThoughts = bufferedThoughts.length ? mergeThoughtEntries(data.payload.thoughts || [], bufferedThoughts) : (data.payload.thoughts || []);
-              return [...newMessages, { role: 'agent', content: finalContent, thoughts: createdThoughts, isFinal: true }];
-            }
-          };
-          
-          if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
-            const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
-            sessionCacheRef.current[activeTaskSessionRef.current] = updateCompletedMessages(cached);
-          } else {
-            setChatMessages(updateCompletedMessages);
-          }
-        } else if (data.type === 'TASK_FAILED' || data.type === 'TASK_CANCELLED') {
-          setIsThinking(false);
-          // D1-A5: see TASK_COMPLETED — a dead task's approvals must
-          // not stay armed for the keyboard shortcuts.
-          pendingApprovalsRef.current = [];
-          // E8-1.1a: failed/cancelled tasks still recorded points.
-          requestRewindManifest(data.payload?.session_id || activeTaskSessionRef.current || activeSessionRef.current);
-          if (data.payload?.task_id || data.request_id) {
-            setActiveTaskIds(prev => { const next = new Set(prev); next.delete(data.payload?.task_id || data.request_id); return next; });
-          }
-          
-          const updateFailedMessages = (prev) => {
-            let newMessages = [...prev];
-            const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
-            
-            const errorText = `**${data.type === 'TASK_CANCELLED' ? 'Task Cancelled' : 'Task Failed'}**: ${data.payload.error || data.payload.message || 'Unknown error'}`;
-            
-            if (lastAgentIdx !== -1) {
-              const last = newMessages[lastAgentIdx];
-              newMessages[lastAgentIdx] = { 
-                ...last, 
-                content: last.content ? `${last.content}\n\n${errorText}` : errorText, 
-                isFinal: true,
-                hasError: true
-              };
-              return newMessages.map((m, i) => 
-                (m.role === 'agent' && !m.isFinal && i !== lastAgentIdx) ? { ...m, isFinal: true, hasError: true, content: "**Task Cancelled**: Superseded by new request." } : m
-              );
-            } else {
-              const veryLast = newMessages[newMessages.length - 1];
-              if (veryLast && veryLast.role === 'agent' && veryLast.isFinal) return newMessages;
-              return [...newMessages, { role: 'agent', content: errorText, isFinal: true, hasError: true }];
-            }
-          };
-          
-          if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
-            const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
-            sessionCacheRef.current[activeTaskSessionRef.current] = updateFailedMessages(cached);
-          } else {
-            setChatMessages(updateFailedMessages);
-          }
-        } else if (data.type === 'SESSION_RENAME_RESPONSE') {
-          // Epic 1 UI batch (E1-08): the engine confirms renames; only
-          // a confirmed rename changes the local list.
-          if (data.payload?.renamed && data.payload.session_id) {
-            setSessions(prev => prev.map(s => s.id === data.payload.session_id ? { ...s, title: data.payload.title } : s));
-          }
-        } else if (data.type === 'SESSION_TITLE_UPDATED') {
-          // Epic 1 UI batch (E1-08): the engine wrote a model title for
-          // a session after a task completed — reflect it in the list.
-          if (data.payload?.session_id && data.payload.title) {
-            setSessions(prev => prev.map(s => s.id === data.payload.session_id ? { ...s, title: data.payload.title } : s));
-          }
-        } else if (data.type === 'SESSION_SEARCH_RESPONSE') {
-          // Epic 1 UI batch (E1-08): ignore stale answers for a query
-          // the user has already replaced or cleared.
-          if (data.payload && data.payload.query === sessionSearchQueryRef.current) {
-            setSessionSearchResults(Array.isArray(data.payload.results) ? data.payload.results : []);
-          }
-        } else if (data.type === 'SESSION_LIST_RESPONSE') {
-          // D1-A9: a payload-less frame must not throw here — the
-          // dispatch of every later message depends on this listener
-          // surviving malformed-but-parseable frames.
-          const sessionList = data.payload?.sessions || [];
-          setSessions(sessionList);
-          if (sessionList.length > 0 && !activeSessionRef.current) {
-            handleSessionSwitch(sessionList[0].id);
-          } else if (isFloating && initialSession) {
-            handleSessionSwitch(initialSession);
-          }
-        } else if (data.type === 'WORKSPACE_LIST_RESPONSE') {
-          // Per-workspace sessions: App keeps its own copy of the
-          // workspace rows — the session list filters by the active
-          // row (see the effect below) and move menus/search labels
-          // read names from it. Projects requests the same list on
-          // the shared socket, so these replies also land here.
-          setWorkspaces(Array.isArray(data.payload?.workspaces) ? data.payload.workspaces : []);
-        } else if (data.type === 'WORKSPACE_SET_ACTIVE_RESPONSE') {
-          // The active flag lives on the LIST rows; refetch them so
-          // the workspace-change effect re-files the session list.
-          if (data.payload?.success) requestWorkspaceList();
-        } else if (data.type === 'SESSION_MOVE_RESPONSE') {
-          // Per-workspace sessions (Q6): move outcomes. A successful
-          // move re-files the row in place — its new binding rides
-          // the reply; a refusal leaves the row exactly as it was.
-          // Bulk moves settle one reply at a time into moveBatchRef;
-          // the last reply reconciles the filtered list and reports
-          // the tally honestly (n moved, m failed + first reason).
-          const p = data.payload || {};
-          if (p.moved && p.session_id) {
-            setSessions(prev => prev.map(s => s.id === p.session_id ? { ...s, workspace: p.workspace ?? null } : s));
-          }
-          const batch = moveBatchRef.current;
-          if (batch) {
-            batch.settled += 1;
-            if (p.moved) {
-              batch.moved += 1;
-            } else {
-              batch.failed += 1;
-              if (!batch.firstError) batch.firstError = p.error || 'Move refused';
-            }
-            if (batch.settled >= batch.total) {
-              moveBatchRef.current = null;
-              if (batch.total > 1) {
-                setSessionSelectMode(false);
-                setSelectedSessionIds([]);
-                setMoveStatus(batch.failed > 0
-                  ? { type: 'error', message: `${batch.moved} moved, ${batch.failed} failed: ${batch.firstError}` }
-                  : { type: 'success', message: `${batch.moved} sessions moved.` });
-              } else if (batch.failed > 0) {
-                setMoveStatus({ type: 'error', message: batch.firstError });
-              }
-              sendSessionListRequest();
-            }
-          }
-        } else if (data.type === 'SLASH_COMMAND_LIST_RESPONSE') {
-          setSlashCommands(data.payload.commands || []);
-        } else if (data.type === 'WORKSPACE_ADD_RESPONSE' || data.type === 'WORKSPACE_REMOVE_RESPONSE') {
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'SLASH_COMMAND_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
-            wsRef.current.send(JSON.stringify({ type: 'SKILL_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
-            // Per-workspace sessions: keep App's workspace rows (and
-            // therefore the session list filter) current as roots
-            // come and go.
-            requestWorkspaceList();
-          }
-        } else if (data.type === 'SESSION_GET_RESPONSE') {
-          // Only replace chat messages if we explicitly requested a session switch and it matches exactly.
-          // Wave 2 slice 2 (RUX-A-01): a switch sent via safeSend has a
-          // facade-minted request_id, so it registers its target in
-          // pendingSessionSwitchIdRef instead; a reply whose session
-          // matches that target is honoured the same way. Replies for
-          // any other session are still ignored (echoed broadcasts
-          // cannot hijack the view).
-          const switchByRequest = data.request_id && data.request_id === pendingSessionSwitchRef.current;
-          const switchBySession = pendingSessionSwitchIdRef.current !== null
-            && data.payload?.session?.id === pendingSessionSwitchIdRef.current;
-          if (switchByRequest || switchBySession) {
-            pendingSessionSwitchRef.current = null; // Clear immediately to ignore any subsequent echoed broadcasts
-            pendingSessionSwitchIdRef.current = null;
-            setSessionSwitchPendingId(null);
-            const sess = data.payload.session;
-            setChatMessages(prev => {
-              const backendMessages = (sess && sess.messages) ? sess.messages.map(m => {
-                let parsedThoughts = m.thoughts;
-                if (typeof parsedThoughts === 'string') {
-                  try {
-                    parsedThoughts = JSON.parse(parsedThoughts);
-                  } catch (e) {
-                    parsedThoughts = [];
-                  }
-                }
-                return {
-                  ...m,
-                  role: m.role === 'assistant' ? 'agent' : m.role,
-                  isFinal: true,
-                  thoughts: Array.isArray(parsedThoughts) ? parsedThoughts : []
-                };
-              }) : [];
-              
-              // If we are currently running a task in this session, the DB won't have its incomplete messages yet.
-              // We must merge it back from our cache or `prev` so the UI doesn't lose the stream.
-              // D1-A1: `isThinking` here was the mount-time render
-              // value (always false) inside this once-registered
-              // handler, so the stranded bubble was silently dropped;
-              // the live value comes from the ref mirror.
-              if (activeTaskSessionRef.current === activeSessionRef.current && isThinkingRef.current) {
-                 const activeMsg = prev.find(m => m.role === 'agent' && !m.isFinal);
-                 if (activeMsg) {
-                    return [...backendMessages, activeMsg];
-                 }
-              }
-              return backendMessages;
-            });
-            // E8-1.1a: surface the switched-to session's points.
-            requestRewindManifest(sess?.id || activeSessionRef.current);
-          }
-        } else if (data.type === 'REWIND_MANIFEST_GET_RESPONSE') {
-          // E8-1.1a: only the active session's manifest is surfaced;
-          // an empty trail clears it (the step menus stay hidden).
-          if (data.payload?.session_id === activeSessionRef.current) {
-            const entries = Array.isArray(data.payload.entries) ? data.payload.entries : [];
-            setRewindManifest(entries.length ? {
-              session_id: data.payload.session_id,
-              task_id: data.payload.task_id,
-              entries,
-            } : null);
-          }
-        } else if (data.type === 'TASK_REWIND_RESPONSE') {
-          // E8-1.1b: the engine rolled the session back. M12: render
-          // the retained history the ENGINE returns in the response —
-          // its own record of what the rewind kept. The old local
-          // structural cut diverged at the final point (the engine
-          // discards no stored messages there, but the local cut
-          // removed the response anyway). The structural cut remains
-          // only as a fallback for responses without the history.
-          // Then arm the undo window.
-          if (data.payload?.session_id === activeSessionRef.current) {
-            // Wave 2 slice 2 (RUX-A-03): a rewind confirmed while
-            // offline kept its modal open in the queued state; the
-            // flushed request has now actually landed, so close it.
-            setRewindConfirm(null);
-            if (data.payload.ok) {
-              if (Array.isArray(data.payload.messages)) {
-                setChatMessages(data.payload.messages.map(m => {
-                  let parsedThoughts = m.thoughts;
-                  if (typeof parsedThoughts === 'string') {
-                    try {
-                      parsedThoughts = JSON.parse(parsedThoughts);
-                    } catch (e) {
-                      parsedThoughts = [];
-                    }
-                  }
-                  return {
-                    ...m,
-                    role: m.role === 'assistant' ? 'agent' : m.role,
-                    isFinal: true,
-                    thoughts: Array.isArray(parsedThoughts) ? parsedThoughts : []
-                  };
-                }));
-              } else {
-                const step = data.payload.rewound_to_step;
-                setChatMessages(prev => {
-                  let taskStart = -1;
-                  prev.forEach((m, j) => {
-                    if (m && m.role === 'user' && !m.steering) taskStart = j;
-                  });
-                  if (taskStart === -1) return prev;
-                  return step === 0 ? prev.slice(0, taskStart) : prev.slice(0, taskStart + 1);
-                });
-              }
-              requestRewindManifest(data.payload.session_id);
-              const expiresAt = (data.payload.undo_expires_at || 0) * 1000;
-              setRewindUndo({ sessionId: data.payload.session_id, expiresAt });
-              if (rewindUndoTimerRef.current) clearTimeout(rewindUndoTimerRef.current);
-              rewindUndoTimerRef.current = setTimeout(() => {
-                handleRewindUndoExpire();
-              }, Math.max(0, expiresAt - Date.now()));
-            } else if (data.payload.error) {
-              // D1-A8: a refusal the user caused must be visible
-              // where they caused it — a system line in the chat,
-              // not only a console warning.
-              setChatMessages(prev => [...prev, {
-                id: `rewind-refused-${Date.now()}`,
-                role: 'system',
-                content: `Rewind refused: ${data.payload.error}`,
-                isFinal: true,
-              }]);
-            }
-          }
-        } else if (data.type === 'TASK_REWIND_UNDO_RESPONSE') {
-          // E8-1.1b: the discarded steps are back in the store; the
-          // rendered list is rebuilt from it via a session fetch
-          // (the SESSION_GET_RESPONSE handler owns that rebuild and
-          // only honours the request id registered here).
-          if (data.payload?.ok && data.payload?.restored) {
-            const sessionId = activeSessionRef.current;
-            clearRewindUndo();
-            if (sessionId && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              const reqId = `rewind_restore_${Date.now()}`;
-              pendingSessionSwitchRef.current = reqId;
-              wsRef.current.send(JSON.stringify({
-                type: 'SESSION_GET_REQUEST',
-                schema_version: 1,
-                request_id: reqId,
-                payload: { session_id: sessionId }
-              }));
-              requestRewindManifest(sessionId);
-            }
-          } else {
-            clearRewindUndo();
-          }
-        } else if (data.type === 'BROWSER_TASK_PAUSE_RESPONSE') {
-          // Epic 8, E8-6.1: dedicated-profile agent browser control response.
-          // State keys by the owning CHAT session id (payload's
-          // chat_session_id); the browser session id is remembered
-          // for exact addressing of later control messages (M04).
-          const payload = data.payload || {};
-          const sid = payload.chat_session_id || activeSessionRef.current;
-          if (sid && payload.session_id) {
-            browserSessionIdsRef.current[sid] = payload.session_id;
-          }
-          if (sid) {
-            setBrowserSessions(prev => ({
-              ...prev,
-              [sid]: {
-                controlState: payload.control_state,
-                currentUrl: payload.current_url || '',
-                challenge: payload.challenge || null,
-                browserSessionId: payload.session_id || null,
-              }
-            }));
-          }
-        } else if (data.type === 'BROWSER_CHALLENGE_DETECTED') {
-          // Epic 8, E8-6.1: CAPTCHA / 2FA park notification — agent never solves challenges.
-          // Same keying as the control response above (M04).
-          const payload = data.payload || {};
-          const sid = payload.chat_session_id || activeSessionRef.current;
-          if (sid && payload.session_id) {
-            browserSessionIdsRef.current[sid] = payload.session_id;
-          }
-          if (sid) {
-            setBrowserSessions(prev => ({
-              ...prev,
-              [sid]: {
-                controlState: 'waiting_user',
-                currentUrl: payload.url || '',
-                challenge: { challenge: payload.challenge, url: payload.url },
-                browserSessionId: payload.session_id || null,
-              }
-            }));
-          }
-        } else if (data.type === 'FALLBACK_STARTED') {
-          setChatMessages(prev => [...prev, { 
-            id: Date.now().toString(),
-            role: 'system', 
-            content: `⚠️ Primary model unreachable. Falling back to alternative provider...`,
-            isFinal: true
-          }]);
-        } else if (data.type === 'FALLBACK_COMPLETED') {
-          setChatMessages(prev => [...prev, { 
-            id: Date.now().toString(),
-            role: 'system', 
-            content: `✅ Fallback successful. Routing request through ${data.payload.provider || 'backup provider'}.`,
-            isFinal: true
-          }]);
-        } else if (data.type === 'MCP_RESOURCE_READ_RESPONSE') {
-          // Issue 006: a resource loaded into the current chat appears
-          // live as a system message (the engine also saved it to the
-          // session, so it survives a reload). Only for our session —
-          // a resource loaded into another session is not ours to show.
-          if (data.payload.success && data.payload.message
-              && data.payload.session_id === activeSessionRef.current) {
-            setChatMessages(prev => [...prev, {
-              id: data.request_id || Date.now().toString(),
-              role: 'system',
-              content: data.payload.message,
-              isFinal: true
-            }]);
-          }
-        } else if (data.type === 'MCP_PROMPT_RUN_RESPONSE') {
-          // Issue 007: a prompt run into the current chat appears live,
-          // one message per prompt message, with the prompt's own role.
-          // Only for our session.
-          if (data.payload.success && Array.isArray(data.payload.messages)
-              && data.payload.session_id === activeSessionRef.current) {
-            setChatMessages(prev => [...prev, ...data.payload.messages.map((m, i) => ({
-              id: `${data.request_id || Date.now().toString()}-${i}`,
-              role: m.role,
-              content: m.content,
-              isFinal: true
-            }))]);
-          }
-        } else if (data.type === 'TOOL_APPROVAL_REQUEST') {
-          setIsThinking(false);
-          // E6-F13: track for the approve/reject shortcuts.
-          pendingApprovalsRef.current = [
-            ...pendingApprovalsRef.current,
-            {
-              kind: 'tool',
-              id: data.request_id || Date.now().toString(),
-              approval_key: data.payload.approval_key || data.request_id,
-            },
-          ];
-          const approvalMsg = {
-            id: data.request_id || Date.now().toString(),
-            role: 'tool_approval', 
-            tool_name: data.payload.tool_name,
-            tool_args: data.payload.tool_args || data.payload.args || {},
-            approval_key: data.payload.approval_key || data.request_id,
-            // Epic 2: engine-built preview ({diff} for edit_file, or
-            // {error} when no preview could be built, or null).
-            preview: data.payload.preview || null,
-            // Epic 8, E8-6.2: browser confirmation details (category
-            // + the exact action named from the page) when this
-            // approval is a browser confirmation; null otherwise.
-            browser_confirmation: data.payload.browser_confirmation || null,
-            isFinal: true
-          };
-          if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
-            const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
-            sessionCacheRef.current[activeTaskSessionRef.current] = [...cached, approvalMsg];
-          } else {
-            setChatMessages(prev => [...prev, approvalMsg]);
-          }
-        } else if (data.type === 'PLUGIN_APPROVAL_REQUEST') {
-          setIsThinking(false);
-          // E6-F13: track for the approve/reject shortcuts.
-          pendingApprovalsRef.current = [
-            ...pendingApprovalsRef.current,
-            { kind: 'plugin', id: data.request_id || Date.now().toString() },
-          ];
-          setChatMessages(prev => [...prev, {
-            id: data.request_id || Date.now().toString(),
-            role: 'plugin_approval', 
-            plugin_name: data.payload.plugin_name,
-            plugin_details: data.payload.plugin_details,
-            isFinal: true
-          }]);
-        } else if (data.type === 'SESSION_CREATE_RESPONSE') {
-          const newId = data.payload.session_id;
-          // D1-A5: a fresh session orphans the previous task's
-          // undecided approvals — they must not stay armed.
-          pendingApprovalsRef.current = [];
-          setActiveSession(newId);
-          // A plan-mode choice made before the session existed (the
-          // '__pending' key) is adopted by the new session.
-          setPlanModeBySession(prev => {
-            if (!prev.__pending) return prev;
-            const next = { ...prev, [newId]: prev.__pending };
-            delete next.__pending;
-            return next;
-          });
-          // Same adoption for a scratchpad that arrived pre-session.
-          setScratchpadBySession(prev => {
-            if (!prev.__pending) return prev;
-            const next = { ...prev, [newId]: prev.__pending };
-            delete next.__pending;
-            return next;
-          });
-          if (!data.payload?.preserve_messages) {
-            setChatMessages([]);
-          }
-          // Refresh list
-          if (wsRef.current) {
-            sendSessionListRequest();
-        wsRef.current.send(JSON.stringify({ type: 'CONFIG_GET_REQUEST', schema_version: 1, request_id: Date.now().toString(), payload: {} }));
-          }
-        } else if (data.type === 'SESSION_DELETE_RESPONSE') {
-          const deletedId = data.payload?.session_id;
-          // D1-A1/A2: the old branch read the mount-time
-          // `activeSession` (so deleting the viewed session never
-          // switched away from it) and ran the switch plus further
-          // setState calls INSIDE the setSessions updater — updaters
-          // must be pure; StrictMode double-invokes them, which fired
-          // the switch and its socket send twice. Compute from the
-          // ref mirrors, set the list, then act.
-          const next = sessionsRef.current.filter(s => s.id !== deletedId);
-          setSessions(next);
-          if (activeSessionRef.current === deletedId) {
-            if (next.length > 0) {
-              handleSessionSwitch(next[0].id);
-            } else {
-              setActiveSession(null);
-              setChatMessages([]);
-            }
-          }
-        } else if (data.type === 'SESSION_EXPORT_RESPONSE') {
-          if (data.payload?.error) {
-            setExportStatus({ type: 'error', message: `Export failed: ${data.payload.error}` });
-          } else {
-            if (data.payload?.content) {
-              const mime = data.payload.format === 'markdown' ? 'text/markdown;charset=utf-8' : 'application/json;charset=utf-8';
-              const blob = new Blob([data.payload.content], { type: mime });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = data.payload.filename || `session.${data.payload.format === 'markdown' ? 'md' : 'json'}`;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-              URL.revokeObjectURL(url);
-            }
-            setExportStatus({
-              type: 'success',
-              message: `Exported ${data.payload?.filename || data.payload?.format || 'session'}`
-            });
-          }
-        } else if (data.type === 'SESSION_FORK_RESPONSE') {
-          // E8-1.2: the fork is a new session ("Fork of <title>")
-          // holding the history up to the chosen step. Refresh the
-          // list and land the user in it; the source is untouched.
-          if (data.payload?.ok && data.payload?.new_session_id) {
-            sendSessionListRequest();
-            handleSessionSwitch(data.payload.new_session_id);
-          } else if (data.payload?.error) {
-            // D1-A8: same rule as the rewind refusal — visible in
-            // the chat the user is looking at, not console-only.
-            setChatMessages(prev => [...prev, {
-              id: `fork-refused-${Date.now()}`,
-              role: 'system',
-              content: `Fork refused: ${data.payload.error}`,
-              isFinal: true,
-            }]);
-          }
-        } else if (data.type === 'SESSION_IMPORT_RESPONSE') {
-          if (data.payload?.ok) {
-            sendSessionListRequest();
-            if (data.payload.session_id) {
-              handleSessionSwitch(data.payload.session_id);
-            }
-            setImportStatus({ type: 'success', message: `Restored session: ${data.payload.title}` });
-          } else {
-            setImportStatus({ type: 'error', message: data.payload?.error || 'Failed to import session' });
-          }
-        } else if (data.type === 'PROVIDER_LIST_RESPONSE') {
-          // sends a list; an object payload is normalised via Object.values
-          // and a missing one becomes []. Never store an object here — the
-          // old `|| {}` fallback is what made MODEL_DEFAULT_CHANGED below
-          // silently no-op (its Array.isArray guard bailed out).
-          const list = data.payload.providers;
-          setProviders(Array.isArray(list) ? list : (list && typeof list === 'object' ? Object.values(list) : []));
-          setProvidersLoaded(true);
-          // Epic 5, E5-05: per-provider health travels with the list.
-          if (data.payload.health && typeof data.payload.health === 'object') {
-            setProviderHealth(data.payload.health);
-            setProviderHealthLoaded(true);
-          }
-        } else if (data.type === 'CONFIG_GET_RESPONSE' || data.type === 'CONFIG_UPDATE_RESPONSE' || data.type === 'CONFIG_RESET_RESPONSE') {
-          if (data.payload && data.payload.config) setEngineConfig(data.payload.config);
-          if (data.type === 'CONFIG_RESET_RESPONSE' && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            // E6-F04: the provider list carries the defaults the
-            // chat model display derives from (is_default /
-            // default_model) — refetch it after a reset, like
-            // provider save/remove below, or Chat keeps displaying
-            // the pre-reset model until a restart.
-            wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
-          }
-        } else if (data.type === 'PROVIDER_REMOVE_RESPONSE' || data.type === 'PROVIDER_SAVE_RESPONSE') {
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'PROVIDER_LIST_REQUEST', schema_version: 1, request_id: Date.now().toString() }));
-          }
-        } else if (data.type === 'MODEL_DEFAULT_CHANGED') {
-          setProviders(prev => {
-            if (!Array.isArray(prev)) return prev;
-            return prev.map(p => {
-              if (p.name === data.payload.provider) {
-                return { ...p, is_default: true, default_model: data.payload.model };
-              }
-              return { ...p, is_default: false };
-            });
-          });
-        } else if (data.type === 'LOCAL_MODEL_LIST_RESPONSE') {
-          setLocalModels(data.payload.models || []);
-        } else if (data.type === 'PLUGIN_LIST_RESPONSE') {
-          const plugins = data.payload.plugins;
-          const pluginArr = Array.isArray(plugins) ? plugins : Object.values(plugins || {});
-          setPluginCount(pluginArr.filter(p => p.enabled !== false).length);
-        } else if (data.type === 'ARTIFACT_LIST_RESPONSE') {
-          // Epic 8, E8-2.3: ignore global requests meant for GlobalArtifactsView
-          if (data.request_id && data.request_id.startsWith('global_artifacts_')) {
-            return;
-          }
-          const list = data.payload?.artifacts || [];
-          setCanvasArtifacts(list);
-          // D1-A1: the current session comes from the ref — the
-          // state variable in this once-registered closure is the
-          // mount-time session.
-          const currentSessionId = activeSessionRef.current;
-          const savedId = currentSessionId ? localStorage.getItem(`aether_canvas_selected_${currentSessionId}`) : null;
-          if (savedId && list.some(a => a.id === savedId)) {
-            setSelectedArtifactId(savedId);
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({
-                type: 'ARTIFACT_GET_REQUEST',
-                schema_version: 1,
-                request_id: Date.now().toString(),
-                payload: { artifact_id: savedId }
-              }));
-            }
-          }
-        } else if (data.type === 'ARTIFACT_RECORDED') {
-          if (data.payload?.session_id === activeSessionRef.current) {
-            setCanvasArtifacts(prev => {
-              const filtered = prev.filter(a => a.id !== data.payload.artifact_id);
-              const artObj = {
-                id: data.payload.artifact_id,
-                session_id: data.payload.session_id,
-                task_id: data.payload.task_id,
-                kind: data.payload.kind,
-                title: data.payload.title,
-                file_path: data.payload.path,
-                created_at: data.payload.created_at
-              };
-              return [artObj, ...filtered];
-            });
-            // Never auto-opens during task execution per PRD
-          }
-        } else if (data.type === 'ARTIFACT_GET_RESPONSE') {
-          setActiveArtifactContent(data.payload);
-        } else if (data.type === 'DEV_SERVER_DETECT_RESPONSE') {
-          // Epic 8, E8-2.2: dev-server probe result for the Preview tab
-          setDevServerInfo(data.payload || null);
-        } else if (data.type === 'VOICE_SESSION_START_RESPONSE') {
-          // Epic 8, E8-5.1a: ok -> the overlay opens and the mic
-          // starts; refused -> the engine's honest reason shows and
-          // no device is ever opened.
-          const p = data.payload || {};
-          const current = voiceStateRef.current;
-          if (current) {
-            if (p.ok) {
-              applyVoiceState({
-                ...current,
-                status: 'active',
-                sessionId: p.session_id || current.sessionId,
-                webrtcConfig: p.webrtc_config || null,
-                error: null,
-              });
-              if (p.session_id && p.session_id !== activeSessionRef.current) {
-                setActiveSession(p.session_id);
-              }
-            } else {
-              applyVoiceState({
-                ...current,
-                status: 'error',
-                sessionId: p.session_id || current.sessionId,
-                error: p.error || 'Voice is unavailable on this machine.',
-                webrtcConfig: null,
-              });
-            }
-          }
-        } else if (data.type === 'VOICE_PARTIAL_TRANSCRIPT') {
-          const p = data.payload || {};
-          const current = voiceStateRef.current;
-          if (current && current.status === 'active' && p.session_id === current.sessionId) {
-            if (p.is_final) {
-              // Commit in order: the previous reply if it was still
-              // streaming, then this user turn.
-              commitVoiceAssistant(current);
-              if (p.text) {
-                setChatMessages(prev => [...prev, {
-                  id: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                  role: 'user', content: p.text, isFinal: true,
-                }]);
-              }
-              applyVoiceState({ ...current, partialText: '', assistantText: '', announcementText: '' });
-            } else {
-              applyVoiceState({ ...current, partialText: p.text || '' });
-            }
-          }
-        } else if (data.type === 'VOICE_OUTPUT_CHUNK') {
-          const p = data.payload || {};
-          const current = voiceStateRef.current;
-          if (current && current.status === 'active' && p.session_id === current.sessionId) {
-            if (p.text_delta) {
-              if (p.announcement_id) {
-                // N10: announcement text is not a reply turn. It
-                // is tracked apart from assistantText so it can
-                // never be committed as a chat message — the
-                // announced task's own message already stands in
-                // chat — while the overlay still shows what is
-                // being announced. Audio below plays as usual.
-                applyVoiceState({
-                  ...current,
-                  announcementText: (current.announcementText || '') + p.text_delta,
-                });
-              } else {
-                applyVoiceState({
-                  ...current,
-                  assistantText: (current.assistantText || '') + p.text_delta,
-                });
-              }
-            }
-            if (p.audio_chunk) {
-              voiceChunkSeqRef.current += 1;
-              setVoiceAudioChunk({
-                seq: voiceChunkSeqRef.current,
-                // N09: the engine's chunk identity, when the
-                // engine stamps one — the overlay reports finished
-                // seqs back as playback progress. Absent (an older
-                // engine), the chunk is simply never reported.
-                engineSeq: typeof p.chunk_seq === 'number' ? p.chunk_seq : null,
-                data: p.audio_chunk,
-              });
-            }
-          }
-        } else if (data.type === 'VOICE_BARGE_IN') {
-          // E8-5.1b: the client honours the committed-words rule
-          // by replacing the streaming bubble with exactly the
-          // text that was actually heard, and cuts the overlay's
-          // scheduled playback so the unheard tail never plays.
-          setVoicePlaybackCut(c => c + 1);
-          const p = data.payload || {};
-          const current = voiceStateRef.current;
-          if (current && p.session_id === current.sessionId) {
-            const committed = p.committed_text || '';
-            // N10: a barge-in that interrupted an announcement
-            // (tagged with its announcement_id) commits nothing —
-            // the heard prefix belongs to the task's own message,
-            // which already stands in chat.
-            if (committed.trim() && !p.announcement_id) {
-              setChatMessages(prev => [...prev, {
-                id: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                role: 'agent', content: committed, thoughts: [], isFinal: true,
-              }]);
-            }
-            applyVoiceState({ ...current, assistantText: '', announcementText: '' });
-          }
-        } else if (data.type === 'VOICE_SESSION_STOP_RESPONSE') {
-          // A local stop already tore the UI down; this only lands
-          // for a stop we did not initiate.
-          if (voiceStateRef.current) applyVoiceState(null);
-        } else if (data.type === 'VOICE_RTC_OFFER_RESPONSE') {
-          // F-12b: the engine's answer goes down to the overlay's
-          // peer connection; a refusal is the voice error state.
-          const p = data.payload || {};
-          const current = voiceStateRef.current;
-          if (current && p.session_id === current.sessionId) {
-            if (p.ok && p.answer) {
-              voiceRtcSeqRef.current += 1;
-              setVoiceRtcAnswer({ seq: voiceRtcSeqRef.current, answer: p.answer });
-            } else {
-              applyVoiceState({
-                ...current,
-                status: 'error',
-                error: p.error || 'Voice connection failed.',
-                webrtcConfig: null,
-              });
-            }
-          }
-        } else if (data.type === 'VOICE_RTC_ICE') {
-          // F-12b: one of the engine's own ICE candidates (or the
-          // null end-of-candidates marker) for the overlay's peer.
-          const p = data.payload || {};
-          const current = voiceStateRef.current;
-          if (current && current.status === 'active' && p.session_id === current.sessionId) {
-            voiceRtcSeqRef.current += 1;
-            setVoiceRtcRemoteCandidate({
-              seq: voiceRtcSeqRef.current,
-              candidate: p.candidate ?? null,
-            });
-          }
-        } else if (data.type === 'DICTATION_START_RESPONSE') {
-          const p = data.payload || {};
-          if (p.ok) {
-            setDictationState({ status: 'active', error: null, text: '' });
-          } else {
-            setDictationState({
-              status: 'error',
-              error: p.error || 'Dictation unavailable',
-              text: '',
-            });
-          }
-        } else if (data.type === 'DICTATION_CHUNK_RESPONSE') {
-          const p = data.payload || {};
-          if (p.text !== undefined && p.text !== null) {
-            setDictationState(prev => ({
-              ...(prev || {}),
-              text: p.text,
-            }));
-          }
-        } else if (data.type === 'DICTATION_STOP_RESPONSE') {
-          const p = data.payload || {};
-          if (p.text !== undefined && p.text !== null) {
-            setDictationState(prev => ({
-              ...(prev || {}),
-              status: 'idle',
-              text: p.text,
-            }));
-          }
-        } else if (data.type === 'READ_ALOUD_START_RESPONSE') {
-          const p = data.payload || {};
-          if (p.ok) {
-            setReadAloudState({
-              messageId: p.message_id,
-              status: 'playing',
-              error: null,
-            });
-          } else {
-            setReadAloudState({
-              messageId: p.message_id,
-              status: 'error',
-              error: p.error || 'TTS unavailable',
-            });
-          }
-        } else if (data.type === 'READ_ALOUD_CHUNK') {
-          const p = data.payload || {};
-          if (p.audio_chunk) {
-            try {
-              const Ctx = window.AudioContext || window.webkitAudioContext;
-              if (Ctx) {
-                if (!readAloudAudioCtxRef.current) readAloudAudioCtxRef.current = new Ctx();
-                const ctx = readAloudAudioCtxRef.current;
-                const binary = window.atob(p.audio_chunk);
-                const bytes = new Uint8Array(binary.length);
-                for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-                const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-                const decoded = ctx.decodeAudioData(buffer);
-                if (decoded && typeof decoded.then === 'function') {
-                  decoded.then((audioBuffer) => {
-                    const source = ctx.createBufferSource();
-                    source.buffer = audioBuffer;
-                    source.connect(ctx.destination);
-                    source.onended = () => { readAloudSourcesRef.current.delete(source); };
-                    readAloudSourcesRef.current.add(source);
-                    const startAt = Math.max(ctx.currentTime, readAloudPlayHeadRef.current);
-                    source.start(startAt);
-                    readAloudPlayHeadRef.current = startAt + (audioBuffer.duration || 0);
-                  }, () => {
-                    // D1-A4: a decode failure was an unhandled
-                    // rejection — silent while the button kept
-                    // showing "playing". Surface it as this
-                    // message's read-aloud error state instead.
-                    setReadAloudState(prev => (prev && (!p.message_id || prev.messageId === p.message_id)
-                      ? { ...prev, status: 'error', error: 'Read-aloud audio could not be decoded.' }
-                      : prev));
-                  });
-                }
-              }
-            } catch (err) {
-              console.error('Failed to decode read-aloud chunk:', err);
-            }
-          }
-          if (p.is_final) {
-            // D1-A4: the engine's final chunk ends the stream — the
-            // state returns to idle so the message's button stops
-            // presenting Stop/playing for audio that has ended.
-            // (Already-scheduled sources still play out; App's stop
-            // path remains authoritative for an explicit stop.)
-            setReadAloudState(prev => (prev && (!p.message_id || prev.messageId === p.message_id)
-              ? { ...prev, status: 'idle' }
-              : prev));
-          }
-        } else if (data.type === 'READ_ALOUD_STOP_RESPONSE') {
-          stopAppReadAloud();
-          setReadAloudState(null);
-        } else if (data.type === 'USAGE_LEDGER_QUERY_RESPONSE') {
-          // Epic 8, E8-A8.1a: rebuild the cost surfaces from the
-          // ledger rows themselves, so the header total and the
-          // popover always reconcile with the recorded calls.
-          setCostTasks(groupEntriesByTask(data.payload?.entries || []));
-        } else if (data.type === 'TASK_COST_UPDATE') {
-          // Epic 8, E8-A8.1a: live tick. The engine read these
-          // figures back from the ledger row it just recorded, so
-          // merging them keeps the header in step with usage.db.
-          const p = data.payload || {};
-          if (p.session_id && p.session_id === activeSessionRef.current) {
-            setLastCostTaskId(p.task_id);
-            setCostTasks(prev => {
-              const existing = prev.find(t => t.task_id === p.task_id);
-              const base = existing || {
-                task_id: p.task_id, cost_usd: 0, input_tokens: 0,
-                output_tokens: 0, last_ts: 0, by_model: {},
-              };
-              const byModel = { ...base.by_model };
-              const model = { ...(byModel[p.model] || {
-                cost_usd: 0, input_tokens: 0, output_tokens: 0,
-                calls: 0, is_local: false, unpriced: false,
-              }) };
-              model.cost_usd += p.delta_cost_usd || 0;
-              model.input_tokens += p.input_tokens || 0;
-              model.output_tokens += p.output_tokens || 0;
-              model.calls += 1;
-              if (p.is_local) model.is_local = true;
-              if (p.pricing_status === 'unpriced') model.unpriced = true;
-              byModel[p.model] = model;
-              const updated = {
-                ...base,
-                cost_usd: typeof p.task_total_cost_usd === 'number'
-                  ? p.task_total_cost_usd
-                  : base.cost_usd + (p.delta_cost_usd || 0),
-                input_tokens: base.input_tokens + (p.input_tokens || 0),
-                output_tokens: base.output_tokens + (p.output_tokens || 0),
-                last_ts: Date.now() / 1000,
-                by_model: byModel,
-              };
-              return [updated, ...prev.filter(t => t.task_id !== p.task_id)];
-            });
-            requestContextBreakdown(p.session_id);
-          }
-        } else if (data.type === 'CONTEXT_BREAKDOWN_RESPONSE') {
-          // Epic 8, E8-A8.1b: segmented context breakdown for header and settings
-          if (data.payload) {
-            setContextBreakdown(data.payload);
-          }
-        } else if (data.type === 'DAILY_BUDGET_SET_RESPONSE') {
-          // Epic 8, E8-A8.1b: daily budget updated
-          setDailyBudget(data.payload?.daily_budget_usd != null ? data.payload.daily_budget_usd : null);
-        } else if (data.type === 'DAILY_BUDGET_EXCEEDED') {
-          // Epic 8, E8-A8.1b: soft alert on daily budget (running task finishes uninterrupted)
-          setBudgetAlert(data.payload);
-        } else if (data.type === 'ERROR') {
-          setIsThinking(false);
-          setChatMessages(prev => {
-            const errorText = `**Error:** ${data.payload.message || 'Unknown error'}`;
-            const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);
-            if (lastAgentIdx !== -1) {
-              const newMessages = [...prev];
-              const last = newMessages[lastAgentIdx];
-              newMessages[lastAgentIdx] = { 
-                ...last, 
-                content: last.content ? `${last.content}\n\n${errorText}` : errorText, 
-                isFinal: true,
-                hasError: true
-              };
-              return newMessages.map((m, i) => 
-                (m.role === 'agent' && !m.isFinal && i !== lastAgentIdx) ? { ...m, isFinal: true, hasError: true, content: "**Task Cancelled**: Superseded by new request." } : m
-              );
-            } else {
-              const veryLast = prev[prev.length - 1];
-              if (veryLast && veryLast.role === 'agent' && veryLast.isFinal) return prev;
-              return [...prev, { role: 'agent', content: errorText, isFinal: true, hasError: true }];
-            }
-          });
-        }
-    };
-
-    // Single subscription, via the facade. Registered synchronously so the
-    // effect cleanup (StrictMode double-mount included) always removes it —
-    // the old async initConnection leaked the first subscription, which is
-    // what the deleted dedup hack was papering over.
-    if (wsRef.current) {
-      wsRef.current.addEventListener('message', handleMessage);
-    }
-
     const unsubscribers = [];
     if (window.electronAPI && window.electronAPI.onChatDetached) {
       unsubscribers.push(window.electronAPI.onChatDetached(() => setIsChatDetached(true)));
@@ -2106,14 +639,46 @@ function AppContent() {
     // it must not fabricate the appearance of a populated knowledge graph.
     return () => {
       clearInterval(memoryPoll);
-      if (wsRef.current) {
-        wsRef.current.removeEventListener('message', handleMessage);
-      }
       unsubscribers.forEach(unsub => {
         if (typeof unsub === 'function') unsub();
       });
     };
   }, []);
+
+  // Wave 5, Annex C row 5 (message-router seam): the once-registered
+  // engine-message dispatch lives in hooks/useEngineMessages.js. It
+  // is handed the refs, setters and stable callbacks it writes
+  // through — the refs discipline (D1-A1) is unchanged, and the two
+  // D3-19 callbacks report the artifact-content load events only the
+  // handler can see.
+  useEngineMessages({
+    wsRef, isFloating, initialSession,
+    activeSessionRef, activeTaskSessionRef, browserSessionIdsRef,
+    chatMessagesRef, isThinkingRef, moveBatchRef, pendingApprovalsRef,
+    pendingSessionSwitchIdRef, pendingSessionSwitchRef, pendingThinkingRef,
+    readAloudAudioCtxRef, readAloudPlayHeadRef, readAloudSourcesRef,
+    rewindUndoTimerRef, sessionCacheRef, sessionSearchQueryRef, sessionsRef,
+    voiceChunkSeqRef, voiceRtcSeqRef, voiceStateRef,
+    setActiveArtifactContent, setActiveSession, setActiveTaskIds,
+    setBrowserSessions, setBudgetAlert, setCanvasArtifacts, setChatMessages,
+    setContextBreakdown, setCostTasks, setDailyBudget, setDevServerInfo,
+    setDictationState, setEngineConfig, setExportStatus, setImportStatus,
+    setIsThinking, setLastCostTaskId, setLocalModels, setMoveStatus,
+    setPlanModeBySession, setPluginCount, setProviderHealth,
+    setProviderHealthLoaded, setProviders, setProvidersLoaded,
+    setReadAloudState, setRewindConfirm, setRewindManifest, setRewindUndo,
+    setScratchpadBySession, setSelectedArtifactId, setSelectedSessionIds,
+    setSessionSearchResults, setSessionSelectMode, setSessionSwitchPendingId,
+    setSessions, setSlashCommands, setStatus, setVoiceAudioChunk,
+    setVoicePlaybackCut, setVoiceRtcAnswer, setVoiceRtcRemoteCandidate,
+    setWorkspaces,
+    applyVoiceState, clearRewindUndo, commitVoiceAssistant,
+    handleRewindUndoExpire, handleSessionSwitch, requestContextBreakdown,
+    requestCostBreakdown, requestRewindManifest, requestWorkspaceList,
+    sendSessionListRequest, stopAppReadAloud,
+    onArtifactLoadStart: markArtifactLoadStarted,
+    onArtifactLoadEnd: markArtifactLoadFinished,
+  });
 
   // Phase 10.3 C1: connection transitions come from the facade's
   // isConnected (driven by its _ws_status listener and getWsStatus), which
@@ -2195,24 +760,8 @@ function AppContent() {
       }
     }
     wasConnectedRef.current = isConnected;
-  }, [isConnected, wsRef, sendSessionListRequest, requestWorkspaceList, dictationState, readAloudState, applyVoiceState, stopAppReadAloud]);
+  }, [isConnected, wsRef, sendSessionListRequest, requestWorkspaceList, dictationState, readAloudState, applyVoiceState, stopAppReadAloud, voiceStateRef, setDictationState, setReadAloudState, setVoiceRtcAnswer, setVoiceRtcRemoteCandidate]);
 
-  // Per-workspace sessions (Q5): when the ACTIVE workspace changes,
-  // the session list re-files itself under the new workspace — the
-  // view returns to 'workspace' and the list is re-requested with
-  // the new filter. Only a path change acts: count-only refreshes
-  // of the rows leave the user's chosen view (All / No workspace)
-  // alone. The open session is untouched either way — this effect
-  // only ever re-requests the LIST.
-  useEffect(() => {
-    const active = workspaces.find(w => w.is_active) || null;
-    const nextPath = active ? active.path : null;
-    if (nextPath === activeWorkspacePathRef.current) return;
-    activeWorkspacePathRef.current = nextPath;
-    sessionListViewRef.current = 'workspace';
-    setSessionListView('workspace');
-    sendSessionListRequest();
-  }, [workspaces, sendSessionListRequest]);
 
   // Epic 8, E8-2.1: sync artifacts when active session changes
   useEffect(() => {
@@ -2235,15 +784,21 @@ function AppContent() {
           request_id: Date.now().toString(),
           payload: { artifact_id: savedId }
         }));
+        // D3-19: the restored selection's content is now in flight.
+        markArtifactLoadStarted(savedId);
       } else {
         setActiveArtifactContent(null);
+        // D3-19: nothing is being fetched for this session.
+        markArtifactLoadFinished();
       }
     } else if (!activeSession) {
       setCanvasArtifacts([]);
       setSelectedArtifactId(null);
       setActiveArtifactContent(null);
+      // D3-19: no session, no load.
+      markArtifactLoadFinished();
     }
-  }, [activeSession, isConnected, wsRef]);
+  }, [activeSession, isConnected, wsRef, markArtifactLoadStarted, markArtifactLoadFinished]);
 
   // Epic 8, E8-A8.1a/b: sync the cost and context surfaces when the session changes
   useEffect(() => {
@@ -2277,8 +832,10 @@ function AppContent() {
         localStorage.setItem(`aether_canvas_selected_${activeSession}`, firstId);
       }
       safeSend('ARTIFACT_GET_REQUEST', { artifact_id: firstId });
+      // D3-19: the first artifact's content is now in flight.
+      markArtifactLoadStarted(firstId);
     }
-  }, [isCanvasOpen, canvasArtifacts, selectedArtifactId, activeSession, safeSend]);
+  }, [isCanvasOpen, canvasArtifacts, selectedArtifactId, activeSession, safeSend, markArtifactLoadStarted]);
 
   const handleSelectArtifact = useCallback((artifactId) => {
     setSelectedArtifactId(artifactId);
@@ -2286,7 +843,9 @@ function AppContent() {
       localStorage.setItem(`aether_canvas_selected_${activeSession}`, artifactId);
     }
     safeSend('ARTIFACT_GET_REQUEST', { artifact_id: artifactId });
-  }, [activeSession, safeSend]);
+    // D3-19: the newly selected artifact's content is now in flight.
+    markArtifactLoadStarted(artifactId);
+  }, [activeSession, safeSend, markArtifactLoadStarted]);
 
   // Epic 8, E8-2.2: ask the engine to probe for a dev server in the
   // artifact's project directory; the answer lands in devServerInfo
@@ -2383,41 +942,6 @@ function AppContent() {
     }
   };
 
-  const handleSessionSwitch = (id) => {
-    // D1-A5: the previous session's undecided approvals are not
-    // actionable from the session being switched to.
-    pendingApprovalsRef.current = [];
-    // E8-1.1a: never show one session's rewind points in another;
-    // the fresh manifest is fetched on SESSION_GET_RESPONSE.
-    setRewindManifest(null);
-    // E8-1.1b: a staged rewind belongs to the session it rewound;
-    // its toast (and confirm modal) must not follow the user into
-    // another session. The engine-side window keeps running and
-    // prunes on expiry.
-    setRewindConfirm(null);
-    if (rewindUndo && rewindUndo.sessionId !== id) clearRewindUndo();
-    setChatMessages(prev => {
-      if (activeSessionRef.current) {
-        sessionCacheRef.current[activeSessionRef.current] = prev;
-      }
-      return sessionCacheRef.current[id] || [];
-    });
-    setActiveSession(id);
-    // Wave 2 slice 2 (RUX-A-01): the fetch goes out via safeSend —
-    // a session clicked while the socket is down is queued, not
-    // discarded, so the full history replaces the cached (or empty)
-    // list as soon as the connection returns, instead of the cached
-    // list being presented as that session forever. safeSend mints
-    // the request_id inside the facade, so the pending switch is
-    // registered by target session id (see pendingSessionSwitchIdRef).
-    pendingSessionSwitchRef.current = null;
-    pendingSessionSwitchIdRef.current = id;
-    // RUX-C-13: a cached copy renders instantly and needs no
-    // loading state (the fetch still refreshes it); an uncached
-    // target shows the switching state until the reply lands.
-    setSessionSwitchPendingId(sessionCacheRef.current[id] ? null : id);
-    safeSend('SESSION_GET_REQUEST', { session_id: id });
-  };
 
   // N08: exact-message scrolling for "jump to conversation". The
   // target is remembered and the scroll fires when the message
@@ -2466,13 +990,15 @@ function AppContent() {
     if (artifact.id) {
       // RUX-A-08: via safeSend, like handleSelectArtifact above.
       safeSend('ARTIFACT_GET_REQUEST', { artifact_id: artifact.id });
+      // D3-19: the navigated-to artifact's content is now in flight.
+      markArtifactLoadStarted(artifact.id);
     }
     setActiveTab('Chat');
 
     if (artifact.message_id) {
       queueMessageScroll(artifact.session_id || activeSession, artifact.message_id);
     }
-  }, [activeSession, safeSend, queueMessageScroll]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeSession, safeSend, queueMessageScroll, markArtifactLoadStarted]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // N08: media "jump to conversation" — a separate path from artifact
   // navigation. Media ids are NOT artifact ids: no canvas selection
@@ -2491,24 +1017,6 @@ function AppContent() {
     }
   };
 
-  const handleNewChat = () => {
-    setRewindManifest(null); // E8-1.1a: a fresh chat has no points yet
-    // Wave 2 slice 2 (RUX-A-02): the create goes out via safeSend —
-    // never discarded. While 'sent', the chat clears immediately for
-    // instant feel, exactly as before. While 'queued', the chat is
-    // NOT cleared and the current session stays active: clearing
-    // into a fake-empty view while activeSession still names the old
-    // session was the worst silent failure in the app — the user's
-    // next message silently landed in the session they believed
-    // they had left. The queued create flushes on reconnect and the
-    // SESSION_CREATE_RESPONSE handler performs the switch and the
-    // clear when the new session actually exists; the app-level
-    // pending indicator shows the action is waiting meanwhile.
-    const disposition = safeSend('SESSION_CREATE_REQUEST', { title: 'New Conversation' });
-    if (disposition === 'sent') {
-      setChatMessages([]); // Clear immediately for instant feel
-    }
-  };
 
   // Epic 6, E6-02: completing or skipping onboarding persists the
   // flag engine-side so the overlay appears exactly once.
@@ -2648,10 +1156,6 @@ function AppContent() {
   // are all driven by the engine's responses — so queueing is the
   // whole fix: the action lands on reconnect and its response drives
   // the UI then, with the pending indicator covering the wait.
-  const handleDeleteSession = (id, e) => {
-    e.stopPropagation(); // prevent triggering handleSessionSwitch
-    safeSend('SESSION_DELETE_REQUEST', { session_id: id });
-  };
 
   const handleExportSession = (format) => {
     if (!activeSession) return;
@@ -2913,70 +1417,6 @@ function AppContent() {
     setPlanModeBySession(prev => ({ ...prev, [planModeKey]: !prev[planModeKey] }));
   };
 
-  // Epic 1 UI batch (E1-08): session rename (inline edit in the list).
-  const handleStartRenameSession = (session, e) => {
-    if (e) e.stopPropagation();
-    setEditingSessionId(session.id);
-    setEditingSessionTitle(session.title || session.name || '');
-  };
-
-  const handleCancelRenameSession = () => {
-    setEditingSessionId(null);
-    setEditingSessionTitle('');
-  };
-
-  const handleCommitRenameSession = (sessionId) => {
-    if (editingSessionId !== sessionId) return; // Escape-cancel already closed it
-    const title = editingSessionTitle.trim();
-    setEditingSessionId(null);
-    setEditingSessionTitle('');
-    if (!title) return; // an empty title cancels instead of renaming
-    if (wsRef.current && wsRef.current.send) {
-      wsRef.current.send(JSON.stringify({
-        type: 'SESSION_RENAME_REQUEST',
-        schema_version: 1,
-        request_id: Date.now().toString(),
-        payload: { session_id: sessionId, title }
-      }));
-    }
-  };
-
-  // Per-workspace sessions (Q5/Q6): list-view switching, selection,
-  // and moves. The view lives in a ref as well as state because the
-  // list-request helper and the message handler read it outside
-  // React's render cycle. (The workspace lookups themselves —
-  // activeWorkspaceRow / workspaceLabelFor — live above, beside the
-  // request helpers the palette memo also uses.)
-  const handleSessionListViewChange = (view) => {
-    sessionListViewRef.current = view;
-    setSessionListView(view);
-    setMoveMenuFor(null);
-    sendSessionListRequest();
-  };
-
-  const toggleSessionSelected = (sessionId) => {
-    setSelectedSessionIds(prev => (prev.includes(sessionId)
-      ? prev.filter(id => id !== sessionId)
-      : [...prev, sessionId]));
-  };
-
-  // One SESSION_MOVE_REQUEST per session: the engine has no bulk
-  // pair, so bulk move is this renderer loop over the single-move
-  // contract. Outcomes tally into moveBatchRef and settle in the
-  // SESSION_MOVE_RESPONSE branch of the message handler.
-  const startSessionMoves = (sessionIds, targetWorkspace) => {
-    if (!sessionIds.length) return;
-    // RUX-A-07: via safeSend (see handleDeleteSession above) — the
-    // menu closes and the batch tally is armed even while offline;
-    // the moves flush in order on reconnect and the
-    // SESSION_MOVE_RESPONSE tally settles when the replies land.
-    setMoveMenuFor(null);
-    setMoveStatus(null);
-    moveBatchRef.current = { total: sessionIds.length, settled: 0, moved: 0, failed: 0, firstError: null };
-    sessionIds.forEach((sid) => {
-      safeSend('SESSION_MOVE_REQUEST', { session_id: sid, workspace: targetWorkspace });
-    });
-  };
 
   // The move-target list shared by the per-row menu and the bulk
   // bar: every configured workspace plus "No workspace". A session's
@@ -3024,30 +1464,6 @@ function AppContent() {
     </>
   );
 
-  // Epic 1 UI batch (E1-08): debounced session search. An empty query
-  // restores the normal list; results are only applied when they answer
-  // the current query (see SESSION_SEARCH_RESPONSE above).
-  useEffect(() => {
-    sessionSearchQueryRef.current = sessionSearchQuery;
-    if (sessionSearchTimerRef.current) clearTimeout(sessionSearchTimerRef.current);
-    if (!sessionSearchQuery.trim()) {
-      setSessionSearchResults(null);
-      return;
-    }
-    sessionSearchTimerRef.current = setTimeout(() => {
-      if (wsRef.current && wsRef.current.send) {
-        wsRef.current.send(JSON.stringify({
-          type: 'SESSION_SEARCH_REQUEST',
-          schema_version: 1,
-          request_id: Date.now().toString(),
-          payload: { query: sessionSearchQuery }
-        }));
-      }
-    }, 300);
-    return () => {
-      if (sessionSearchTimerRef.current) clearTimeout(sessionSearchTimerRef.current);
-    };
-  }, [sessionSearchQuery]);
 
   // Wave 1 slice 4: until the engine is ready, the gate REPLACES the
   // shell. Every hook above keeps running, so engine data keeps
@@ -3571,6 +1987,7 @@ function AppContent() {
           selectedArtifactId={selectedArtifactId}
           onSelectArtifact={handleSelectArtifact}
           activeArtifactContent={activeArtifactContent}
+          isLoading={artifactContentLoading}
           devServerInfo={devServerInfo}
           onDetectDevServer={handleDetectDevServer}
         />

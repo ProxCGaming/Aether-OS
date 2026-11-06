@@ -237,9 +237,8 @@ export default function ArtifactsCanvas({
 
     // D3-19: the loading prop is honoured — while content is in
     // flight and there is nothing to show yet, the pane says so
-    // instead of rendering an empty viewer. (Wiring the prop from
-    // App.jsx is a follow-up for the App owner; the canvas no
-    // longer swallows it.)
+    // instead of rendering an empty viewer. App.jsx wires the
+    // prop (Wave 5, D1 slice: artifact-load lifecycle in App).
     if (isLoading && !content && !diff) {
       return (
         <div
