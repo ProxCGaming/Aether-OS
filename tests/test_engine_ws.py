@@ -80,7 +80,7 @@ class TestEngineWebSocket(unittest.TestCase):
     def test_websocket_missing_api_key_fails_gracefully(self):
         with TestClient(app) as client:
             valid_token = engine_state.auth_token
-            with patch("aether_engine.app.SecretStore") as mock_store_cls:
+            with patch("aether_engine.routes.websocket.SecretStore") as mock_store_cls:
                 # Mock store returning ProviderNotFoundError
                 mock_store = mock_store_cls.return_value
                 from aether_engine.secrets.storage import ProviderNotFoundError
@@ -103,11 +103,11 @@ class TestEngineWebSocket(unittest.TestCase):
         with TestClient(app) as client:
             valid_token = engine_state.auth_token
             
-            async def mock_call_stream(messages, tools=None):
+            async def mock_call_stream(messages, tools=None, node_name=None):
                 yield StreamChunk(text="Hello from test LLM!")
 
-            with patch("aether_engine.app.SecretStore") as mock_store_cls, \
-                 patch("aether_engine.app._create_provider_instance") as mock_factory:
+            with patch("aether_engine.routes.websocket.SecretStore") as mock_store_cls, \
+                 patch("aether_engine.routes.websocket._create_provider_instance") as mock_factory:
 
                 mock_store = mock_store_cls.return_value
                 mock_store.load_provider.return_value = "fake-key"
@@ -152,14 +152,14 @@ class TestEngineWebSocket(unittest.TestCase):
         self.assertIn("SUCCEEDED", audit_content)
 
     def test_websocket_task_cancellation_flow(self):
-        async def slow_call_stream(messages, tools=None):
+        async def slow_call_stream(messages, tools=None, node_name=None):
             await asyncio.sleep(5)  # Simulate a slow query
             yield StreamChunk(text="Done")
 
         with TestClient(app) as client:
             valid_token = engine_state.auth_token
-            with patch("aether_engine.app.SecretStore") as mock_store_cls, \
-                 patch("aether_engine.app._create_provider_instance") as mock_factory:
+            with patch("aether_engine.routes.websocket.SecretStore") as mock_store_cls, \
+                 patch("aether_engine.routes.websocket._create_provider_instance") as mock_factory:
 
                 mock_store = mock_store_cls.return_value
                 mock_store.load_provider.return_value = "fake-key"
@@ -179,8 +179,17 @@ class TestEngineWebSocket(unittest.TestCase):
                     )
                     ws.send_text(start_event.to_json())
 
-                    # TASK_CREATED
-                    Event.from_json(ws.receive_text())
+                    # TASK_CREATED — the launch pre-work (RUX-B-07)
+                    # answers session creation first and background
+                    # pushes can interleave, so read until the task
+                    # actually exists before cancelling it: a cancel
+                    # sent during the launch cancels the launch, not
+                    # the running task this test exercises.
+                    ev = Event.from_json(ws.receive_text())
+                    for _ in range(25):
+                        if ev.type == EventType.TASK_CREATED:
+                            break
+                        ev = Event.from_json(ws.receive_text())
 
                     # Cancel task
                     cancel_event = Event(type=EventType.CANCEL_TASK)
@@ -220,9 +229,49 @@ class TestEngineWebSocket(unittest.TestCase):
                 self.assertIn("openai", names)
 
     def test_provider_save_and_remove(self):
+        # The remove below is persisted by design (asserted at the end
+        # of this test): it strips google_gemini from the on-disk
+        # config, which every later TestClient startup reloads
+        # (state.initialize). Snapshot the state this test overwrites
+        # and restore it on cleanup, or the stripped provider leaks
+        # into later tests — and into the developer's real config.
+        _cfg = engine_state.user_config
+        _saved = {
+            "provider_models": dict(_cfg.provider_models),
+            "custom_base_urls": dict(_cfg.custom_base_urls),
+            "custom_provider_names": dict(_cfg.custom_provider_names),
+            "custom_provider_types": dict(_cfg.custom_provider_types),
+            "default_provider": _cfg.default_provider,
+            "default_model": _cfg.default_model,
+            "configured": list(engine_state.configured_providers),
+            "active": (engine_state.active_provider, engine_state.active_model),
+            "registry_ids": [
+                m.id for m in engine_state.model_registry
+                .get_models_for_provider("google_gemini")
+            ],
+        }
+
+        def _restore_provider_state():
+            from aether_engine.config import save_config
+
+            cfg = engine_state.user_config
+            cfg.provider_models = _saved["provider_models"]
+            cfg.custom_base_urls = _saved["custom_base_urls"]
+            cfg.custom_provider_names = _saved["custom_provider_names"]
+            cfg.custom_provider_types = _saved["custom_provider_types"]
+            cfg.default_provider = _saved["default_provider"]
+            cfg.default_model = _saved["default_model"]
+            engine_state.configured_providers = _saved["configured"]
+            engine_state.active_provider, engine_state.active_model = _saved["active"]
+            if _saved["registry_ids"]:
+                engine_state.model_registry.update_provider_models(
+                    "google_gemini", _saved["registry_ids"])
+            save_config(cfg)
+
+        self.addCleanup(_restore_provider_state)
         with TestClient(app) as client:
             valid_token = engine_state.auth_token
-            with patch("aether_engine.app.SecretStore") as mock_cls:
+            with patch("aether_engine.routes.websocket.SecretStore") as mock_cls:
                 mock_store = mock_cls.return_value
                 mock_store.list_providers.return_value = []
                 mock_store.save_provider.return_value = None
@@ -259,7 +308,15 @@ class TestEngineWebSocket(unittest.TestCase):
                         payload={"provider": "google_gemini"},
                     )
                     ws.send_text(rm_req.to_json())
+                    # The save above defers model discovery (RUX-B-06);
+                    # when it lands it pushes a PROVIDER_LIST_RESPONSE on
+                    # this socket, which can arrive ahead of the remove
+                    # response — read past any such push.
                     resp = Event.from_json(ws.receive_text())
+                    for _ in range(4):
+                        if resp.type == EventType.PROVIDER_REMOVE_RESPONSE:
+                            break
+                        resp = Event.from_json(ws.receive_text())
                     self.assertEqual(resp.type, EventType.PROVIDER_REMOVE_RESPONSE)
                     self.assertTrue(resp.payload["deleted"])
                     self.assertTrue(resp.payload["success"])
@@ -289,7 +346,7 @@ class TestEngineWebSocket(unittest.TestCase):
         pname = "custom_remove_me_1234"
         with TestClient(app) as client:
             valid_token = engine_state.auth_token
-            with patch("aether_engine.app.SecretStore") as mock_cls:
+            with patch("aether_engine.routes.websocket.SecretStore") as mock_cls:
                 mock_store = mock_cls.return_value
                 mock_store.list_providers.return_value = [pname]
                 mock_store.delete_provider.return_value = True
@@ -326,8 +383,8 @@ class TestEngineWebSocket(unittest.TestCase):
         try:
             with TestClient(app) as client:
                 valid_token = engine_state.auth_token
-                with patch("aether_engine.app.SecretStore") as mock_cls, \
-                     patch("aether_engine.app.fetch_available_models",
+                with patch("aether_engine.routes.websocket.SecretStore") as mock_cls, \
+                     patch("aether_engine.routes.websocket.fetch_available_models",
                            new=AsyncMock(return_value=DiscoveryResult(models=["m1", "m2"]))):
                     mock_store = mock_cls.return_value
                     mock_store.list_providers.return_value = []
@@ -438,7 +495,7 @@ class TestEditAndResendHardening(unittest.TestCase):
         session_id = self._seed_session()
         with TestClient(app) as client:
             valid_token = engine_state.auth_token
-            with patch("aether_engine.app.SecretStore") as mock_store_cls:
+            with patch("aether_engine.routes.websocket.SecretStore") as mock_store_cls:
                 mock_store = mock_store_cls.return_value
                 from aether_engine.secrets.storage import ProviderNotFoundError
 

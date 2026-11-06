@@ -19,9 +19,5 @@
 # entry without the fix that makes it pass, and never add an entry to
 # hide a new failure.
 #
-tests/test_engine_ws.py::TestEngineWebSocket::test_custom_provider_save_uses_provided_display_name
-tests/test_engine_ws.py::TestEngineWebSocket::test_provider_save_and_remove
-tests/test_engine_ws.py::TestEngineWebSocket::test_websocket_task_cancellation_flow
-tests/test_engine_ws.py::TestEngineWebSocket::test_websocket_task_flow_with_provider
 tests/test_phase5_1_fixes.py::TestFix2SandboxEnforcement::test_risky_tools_set_matches_graph
 tests/test_phase5_2_fixes.py::test_tool_filtering_keeps_used_tools
