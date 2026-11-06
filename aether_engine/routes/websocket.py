@@ -4,7 +4,6 @@ import copy
 import logging
 import re
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -23,9 +22,7 @@ from aether_common.contracts import (
 from aether_engine.config import (
     AUXILIARY_TASK_CLASSES,
     UserConfig,
-    anchor_default_model,
     canonical_workspace_root,
-    custom_provider_flavor,
     find_workspace_root,
     remove_workspace_root,
     save_config,
@@ -49,13 +46,8 @@ from aether_engine.memory.facade import backend_or_none
 from aether_engine.orchestration.core import (
     _build_provider_list_async,
     _create_provider_instance,
-    clear_discovery_failure,
-    discover_pending_provider_models,
-    discovery_recently_failed,
-    record_discovery_failure,
-    validate_provider_key_shared,
 )
-from aether_engine.providers.discovery import fetch_available_models
+from aether_engine.providers.discovery import fetch_available_models  # noqa: F401 — patch target: tests patch it here; ws_providers resolves it through this module at call time
 from aether_engine.providers.serving import (
     begin_serving_tracking,
     clear_serving_provider,
@@ -66,6 +58,44 @@ from aether_engine.rewind import fork as fork_service
 from aether_engine.rewind import manifest as rewind_manifest
 from aether_engine.rewind import service as rewind_service
 from aether_engine.routes.ws_connection import WsConnection
+from aether_engine.routes.ws_mcp_plugins import (
+    PLUGIN_INSTALL_TTL_SECONDS,  # noqa: F401 — re-exported: tests patch the TTL on this module
+    pending_plugin_install_created,
+    pending_plugin_installs,
+    prune_expired_plugin_installs,
+    send_mcp_prompt_list_result,
+    send_mcp_prompt_run_result,
+    send_mcp_resource_list_result,
+    send_mcp_resource_read_result,
+    send_mcp_server_connect_result,
+    send_mcp_server_disconnect_result,
+    send_mcp_server_remove_result,
+    send_mcp_server_test_result,
+    send_mcp_server_update_result,
+    send_plugin_install_result,
+    send_plugin_toggle_result,
+    send_plugin_uninstall_result,
+)
+from aether_engine.routes.ws_memory_media import (
+    send_diagnostics_export_result,
+    send_local_model_delete_result,
+    send_local_model_list_result,
+    send_media_search_result,
+    send_memory_episodes_result,
+    send_memory_export_result,
+    send_memory_graph_result,
+    send_model_hub_delete_result,
+    send_model_hub_detail_result,
+    send_model_hub_search_result,
+    send_version_check_result,
+)
+from aether_engine.routes.ws_providers import (
+    complete_provider_save_discovery,
+    send_capability_check_result,
+    send_provider_list_update,
+    send_refresh_models_result,
+    send_validation_result,
+)
 from aether_engine.routes.ws_sessions import (
     _ARTIFACT_TRUNCATION_MARKER,  # noqa: F401 — re-export, see ws_sessions
     ARTIFACT_CONTENT_CAP_BYTES,  # noqa: F401 — re-export, see ws_sessions
@@ -79,6 +109,23 @@ from aether_engine.routes.ws_sessions import (
     _unbind_sessions_bound_to,
     _workspace_session_counts,
     handle_artifact_get,
+)
+from aether_engine.routes.ws_voice import (
+    cancel_voice_background_tasks,
+    close_speech_engines,
+    create_stt_engine,  # noqa: F401 — re-exported: tests setattr the factories on this module
+    create_tts_engine,  # noqa: F401 — re-exported: tests setattr the factories on this module
+    dictation_stt,
+    enqueue_dictation,
+    enqueue_voice_op,
+    open_read_aloud_tts,
+    read_aloud_tts,
+    send_dictation_chunk_result,
+    send_dictation_stop_result,
+    send_voice_session_start_result,
+    send_voice_session_stop_result,
+    stop_read_aloud,
+    stop_voice_session,
 )
 from aether_engine.routing.intent import classify_intent
 from aether_engine.routing.policy import (
@@ -151,34 +198,9 @@ router = APIRouter()
 # click could run for minutes. 180 s is generous for a real sweep
 # yet still bounded — past it the run is cancelled and reported
 # exactly like a failed run whose error is the timeout (see
-# _send_capability_check_result). Tests patch this module attribute
+# send_capability_check_result). Tests patch this module attribute
 # to shorten the budget.
 CAPABILITY_CHECK_RUN_BUDGET_SECONDS = 180.0
-
-# Phase 10.1 A1: pending plugin installs awaiting the user's approval.
-# Keyed by request id; each value is the prepare_install() payload
-# ({"source": ..., "manifest": {...}}) for one PLUGIN_INSTALL_REQUEST.
-# The install is only executed when the matching PLUGIN_APPROVAL_GRANTED
-# arrives; a PLUGIN_APPROVAL_REJECTED pops (discards) the entry.
-pending_plugin_installs: dict[str, dict[str, Any]] = {}
-
-# E1-06: a prepared install the user never answers must not wait
-# forever — entries expire after this many seconds (swept whenever
-# a new install is prepared or a grant arrives), and each entry is
-# also dropped when the connection that prepared it disconnects.
-PLUGIN_INSTALL_TTL_SECONDS = 600.0
-pending_plugin_install_created: dict[str, float] = {}
-
-
-def _prune_expired_plugin_installs() -> None:
-    """Drop pending plugin installs older than the TTL (E1-06)."""
-    now = time.time()
-    expired = [
-        req_id for req_id, created in pending_plugin_install_created.items()
-        if now - created > PLUGIN_INSTALL_TTL_SECONDS]
-    for req_id in expired:
-        pending_plugin_installs.pop(req_id, None)
-        pending_plugin_install_created.pop(req_id, None)
 
 
 def _try_save_config() -> str | None:
@@ -270,24 +292,6 @@ def _audit_approval_arguments_edited(
             "changed_fields": changed,
         })
     return changed
-
-
-def create_stt_engine():
-    """Factory for local STT engine (E8-5.3 push-to-talk dictation).
-
-    Model hub, H3: the engine is built with the configured speech
-    STT model (``speech_stt_model``), read fresh at construction —
-    the per-connection cache below keys on the same value, so a
-    Settings change rebuilds on next use.
-    """
-    from aether_engine.voice.stt import FasterWhisperStt
-    return FasterWhisperStt(model=engine_state.user_config.speech_stt_model)
-
-
-def create_tts_engine():
-    """Factory for local TTS engine (E8-5.3 assistant read-aloud)."""
-    from aether_engine.voice.tts import KokoroTts
-    return KokoroTts()
 
 
 def _extract_token(ws: WebSocket) -> str | None:
@@ -383,693 +387,36 @@ async def ws_tasks(ws: WebSocket):
     # the old runner first, commit any staged rewind, then build the
     # new task — is preserved inside the launch pipeline.
     task_start_tail: asyncio.Task | None = None
-    # RUX-B-09: dictation chunk/stop work is chained the same way —
-    # transcription results are applied in arrival order even though
-    # each chunk runs off the receive loop.
-    dictation_tail: asyncio.Task | None = None
-    # RUX-B-09: voice session start/stop operations are chained too,
-    # so a stop sent while a start is still opening its stages lands
-    # after that start — the order the serial loop used to give —
-    # instead of racing it and leaving a session running.
-    voice_op_tail: asyncio.Task | None = None
     active_downloads: dict[str, asyncio.Task] = {}
     # N-44: the id of the task this connection is currently running
     # (set by the task pump when TASK_CREATED flows past, cleared
     # when the pump exits) — CANCEL_TASK reports the task it
     # actually cancelled instead of a hard-coded "unknown".
     active_task_id: str | None = None
+    secret_store = SecretStore()
     # Wave 5: the per-connection working state — send-locked
-    # socket, audit logger, background-task registry (N-19),
-    # per-name locks — lives on one WsConnection the handler
-    # families share (routes/ws_connection.py). The local names
-    # below stay as aliases into it, so the closures keep working
-    # against the context unchanged.
-    conn = WsConnection(ws, engine_state.audit_logger)
+    # socket, audit logger, secret store, background-task registry
+    # (N-19), per-name locks, voice-session state — lives on one
+    # WsConnection the handler families share
+    # (routes/ws_connection.py). The local names below stay as
+    # aliases into it, so the code that has not moved yet keeps
+    # working against the context unchanged.
+    conn = WsConnection(ws, engine_state.audit_logger, secret_store)
     _conn_background_tasks = conn.background_tasks
     _spawn_background = conn.spawn_background
 
     # E1-06: plugin installs THIS connection prepared — dropped
     # from the module-global pending table when it disconnects.
     _own_plugin_install_ids: set[str] = set()
-    secret_store = SecretStore()
-    # Epic 8, E8-5.1a: this connection's voice session, if any. The
-    # pipeline runs as its own task — the talker lane never queues
-    # behind task_runner (grill Q28/Q29).
-    voice_state: dict[str, Any] = {
-        "pipeline": None,
-        "task": None,
-        "read_aloud_task": None,
-        "read_aloud_id": None,
-        # S4-M7: per-connection speech-engine cache. Building a
-        # FasterWhisperStt/KokoroTts loads a model, so dictation and
-        # read-aloud reuse one engine for the connection's lifetime
-        # instead of constructing a fresh one per chunk/request.
-        # H3: the dictation slot is keyed by the configured speech
-        # STT model (dictation_stt_model) — a settings change swaps
-        # the engine on next use instead of silently dictating with
-        # the old model until reconnect.
-        "dictation_stt": None,
-        "dictation_stt_opened": False,
-        "dictation_stt_model": None,
-        "read_aloud_tts": None,
-        "read_aloud_tts_opened": False,
-    }
+    voice_state = conn.voice_state
 
-    async def _send_validation_result(resp_type, req_id_, pname_, key_, base_url_):
-        """Answer a provider Test request from a background task.
+    # Wave 5: the provider/model handler family lives in
+    # routes/ws_providers.py — the dispatch branches below call
+    # its module-level handlers with this connection's context.
 
-        Validation (discovery + pings) used to be awaited inline in
-        the message loop, so one slow Test wedged the whole socket —
-        chat, cancellations, everything queued behind it, and a
-        double-click doubled the freeze. Now the loop stays free;
-        duplicate clicks attach to the same in-flight run via
-        validate_provider_key_shared and each requester still gets
-        its own response.
-        """
-        try:
-            result = await validate_provider_key_shared(pname_, key_, base_url=base_url_, persist_models=False)
-            result["provider"] = pname_
-            result["success"] = result.get("status") == "connected"
-        except Exception as e:  # noqa: BLE001 — a validation failure must still produce a response, never silence
-            logger.warning(f"Provider validation for {pname_} raised: {e}")
-            result = {
-                "provider": pname_,
-                "status": "network_error",
-                "message": f"Validation failed unexpectedly: {e}",
-                "success": False,
-            }
-        try:
-            await ws.send_text(Event(type=resp_type, request_id=req_id_, payload=result).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-validation; nothing else to do
-            logger.debug(f"Could not send validation result for {pname_}: {e}")
-
-    async def _send_provider_list_update(req_id_):
-        """Background half of PROVIDER_LIST_REQUEST (RUX-B-02).
-
-        The handler answers immediately from the model cache; this
-        task runs discovery for providers whose cache is still empty
-        and, if any model list changed, pushes a refreshed
-        PROVIDER_LIST_RESPONSE — the same message the renderer already
-        applies for list updates. Discovery of one dead provider costs
-        a full DISCOVERY_TIMEOUT, so it must never run on the message
-        loop (it fires on every connect and after save/remove/reset).
-        """
-        try:
-            changed = await discover_pending_provider_models(secret_store)
-        except Exception as e:  # noqa: BLE001 — discovery is best-effort; the cached list already went out
-            logger.warning(f"Provider discovery for list update failed: {e}")
-            return
-        if not changed:
-            return
-        try:
-            providers = await _build_provider_list_async(secret_store, discover=False)
-            cfg = engine_state.user_config
-            await ws.send_text(Event(
-                type=EventType.PROVIDER_LIST_RESPONSE,
-                request_id=req_id_,
-                payload={"providers": providers, "default_provider": cfg.default_provider, "default_model": cfg.default_model, "health": engine_state.health_manager.get_all_statuses()},
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-discovery; nothing else to do
-            logger.debug(f"Could not send provider list update: {e}")
-
-    async def _push_provider_list(req_id_, discovery_provider_=None, discovery_error_=None):
-        """Push a PROVIDER_LIST_RESPONSE built from the current cache.
-
-        This is the send half of _send_provider_list_update, shared
-        with the deferred PROVIDER_SAVE discovery below (RUX-B-06):
-        the list is the message the renderer already applies for
-        provider updates, and a discovery error rides its provider
-        entry exactly as REFRESH_MODELS_RESPONSE entries carry it.
-        """
-        try:
-            providers = await _build_provider_list_async(secret_store, discover=False)
-            if discovery_provider_ is not None and discovery_error_ is not None:
-                for prov in providers:
-                    if prov.get("name") == discovery_provider_:
-                        prov["discovery_error"] = discovery_error_
-                        break
-            cfg = engine_state.user_config
-            await ws.send_text(Event(
-                type=EventType.PROVIDER_LIST_RESPONSE,
-                request_id=req_id_,
-                payload={"providers": providers, "default_provider": cfg.default_provider, "default_model": cfg.default_model, "health": engine_state.health_manager.get_all_statuses()},
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-push; nothing else to do
-            logger.debug(f"Could not push provider list: {e}")
-
-    async def _complete_provider_save_discovery(
-            req_id_, pname_, key_, base_url_, resolve_default_):
-        """Deferred discovery half of PROVIDER_SAVE_REQUEST (RUX-B-06).
-
-        The save branch persists the key/config and answers at once;
-        only the model discovery moves here. It applies exactly what
-        the old inline fetch applied — models + excluded models to
-        config and registry, and, for an is_default save, the default
-        model resolution the branch deferred — then pushes the
-        refreshed provider list. A discovery failure is recorded in
-        the negative cache (RUX-B-02) and reported on the provider's
-        list entry instead of blocking the save response.
-        """
-        cfg = engine_state.user_config
-        discovery_error = None
-        try:
-            disc = await fetch_available_models(
-                pname_, key_, base_url=base_url_,
-                provider_flavor=custom_provider_flavor(pname_, cfg))
-        except Exception as e:  # noqa: BLE001 — discovery is best-effort beside a completed save; surface it on the list entry
-            logger.warning(f"Deferred discovery for saved provider {pname_} raised: {e}")
-            disc = None
-            discovery_error = {"code": None, "message": str(e)}
-        if disc is not None:
-            if disc.ok:
-                clear_discovery_failure(pname_)
-            else:
-                record_discovery_failure(pname_)
-            if disc.error is not None:
-                discovery_error = disc.error.to_dict()
-            elif disc.excluded:
-                cfg.provider_excluded_models[pname_] = disc.excluded
-            if disc.models:
-                # B10: keep the configured default anchored in the
-                # replaced list — except while resolve_default_ is
-                # pending: then this provider has just become the
-                # default and its model is resolved from this very
-                # discovery below, so cfg.default_model still names
-                # the *previous* provider's model and must not be
-                # pinned into this provider's list.
-                models = (
-                    disc.models
-                    if resolve_default_
-                    else anchor_default_model(cfg, pname_, disc.models)
-                )
-                cfg.provider_models[pname_] = models
-                engine_state.model_registry.update_provider_models(pname_, models)
-        if resolve_default_ and cfg.default_provider == pname_:
-            # The save branch set this provider as the default but
-            # deferred choosing its model until discovery landed —
-            # the same registry-priority resolution (never raw list
-            # position) the inline path used (F-10 residual).
-            default_entry = engine_state.model_registry.get_default_model_for_provider(pname_)
-            resolved_default = default_entry.id if default_entry else ""
-            if not resolved_default:
-                cur_models = cfg.provider_models.get(pname_, [])
-                resolved_default = cur_models[0] if cur_models else ""
-            if resolved_default:
-                cfg.default_model = resolved_default
-                engine_state.active_provider = pname_
-                engine_state.active_model = resolved_default
-        try:
-            save_config(cfg)
-        except Exception as e:  # noqa: BLE001 — the in-memory state still landed; the list push below reports it
-            logger.warning(f"Could not persist deferred discovery for {pname_}: {e}")
-        await _push_provider_list(req_id_, pname_, discovery_error)
-
-    async def _send_refresh_models_result(req_id_, payload_):
-        """Answer a REFRESH_MODELS_REQUEST from a background task (RUX-B-01).
-
-        The refresh used to be awaited inline in the message loop:
-        a discovery pass over every stored provider, then a second
-        pass inside _build_provider_list_async — up to ~100 s during
-        which every other message on the socket (model switches,
-        cancels, approvals) waited unread. Now the loop stays free
-        and the REFRESH_MODELS_RESPONSE is sent when the work lands,
-        exactly as _send_validation_result does for provider Tests.
-        """
-        try:
-            target_provider = payload_.get("provider")
-            stored = set(secret_store.list_providers())
-            cfg = engine_state.user_config
-
-            providers_to_refresh = set(stored)
-            for p in cfg.custom_provider_types:
-                if cfg.custom_provider_types[p] == "openai_compatible":
-                    providers_to_refresh.add(p)
-            providers_to_refresh.add("custom_openai")
-
-            if target_provider:
-                providers_to_refresh = [target_provider]
-            else:
-                providers_to_refresh = list(providers_to_refresh)
-
-            refreshed_models: dict[str, Any] = {}
-
-            for pname in providers_to_refresh:
-                try:
-                    payload_key = payload_.get("api_key")
-                    payload_url = payload_.get("base_url")
-
-                    if payload_key is not None:
-                        key = payload_key
-                    else:
-                        key = secret_store.load_provider(pname) if pname in stored else ""
-
-                    if payload_url is not None:
-                        base_url = payload_url
-                    else:
-                        base_url = cfg.custom_base_urls.get(pname)
-
-                    is_custom = pname == "custom_openai" or cfg.custom_provider_types.get(pname) == "openai_compatible"
-                    if (key or is_custom) and not discovery_recently_failed(pname):
-                        disc = await fetch_available_models(
-                            provider_name=pname,
-                            api_key=key,
-                            base_url=base_url,
-                            filter_reachability=True,
-                            force_reachability=True,
-                            provider_flavor=custom_provider_flavor(pname, cfg),
-                        )
-                        if disc.ok:
-                            clear_discovery_failure(pname)
-                        else:
-                            record_discovery_failure(pname)
-                        # Do not persist discovery data for unsaved/template
-                        # providers; models still flow back to the UI response.
-                        if disc.models or disc.excluded or disc.error:
-                            refreshed_models[pname] = disc
-                        is_registered = (
-                            pname in stored
-                            or pname in cfg.custom_base_urls
-                            or pname in cfg.custom_provider_types
-                        )
-                        # E5-F14: a targeted refresh of a REGISTERED
-                        # (saved) provider applies and persists
-                        # exactly like the full refresh — the old
-                        # "manual click should not save" gate left
-                        # config/registry/disk holding the stale
-                        # catalog while the response showed the new
-                        # one, so the refresh evaporated on the next
-                        # listing/restart. Unsaved templates stay
-                        # unpersisted via is_registered above.
-                        if disc.models and is_registered:
-                            # B10: keep the configured default anchored
-                            # in the replaced list (anchor_default_model).
-                            models = anchor_default_model(cfg, pname, disc.models)
-                            cfg.provider_models[pname] = models
-                            cfg.provider_excluded_models[pname] = disc.excluded
-                            engine_state.model_registry.update_provider_models(pname, models)
-                            save_config(cfg)
-                except Exception as ref_err:  # noqa: BLE001 — per-provider isolation: one provider's refresh failure must not abort the refresh for the rest
-                    record_discovery_failure(pname)
-                    logger.error(f"Error during refresh models for {pname}: {ref_err}")
-
-            updated_providers = await _build_provider_list_async(secret_store)
-            # Surface freshly discovered models for the target provider even if
-            # it is an unsaved template (whose data we intentionally don't persist).
-            for prov in updated_providers:
-                disc = refreshed_models.get(prov.get("name"))
-                if disc is not None:
-                    prov["models"] = disc.models
-                    prov["excluded_models"] = disc.excluded
-                    if disc.error is not None:
-                        prov["discovery_error"] = disc.error.to_dict()
-            response = Event(
-                type=EventType.REFRESH_MODELS_RESPONSE,
-                request_id=req_id_,
-                payload={
-                    "providers": updated_providers,
-                    "default_provider": cfg.default_provider,
-                    "default_model": cfg.default_model,
-                },
-            )
-        except Exception as e:  # noqa: BLE001 — a refresh failure must still be logged, never kill the connection
-            logger.error(f"Refresh models failed: {e}")
-            return
-        try:
-            await ws.send_text(response.to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-refresh; nothing else to do
-            logger.debug(f"Could not send refresh models response: {e}")
-
-    async def _send_capability_check_result(req_id_, method_):
-        """Answer a CAPABILITY_CHECK_RUN_NOW from a background task (RUX-B-03).
-
-        The run used to be awaited inline in the message loop:
-        per-provider discovery plus a live self-test per model,
-        minutes at a time with NO overall budget, during which every
-        other message on the socket — model switches, cancels,
-        approvals — waited unread and the app looked hung. Now the
-        loop stays free and the CAPABILITY_CHECK_HISTORY_RESPONSE is
-        sent when the run lands, exactly as _send_validation_result
-        does for provider Tests.
-
-        The run is bounded by CAPABILITY_CHECK_RUN_BUDGET_SECONDS.
-        Past the budget the run is cancelled and recorded + reported
-        exactly like a failed run (status FAILED, the timeout as its
-        error_log) — same record shape _execute_check_job persists
-        for its own failures — so the response never changes shape
-        and the timed-out run still appears in history.
-        """
-        mgr = engine_state.scheduler_manager
-        started_at = time.time()
-        try:
-            run_res = await asyncio.wait_for(
-                mgr.run_now(method=method_),
-                timeout=CAPABILITY_CHECK_RUN_BUDGET_SECONDS,
-            )
-        except TimeoutError:
-            run_res = {
-                "id": str(uuid.uuid4()),
-                "method": method_ or mgr.current_method,
-                "started_at": started_at,
-                "finished_at": time.time(),
-                "models_tested": 0,
-                "status": "FAILED",
-                "cost_estimate": 0.0,
-                "error_log": (
-                    f"Capability check timed out after "
-                    f"{CAPABILITY_CHECK_RUN_BUDGET_SECONDS:g} seconds; "
-                    f"the run was cancelled."
-                ),
-            }
-            logger.warning(
-                f"Capability check run exceeded the "
-                f"{CAPABILITY_CHECK_RUN_BUDGET_SECONDS:g}s budget; "
-                f"recorded as a failed run.")
-            try:
-                # Persist it like any other failed run so the summary
-                # and history below (and every later history poll)
-                # include it. E1-14: through the scheduler's public
-                # record_run — the routes layer no longer reaches
-                # for its private _record_run.
-                mgr.record_run(run_res)
-            except Exception as e:  # noqa: BLE001 — the response matters more than the history row; never lose the reply over persistence
-                logger.warning(f"Could not record timed-out capability run: {e}")
-        except Exception as e:  # noqa: BLE001 — a failed check must still produce a response, never silence
-            logger.warning(f"Capability check run raised: {e}")
-            run_res = {
-                "id": str(uuid.uuid4()),
-                "method": method_ or mgr.current_method,
-                "started_at": started_at,
-                "finished_at": time.time(),
-                "models_tested": 0,
-                "status": "FAILED",
-                "cost_estimate": 0.0,
-                "error_log": str(e),
-            }
-        try:
-            await ws.send_text(Event(
-                type=EventType.CAPABILITY_CHECK_HISTORY_RESPONSE,
-                request_id=req_id_,
-                payload={
-                    "latest_run": run_res,
-                    "summary": mgr.get_status_summary(),
-                    "history": mgr.get_history(),
-                },
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-check; nothing else to do
-            logger.debug(f"Could not send capability check result: {e}")
-
-    # ------------------------------------------------------------------
-    # RUX-B-04: the MCP handler family, answered from background tasks.
-    #
-    # Every handler in this family used to await the MCP registry
-    # inline in the message loop at the server's connect timeout
-    # (30 s default, configurable to 300 s — validate_mcp_server_config
-    # in mcp/registry.py), so touching one hung or dead server in
-    # Settings froze ALL control traffic on the socket — model
-    # switches, cancels, approvals — for that long, per click. Now
-    # each branch spawns one of the helpers below; the loop stays
-    # free and the response is sent when the work lands, exactly as
-    # _send_validation_result does for provider Tests.
-    # Race guard: the serial loop also implicitly guaranteed one
-    # MCP operation per server at a time — the per-server lock that
-    # preserves it lives on the connection context
-    # (routes/ws_connection.py carries the full rationale verbatim).
-    _mcp_server_lock = conn.mcp_server_lock
-
-    async def _send_mcp_server_remove_result(req_id_, name_):
-        """Answer an MCP_SERVER_REMOVE_REQUEST from a background task (RUX-B-04)."""
-        from aether_engine.mcp.registry import (
-            GLOBAL_MCP_REGISTRY,
-            MCPConfigError,
-        )
-        ok, error = True, ""
-        if name_:
-            # Issue 011 (S5): wrap like ADD/UPDATE — remove_server
-            # raises MCPConfigError via _save_config when the config
-            # file failed to load (corrupt), and without this the
-            # request would end with no response at all. A failed
-            # remove answers success:false + error. remove_server
-            # closes any live session inside the removal (S5).
-            try:
-                async with _mcp_server_lock(name_):
-                    await GLOBAL_MCP_REGISTRY.remove_server(name_)
-            except (MCPConfigError, OSError) as e:
-                # OSError: the config save's storage failure
-                # (E3-F04) — same answer-don't-die rule as ADD.
-                ok, error = False, str(e)
-        try:
-            await ws.send_text(Event(
-                type=EventType.MCP_SERVER_REMOVE_RESPONSE,
-                request_id=req_id_,
-                payload={"success": ok, "name": name_, "error": error},
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-removal; nothing else to do
-            logger.debug(f"Could not send MCP server remove response for {name_}: {e}")
-
-    async def _send_mcp_server_update_result(req_id_, name_, auto_connect_, enabled_):
-        """Answer an MCP_SERVER_UPDATE_REQUEST from a background task (RUX-B-04)."""
-        from aether_engine.mcp.registry import (
-            GLOBAL_MCP_REGISTRY,
-            MCPConfigError,
-        )
-        ok, error, config = True, "", None
-        if not name_:
-            ok, error = False, "Server name is required."
-        else:
-            try:
-                async with _mcp_server_lock(name_):
-                    config = await GLOBAL_MCP_REGISTRY.update_server(
-                        name_,
-                        auto_connect=auto_connect_,
-                        enabled=enabled_,
-                    )
-            except (MCPConfigError, OSError) as e:
-                # OSError: the config save's storage failure
-                # (E3-F04) — same answer-don't-die rule as ADD.
-                ok, error = False, str(e)
-        try:
-            await ws.send_text(Event(
-                type=EventType.MCP_SERVER_UPDATE_RESPONSE,
-                request_id=req_id_,
-                payload={"success": ok, "name": name_, "config": config, "error": error},
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-update; nothing else to do
-            logger.debug(f"Could not send MCP server update response for {name_}: {e}")
-
-    async def _send_mcp_server_connect_result(req_id_, name_):
-        """Answer an MCP_SERVER_CONNECT_REQUEST from a background task (RUX-B-04)."""
-        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-        if name_:
-            try:
-                async with _mcp_server_lock(name_):
-                    result = await GLOBAL_MCP_REGISTRY.connect_server(name_)
-            except Exception as e:  # noqa: BLE001 — as in _send_validation_result: a failure must still produce a response, never silence (the registry/client convert ordinary failures to result dicts; this net covers the unexpected)
-                logger.warning(f"MCP connect for {name_} raised: {e}")
-                result = {"ok": False, "error": str(e)}
-        else:
-            result = {"ok": False, "error": "Server name is required."}
-        server_status = GLOBAL_MCP_REGISTRY.get_server_status(name_) if name_ else {}
-        try:
-            await ws.send_text(Event(
-                type=EventType.MCP_SERVER_CONNECT_RESPONSE,
-                request_id=req_id_,
-                payload={
-                    "success": result["ok"], "name": name_, "error": result.get("error", ""),
-                    "status": server_status.get("status"), "tool_count": server_status.get("tool_count", 0),
-                },
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-connect; nothing else to do
-            logger.debug(f"Could not send MCP server connect response for {name_}: {e}")
-
-    async def _send_mcp_server_disconnect_result(req_id_, name_):
-        """Answer an MCP_SERVER_DISCONNECT_REQUEST from a background task (RUX-B-04)."""
-        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-        if name_:
-            try:
-                async with _mcp_server_lock(name_):
-                    result = await GLOBAL_MCP_REGISTRY.disconnect_server(name_)
-            except Exception as e:  # noqa: BLE001 — as in _send_validation_result: a failure must still produce a response, never silence
-                logger.warning(f"MCP disconnect for {name_} raised: {e}")
-                result = {"ok": False, "error": str(e)}
-        else:
-            result = {"ok": False, "error": "Server name is required."}
-        server_status = GLOBAL_MCP_REGISTRY.get_server_status(name_) if name_ else {}
-        try:
-            await ws.send_text(Event(
-                type=EventType.MCP_SERVER_DISCONNECT_RESPONSE,
-                request_id=req_id_,
-                payload={
-                    "success": result["ok"], "name": name_, "error": result.get("error", ""),
-                    "status": server_status.get("status"), "tool_count": server_status.get("tool_count", 0),
-                },
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-disconnect; nothing else to do
-            logger.debug(f"Could not send MCP server disconnect response for {name_}: {e}")
-
-    async def _send_mcp_server_test_result(req_id_, name_):
-        """Answer an MCP_SERVER_TEST_REQUEST from a background task (RUX-B-04)."""
-        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-        if name_:
-            try:
-                async with _mcp_server_lock(name_):
-                    result = await GLOBAL_MCP_REGISTRY.test_connection(name_)
-            except Exception as e:  # noqa: BLE001 — as in _send_validation_result: a failure must still produce a response, never silence
-                logger.warning(f"MCP connection test for {name_} raised: {e}")
-                result = {"ok": False, "error": str(e), "tools": []}
-        else:
-            result = {"ok": False, "error": "Server name is required.", "tools": []}
-        try:
-            await ws.send_text(Event(
-                type=EventType.MCP_SERVER_TEST_RESPONSE,
-                request_id=req_id_,
-                payload={
-                    "success": result["ok"],
-                    "name": name_,
-                    "error": result.get("error", ""),
-                    "tools": result.get("tools", []),
-                },
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-test; nothing else to do
-            logger.debug(f"Could not send MCP server test response for {name_}: {e}")
-
-    async def _send_mcp_resource_list_result(req_id_, name_):
-        """Answer an MCP_RESOURCE_LIST_REQUEST from a background task (RUX-B-04)."""
-        # Issue 006: list a connected server's resources.
-        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-        resources, ok, error = [], True, ""
-        if not name_:
-            ok, error = False, "Server name is required."
-        else:
-            try:
-                async with _mcp_server_lock(name_):
-                    resources = await GLOBAL_MCP_REGISTRY.list_resources(name_)
-            except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced in the response payload
-                ok, error = False, str(e)
-        try:
-            await ws.send_text(Event(
-                type=EventType.MCP_RESOURCE_LIST_RESPONSE,
-                request_id=req_id_,
-                payload={"success": ok, "name": name_, "resources": resources, "error": error},
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-list; nothing else to do
-            logger.debug(f"Could not send MCP resource list response for {name_}: {e}")
-
-    async def _send_mcp_resource_read_result(req_id_, name_, uri_, session_id_):
-        """Answer an MCP_RESOURCE_READ_REQUEST from a background task (RUX-B-04)."""
-        # Issue 006: read a resource and load it into the current
-        # chat as a context message. Role "system": it is context,
-        # not something the user said — and the supervisor's
-        # get_current_chat_history briefing reads it back to the
-        # model on the next turn. If no session was given (or it
-        # no longer exists), create one so the resource is never
-        # lost. The UI also gets the message live in this response
-        # (App.jsx appends it) — the Settings panel alone cannot
-        # update the chat view.
-        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-        ok, error, content, session_id = True, "", "", session_id_
-        if not name_ or not uri_:
-            ok, error = False, "Server name and resource URI are required."
-        else:
-            try:
-                # Only the registry read takes the per-server lock:
-                # the chat persistence below touches no MCP state.
-                async with _mcp_server_lock(name_):
-                    content = await GLOBAL_MCP_REGISTRY.read_resource(name_, uri_)
-            except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced in the response payload
-                ok, error = False, str(e)
-        message = ""
-        truncated = content.endswith("...[resource truncated to 20000 chars]")
-        if ok:
-            # A chat-save failure must return an error, never kill
-            # the websocket (an exception here used to take the
-            # whole connection down with it).
-            try:
-                if session_id:
-                    sess = await asyncio.to_thread(session_store.get_session, session_id)
-                    if sess is None:
-                        session_id = None
-                if not session_id:
-                    session_id, _binding = await _create_bound_session(
-                        f"MCP resource: {uri_}")
-                message = f"[MCP resource from server '{name_}': {uri_}]\n{content}"
-                await asyncio.to_thread(
-                    session_store.add_message, session_id, "system", message
-                )
-            except Exception as e:  # noqa: BLE001 — chat-persistence boundary: a save failure becomes an error response, never a dead websocket
-                logger.error(f"Failed to save MCP resource to chat: {e}")
-                ok, error = False, f"Failed to save resource to chat: {e}"
-                message = ""
-            if ok:
-                engine_state.audit_logger.log_event("MCP_RESOURCE_READ", {
-                    "server": name_, "uri": uri_, "session_id": session_id,
-                    "truncated": truncated,
-                })
-        try:
-            await ws.send_text(Event(
-                type=EventType.MCP_RESOURCE_READ_RESPONSE,
-                request_id=req_id_,
-                payload={
-                    "success": ok, "name": name_, "uri": uri_, "content": content,
-                    "message": message, "truncated": truncated,
-                    "session_id": session_id, "error": error,
-                },
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-read; nothing else to do
-            logger.debug(f"Could not send MCP resource read response for {name_}: {e}")
-
-    async def _send_mcp_prompt_list_result(req_id_, name_):
-        """Answer an MCP_PROMPT_LIST_REQUEST from a background task (RUX-B-04)."""
-        # Issue 007: list a connected server's prompt templates.
-        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-        prompts, ok, error = [], True, ""
-        if not name_:
-            ok, error = False, "Server name is required."
-        else:
-            try:
-                async with _mcp_server_lock(name_):
-                    prompts = await GLOBAL_MCP_REGISTRY.list_prompts(name_)
-            except Exception as e:  # noqa: BLE001 — MCP client calls raise arbitrary server/transport errors; surfaced in the response payload
-                ok, error = False, str(e)
-        try:
-            await ws.send_text(Event(
-                type=EventType.MCP_PROMPT_LIST_RESPONSE,
-                request_id=req_id_,
-                payload={"success": ok, "name": name_, "prompts": prompts, "error": error},
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-list; nothing else to do
-            logger.debug(f"Could not send MCP prompt list response for {name_}: {e}")
-
-    async def _send_mcp_prompt_run_result(req_id_, name_, prompt_name_, arguments_, session_id_):
-        """Answer an MCP_PROMPT_RUN_REQUEST from a background task (RUX-B-04)."""
-        # Issue 007: run a prompt template and insert its messages
-        # into the current chat (same pattern as resources in
-        # 006, but with the prompt's own roles). Never auto-run:
-        # only an explicit Run / slash command reaches here. The
-        # shared _run_mcp_prompt_into_chat bundles the registry call
-        # with the chat insert, so the per-server lock covers the
-        # whole run — the two cannot be split without splitting the
-        # helper the slash path also uses.
-        if name_:
-            async with _mcp_server_lock(name_):
-                result = await _run_mcp_prompt_into_chat(
-                    name_, prompt_name_, arguments_, session_id_
-                )
-        else:
-            result = await _run_mcp_prompt_into_chat(
-                name_, prompt_name_, arguments_, session_id_
-            )
-        try:
-            await ws.send_text(Event(
-                type=EventType.MCP_PROMPT_RUN_RESPONSE,
-                request_id=req_id_,
-                payload={
-                    "success": result["ok"], "name": name_, "prompt": prompt_name_,
-                    "messages": result["messages"],
-                    "session_id": result["session_id"], "error": result["error"],
-                },
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-run; nothing else to do
-            logger.debug(f"Could not send MCP prompt run response for {name_}: {e}")
+    # Wave 5: the MCP handler family (RUX-B-04) lives in
+    # routes/ws_mcp_plugins.py — the dispatch branches below call
+    # its module-level handlers with this connection's context.
 
     # ------------------------------------------------------------------
     # RUX-B-08: read-path lookups + exports, answered from background
@@ -1080,675 +427,15 @@ async def ws_tasks(ws: WebSocket):
     # exports run on worker threads. Response shapes are unchanged.
     # ------------------------------------------------------------------
 
-    async def _send_media_search_result(req_id_, query_, collection_, limit_):
-        """Answer a MEDIA_SEARCH_REQUEST from a background task (RUX-B-08)."""
-        from aether_engine.tools.media_recall import search_media_entries
-        error = None
-        if query_:
-            try:
-                recall = await search_media_entries(
-                    query_, limit=limit_, collection=collection_)
-                results = recall["results"]
-                degraded = bool(recall["degraded"])
-            except Exception as e:  # noqa: BLE001 — a failed recall must not kill the connection; the loop staying alive is the point of the move
-                # E1-03: staying alive is not enough — the requester
-                # must be ANSWERED. A failed recall is a degraded,
-                # empty result carrying the error, in the same shape
-                # the renderer already renders.
-                logger.warning(f"Media search for {query_!r} raised: {e}")
-                results = []
-                degraded = True
-                error = str(e)
-        else:
-            results = []
-            degraded = False
-        payload = {
-            "query": query_,
-            "media": results,
-            "degraded": degraded,
-        }
-        if error is not None:
-            payload["error"] = error
-        try:
-            await ws.send_text(Event(
-                type=EventType.MEDIA_SEARCH_RESPONSE,
-                request_id=req_id_,
-                payload=payload,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-search; nothing else to do
-            logger.debug(f"Could not send media search response: {e}")
+    # Wave 5: the media/memory handler family (RUX-B-08) lives in
+    # routes/ws_memory_media.py — the dispatch branches below call
+    # its module-level handlers with this connection's context.
+    # Wave 5: the plugin lifecycle family (RUX-B-10) lives in
+    # routes/ws_mcp_plugins.py, with the pending-install state.
 
-    async def _send_local_model_list_result(req_id_):
-        """Answer a LOCAL_MODEL_LIST_REQUEST from a background task (RUX-B-08)."""
-        try:
-            payload = {"models": await engine_state.ollama_manager.list_models()}
-        except Exception as e:  # noqa: BLE001 — a dead daemon must not kill the connection; the loop staying alive is the point of the move
-            # E1-03: answer with an empty list + the error instead of
-            # leaving the requester waiting on a reply that never comes.
-            logger.warning(f"Local model list raised: {e}")
-            payload = {"models": [], "error": str(e)}
-        try:
-            await ws.send_text(Event(
-                type=EventType.LOCAL_MODEL_LIST_RESPONSE,
-                request_id=req_id_,
-                payload=payload,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-list; nothing else to do
-            logger.debug(f"Could not send local model list response: {e}")
-
-    async def _send_local_model_delete_result(req_id_, model_name_):
-        """Answer a LOCAL_MODEL_DELETE_REQUEST from a background task (RUX-B-08)."""
-        try:
-            payload = {
-                "model": model_name_,
-                "deleted": await engine_state.ollama_manager.delete_model(model_name_),
-            }
-        except Exception as e:  # noqa: BLE001 — a dead daemon must not kill the connection; the loop staying alive is the point of the move
-            # E1-03: answer with deleted=False + the error instead of
-            # leaving the requester waiting on a reply that never comes.
-            logger.warning(f"Local model delete for {model_name_} raised: {e}")
-            payload = {"model": model_name_, "deleted": False, "error": str(e)}
-        try:
-            await ws.send_text(Event(
-                type=EventType.LOCAL_MODEL_DELETE_RESPONSE,
-                request_id=req_id_,
-                payload=payload,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-delete; nothing else to do
-            logger.debug(f"Could not send local model delete response: {e}")
-
-    async def _send_model_hub_search_result(req_id_, source_, query_, family_):
-        """Answer a MODEL_HUB_SEARCH_REQUEST from a background task (RUX-B-08)."""
-        try:
-            result = await engine_state.model_hub.search(
-                source=source_, query=query_, family=family_)
-        except Exception as e:  # noqa: BLE001 — a failed catalogue call must not kill the connection; the loop staying alive is the point of the move
-            # E1-03: answer in the hub's own {models, error} shape
-            # instead of leaving the requester waiting forever.
-            logger.warning(f"Model hub search raised: {e}")
-            result = {"models": [], "error": str(e)}
-        try:
-            await ws.send_text(Event(
-                type=EventType.MODEL_HUB_SEARCH_RESPONSE,
-                request_id=req_id_,
-                payload=result,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-search; nothing else to do
-            logger.debug(f"Could not send model hub search response: {e}")
-
-    async def _send_model_hub_detail_result(req_id_, source_, repo_id_):
-        """Answer a MODEL_HUB_DETAIL_REQUEST from a background task (RUX-B-08)."""
-        try:
-            result = await engine_state.model_hub.detail(
-                source=source_, repo_id=repo_id_)
-        except Exception as e:  # noqa: BLE001 — a failed catalogue call must not kill the connection; the loop staying alive is the point of the move
-            # E1-03: answer in the hub's own {detail, error} shape
-            # instead of leaving the requester waiting forever.
-            logger.warning(f"Model hub detail raised: {e}")
-            result = {"detail": None, "error": str(e)}
-        try:
-            await ws.send_text(Event(
-                type=EventType.MODEL_HUB_DETAIL_RESPONSE,
-                request_id=req_id_,
-                payload=result,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-detail; nothing else to do
-            logger.debug(f"Could not send model hub detail response: {e}")
-
-    async def _send_model_hub_delete_result(req_id_, source_, model_id_):
-        """Answer a MODEL_HUB_DELETE_REQUEST from a background task (RUX-B-08)."""
-        try:
-            result = await engine_state.hub_downloads.delete(
-                source=source_, model_id=model_id_)
-        except Exception as e:  # noqa: BLE001 — a failed delete must not kill the connection; the loop staying alive is the point of the move
-            # E1-03: answer in the delete result's own
-            # {success, deleted, error} shape instead of leaving the
-            # requester waiting forever.
-            logger.warning(f"Model hub delete raised: {e}")
-            result = {"success": False, "deleted": False, "error": str(e)}
-        try:
-            await ws.send_text(Event(
-                type=EventType.MODEL_HUB_DELETE_RESPONSE,
-                request_id=req_id_,
-                payload=result,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-delete; nothing else to do
-            logger.debug(f"Could not send model hub delete response: {e}")
-
-    async def _send_memory_export_result(req_id_):
-        """Answer a MEMORY_EXPORT_REQUEST off the loop (RUX-B-08).
-
-        backend.export() is synchronous and scales with memory size
-        (up to 100k facts + 100k episodes), so it runs on a worker
-        thread — the pattern BACKUP_CREATE already uses.
-        """
-        backend = backend_or_none(engine_state.user_config, context="memory export")
-        if backend is None:
-            payload = {"success": False, "error": "The configured memory backend is unavailable (see engine log)."}
-        else:
-            try:
-                payload = {"success": True, "export": await asyncio.to_thread(backend.export)}
-            except Exception as e:  # noqa: BLE001 — export failure must surface, not crash the handler
-                payload = {"success": False, "error": str(e)}
-        try:
-            await ws.send_text(Event(
-                type=EventType.MEMORY_EXPORT_RESPONSE,
-                request_id=req_id_,
-                payload=payload,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-export; nothing else to do
-            logger.debug(f"Could not send memory export response: {e}")
-
-    async def _send_memory_episodes_result(req_id_, limit_):
-        """Answer a MEMORY_EPISODES_REQUEST off the loop (E1-11).
-
-        The backend reads (episode listing + embedding stats) are
-        synchronous store calls that scale with memory size; run
-        inline in the handler they stalled the receive loop behind
-        one Memory-screen refresh. Same RUX-B-08 pattern as the
-        memory export above.
-        """
-        def _build_payload():
-            backend = backend_or_none(engine_state.user_config, context="memory episodes list")
-            if backend is None:
-                return {"episodes": [], "error": "The configured memory backend is unavailable (see engine log)."}
-            return {
-                "episodes": backend.list_episodes(limit=limit_),
-                "backend": backend.name,
-                "embedding_stats": backend.embedding_stats(),
-            }
-
-        try:
-            payload = await asyncio.to_thread(_build_payload)
-        except Exception as e:  # noqa: BLE001 — a failed read must still produce a response, never silence
-            payload = {"episodes": [], "error": str(e)}
-        try:
-            await ws.send_text(Event(
-                type=EventType.MEMORY_EPISODES_RESPONSE,
-                request_id=req_id_,
-                payload=payload,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected; nothing else to do
-            logger.debug(f"Could not send memory episodes response: {e}")
-
-    async def _send_memory_graph_result(req_id_, query_, limit_, include_history_):
-        """Answer a MEMORY_GRAPH_REQUEST off the loop (E1-11).
-
-        Fact listing/search is a synchronous backend read that
-        scales with the graph; same off-loop treatment as the
-        episodes list above.
-        """
-        def _build_payload():
-            backend = backend_or_none(engine_state.user_config, context="memory graph list")
-            if backend is None:
-                # E4-F08: report unavailability like the episodes
-                # list and export handlers do — not a bare empty
-                # list the UI cannot tell from "no facts".
-                return {"facts": [], "error": "The configured memory backend is unavailable (see engine log)."}
-            if query_:
-                # Epic 4, E4-08: fact search for the Memory UI.
-                return {"facts": backend.search_facts(
-                    str(query_), limit=limit_, include_history=include_history_)}
-            return {"facts": backend.list_facts(
-                limit=limit_, include_history=include_history_)}
-
-        try:
-            payload = await asyncio.to_thread(_build_payload)
-        except Exception as e:  # noqa: BLE001 — a failed read must still produce a response, never silence
-            payload = {"facts": [], "error": str(e)}
-        try:
-            await ws.send_text(Event(
-                type=EventType.MEMORY_GRAPH_RESPONSE,
-                request_id=req_id_,
-                payload=payload,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected; nothing else to do
-            logger.debug(f"Could not send memory graph response: {e}")
-
-    async def _send_diagnostics_export_result(req_id_):
-        """Answer a DIAGNOSTICS_EXPORT_REQUEST off the loop (RUX-B-08).
-
-        build_diagnostics + the two store counts are synchronous
-        bulk work, so the whole payload build runs on a worker
-        thread — the pattern BACKUP_CREATE already uses.
-        """
-        def _build_payload():
-            try:
-                from aether_engine.diagnostics import build_diagnostics
-                from aether_engine.memory import episodic as _episodic
-                from aether_engine.memory import knowledge_graph as _kg
-
-                store = SecretStore()
-                with _kg._get_conn() as _conn:
-                    kg_count = _conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
-                bundle = build_diagnostics(
-                    user_config=engine_state.user_config,
-                    health=engine_state.health_manager.get_all_statuses(),
-                    kg_count=kg_count,
-                    episodic_count=_episodic.embedding_stats().get("total", 0),
-                    audit_log_path=engine_state.audit_logger.log_path,
-                    providers=store.list_providers(),
-                )
-                return {"success": True, "bundle": bundle}
-            except Exception as e:  # noqa: BLE001 — diagnostics failure must surface, not crash the handler
-                return {"success": False, "error": str(e)}
-
-        payload = await asyncio.to_thread(_build_payload)
-        try:
-            await ws.send_text(Event(
-                type=EventType.DIAGNOSTICS_EXPORT_RESPONSE,
-                request_id=req_id_,
-                payload=payload,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-export; nothing else to do
-            logger.debug(f"Could not send diagnostics export response: {e}")
-
-    async def _send_version_check_result(req_id_):
-        """Answer a VERSION_CHECK_REQUEST from a background task (RUX-B-08)."""
-        try:
-            import httpx
-
-            def _parse(v: str) -> tuple:
-                # E10-F09: SemVer precedence, not digit
-                # stripping. Build metadata (+...) never
-                # affects precedence; a prerelease precedes
-                # its release; prerelease identifiers compare
-                # numerically when numeric (numeric < alpha-
-                # numeric), lexically otherwise, and a
-                # shorter identifier list precedes a longer
-                # one it prefixes. An unparseable tag raises
-                # — the handler turns that into a failed
-                # check, not a successful "no update".
-                text = v.strip()
-                if text[:1] in ("v", "V"):
-                    text = text[1:]
-                core, _, _build = text.partition("+")
-                core, dash, prerelease = core.partition("-")
-                pieces = core.split(".")
-                if len(pieces) > 3 or not all(p.isdigit() for p in pieces):
-                    raise ValueError(f"not a semantic version: {v!r}")
-                nums = [int(p) for p in pieces] + [0] * (3 - len(pieces))
-                if not dash:
-                    return (*nums, 1, ())
-                pre_key = []
-                for ident in prerelease.split("."):
-                    if ident.isdigit():
-                        pre_key.append((0, int(ident), ""))
-                    elif ident:
-                        pre_key.append((1, 0, ident))
-                    else:
-                        raise ValueError(f"not a semantic version: {v!r}")
-                return (*nums, 0, tuple(pre_key))
-
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    "https://api.github.com/repos/ProxCGaming/Aether-OS/releases/latest",
-                    headers={"Accept": "application/vnd.github+json"},
-                )
-            if resp.status_code == 404:
-                payload = {"success": False, "error": "No releases have been published yet.",
-                           "current": APP_VERSION}
-            elif resp.status_code != 200:
-                payload = {"success": False, "error": f"GitHub answered {resp.status_code}.",
-                           "current": APP_VERSION}
-            else:
-                latest = str(resp.json().get("tag_name", "")).lstrip("v")
-                payload = {
-                    "success": True,
-                    "current": APP_VERSION,
-                    "latest": latest,
-                    "update_available": _parse(latest) > _parse(APP_VERSION),
-                }
-        except Exception as e:  # noqa: BLE001 — a failed check must surface, not crash the handler
-            payload = {"success": False, "error": str(e), "current": APP_VERSION}
-        try:
-            await ws.send_text(Event(
-                type=EventType.VERSION_CHECK_RESPONSE,
-                request_id=req_id_,
-                payload=payload,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-check; nothing else to do
-            logger.debug(f"Could not send version check response: {e}")
-
-    # ------------------------------------------------------------------
-    # RUX-B-10: the plugin lifecycle, answered from background tasks.
-    #
-    # Install's tree copy ran synchronously in the loop on approval
-    # (scaling with plugin size); uninstall/toggle awaited an MCP
-    # disconnect per installed server (30 s default each) in the loop
-    # before their synchronous file work. Now the disconnects await
-    # in a task and the file work runs on worker threads. A
-    # per-plugin lock preserves the serial loop's ordering between
-    # lifecycle operations on the same plugin, as the MCP helpers'
-    # per-server lock does (RUX-B-04). Response shapes — including
-    # the failure payloads the renderer surfaces (E7-F05) — are
-    # exactly the inline handlers'.
-    _plugin_lifecycle_lock = conn.plugin_lifecycle_lock
-
-    async def _send_plugin_install_result(req_id_, data_):
-        """Answer a PLUGIN_APPROVAL_GRANTED from a background task (RUX-B-10)."""
-        plugin_name = (data_.get("manifest") or {}).get("name", "")
-        try:
-            async with _plugin_lifecycle_lock(plugin_name):
-                await asyncio.to_thread(engine_state.plugin_installer.install, data_)
-            engine_state.audit_logger.log_event("PLUGIN_INSTALLED", {"manifest": data_["manifest"]})
-            payload = {"success": True}
-        except Exception as e:  # noqa: BLE001 — handler boundary: any install failure is reported to the client in the response payload
-            payload = {"success": False, "error": str(e)}
-        try:
-            await ws.send_text(Event(
-                type=EventType.PLUGIN_INSTALL_RESPONSE,
-                request_id=req_id_,
-                payload=payload,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-install; nothing else to do
-            logger.debug(f"Could not send plugin install response: {e}")
-
-    async def _disconnect_plugin_mcp_servers(name_):
-        """Disconnect a plugin's MCP servers (PLUGIN_UNINSTALL/TOGGLE).
-
-        Disconnect the plugin's MCP servers first, in this
-        (session-owner) task — remove_server_sync inside
-        uninstall()/toggle() cannot close a live session from a sync
-        caller (anyio cancel-scope rule, see registry.py).
-        """
-        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-        installed = engine_state.plugin_installer.get_all().get(name_, {})
-        for mcp_name in installed.get("installed_mcp", []):
-            await GLOBAL_MCP_REGISTRY.disconnect_server(mcp_name)
-
-    async def _send_plugin_uninstall_result(req_id_, name_):
-        """Answer a PLUGIN_UNINSTALL_REQUEST from a background task (RUX-B-10)."""
-        try:
-            async with _plugin_lifecycle_lock(name_ or ""):
-                await _disconnect_plugin_mcp_servers(name_)
-                await asyncio.to_thread(engine_state.plugin_installer.uninstall, name_)
-            payload = {"success": True, "name": name_}
-        except Exception as e:  # noqa: BLE001 — handler boundary: any uninstall failure is reported to the client in the response payload
-            payload = {"success": False, "error": str(e)}
-        try:
-            await ws.send_text(Event(
-                type=EventType.PLUGIN_UNINSTALL_RESPONSE,
-                request_id=req_id_,
-                payload=payload,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-uninstall; nothing else to do
-            logger.debug(f"Could not send plugin uninstall response: {e}")
-
-    async def _send_plugin_toggle_result(req_id_, name_, enabled_):
-        """Answer a PLUGIN_TOGGLE_REQUEST from a background task (RUX-B-10)."""
-        try:
-            async with _plugin_lifecycle_lock(name_ or ""):
-                if not enabled_:
-                    # Mirrors the uninstall path (E7-F01): if a
-                    # disconnect fails, toggle() is never reached, so
-                    # the plugin stays enabled with its sessions and
-                    # skills untouched.
-                    await _disconnect_plugin_mcp_servers(name_)
-                await asyncio.to_thread(
-                    engine_state.plugin_installer.toggle, name_, enabled_)
-            payload = {"success": True, "name": name_, "enabled": enabled_}
-        except Exception as e:  # noqa: BLE001 — handler boundary: any toggle failure is reported to the client in the response payload
-            payload = {"success": False, "error": str(e)}
-        try:
-            await ws.send_text(Event(
-                type=EventType.PLUGIN_TOGGLE_RESPONSE,
-                request_id=req_id_,
-                payload=payload,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-toggle; nothing else to do
-            logger.debug(f"Could not send plugin toggle response: {e}")
-
-    # ------------------------------------------------------------------
-    # RUX-B-09: the voice family, off the receive loop.
-    #
-    # Session start awaited opening the VAD/STT/TTS stages inline
-    # (first start loads the speech models); each dictation chunk /
-    # stop awaited that chunk's transcription inline. Session start
-    # now runs in a background task (serialised against other starts
-    # by a lock, since two starts would fight over voice_state).
-    # Dictation runs in tasks too, but CHAINED: each chunk's work
-    # waits for the previous chunk's task, so transcriptions are
-    # applied — and answered — in arrival order even though their
-    # durations vary.
-    # ------------------------------------------------------------------
-    voice_start_lock = asyncio.Lock()
-
-    async def _send_voice_session_start_result(req_id_, payload_):
-        """Answer a VOICE_SESSION_START_REQUEST from a background task (RUX-B-09)."""
-        async with voice_start_lock:
-            # Fail-closed start: an unavailable stage (missing
-            # local STT/TTS/VAD/transport) or an unconfigured
-            # chat model answers ok=False with the honest reason
-            # and opens nothing — no device, no model, no peer.
-            await _stop_voice_session()
-            voice_session_id = payload_.get("session_id")
-            if not voice_session_id:
-                voice_session_id, _binding = await _create_bound_session(
-                    "Voice conversation")
-            cfg = engine_state.user_config
-            voice_error: str | None = None
-            voice_pipeline = None
-            webrtc_config = None
-            try:
-                voice_provider = _create_provider_instance(
-                    cfg.default_provider, cfg.default_model, secret_store)
-            except (ProviderNotFoundError, SecretDecryptionError) as e:
-                voice_provider = None
-                voice_error = (
-                    f"voice unavailable: chat model {cfg.default_provider}/"
-                    f"{cfg.default_model} is not configured ({e})")
-            if voice_provider is not None:
-                from aether_engine.voice import VoiceUnavailableError
-                from aether_engine.voice.pipeline import (
-                    create_voice_pipeline,
-                    fast_chat_talker,
-                )
-                from aether_engine.voice.vad import EndpointerConfig
-
-                async def _persist_voice_user(text: str, _sid: str = voice_session_id) -> None:
-                    try:
-                        await asyncio.to_thread(
-                            session_store.add_message,
-                            _sid, "user", text)
-                    except Exception as e:  # noqa: BLE001 — best-effort persistence, as START_TASK: a save failure must not lose the turn
-                        logger.error(f"Failed to save voice user message: {e}")
-
-                async def _persist_voice_assistant(text: str, _sid: str = voice_session_id) -> None:
-                    try:
-                        await asyncio.to_thread(
-                            session_store.add_message,
-                            _sid, "assistant", text)
-                    except Exception as e:  # noqa: BLE001 — best-effort persistence, as task completion: a save failure must not lose the turn
-                        logger.error(f"Failed to save voice assistant message: {e}")
-
-                async def _voice_turn_error(message: str) -> None:
-                    await _emit_voice_event(Event(
-                        type=EventType.ERROR,
-                        payload={"message": f"Voice reply failed: {message}"},
-                    ))
-
-                async def _voice_should_escalate(text: str, _provider=voice_provider) -> bool:
-                    """E8-5.1b: the same E1-04 split the typed
-                    path uses — classify_intent decides; chat
-                    stays with the talker, work escalates to
-                    the supervisor graph."""
-                    try:
-                        intent = await classify_intent(text, provider=_provider)
-                    except Exception:  # a routing failure keeps the turn with the talker
-                        logger.debug("voice intent classification failed", exc_info=True)
-                        return False
-                    return not intent.is_chat
-
-                async def _voice_escalation_launch(text: str, _sid: str = voice_session_id, _provider=voice_provider) -> None:
-                    """Launch (never await) the background job:
-                    the task lane is a separate execution, so
-                    the talker stays free while it runs."""
-                    task = asyncio.ensure_future(
-                        _run_voice_background_task(text, _sid, _provider))
-                    background = voice_state.setdefault("background_tasks", set())
-                    background.add(task)
-                    task.add_done_callback(background.discard)
-
-                voice_pipeline, voice_error = create_voice_pipeline(
-                    session_id=voice_session_id,
-                    talker=fast_chat_talker(
-                        voice_provider, session_id=voice_session_id),
-                    emit=_emit_voice_event,
-                    on_user_final=_persist_voice_user,
-                    on_assistant_final=_persist_voice_assistant,
-                    on_turn_error=_voice_turn_error,
-                    escalation_classifier=_voice_should_escalate,
-                    on_escalation=_voice_escalation_launch,
-                    # H3: the speech config is read HERE, at
-                    # session start — a mid-session change is
-                    # picked up by the NEXT session only (P3(a)).
-                    stt_model=cfg.speech_stt_model,
-                    tts_voice=cfg.speech_tts_voice,
-                    endpointer_config=EndpointerConfig(
-                        speech_threshold=cfg.vad_threshold,
-                        silence_duration_ms=cfg.silence_duration_ms,
-                        smart_turn_sensitivity=cfg.smart_turn_sensitivity,
-                    ),
-                )
-                if voice_pipeline is not None:
-                    try:
-                        webrtc_config = await voice_pipeline.start()
-                    except VoiceUnavailableError as e:
-                        voice_error = str(e)
-                        voice_pipeline = None
-            if voice_pipeline is not None:
-                voice_state["pipeline"] = voice_pipeline
-                voice_state["task"] = asyncio.ensure_future(
-                    _run_voice_pipeline(voice_pipeline))
-
-                # F-12a: the engine's own ICE candidates trickle
-                # back to the renderer as VOICE_RTC_ICE pushes.
-                async def _push_rtc_ice(candidate, _sid=voice_session_id):
-                    await _emit_voice_event(Event(
-                        type=EventType.VOICE_RTC_ICE,
-                        payload={
-                            "session_id": _sid,
-                            "candidate": candidate,
-                        },
-                    ))
-
-                voice_pipeline.set_rtc_ice_listener(_push_rtc_ice)
-            try:
-                await ws.send_text(Event(
-                    type=EventType.VOICE_SESSION_START_RESPONSE,
-                    request_id=req_id_,
-                    payload={
-                        "ok": voice_pipeline is not None,
-                        "session_id": voice_session_id,
-                        "webrtc_config": webrtc_config,
-                        "error": voice_error,
-                    },
-                ).to_json())
-            except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-start; nothing else to do
-                logger.debug(f"Could not send voice session start response: {e}")
-
-    async def _send_dictation_chunk_result(req_id_, reason_, raw_b64_, sample_rate_, is_final_):
-        """Answer one DICTATION_CHUNK_REQUEST (RUX-B-09, chained by _enqueue_dictation)."""
-        if reason_ is not None:
-            payload = {"ok": False, "text": "", "is_final": False, "error": f"voice unavailable: {reason_}"}
-        else:
-            try:
-                audio_bytes = base64.b64decode(raw_b64_)
-                stt = await _open_dictation_stt()
-                text = await stt.transcribe(audio_bytes, sample_rate=sample_rate_)
-                payload = {"ok": True, "text": text, "is_final": is_final_, "error": None}
-            except Exception as e:  # noqa: BLE001
-                payload = {"ok": False, "text": "", "is_final": is_final_, "error": str(e)}
-        try:
-            await ws.send_text(Event(
-                type=EventType.DICTATION_CHUNK_RESPONSE,
-                request_id=req_id_,
-                payload=payload,
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected mid-chunk; nothing else to do
-            logger.debug(f"Could not send dictation chunk response: {e}")
-
-    async def _send_dictation_stop_result(req_id_, raw_b64_, sample_rate_):
-        """Answer a DICTATION_STOP_REQUEST (RUX-B-09, chained by _enqueue_dictation)."""
-        text = ""
-        stop_error: str | None = None
-        if raw_b64_:
-            try:
-                stt = await _open_dictation_stt()
-                audio_bytes = base64.b64decode(raw_b64_)
-                text = await stt.transcribe(audio_bytes, sample_rate=sample_rate_)
-            except Exception as e:  # noqa: BLE001 — S4-M7: a failed final transcription must be distinguishable from silence
-                logger.warning(f"Dictation stop transcribe error: {e}")
-                stop_error = str(e)
-        try:
-            await ws.send_text(Event(
-                type=EventType.DICTATION_STOP_RESPONSE,
-                request_id=req_id_,
-                payload={"ok": stop_error is None, "text": text if stop_error is None else "", "error": stop_error},
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected at stop; nothing else to do
-            logger.debug(f"Could not send dictation stop response: {e}")
-
-    async def _send_voice_session_stop_result(req_id_):
-        """Answer a VOICE_SESSION_STOP_REQUEST (RUX-B-09, chained by _enqueue_voice_op)."""
-        await _stop_voice_session()
-        try:
-            await ws.send_text(Event(
-                type=EventType.VOICE_SESSION_STOP_RESPONSE,
-                request_id=req_id_,
-                payload={"ok": True},
-            ).to_json())
-        except Exception as e:  # noqa: BLE001 — the client may have disconnected at stop; nothing else to do
-            logger.debug(f"Could not send voice session stop response: {e}")
-
-    def _enqueue_voice_op(work_):
-        """Chain one voice start/stop operation after all prior ones.
-
-        Same shield-and-await construction as _enqueue_dictation:
-        operation order is arrival order, and a failed or cancelled
-        operation never strands the ones behind it.
-        """
-        nonlocal voice_op_tail
-        previous = voice_op_tail
-
-        async def _chained():
-            if previous is not None:
-                try:
-                    await asyncio.shield(previous)
-                except asyncio.CancelledError:
-                    if not previous.cancelled():
-                        raise
-                except Exception as e:  # noqa: BLE001 — a failed earlier operation is answered by its own link; later operations still run
-                    logger.debug(f"Earlier voice operation ended with an error before a chained operation: {e}")
-            await work_
-
-        voice_op_tail = asyncio.create_task(_chained())
-
-    def _enqueue_dictation(work_):
-        """Chain one dictation work coroutine after all prior ones.
-
-        The chain — not task scheduling — is what guarantees order:
-        each link shields and awaits the previous link before its
-        own transcription starts, so a fast chunk can never overtake
-        a slow earlier one. A cancelled/failed link never strands
-        the rest of the chain.
-        """
-        nonlocal dictation_tail
-        previous = dictation_tail
-
-        async def _chained():
-            if previous is not None:
-                try:
-                    await asyncio.shield(previous)
-                except asyncio.CancelledError:
-                    if not previous.cancelled():
-                        raise
-                except Exception as e:  # noqa: BLE001 — a failed earlier chunk is answered by its own link; later chunks still run
-                    logger.debug(f"Earlier dictation chunk ended with an error before a chained chunk: {e}")
-            await work_
-
-        dictation_tail = asyncio.create_task(_chained())
+    # Wave 5: the voice handler family (RUX-B-09) lives in
+    # routes/ws_voice.py — the dispatch branches below call its
+    # module-level handlers with this connection's context.
 
     # Epic 2, E2-10: install the web-search seam for this connection —
     # keys resolve through the encrypted secret store (provider name =
@@ -1853,331 +540,10 @@ async def ws_tasks(ws: WebSocket):
     # layer only wires it to the socket: events out, transcript
     # commits into the session store, teardown on stop/disconnect.
 
-    async def _emit_voice_event(event: Event) -> None:
-        try:
-            await ws.send_text(event.to_json())
-        except Exception:  # a dead socket must not kill the pipeline mid-turn
-            logger.debug("voice event send failed", exc_info=True)
+    # Wave 5: the voice pipeline lifecycle helpers, speech-engine
+    # cache, escalated background-job runner and teardown helpers
+    # live in routes/ws_voice.py.
 
-    async def _run_voice_pipeline(pipeline) -> None:
-        # Finding M19: the talker and the escalation classifier make
-        # real model calls from this task — outside the task pump, so
-        # no pump ever sets their attribution. Carry the voice
-        # session's context for the whole run; escalated background
-        # tasks set their own context in the pump as before.
-        usage_token = set_usage_context(session_id=pipeline.session_id)
-        try:
-            await pipeline.run()
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # the session is over either way; never wedge the socket
-            logger.warning("voice pipeline ended with an error", exc_info=True)
-        finally:
-            reset_usage_context(usage_token)
-
-    async def _stop_voice_session() -> None:
-        """Stop the connection's voice pipeline, if any. Closing the
-        pipeline's transport ends its frame loop; cancelling the run
-        task is the backstop."""
-        pipeline = voice_state.get("pipeline")
-        task = voice_state.get("task")
-        voice_state["pipeline"] = None
-        voice_state["task"] = None
-        if pipeline is not None:
-            try:
-                await pipeline.stop()
-            except Exception:  # teardown is best-effort by definition
-                logger.debug("voice pipeline stop failed", exc_info=True)
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-    async def _stop_read_aloud() -> None:
-        """Stop any running read-aloud synthesis task (Epic 8, E8-5.3)."""
-        ra_task = voice_state.get("read_aloud_task")
-        voice_state["read_aloud_task"] = None
-        voice_state["read_aloud_id"] = None
-        if ra_task is not None and not ra_task.done():
-            ra_task.cancel()
-            try:
-                await ra_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.debug("read-aloud task cancel failed", exc_info=True)
-
-    # ── Cached speech engines (S4-M7) ────────────────────────────────
-    # One STT and one TTS engine per connection, closed only at
-    # connection teardown — NOT on DICTATION_STOP / read-aloud end,
-    # or push-to-talk would reload the model on every utterance.
-    # H3 exception: the dictation STT slot is keyed by the configured
-    # speech model — a model change (not a stop) swaps the engine.
-
-    def _dictation_stt() -> Any:
-        """The connection's cached dictation STT engine.
-
-        Model-aware (H3): the cache is keyed by the configured
-        speech STT model. Same model → the same engine, no reload.
-        A changed model builds the new model's engine on this next
-        use and drops the old one (for FasterWhisperStt, dropping
-        the reference IS the release — its close() only drops the
-        loaded model). The pre-H3 cache never re-read config, so a
-        Settings change silently left dictation on the old model
-        until the socket reconnected: a placebo control.
-        """
-        model = engine_state.user_config.speech_stt_model
-        engine = voice_state.get("dictation_stt")
-        if engine is None or voice_state.get("dictation_stt_model") != model:
-            engine = create_stt_engine()
-            voice_state["dictation_stt"] = engine
-            voice_state["dictation_stt_model"] = model
-            voice_state["dictation_stt_opened"] = False
-        return engine
-
-    async def _open_dictation_stt() -> Any:
-        """The cached STT engine, opened once. An open failure is
-        logged, not raised — the transcribe call that follows reports
-        the real error to the client (today's per-chunk tolerance),
-        and a later chunk may retry the open."""
-        engine = _dictation_stt()
-        if not voice_state.get("dictation_stt_opened"):
-            if hasattr(engine, "open"):
-                try:
-                    await engine.open()
-                    voice_state["dictation_stt_opened"] = True
-                except Exception:
-                    logger.debug("STT open error", exc_info=True)
-            else:
-                voice_state["dictation_stt_opened"] = True
-        return engine
-
-    def _read_aloud_tts() -> Any:
-        """The connection's cached read-aloud TTS engine, built once."""
-        engine = voice_state.get("read_aloud_tts")
-        if engine is None:
-            engine = create_tts_engine()
-            voice_state["read_aloud_tts"] = engine
-        return engine
-
-    async def _open_read_aloud_tts() -> Any:
-        """The cached TTS engine, opened once. Same failure contract
-        as ``_open_dictation_stt``: logged, not raised."""
-        engine = _read_aloud_tts()
-        if not voice_state.get("read_aloud_tts_opened"):
-            if hasattr(engine, "open"):
-                try:
-                    await engine.open()
-                    voice_state["read_aloud_tts_opened"] = True
-                except Exception:
-                    logger.debug("TTS open error", exc_info=True)
-            else:
-                voice_state["read_aloud_tts_opened"] = True
-        return engine
-
-    async def _close_speech_engines() -> None:
-        """Close both cached speech engines (connection teardown).
-        Guarded and best-effort: a failing close never wedges the
-        disconnect path, and the slots are cleared regardless."""
-        voice_state["dictation_stt_model"] = None
-        for engine_key, opened_key in (
-            ("dictation_stt", "dictation_stt_opened"),
-            ("read_aloud_tts", "read_aloud_tts_opened"),
-        ):
-            engine = voice_state.get(engine_key)
-            voice_state[engine_key] = None
-            voice_state[opened_key] = False
-            if engine is None:
-                continue
-            try:
-                if hasattr(engine, "close"):
-                    await engine.close()
-            except Exception:
-                logger.debug("speech engine close failed", exc_info=True)
-
-    async def _run_voice_background_task(text: str, session_id: str, provider) -> None:
-        """One voice-escalated job (Epic 8, E8-5.1b): a normal
-        supervisor task, built exactly like a typed work message
-        (same central registry builder, same execute_task_generator
-        pump), but running FREE in the background — the talker lane
-        never waits on it. Its events stream to the socket, so the
-        task shows in chat with every detail exactly as tasks show
-        today; an approval pauses it for the normal in-chat
-        approval (the resume path is keyed by thread, not by this
-        pump — and nothing in the voice path can approve). When it
-        lands, the final summary is spoken through the live voice
-        pipeline; if voice mode has ended by then, the summary
-        simply stands in chat as the task's own message (the pump
-        already persisted it).
-
-        N10: the pause itself is announced too — a task waiting on
-        the owner's approval says so, factually, and points at the
-        chat where the decision belongs. Every announcement carries
-        a stable identity derived from the child task + event kind,
-        and a completion announcement also carries the persisted
-        message's own id, so the desktop renders the spoken text as
-        that message rather than as a second assistant turn."""
-        cfg = engine_state.user_config
-        req_id = f"voice-task-{uuid.uuid4().hex[:12]}"
-        terminal: dict[str, Any] = {}
-        # N10: announcement bookkeeping for this job. Identities are
-        # derived from the child task's own ids, so the same pause
-        # or result always maps to the same announcement — an event
-        # the stream re-reports never announces twice.
-        announced: set[str] = set()
-        announce_tasks: set[asyncio.Task] = set()
-        identity: dict[str, Any] = {}
-
-        def _announcement_id(kind: str, *parts: Any) -> str:
-            base = identity.get("task_id") or req_id
-            return ":".join(
-                ["voice-ann", str(base), kind]
-                + [str(p) for p in parts if p])
-
-        async def _announce(
-            announcement_id: str, kind: str, text: str, *,
-            message_id: str | None = None,
-        ) -> None:
-            if announcement_id in announced:
-                return
-            announced.add(announcement_id)
-            pipeline = voice_state.get("pipeline")
-            if pipeline is None:
-                return
-            await pipeline.speak_announcement(
-                text, announcement_id=announcement_id, kind=kind,
-                message_id=message_id)
-
-        def _schedule_announce(
-            announcement_id: str, kind: str, text: str,
-        ) -> None:
-            # A mid-stream announcement (an approval pause) must
-            # not block the pump — the approval card has to reach
-            # chat promptly. The pipeline speaks at the next quiet
-            # moment on its own.
-            task = asyncio.ensure_future(
-                _announce(announcement_id, kind, text))
-            announce_tasks.add(task)
-            task.add_done_callback(announce_tasks.discard)
-
-        async def _task_message_id(response: str) -> str | None:
-            """The id of the message the pump persisted for this
-            job's result: the newest assistant message in the
-            session with exactly this content. Best-effort — the
-            announcement stays identity-tagged without it."""
-            try:
-                session = await asyncio.to_thread(
-                    session_store.get_session, session_id)
-            except Exception:  # noqa: BLE001 — a lookup failure must not break the announcement
-                return None
-            for message in reversed((session or {}).get("messages") or []):
-                if (message.get("role") == "assistant"
-                        and message.get("content") == response):
-                    return message.get("id")
-            return None
-
-        try:
-            from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-
-            reqs = infer_task_requirements(text)
-            tools = build_tool_registry(
-                mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(
-                    risk_overrides=cfg.mcp_tool_risk_overrides),
-                include_file_tools=reqs.wants_code,
-            )
-            generator = run_langgraph_task(
-                prompt=text,
-                provider=provider,
-                tools=tools,
-                request_id=req_id,
-                approval_handler=None,
-                workspace_roots=cfg.workspace_roots or [str(Path.home() / "AetherWorkspace")],
-                disabled_nodes=engine_state.disabled_nodes,
-                session_id=session_id,
-                agent_models=cfg.agent_models,
-                agent_tools=cfg.agent_tools,
-                secret_store=secret_store,
-                user_config=cfg,
-                forced_agent=None,
-                active_skills=[],
-                plan_mode=False,
-                attachments=None,
-            )
-
-            async def _observed():
-                async for ev in generator:
-                    payload = (
-                        ev.payload if isinstance(ev.payload, dict)
-                        else {})
-                    if payload.get("task_id"):
-                        identity["task_id"] = payload["task_id"]
-                    if ev.type == EventType.TASK_COMPLETED:
-                        terminal["response"] = payload.get("response")
-                    elif ev.type == EventType.TASK_FAILED:
-                        terminal["error"] = (
-                            payload.get("error") or "unknown error")
-                    elif ev.type == EventType.TOOL_APPROVAL_REQUEST:
-                        # N10: the task is paused on the owner.
-                        # Announce it — factually, and pointing at
-                        # the chat, where the decision belongs:
-                        # nothing in the voice path can approve.
-                        tool_name = payload.get("tool_name")
-                        if tool_name:
-                            notice = (
-                                "That background task is paused, "
-                                "waiting for your approval to use "
-                                f"{tool_name}. You can review and "
-                                "decide in the chat.")
-                        else:
-                            notice = (
-                                "That background task is paused, "
-                                "waiting for your approval. You can "
-                                "review and decide in the chat.")
-                        _schedule_announce(
-                            _announcement_id(
-                                "approval", payload.get("approval_key"),
-                                tool_name),
-                            "approval", notice)
-                    yield ev
-
-            await execute_task_generator(
-                _observed(), cfg.default_provider, cfg.default_model,
-                req_id, session_id=session_id,
-                routing_reason="Voice escalation: spoken request classified as work",
-            )
-        except asyncio.CancelledError:
-            for task in announce_tasks:
-                task.cancel()
-            raise
-        except Exception:  # a background job must never wedge the socket
-            logger.warning("voice background task failed to run", exc_info=True)
-            terminal.setdefault("error", "the background task could not be started")
-        pipeline = voice_state.get("pipeline")
-        if pipeline is None:
-            return
-        if terminal.get("response"):
-            await _announce(
-                _announcement_id("completed"), "completed",
-                str(terminal["response"]),
-                message_id=await _task_message_id(
-                    str(terminal["response"])))
-        elif terminal.get("error"):
-            await _announce(
-                _announcement_id("failed"), "failed",
-                f"That background task failed: {terminal['error']}")
-
-    async def _cancel_voice_background_tasks() -> None:
-        """Disconnect teardown for escalated jobs: their event
-        stream dies with the socket, so they stop with it. (Voice
-        STOP alone does NOT cancel them — they run free; only
-        their spoken summary is skipped.)"""
-        tasks = voice_state.get("background_tasks") or set()
-        voice_state["background_tasks"] = set()
-        for task in tasks:
-            if not task.done():
-                task.cancel()
 
     async def execute_task_generator(generator, p_name: str, p_model: str, req_id: str, session_id: str | None = None, *, routing_reason: str = "Default Routing", routing_capabilities: list | None = None, retry_factory=None, fallback_blocked_message: str | None = None):
         """Stream one task's events to the client.
@@ -2456,6 +822,10 @@ async def ws_tasks(ws: WebSocket):
                 active_task_id = None
             reset_usage_context(usage_token)
             end_serving_tracking(serving_token)
+
+    # The voice family's escalated background jobs drive this
+    # pump through the connection context (routes/ws_voice.py).
+    conn.execute_task_generator = execute_task_generator
 
     async def _start_task_message(msg_, req_id_, previous_start_):
         """Run one START_TASK's pre-work off the receive loop (RUX-B-07).
@@ -2906,7 +1276,7 @@ async def ws_tasks(ws: WebSocket):
             if not dl_task.done():
                 dl_task.cancel()
         active_downloads.clear()
-        for tail in (dictation_tail, voice_op_tail):
+        for tail in (conn.dictation_tail, conn.voice_op_tail):
             if tail is not None and not tail.done():
                 tail.cancel()
         pending = [t for t in _conn_background_tasks if not t.done()]
@@ -3256,7 +1626,7 @@ async def ws_tasks(ws: WebSocket):
                 # RUX-B-02: answer from the model cache immediately;
                 # discovery for providers with an empty cache runs in
                 # a background task and pushes a refreshed list when
-                # it lands (see _send_provider_list_update).
+                # it lands (see send_provider_list_update).
                 providers = await _build_provider_list_async(secret_store, discover=False)
                 cfg = engine_state.user_config
                 await ws.send_text(Event(
@@ -3264,7 +1634,7 @@ async def ws_tasks(ws: WebSocket):
                     request_id=req_id,
                     payload={"providers": providers, "default_provider": cfg.default_provider, "default_model": cfg.default_model, "health": engine_state.health_manager.get_all_statuses()},
                 ).to_json())
-                _spawn_background(_send_provider_list_update(req_id))
+                _spawn_background(send_provider_list_update(conn, req_id))
 
             elif msg.type in (EventType.PROVIDER_VALIDATE_REQUEST, EventType.SETTINGS_PROVIDER_VALIDATE_REQUEST):
                 pname = msg.payload.get("provider", "")
@@ -3289,7 +1659,7 @@ async def ws_tasks(ws: WebSocket):
                     if saved_url:
                         base_url = saved_url
                 
-                # _send_validation_result validates with
+                # send_validation_result validates with
                 # persist_models=False: testing a throwaway/template
                 # provider must not leak discovery data into the
                 # persisted config.
@@ -3300,10 +1670,10 @@ async def ws_tasks(ws: WebSocket):
                         payload={"provider": pname, "status": "invalid_key", "message": "API key cannot be empty."},
                     ).to_json())
                 else:
-                    # Off the message loop (see _send_validation_result):
+                    # Off the message loop (see send_validation_result):
                     # the Test no longer blocks the socket, and repeat
                     # clicks share the in-flight validation.
-                    _spawn_background(_send_validation_result(resp_type, req_id, pname, key, base_url))
+                    _spawn_background(send_validation_result(conn, resp_type, req_id, pname, key, base_url))
 
             elif msg.type == EventType.PROVIDER_SAVE_REQUEST:
                 pname = msg.payload.get("provider", "")
@@ -3353,7 +1723,7 @@ async def ws_tasks(ws: WebSocket):
                     # to discover inline here (≤10 s on the message
                     # loop). The save itself — key, config, defaults —
                     # is instant and answers now; discovery moves to
-                    # _complete_provider_save_discovery, which applies
+                    # complete_provider_save_discovery, which applies
                     # the same results and pushes the refreshed list.
                     deferred_discovery = bool(key and not models)
                     if key:
@@ -3377,7 +1747,7 @@ async def ws_tasks(ws: WebSocket):
                         if deferred_discovery:
                             # The model choice waits for the deferred
                             # discovery (same registry-priority
-                            # resolution, in _complete_provider_save_
+                            # resolution, in complete_provider_save_
                             # discovery) — resolving now could only use
                             # the stale pre-discovery list.
                             engine_state.active_provider = pname
@@ -3413,7 +1783,7 @@ async def ws_tasks(ws: WebSocket):
                         payload=save_payload,
                     ).to_json())
                     if deferred_discovery:
-                        _spawn_background(_complete_provider_save_discovery(
+                        _spawn_background(complete_provider_save_discovery(conn, 
                             req_id, pname, key, base_url,
                             bool(is_default and not default_model)))
                 except Exception as e:  # noqa: BLE001 — handler boundary: any save failure is reported to the client in the response payload
@@ -4400,7 +2770,7 @@ async def ws_tasks(ws: WebSocket):
                 # tool uses) so transcript and semantic matches reach
                 # the UI. An empty query is an honest empty result —
                 # recall is never invoked with nothing to search for.
-                # Off the message loop (see _send_media_search_result):
+                # Off the message loop (see send_media_search_result):
                 # the recall embeds the query and can take seconds
                 # (RUX-B-08). The payload parsing stays here — it is
                 # instant and defines the request the task runs.
@@ -4412,7 +2782,7 @@ async def ws_tasks(ws: WebSocket):
                     search_limit = int(msg.payload.get("limit") or 20)
                 except (TypeError, ValueError):
                     search_limit = 20
-                _spawn_background(_send_media_search_result(
+                _spawn_background(send_media_search_result(conn, 
                     req_id, search_query, search_collection, search_limit))
 
             elif msg.type == EventType.MEDIA_DELETE_REQUEST:
@@ -4448,9 +2818,9 @@ async def ws_tasks(ws: WebSocket):
             # Local Models (Ollama) & Task Download Events
             # -----------------------------------------------------------
             elif msg.type == EventType.LOCAL_MODEL_LIST_REQUEST:
-                # Off the message loop (see _send_local_model_list_result):
+                # Off the message loop (see send_local_model_list_result):
                 # the daemon call can take seconds (RUX-B-08).
-                _spawn_background(_send_local_model_list_result(req_id))
+                _spawn_background(send_local_model_list_result(conn, req_id))
 
             elif msg.type == EventType.LOCAL_MODEL_DOWNLOAD_START:
                 model_name = msg.payload.get("model", "") or msg.payload.get("repo_id", "")
@@ -4478,27 +2848,27 @@ async def ws_tasks(ws: WebSocket):
                     logger.info(f"Download cancelled for model: {cancel_model}")
 
             elif msg.type == EventType.LOCAL_MODEL_DELETE_REQUEST:
-                # Off the message loop (see _send_local_model_delete_result):
+                # Off the message loop (see send_local_model_delete_result):
                 # the daemon call can take seconds (RUX-B-08).
-                _spawn_background(_send_local_model_delete_result(
+                _spawn_background(send_local_model_delete_result(conn, 
                     req_id, msg.payload.get("model", "")))
 
             # -----------------------------------------------------------
             # Model Hub catalogue layer (H1, read-only)
             # -----------------------------------------------------------
             elif msg.type == EventType.MODEL_HUB_SEARCH_REQUEST:
-                # Off the message loop (see _send_model_hub_search_result):
+                # Off the message loop (see send_model_hub_search_result):
                 # the catalogue call is live HTTP (RUX-B-08).
-                _spawn_background(_send_model_hub_search_result(
+                _spawn_background(send_model_hub_search_result(conn, 
                     req_id,
                     msg.payload.get("source", "hf"),
                     msg.payload.get("query", "") or "",
                     msg.payload.get("family")))
 
             elif msg.type == EventType.MODEL_HUB_DETAIL_REQUEST:
-                # Off the message loop (see _send_model_hub_detail_result):
+                # Off the message loop (see send_model_hub_detail_result):
                 # the catalogue call is live HTTP (RUX-B-08).
-                _spawn_background(_send_model_hub_detail_result(
+                _spawn_background(send_model_hub_detail_result(conn, 
                     req_id,
                     msg.payload.get("source", "hf"),
                     msg.payload.get("id", "") or ""))
@@ -4561,10 +2931,10 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
 
             elif msg.type == EventType.MODEL_HUB_DELETE_REQUEST:
-                # Off the message loop (see _send_model_hub_delete_result):
+                # Off the message loop (see send_model_hub_delete_result):
                 # the delete verifies against the daemon and removes
                 # the repo tree (RUX-B-08).
-                _spawn_background(_send_model_hub_delete_result(
+                _spawn_background(send_model_hub_delete_result(conn, 
                     req_id,
                     msg.payload.get("source", "hf"),
                     msg.payload.get("id", "") or ""))
@@ -4587,10 +2957,10 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
 
             elif msg.type == EventType.CAPABILITY_CHECK_RUN_NOW:
-                # Off the message loop (see _send_capability_check_result):
+                # Off the message loop (see send_capability_check_result):
                 # a run is minutes of discovery + live self-tests and
                 # must not wedge the socket behind it (RUX-B-03).
-                _spawn_background(_send_capability_check_result(req_id, msg.payload.get("method")))
+                _spawn_background(send_capability_check_result(conn, req_id, msg.payload.get("method")))
 
             elif msg.type == EventType.CAPABILITY_CHECK_GET_HISTORY:
                 status_sum = engine_state.scheduler_manager.get_status_summary()
@@ -4619,10 +2989,10 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
 
             elif msg.type == EventType.REFRESH_MODELS_REQUEST:
-                # Off the message loop (see _send_refresh_models_result):
+                # Off the message loop (see send_refresh_models_result):
                 # a refresh can take ~100 s of discovery and must not
                 # wedge the socket behind it (RUX-B-01).
-                _spawn_background(_send_refresh_models_result(req_id, dict(msg.payload)))
+                _spawn_background(send_refresh_models_result(conn, req_id, dict(msg.payload)))
 
             # -----------------------------------------------------------
             # Tools, MCP, Plugins, Memory Events
@@ -5122,63 +3492,63 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
 
             elif msg.type == EventType.MCP_SERVER_REMOVE_REQUEST:
-                # Off the message loop (see _send_mcp_server_remove_result):
+                # Off the message loop (see send_mcp_server_remove_result):
                 # removal closes any live session at the connect
                 # timeout and must not wedge the socket (RUX-B-04).
-                _spawn_background(_send_mcp_server_remove_result(
+                _spawn_background(send_mcp_server_remove_result(conn, 
                     req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_SERVER_UPDATE_REQUEST:
-                # Off the message loop (see _send_mcp_server_update_result):
+                # Off the message loop (see send_mcp_server_update_result):
                 # disabling a server disconnects it at the connect
                 # timeout and must not wedge the socket (RUX-B-04).
-                _spawn_background(_send_mcp_server_update_result(
+                _spawn_background(send_mcp_server_update_result(conn, 
                     req_id, msg.payload.get("name"),
                     msg.payload.get("auto_connect"), msg.payload.get("enabled")))
 
             elif msg.type == EventType.MCP_SERVER_CONNECT_REQUEST:
-                # Off the message loop (see _send_mcp_server_connect_result):
+                # Off the message loop (see send_mcp_server_connect_result):
                 # a connect runs at the server's connect timeout —
                 # 30 s default, up to 300 s — and must not wedge the
                 # socket behind it (RUX-B-04).
-                _spawn_background(_send_mcp_server_connect_result(
+                _spawn_background(send_mcp_server_connect_result(conn, 
                     req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_SERVER_DISCONNECT_REQUEST:
                 # Off the message loop (see
-                # _send_mcp_server_disconnect_result): closing a hung
+                # send_mcp_server_disconnect_result): closing a hung
                 # session is bounded by the same timeouts and must
                 # not wedge the socket behind it (RUX-B-04).
-                _spawn_background(_send_mcp_server_disconnect_result(
+                _spawn_background(send_mcp_server_disconnect_result(conn, 
                     req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_SERVER_TEST_REQUEST:
-                # Off the message loop (see _send_mcp_server_test_result):
+                # Off the message loop (see send_mcp_server_test_result):
                 # a test opens a throwaway session at the connect
                 # timeout and must not wedge the socket (RUX-B-04).
-                _spawn_background(_send_mcp_server_test_result(
+                _spawn_background(send_mcp_server_test_result(conn, 
                     req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_RESOURCE_LIST_REQUEST:
-                # Off the message loop (see _send_mcp_resource_list_result):
+                # Off the message loop (see send_mcp_resource_list_result):
                 # the list runs against the live session at its read
                 # timeout and must not wedge the socket (RUX-B-04).
-                _spawn_background(_send_mcp_resource_list_result(
+                _spawn_background(send_mcp_resource_list_result(conn, 
                     req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_RESOURCE_READ_REQUEST:
-                # Off the message loop (see _send_mcp_resource_read_result):
+                # Off the message loop (see send_mcp_resource_read_result):
                 # the read runs against the live session at its read
                 # timeout and must not wedge the socket (RUX-B-04).
-                _spawn_background(_send_mcp_resource_read_result(
+                _spawn_background(send_mcp_resource_read_result(conn, 
                     req_id, msg.payload.get("name"), msg.payload.get("uri"),
                     msg.payload.get("session_id")))
 
             elif msg.type == EventType.MCP_PROMPT_LIST_REQUEST:
-                # Off the message loop (see _send_mcp_prompt_list_result):
+                # Off the message loop (see send_mcp_prompt_list_result):
                 # the list runs against the live session at its read
                 # timeout and must not wedge the socket (RUX-B-04).
-                _spawn_background(_send_mcp_prompt_list_result(
+                _spawn_background(send_mcp_prompt_list_result(conn, 
                     req_id, msg.payload.get("name")))
 
             elif msg.type == EventType.MCP_PROMPT_RUN_REQUEST:
@@ -5189,7 +3559,7 @@ async def ws_tasks(ws: WebSocket):
                 # The arguments-type rejection is a pure payload check
                 # — instant, answered inline exactly as before; the run
                 # itself is off the message loop (see
-                # _send_mcp_prompt_run_result): it awaits the server at
+                # send_mcp_prompt_run_result): it awaits the server at
                 # its read timeout and must not wedge the socket
                 # (RUX-B-04).
                 name = msg.payload.get("name")
@@ -5206,7 +3576,7 @@ async def ws_tasks(ws: WebSocket):
                         },
                     ).to_json())
                 else:
-                    _spawn_background(_send_mcp_prompt_run_result(
+                    _spawn_background(send_mcp_prompt_run_result(conn, 
                         req_id, name, prompt_name, arguments,
                         msg.payload.get("session_id")))
 
@@ -5244,7 +3614,7 @@ async def ws_tasks(ws: WebSocket):
                     # one with its creation time + owning connection
                     # (the stored VALUE stays the raw prepare
                     # payload — it is sent to the client verbatim).
-                    _prune_expired_plugin_installs()
+                    prune_expired_plugin_installs()
                     pending_plugin_installs[req_id] = data
                     pending_plugin_install_created[req_id] = time.time()
                     _own_plugin_install_ids.add(req_id)
@@ -5264,17 +3634,17 @@ async def ws_tasks(ws: WebSocket):
                     ).to_json())
 
             elif msg.type == EventType.PLUGIN_APPROVAL_GRANTED:
-                # Off the message loop (see _send_plugin_install_
+                # Off the message loop (see send_plugin_install_
                 # result): the install copy is synchronous and
                 # scales with plugin size (RUX-B-10). The pending
                 # entry is still popped here, in the loop, so a
                 # duplicate grant can never install twice.
-                _prune_expired_plugin_installs()
+                prune_expired_plugin_installs()
                 data = pending_plugin_installs.pop(req_id, None)
                 pending_plugin_install_created.pop(req_id, None)
                 _own_plugin_install_ids.discard(req_id)
                 if data:
-                    _spawn_background(_send_plugin_install_result(req_id, data))
+                    _spawn_background(send_plugin_install_result(conn, req_id, data))
                 else:
                     # E1-06: a grant naming an unknown or expired
                     # install used to get NO reply at all — the UI
@@ -5298,18 +3668,18 @@ async def ws_tasks(ws: WebSocket):
                 ).to_json())
 
             elif msg.type == EventType.PLUGIN_UNINSTALL_REQUEST:
-                # Off the message loop (see _send_plugin_uninstall_
+                # Off the message loop (see send_plugin_uninstall_
                 # result): the MCP disconnects await at the server
                 # timeout and the file work is synchronous (RUX-B-10).
-                _spawn_background(_send_plugin_uninstall_result(
+                _spawn_background(send_plugin_uninstall_result(conn, 
                     req_id, msg.payload.get("name")))
                     
             elif msg.type == EventType.PLUGIN_TOGGLE_REQUEST:
-                # Off the message loop (see _send_plugin_toggle_
+                # Off the message loop (see send_plugin_toggle_
                 # result): a disable awaits the MCP disconnects at
                 # the server timeout before its synchronous file
                 # work (RUX-B-10).
-                _spawn_background(_send_plugin_toggle_result(
+                _spawn_background(send_plugin_toggle_result(conn, 
                     req_id, msg.payload.get("name"), msg.payload.get("enabled", True)))
 
             elif msg.type == EventType.MEMORY_EPISODES_REQUEST:
@@ -5317,8 +3687,8 @@ async def ws_tasks(ws: WebSocket):
                 # also carries embedding health for Diagnostics.
                 # E1-11: answered from a background task — the
                 # backend reads are synchronous and scale with
-                # memory size (see _send_memory_episodes_result).
-                _spawn_background(_send_memory_episodes_result(
+                # memory size (see send_memory_episodes_result).
+                _spawn_background(send_memory_episodes_result(conn, 
                     req_id, msg.payload.get("limit", 50)))
 
             elif msg.type == EventType.MEMORY_EPISODE_DELETE_REQUEST:
@@ -5377,8 +3747,8 @@ async def ws_tasks(ws: WebSocket):
             elif msg.type == EventType.MEMORY_GRAPH_REQUEST:
                 # E1-11: answered from a background task — the fact
                 # list/search is a synchronous backend read (see
-                # _send_memory_graph_result).
-                _spawn_background(_send_memory_graph_result(
+                # send_memory_graph_result).
+                _spawn_background(send_memory_graph_result(conn, 
                     req_id, msg.payload.get("query"),
                     msg.payload.get("limit", 100),
                     bool(msg.payload.get("include_history"))))
@@ -5502,10 +3872,10 @@ async def ws_tasks(ws: WebSocket):
             elif msg.type == EventType.MEMORY_EXPORT_REQUEST:
                 # Epic 4, E4-03: the full memory as JSON (facts incl.
                 # superseded history + episodes) for the UI to save.
-                # Off the message loop (see _send_memory_export_result):
+                # Off the message loop (see send_memory_export_result):
                 # the export is synchronous and scales with memory
                 # size, so it runs on a worker thread (RUX-B-08).
-                _spawn_background(_send_memory_export_result(req_id))
+                _spawn_background(send_memory_export_result(conn, req_id))
 
             elif msg.type == EventType.BACKUP_CREATE_REQUEST:
                 # Epic 10, E10-03: snapshot ~/.aether into a zip under
@@ -5564,18 +3934,18 @@ async def ws_tasks(ws: WebSocket):
             elif msg.type == EventType.DIAGNOSTICS_EXPORT_REQUEST:
                 # Epic 10, E10-04: redacted bundle — config scrubbed by
                 # the audit redactor, memory as counts only.
-                # Off the message loop (see _send_diagnostics_export_
+                # Off the message loop (see send_diagnostics_export_
                 # result): the bundle build is synchronous bulk work,
                 # so it runs on a worker thread (RUX-B-08).
-                _spawn_background(_send_diagnostics_export_result(req_id))
+                _spawn_background(send_diagnostics_export_result(conn, req_id))
 
             elif msg.type == EventType.VERSION_CHECK_REQUEST:
                 # Epic 10, E10-05: report-only update check against the
                 # project's GitHub releases. Nothing downloads or
                 # installs — the user decides.
-                # Off the message loop (see _send_version_check_result):
+                # Off the message loop (see send_version_check_result):
                 # the check is live HTTP with a 10 s timeout (RUX-B-08).
-                _spawn_background(_send_version_check_result(req_id))
+                _spawn_background(send_version_check_result(conn, req_id))
 
             elif msg.type == EventType.SKILL_LIST_REQUEST:
                 from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
@@ -6065,19 +4435,19 @@ async def ws_tasks(ws: WebSocket):
             # Voice session (Epic 8, E8-5.1a)
             # -----------------------------------------------------------
             elif msg.type == EventType.VOICE_SESSION_START_REQUEST:
-                # Off the receive loop (see _send_voice_session_
+                # Off the receive loop (see send_voice_session_
                 # start_result): opening the stages can load the
                 # speech models and take seconds (RUX-B-09). The
                 # start is chained with session stops (and other
                 # starts) so their relative order is preserved.
-                _enqueue_voice_op(_send_voice_session_start_result(
+                enqueue_voice_op(conn, send_voice_session_start_result(conn, 
                     req_id, dict(msg.payload)))
 
             elif msg.type == EventType.VOICE_SESSION_STOP_REQUEST:
-                # Chained with session starts (see _enqueue_voice_op):
+                # Chained with session starts (see enqueue_voice_op):
                 # a stop sent while a start is still opening lands
                 # after it, never before it (RUX-B-09).
-                _enqueue_voice_op(_send_voice_session_stop_result(req_id))
+                enqueue_voice_op(conn, send_voice_session_stop_result(conn, req_id))
 
             elif msg.type == EventType.VOICE_PLAYBACK_PROGRESS:
                 # N09: the renderer's playback report for the live
@@ -6158,7 +4528,7 @@ async def ws_tasks(ws: WebSocket):
             # Push-to-talk dictation + TTS read-aloud (Epic 8, E8-5.3)
             # -----------------------------------------------------------
             elif msg.type == EventType.DICTATION_START_REQUEST:
-                stt = _dictation_stt()
+                stt = dictation_stt(conn)
                 reason = stt.unavailable_reason()
                 if reason is not None:
                     await ws.send_text(Event(
@@ -6175,13 +4545,13 @@ async def ws_tasks(ws: WebSocket):
 
             elif msg.type == EventType.DICTATION_CHUNK_REQUEST:
                 # Off the receive loop, but chained in arrival
-                # order (see _enqueue_dictation): each chunk's
+                # order (see enqueue_dictation): each chunk's
                 # transcription can take seconds, and a later chunk
                 # must never be applied before an earlier one
                 # (RUX-B-09). The engine snapshot + availability
                 # check stay here, at receipt, as before.
-                _dictation_engine = _dictation_stt()
-                _enqueue_dictation(_send_dictation_chunk_result(
+                _dictation_engine = dictation_stt(conn)
+                enqueue_dictation(conn, send_dictation_chunk_result(conn, 
                     req_id,
                     _dictation_engine.unavailable_reason(),
                     msg.payload.get("audio") or "",
@@ -6190,17 +4560,17 @@ async def ws_tasks(ws: WebSocket):
 
             elif msg.type == EventType.DICTATION_STOP_REQUEST:
                 # The final transcription joins the same chain as
-                # the chunks (see _enqueue_dictation), so the stop
+                # the chunks (see enqueue_dictation), so the stop
                 # response can never overtake a chunk response
                 # (RUX-B-09).
-                _enqueue_dictation(_send_dictation_stop_result(
+                enqueue_dictation(conn, send_dictation_stop_result(conn, 
                     req_id,
                     msg.payload.get("audio"),
                     _coerce_sample_rate(msg.payload.get("sample_rate"))))
 
             elif msg.type == EventType.READ_ALOUD_START_REQUEST:
-                await _stop_read_aloud()
-                tts = _read_aloud_tts()
+                await stop_read_aloud(conn)
+                tts = read_aloud_tts(conn)
                 reason = tts.unavailable_reason()
                 msg_id = msg.payload.get("message_id")
                 text_to_speak = msg.payload.get("text") or ""
@@ -6222,7 +4592,7 @@ async def ws_tasks(ws: WebSocket):
                         try:
                             # S4-M7: open the cached engine once for
                             # the connection, not on every start.
-                            tts_inst = await _open_read_aloud_tts()
+                            tts_inst = await open_read_aloud_tts(conn)
                             async for chunk in tts_inst.synthesize(text, voice=voice):
                                 b64_chunk = base64.b64encode(chunk).decode("ascii")
                                 await target_ws.send_text(Event(
@@ -6252,7 +4622,7 @@ async def ws_tasks(ws: WebSocket):
 
             elif msg.type == EventType.READ_ALOUD_STOP_REQUEST:
                 msg_id = msg.payload.get("message_id")
-                await _stop_read_aloud()
+                await stop_read_aloud(conn)
                 await ws.send_text(Event(
                     type=EventType.READ_ALOUD_STOP_RESPONSE,
                     request_id=req_id,
@@ -6266,10 +4636,10 @@ async def ws_tasks(ws: WebSocket):
             task_start_tail.cancel()
         if task_runner and not task_runner.done():
             task_runner.cancel()
-        await _stop_voice_session()
-        await _stop_read_aloud()
-        await _close_speech_engines()
-        await _cancel_voice_background_tasks()
+        await stop_voice_session(conn)
+        await stop_read_aloud(conn)
+        await close_speech_engines(conn)
+        await cancel_voice_background_tasks(conn)
         await _cancel_connection_background_work()
         engine_state.audit_logger.log_event("CLIENT_DISCONNECTED", {"client_ip": ip})
     except Exception as e:  # noqa: BLE001 — top-level socket boundary: any session failure is logged and the task is cancelled, never propagated
@@ -6279,10 +4649,10 @@ async def ws_tasks(ws: WebSocket):
             task_start_tail.cancel()
         if task_runner and not task_runner.done():
             task_runner.cancel()
-        await _stop_voice_session()
-        await _stop_read_aloud()
-        await _close_speech_engines()
-        await _cancel_voice_background_tasks()
+        await stop_voice_session(conn)
+        await stop_read_aloud(conn)
+        await close_speech_engines(conn)
+        await cancel_voice_background_tasks(conn)
         await _cancel_connection_background_work()
 
 # --- Legacy unauthenticated HTTP management routes: REMOVED (Phase 9, A1) ---
