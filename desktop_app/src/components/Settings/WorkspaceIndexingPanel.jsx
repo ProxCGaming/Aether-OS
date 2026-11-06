@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 import LoadStateRow from './LoadStateRow';
+import { formatBytes } from '../../formatBytes';
 
 const REASON_METADATA = {
   gitignore: { label: 'Gitignored', color: '#818cf8', bg: 'rgba(99, 102, 241, 0.15)' },
@@ -23,13 +24,6 @@ const REASON_METADATA = {
   lockfile: { label: 'Lockfile', color: '#fbbf24', bg: 'rgba(245, 158, 11, 0.15)' },
   not_prose: { label: 'Not prose', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.15)' },
 };
-
-function formatBytes(bytes) {
-  if (!bytes || bytes <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
 
 export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorkspace = '' }) {
   const socket = useAetherSocket();

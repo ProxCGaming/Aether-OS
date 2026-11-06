@@ -101,6 +101,21 @@ describe('Wave 4 — desktop dead code sweep (D-07 + full-surface grep proof)', 
   });
 });
 
+describe('Wave 5 — .spin-animation is defined (used-but-undefined class)', () => {
+  // Observed in Wave 4 and closed here: LocalModelsTab renders
+  // <RefreshCw className="spin-animation" /> at 3 sites (download
+  // progress, searching, inventory loading), but no stylesheet
+  // defined the class, so those icons never spun. The rule drives
+  // the live @keyframes spin in the same stylesheet.
+  it('is defined exactly once, in index.css beside @keyframes spin', () => {
+    expect(ruleCount(indexCss, '.spin-animation')).toBe(1);
+    expect(ruleCount(chatCss, '.spin-animation')).toBe(0);
+    const start = indexCss.indexOf('.spin-animation {');
+    const block = indexCss.slice(start, indexCss.indexOf('}', start));
+    expect(block).toContain('animation: spin 1s linear infinite');
+  });
+});
+
 describe('D3-20 — proven-dead CSS is removed', () => {
   it('keeps @keyframes spin — inline JSX styles animate with it', () => {
     expect(/@keyframes spin\s*\{/.test(indexCss)).toBe(true);

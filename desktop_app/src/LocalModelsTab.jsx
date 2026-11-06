@@ -1,6 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, Download, Trash2, CheckCircle2, X, RefreshCw, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react';
+import { Search, Download, CheckCircle2, X, RefreshCw, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react';
 import './chat.css';
+import { formatBytes } from './formatBytes';
+import {
+  FAMILY_LABELS,
+  SOURCE_LABELS,
+  RUNNABILITY_BADGES,
+  chipStyle,
+  downloadButtonStyle,
+} from './modelHubLabels';
+import { DownloadProgressRow, DownloadedModelsSection } from './components/DownloadedModels';
 
 // Model Hub (H4): this tab is the renderer's window onto the hub
 // contracts built in H1–H3. Search runs against two live sources —
@@ -34,47 +43,8 @@ const FAMILY_CHIPS = [
   { value: 'other', label: 'Other' },
 ];
 
-const FAMILY_LABELS = {
-  brain: 'Brain',
-  'speech-to-text': 'Speech-to-text',
-  'text-to-speech': 'Text-to-speech',
-  embedding: 'Embedding',
-  other: 'Other',
-};
-
-const SOURCE_LABELS = { hf: 'Hugging Face', ollama: 'Ollama' };
-
-// Daemon-typed model kinds (engine /api/show capabilities): what a
-// downloaded model is FOR, as opposed to the hub family taxonomy.
-const TYPE_LABELS = {
-  chat: 'Chat',
-  embedding: 'Embedding',
-  both: 'Chat + Embedding',
-  unknown: 'Type unknown',
-};
-
-const RUNNABILITY_BADGES = {
-  'in-app': { label: 'In-app', color: '#34d399', bg: 'rgba(16, 185, 129, 0.15)', border: 'rgba(16, 185, 129, 0.3)' },
-  ollama: { label: 'Via Ollama', color: '#f5b544', bg: 'rgba(245, 181, 52, 0.12)', border: 'rgba(245, 181, 52, 0.35)' },
-  'not-runnable': { label: 'Not locally runnable', color: '#f87171', bg: 'rgba(239, 68, 68, 0.12)', border: 'rgba(239, 68, 68, 0.3)' },
-  unknown: { label: 'Run support unknown', color: '#9090a0', bg: 'rgba(144, 144, 160, 0.12)', border: 'rgba(144, 144, 160, 0.3)' },
-};
-
 function rowKey(row) {
   return `${row.source}:${row.id}`;
-}
-
-function formatBytes(bytes) {
-  if (bytes === null || bytes === undefined || Number.isNaN(bytes)) return null;
-  if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(1)} ${units[unit]}`;
 }
 
 function formatDownloads(count) {
@@ -83,18 +53,6 @@ function formatDownloads(count) {
   if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
   return `${count}`;
 }
-
-const chipStyle = {
-  background: 'rgba(100, 100, 100, 0.15)', color: 'var(--text-primary, #e2e8f0)',
-  padding: '4px 8px', borderRadius: '6px', fontSize: '11px', fontWeight: 500,
-};
-
-const downloadButtonStyle = {
-  padding: '10px 16px', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)',
-  color: 'var(--text-primary, #fff)', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)',
-  borderRadius: '12px', cursor: 'pointer', fontWeight: 500, display: 'flex',
-  justifyContent: 'center', alignItems: 'center', gap: '8px', transition: 'all 0.2s',
-};
 
 export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages = [], defaultProvider = '', defaultModel = '', currentEmbedder = '' }) {
   const [source, setSource] = useState('hf');
@@ -510,28 +468,13 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
 
   // ---- rendering -------------------------------------------------
 
-  const renderProgress = (progress) => {
-    // RUX-A-19: a cancel sitting in the offline queue is marked on
-    // the progress row it belongs to — the download is still
-    // running until TASK_CANCELLED says otherwise.
-    const cancelQueued = Boolean(pendingCancelFor(progress.key));
-    return (
-      <>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'rgb(var(--accent-rgb, 167, 139, 250))', fontSize: '13px', fontWeight: 600 }}>
-          <RefreshCw size={14} className="spin-animation" /> {Math.round(progress.percent || 0)}%
-          {progress.status ? <span style={{ color: 'var(--text-secondary, #9090a0)', fontWeight: 500 }}>{progress.status}</span> : null}
-          {cancelQueued && (
-            <span data-testid={`cancel-queued-${progress.key}`} style={{ color: '#fbbf24', fontWeight: 500 }}>
-              Cancel queued — still downloading
-            </span>
-          )}
-        </div>
-        <button onClick={() => handleCancel(progress.key)} disabled={cancelQueued} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: '#ef4444', cursor: cancelQueued ? 'default' : 'pointer', opacity: cancelQueued ? 0.45 : 1, border: '1px solid rgba(239,68,68,0.3)' }} title={cancelQueued ? 'Cancel already queued — will apply when the engine reconnects' : 'Cancel Download'}>
-          <X size={14} />
-        </button>
-      </>
-    );
-  };
+  const renderProgress = (progress) => (
+    <DownloadProgressRow
+      progress={progress}
+      cancelQueued={Boolean(pendingCancelFor(progress.key))}
+      onCancel={handleCancel}
+    />
+  );
 
   const renderVariant = (row, variant) => {
     const label = variant.quant || (variant.kind === 'gguf' ? 'GGUF' : variant.kind);
@@ -607,7 +550,7 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
     const progress = progressForRow(row);
     const alreadyDownloaded = isDownloaded(row);
     const expanded = expandedKey === rowKey(row);
-    const sizeText = formatBytes(row.size_bytes);
+    const sizeText = row.size_bytes ? formatBytes(row.size_bytes) : null;
     const downloadsText = formatDownloads(row.downloads);
     // Whole-repo downloads: Ollama library rows and in-app speech
     // repos. HF GGUF repos download per variant from the detail.
@@ -698,95 +641,6 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
             {renderDetail(row)}
           </div>
         )}
-      </div>
-    );
-  };
-
-  const renderDownloadedRow = (row) => {
-    const sizeText = formatBytes(row.size_bytes);
-    const isActive = row.source === 'ollama'
-      && activeDefault.provider === 'ollama' && activeDefault.model === row.id;
-    // RUX-A-19: queued states for this row, from the real queue.
-    const setActiveQueued = Boolean(pendingSetActiveFor(row));
-    const deleteQueued = Boolean(pendingDeleteFor(row));
-    // Embedder eligibility: the daemon said this model can embed
-    // (type), or the hub family already classes it as an embedding
-    // model. The active one is the engine's configured embedder.
-    const canEmbed = row.source === 'ollama'
-      && (row.type === 'embedding' || row.type === 'both' || row.family === 'embedding');
-    const isEmbedder = canEmbed && activeEmbedder === row.id;
-    const embedderQueued = Boolean(pendingEmbedderFor(row));
-    const embedderPending = embedderSwitchPending === row.id;
-    return (
-      <div
-        key={rowKey(row)}
-        data-testid={`downloaded-row-${rowKey(row)}`}
-        style={{ display: 'flex', alignItems: 'center', gap: '16px', padding: '14px 16px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '12px' }}
-      >
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary, #fff)' }}>{row.name}</span>
-            <span style={chipStyle}>{SOURCE_LABELS[row.source] || row.source}</span>
-            <span style={chipStyle}>{FAMILY_LABELS[row.family] || 'Other'}</span>
-            {row.type && (
-              <span data-testid={`downloaded-type-${rowKey(row)}`} style={{ ...chipStyle, color: row.type === 'embedding' || row.type === 'both' ? '#93c5fd' : chipStyle.color }}>
-                {TYPE_LABELS[row.type] || row.type}
-              </span>
-            )}
-            {row.params && <span style={chipStyle}>{row.params} Params</span>}
-            {row.quant && <span style={chipStyle}>{row.quant}</span>}
-            {sizeText && <span style={{ fontSize: '12px', color: 'var(--text-secondary, #9090a0)' }}>{sizeText}</span>}
-          </div>
-          {row.path && (
-            <div style={{ fontSize: '11px', color: 'var(--text-secondary, #9090a0)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '4px' }} title={row.path}>{row.path}</div>
-          )}
-        </div>
-        {canEmbed && (
-          isEmbedder ? (
-            <button disabled data-testid={`embedder-active-${rowKey(row)}`} title="Currently the embedding model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(59, 130, 246, 0.15)', color: '#93c5fd', border: '1px solid rgba(59, 130, 246, 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
-              Embedder
-            </button>
-          ) : embedderQueued ? (
-            <button disabled data-testid={`embedder-queued-${rowKey(row)}`} title="Embedder switch queued — will apply when the engine reconnects" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(251, 191, 36, 0.12)', color: '#fbbf24', border: '1px solid rgba(251, 191, 36, 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
-              Embedder Queued
-            </button>
-          ) : embedderPending ? (
-            <button disabled data-testid={`embedder-pending-${rowKey(row)}`} title="Waiting for the engine to confirm the embedder switch" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(255,255,255,0.06)', color: 'var(--text-secondary, #9090a0)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
-              Setting…
-            </button>
-          ) : (
-            <button onClick={() => handleUseAsEmbedder(row.id)} data-testid={`use-as-embedder-${rowKey(row)}`} title="Use this model for memory + workspace embeddings" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(59, 130, 246, 0.15)', color: '#93c5fd', border: '1px solid rgba(59, 130, 246, 0.35)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
-              Use as Embedder
-            </button>
-          )
-        )}
-        {row.source === 'ollama' && (
-          isActive ? (
-            <button disabled title="Currently the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
-              Active
-            </button>
-          ) : setActiveQueued ? (
-            <button disabled data-testid={`set-active-queued-${rowKey(row)}`} title="Set-active queued — will apply when the engine reconnects" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(251, 191, 36, 0.12)', color: '#fbbf24', border: '1px solid rgba(251, 191, 36, 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
-              Set Active Queued
-            </button>
-          ) : setActivePending === row.id ? (
-            <button disabled data-testid={`set-active-pending-${rowKey(row)}`} title="Waiting for the engine to confirm the switch" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(255,255,255,0.06)', color: 'var(--text-secondary, #9090a0)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
-              Setting…
-            </button>
-          ) : (
-            <button onClick={() => handleSetActive(row.id)} title="Set as the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)', color: 'var(--text-primary, #fff)', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
-              Set Active
-            </button>
-          )
-        )}
-        {deleteQueued && (
-          <span data-testid={`hub-delete-queued-${rowKey(row)}`} style={{ fontSize: '12px', color: '#fbbf24', fontWeight: 500 }}>
-            Delete queued
-          </span>
-        )}
-        <button onClick={() => handleDeleteDownloaded(row)} disabled={deleteQueued} className="ios-glass" style={{ padding: '8px 10px', background: 'rgba(239,68,68,0.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '10px', cursor: deleteQueued ? 'default' : 'pointer', opacity: deleteQueued ? 0.45 : 1 }} title={deleteQueued ? 'Delete already queued — will apply when the engine reconnects' : 'Delete Model'}>
-          <Trash2 size={16} />
-        </button>
       </div>
     );
   };
@@ -894,36 +748,24 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
         )}
       </div>
 
-      {/* Downloaded inventory */}
-      <div data-testid="downloaded-section">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-          <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0, color: 'var(--text-primary, #fff)' }}>Downloaded</h3>
-          <button onClick={refreshDownloaded} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: 'var(--text-secondary, #9090a0)', cursor: 'pointer', border: '1px solid rgba(255,255,255,0.1)' }} title="Refresh downloaded models">
-            <RefreshCw size={14} />
-          </button>
-        </div>
-        {inventoryLoad === 'loading' ? (
-          <div data-testid="downloaded-loading" style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <RefreshCw size={14} className="spin-animation" /> Loading downloaded models…
-          </div>
-        ) : inventoryLoad === 'queued' ? (
-          <div data-testid="downloaded-queued" style={{ color: '#fbbf24', fontSize: '14px' }}>
-            Downloaded list queued — will load when the engine reconnects.
-          </div>
-        ) : inventoryLoad === 'error' ? (
-          <div data-testid="downloaded-error" role="alert" style={{ color: '#f87171', fontSize: '14px' }}>
-            The downloaded model list could not be loaded — use Refresh above to try again.
-          </div>
-        ) : downloaded.length === 0 ? (
-          <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px' }}>
-            No models downloaded yet — download one from the catalogue above and it will appear here.
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {downloaded.map(renderDownloadedRow)}
-          </div>
-        )}
-      </div>
+      {/* Downloaded inventory — the download-manager seam lives in
+          components/DownloadedModels; this tab passes the hub
+          state and handlers down as props. */}
+      <DownloadedModelsSection
+        downloaded={downloaded}
+        inventoryLoad={inventoryLoad}
+        activeDefault={activeDefault}
+        activeEmbedder={activeEmbedder}
+        embedderSwitchPending={embedderSwitchPending}
+        setActivePending={setActivePending}
+        pendingSetActiveFor={pendingSetActiveFor}
+        pendingDeleteFor={pendingDeleteFor}
+        pendingEmbedderFor={pendingEmbedderFor}
+        onRefresh={refreshDownloaded}
+        onSetActive={handleSetActive}
+        onUseAsEmbedder={handleUseAsEmbedder}
+        onDeleteDownloaded={handleDeleteDownloaded}
+      />
 
     </div>
   );

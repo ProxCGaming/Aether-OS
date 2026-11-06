@@ -196,6 +196,12 @@ h1, h2, h3 {
 }
 @keyframes spin { 100% { transform: rotate(360deg); } }
 
+/* Wave 5: LocalModelsTab's refresh/progress icons carry this class
+   (3 sites) but no rule ever defined it, so they never spun. The
+   class drives the spin keyframes above at the same 1s linear
+   pace the inline-style spinners use. */
+.spin-animation { animation: spin 1s linear infinite; }
+
 @keyframes float1 {
   0% { transform: translate(0, 0) scale(1); }
   33% { transform: translate(40px, -60px) scale(1.1); }
