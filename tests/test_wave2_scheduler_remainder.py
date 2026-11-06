@@ -128,13 +128,23 @@ async def test_stop_clears_not_running_scheduler(tmp_path):
 
 @pytest.mark.asyncio
 async def test_option_a_runs_off_event_loop(manager):
+    ran = []
+
     def slow_option_a():
         time.sleep(0.4)
+        ran.append(True)
         return 7
 
     manager._run_option_a = slow_option_a
     delay, record = await _probe_delay(
         manager._execute_check_job(method="Option A"))
-    assert record["models_tested"] == 7
+    assert ran, "the Option A pass never executed"
+    # E6-NEW-16 (Wave 5): an Option-A-only run makes no provider
+    # calls, so the record must not claim models were "tested" or
+    # price the static rows. This assertion previously read
+    # models_tested == 7 — it pinned the fabricated count the
+    # NEW-16 card names, so it was updated with the fix.
+    assert record["models_tested"] == 0
+    assert record["cost_estimate"] == 0.0
     assert record["status"] == "SUCCESS"
     assert delay < 0.25, f"event loop stalled {delay:.2f}s by Option A"

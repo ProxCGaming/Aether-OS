@@ -36,32 +36,13 @@ DEFAULT_DB_PATH = Path.home() / ".aether" / "capabilities.db"
 # aether_engine.capability.benchmark_cache (BENCHMARK_CACHE) — the live
 # table _run_option_a imports. A duplicate copy in this module drifted
 # from it (N-38); do not re-add one here.
+#
+# The Option C self-test suite likewise lives in exactly one place:
+# aether_engine.capability.test_suite (SELF_TEST_SUITE), executed by
+# aether_engine.capability.self_test. A second, divergent prompt list
+# stood in this module, referenced by nothing (E6-NEW-15); do not
+# re-add one here either.
 # ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Option C: Live self-test prompts
-# ---------------------------------------------------------------------------
-_SELF_TEST_PROMPTS = [
-    {
-        "name": "reasoning",
-        "prompt": "What is 17 * 23? Answer with ONLY the number.",
-        "expected_contains": "391",
-        "category": "reasoning",
-    },
-    {
-        "name": "code",
-        "prompt": "Write a Python function `add(a, b)` that returns the sum. Answer with ONLY the code, no explanation.",
-        "expected_contains": "def add",
-        "category": "code",
-    },
-    {
-        "name": "instruction_following",
-        "prompt": "Reply with exactly the word 'PONG' and nothing else.",
-        "expected_contains": "PONG",
-        "category": "chat",
-    },
-]
 
 
 class CapabilitySchedulerManager:
@@ -408,8 +389,10 @@ class CapabilitySchedulerManager:
             if run_method in ("Option A", "Both"):
                 # N-12: Option A is a synchronous SQLite pass — run
                 # it off the event loop.
-                count = await asyncio.to_thread(self._run_option_a)
-                models_tested += count
+                await asyncio.to_thread(self._run_option_a)
+                # Option A loads static cache rows and makes no
+                # provider calls (it logs its own row count), so
+                # nothing is added to models_tested (E6-NEW-16 below).
 
             if run_method in ("Option C", "Both"):
                 count = await self._run_option_c()
@@ -422,8 +405,19 @@ class CapabilitySchedulerManager:
             status_str = "FAILED"
 
         finished_at = time.time()
-        # Estimate cost: ~5 tokens in + 10 tokens out per test, 3 tests per model
-        cost_estimate = models_tested * 3 * 0.002  # rough sub-cent estimate
+        # E6-NEW-16: the run record must not fabricate. "models_tested"
+        # counts only models that actually underwent a provider call
+        # (Option C self-tests); Option A merely loads static rows, so
+        # a benchmarks-only run honestly records 0 tested and 0 cost.
+        # The estimate prices the real suite size — len(SELF_TEST_SUITE)
+        # tests per self-tested model — at a rough sub-cent per-test
+        # figure; it is an estimate of Option C spend only, never a
+        # charge for work that made no calls. (Pre-fix, the formula
+        # multiplied the combined count, static rows included, by an
+        # assumed 3 tests per model although the suite has 4.)
+        from aether_engine.capability.test_suite import SELF_TEST_SUITE
+
+        cost_estimate = models_tested * len(SELF_TEST_SUITE) * 0.002
 
         record = {
             "id": run_id,

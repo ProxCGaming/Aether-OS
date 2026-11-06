@@ -258,6 +258,13 @@ class PluginInstaller:
         self.pending_installs: dict[str, dict] = {}
         self._audit_logger = audit_logger
 
+    # -- Registry persistence ------------------------------------------
+    # This store follows the same file discipline as its sibling stores
+    # (mcp/registry.py, skills/manager.py, config.py): a corrupt file is
+    # quarantined to a .bak and surfaced, never silently replaced, and
+    # a save is an atomic temp-file write that is flushed and fsynced
+    # before os.replace() swaps it in.
+
     @property
     def registry_load_error(self) -> str | None:
         """Error from loading the on-disk registry, or None if it loaded."""
@@ -299,14 +306,28 @@ class PluginInstaller:
                 "or delete it (a .bak backup was saved) before saving "
                 "plugin changes."
             )
-        import json
         # Atomic write (temp file + os.replace in the same directory):
         # a failed save leaves the previous registry file fully intact,
         # so on-disk state can never be a half-written mix of the old
-        # and new entries. install()'s rollback relies on this.
+        # and new entries. install()'s rollback relies on this. The
+        # temp file is flushed and fsynced before the replace — the
+        # discipline every sibling store follows (E6-NEW-14: this save
+        # used to rename an unsynced file, so a crash could leave the
+        # "replaced" registry empty on disk) — and is removed again if
+        # the write fails partway.
         tmp_file = self.registry_file.with_name(self.registry_file.name + ".tmp")
-        tmp_file.write_text(json.dumps(self._registry, indent=2))
-        os.replace(tmp_file, self.registry_file)
+        try:
+            with tmp_file.open("w", encoding="utf-8") as f:
+                f.write(json.dumps(self._registry, indent=2))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_file, self.registry_file)
+        except BaseException:
+            try:
+                tmp_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     # -- E7-F08: capability ownership / conflicts ----------------------
 
@@ -693,12 +714,26 @@ class PluginInstaller:
                     f"has {actual}", manifest.name, src)
 
     @staticmethod
-    def _safe_extract(source: Path, target_dir: Path) -> None:
+    def _safe_extract(
+        source: Path,
+        target_dir: Path,
+        expected_hashes: dict[str, str] | None = None,
+    ) -> None:
         """Extract a previously validated zip, member by member.
 
         ``extractall`` is never used. Each destination is resolved and
         checked to stay inside ``target_dir`` (defence in depth — the
         members were already validated, so this must never fire).
+
+        When ``expected_hashes`` is given (install passes the
+        manifest's files map), every member it names is re-hashed as
+        it streams out and the extraction refuses on a mismatch.
+        Validation hashed the archive at an earlier moment; without
+        the re-check, bytes swapped between validation and extraction
+        would land on disk unverified (E6-NEW-13). ``manifest.json``
+        itself is the trust anchor and is never in the map — it is
+        skipped here exactly as validation skips it. Members absent
+        from the map keep the byte-budget checks only.
         """
         target_root = target_dir.resolve()
         total_written = 0
@@ -719,6 +754,7 @@ class PluginInstaller:
                 # a caller that skipped validation) still cannot
                 # expand without limit.
                 member_written = 0
+                hasher = hashlib.sha256()
                 with z.open(info) as src_f, dest.open("wb") as out:
                     while True:
                         chunk = src_f.read(_EXTRACT_CHUNK_BYTES)
@@ -736,7 +772,20 @@ class PluginInstaller:
                                 "Refusing to extract: archive exceeds "
                                 f"the {PLUGIN_ZIP_MAX_TOTAL_BYTES}-byte "
                                 "total limit")
+                        hasher.update(chunk)
                         out.write(chunk)
+                if (
+                    expected_hashes is not None
+                    and member != _MANIFEST_MEMBER
+                    and member in expected_hashes
+                    and not hmac.compare_digest(
+                        hasher.hexdigest(), expected_hashes[member]
+                    )
+                ):
+                    raise ValueError(
+                        f"Refusing to extract {member!r}: SHA-256 of the "
+                        "extracted bytes does not match the manifest "
+                        "(archive changed after validation?)")
 
     @staticmethod
     def _contained_path(base: Path, relative: str, what: str) -> Path:
@@ -774,12 +823,10 @@ class PluginInstaller:
                         "Invalid plugin package: manifest.json declares "
                         f"over {PLUGIN_ZIP_MAX_MEMBER_BYTES} uncompressed "
                         "bytes")
-                import json
                 manifest_data = json.loads(z.read(_MANIFEST_MEMBER).decode())
         elif src_path.is_dir():
             m_path = src_path / "manifest.json"
             if m_path.exists():
-                import json
                 manifest_data = json.loads(m_path.read_text(encoding="utf-8"))
 
         if not manifest_data:
@@ -904,7 +951,7 @@ class PluginInstaller:
             # --- Mutation phase ---
             target_dir.mkdir(parents=True, exist_ok=True)
             if source.is_file() and source.suffix == ".zip":
-                self._safe_extract(source, target_dir)
+                self._safe_extract(source, target_dir, manifest.files)
             elif source.is_dir():
                 # Copy contents
                 for item in source.iterdir():
@@ -1153,7 +1200,8 @@ class PluginInstaller:
         # longer matches what this plugin installed) is left
         # registered; uninstalling must not delete the new owner's
         # server from under it.
-        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
+        from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY, MCPConfigError
+        mcp_to_remove: list[str] = []
         for mcp_name in data.get("installed_mcp", []):
             current = GLOBAL_MCP_REGISTRY.get_server(mcp_name)
             if current is None:
@@ -1166,6 +1214,34 @@ class PluginInstaller:
                     "— it is no longer solely owned by this plugin "
                     "(E7-F08)", plugin_name, mcp_name)
                 continue
+            mcp_to_remove.append(mcp_name)
+        # E6-NEW-02: the same connected-session pre-check toggle()
+        # runs (E7-F01). remove_server_sync refuses a connected
+        # server while an event loop is running in this thread; if
+        # that refusal surfaced mid-loop here, the servers already
+        # removed stayed removed while the skills, files and registry
+        # entry survived — a half-uninstalled plugin. The websocket
+        # uninstall handler disconnects first; a caller that did not
+        # now gets the refusal BEFORE anything mutates, so a failed
+        # uninstall leaves the plugin whole. The check covers only
+        # the servers this uninstall will actually remove (E7-F08).
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop_running = False
+        else:
+            loop_running = True
+        if loop_running:
+            for mcp_name in mcp_to_remove:
+                status = GLOBAL_MCP_REGISTRY.get_server_status(mcp_name)
+                if status.get("status") == "connected":
+                    raise MCPConfigError(
+                        f"Cannot uninstall {plugin_name}: MCP server "
+                        f"'{mcp_name}' is still connected; disconnect "
+                        "it first (await remove_server) — refusing "
+                        "to uninstall over a live session."
+                    )
+        for mcp_name in mcp_to_remove:
             GLOBAL_MCP_REGISTRY.remove_server_sync(mcp_name)
 
         # Remove skills — same ownership rule for the skill dirs.
@@ -1405,4 +1481,9 @@ class PluginInstaller:
         self._save_registry()
 
     def get_all(self) -> dict[str, Any]:
-        return self._registry
+        # Hand out a snapshot, not the live registry (E6-NEW-14): a
+        # caller mutating the returned dict would otherwise change
+        # installer state without going through _save_registry, and
+        # the change would silently reach disk on the next save.
+        # Callers only read (iteration, .get, spreads).
+        return copy.deepcopy(self._registry)
