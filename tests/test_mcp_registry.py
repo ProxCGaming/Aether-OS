@@ -5,6 +5,7 @@ TDD red first: fails until aether_engine/mcp/registry.py is extended.
 import pytest
 
 from aether_engine.mcp.registry import (
+    MCP_TOOL_BACKSTOP_TIMEOUT_S,
     MCPConfigError,
     MCPRegistry,
     validate_mcp_server_config,
@@ -91,7 +92,10 @@ async def test_connect_fake_http_server_exposes_prefixed_tool(registry, fake_url
     tool = tools[0]
     assert tool.risk == ToolRisk.EXECUTE
     assert tool.source == "mcp:fake"
-    assert tool.timeout_s == 60
+    # The Tool's timeout_s is the registry backstop: the 60s call budget
+    # plus the client's post-cancel grace + slack, so the backstop can
+    # never pre-empt call_tool's own graceful failure path (Wave 2).
+    assert tool.timeout_s == MCP_TOOL_BACKSTOP_TIMEOUT_S
 
     status = registry.list_servers_with_status()["fake"]
     assert status["status"] == "connected"

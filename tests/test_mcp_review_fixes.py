@@ -198,7 +198,9 @@ async def test_remove_server_closes_live_session(config_path, fake_url):
     assert registry.get_mcp_tools() == []
 
 
-# -- S2: tool-call timeout is Tool.timeout_s (60s), not the server timeout -
+# -- S2: tool-call timeout is the 60s call budget, not the server timeout --
+# (The Tool's registry backstop is that budget + the client's grace +
+# slack — see MCP_TOOL_BACKSTOP_TIMEOUT_S; the call itself gets 60s.)
 
 async def test_tool_call_uses_tool_timeout_not_server_timeout(config_path, fake_url):
     from aether_engine.tools.registry import build_tool_registry
@@ -218,7 +220,9 @@ async def test_tool_call_uses_tool_timeout_not_server_timeout(config_path, fake_
 
     client.call_tool = _spy
     tools = registry.get_mcp_tools()
-    assert tools[0].timeout_s == 60
+    from aether_engine.mcp.registry import MCP_TOOL_BACKSTOP_TIMEOUT_S
+
+    assert tools[0].timeout_s == MCP_TOOL_BACKSTOP_TIMEOUT_S
     tool_registry = build_tool_registry(mcp_tools=tools)
     result = await tool_registry.execute("fake__add", {"a": 3, "b": 5}, approved=True)
     assert result.strip() == "8"

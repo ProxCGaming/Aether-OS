@@ -18,6 +18,7 @@ import gzip
 import json
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -86,6 +87,14 @@ async def test_lifespan_manages_episodic_backfill_task(monkeypatch):
 
     monkeypatch.setattr(app_module.engine_state, "initialize", lambda: None)
     monkeypatch.setattr(app_module.engine_state, "shutdown", lambda: None)
+    # The shared engine_state singleton's audit_logger may have been
+    # bound to an earlier test's (now deleted) tmp dir by a real
+    # initialize() elsewhere in the suite; the lifespan's shutdown
+    # path logs ENGINE_STOPPED through it. Stub it so this test is
+    # hermetic regardless of suite order.
+    monkeypatch.setattr(
+        app_module.engine_state, "audit_logger",
+        SimpleNamespace(log_event=lambda *a, **k: None))
     monkeypatch.setattr(
         "aether_engine.diagnostics.install_crash_logging", lambda: None)
     monkeypatch.setattr(
