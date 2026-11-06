@@ -22,6 +22,7 @@ What the node still owns (not enforcement, so not duplicated):
 
 See ADR 0009 (fail-closed, pre-flight), ADR 0010 (workspace restriction), ADR 0011 §2 (preservation).
 """
+import asyncio
 import json
 import logging
 import os
@@ -140,6 +141,22 @@ def _snapshot_workspace_files(
                     continue
                 snapshot[str(path)] = (stat.st_mtime_ns, stat.st_size)
     return snapshot
+
+
+async def _snapshot_workspace_files_async(
+    workspace_roots: list | None,
+) -> dict[str, tuple[int, int]]:
+    """``_snapshot_workspace_files`` off the event loop (E2-01).
+
+    The walk is synchronous recursive I/O over the whole workspace;
+    run inline it stalls every concurrent task for its duration, and
+    this node takes one snapshot before and one after every
+    write-capable tool call. Delegating to a worker thread keeps the
+    semantics identical — same effective roots, same prune set, same
+    (mtime_ns, size) signatures — while the loop stays responsive.
+    """
+    return await asyncio.to_thread(
+        _snapshot_workspace_files, workspace_roots)
 
 
 def _changed_workspace_files(
@@ -351,8 +368,9 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
             ):
                 try:
                     if registry.get_tool(tool_name).risk.value != "read_only":
-                        fs_snapshot_before = _snapshot_workspace_files(
-                            workspace_roots)
+                        fs_snapshot_before = (
+                            await _snapshot_workspace_files_async(
+                                workspace_roots))
                 except Exception:  # noqa: BLE001 — unknown tool metadata: no observation; the execution below surfaces the real error.
                     fs_snapshot_before = None
 
@@ -496,9 +514,12 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
             # and the per-session views need no changes.
             if executed_write and fs_snapshot_before is not None:
                 try:
+                    fs_snapshot_after = (
+                        await _snapshot_workspace_files_async(
+                            workspace_roots))
                     changed_paths = _changed_workspace_files(
                         fs_snapshot_before,
-                        _snapshot_workspace_files(workspace_roots),
+                        fs_snapshot_after,
                     )
                 except Exception:
                     logger.exception(
