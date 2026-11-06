@@ -14,6 +14,7 @@ into.
 from aether_engine.browser.session import (
     BrowserControlState,
     BrowserError,
+    BrowserNavigationRejectedError,
     BrowserParkedError,
     BrowserProfileError,
     BrowserSession,
@@ -22,12 +23,14 @@ from aether_engine.browser.session import (
     dedicated_profile_dir,
     get_browser_manager,
     reset_browser_manager,
+    validate_navigation_url,
     validate_profile_dir,
 )
 
 __all__ = [
     "BrowserControlState",
     "BrowserError",
+    "BrowserNavigationRejectedError",
     "BrowserParkedError",
     "BrowserProfileError",
     "BrowserSession",
@@ -36,5 +39,6 @@ __all__ = [
     "dedicated_profile_dir",
     "get_browser_manager",
     "reset_browser_manager",
+    "validate_navigation_url",
     "validate_profile_dir",
 ]

@@ -26,12 +26,26 @@ Playwright is imported lazily and only when a session actually
 starts. When it (or its browser build) is unavailable, starting
 fails closed with :class:`BrowserUnavailableError` — an honest
 error, never a silent no-op.
+
+Navigation targets are guarded as strictly as the profile
+(E7-01): :func:`validate_navigation_url` allows only http/https
+URLs whose host is a public address — never ``file://`` or
+browser-internal pages, never loopback / link-local /
+private-range hosts, whether named by literal, by a ``localhost``
+name, or by DNS resolution. The credential vault's fill path
+already refused non-http(s) pages; the general browsing path
+had no equivalent rule, so an approved navigation could put a
+local file or an internal service in the page and the read-only
+extract tool would hand its text to the model.
 """
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import logging
+import socket
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -56,6 +70,21 @@ class BrowserUnavailableError(BrowserError):
 
 class BrowserParkedError(BrowserError):
     """Raised when a browser action is attempted in a non-agent state."""
+
+
+class BrowserNavigationRejectedError(BrowserError):
+    """Raised when a navigation target fails URL validation (E7-01).
+
+    ``reason`` is the machine-readable refusal class (``scheme``,
+    ``no_host``, ``internal_host``) for audit events. The message
+    is the human/model-facing explanation and names the scheme or
+    host only — never the full URL, which can carry credentials
+    or tokens (finding M08).
+    """
+
+    def __init__(self, message: str, *, reason: str = ""):
+        super().__init__(message)
+        self.reason = reason
 
 
 class BrowserControlState(str, Enum):
@@ -132,6 +161,149 @@ def validate_profile_dir(path: str | Path) -> Path:
         f"Refusing browser profile '{candidate}': agent browser sessions may only use "
         f"the dedicated profile at '{root}'.{hint}"
     )
+
+
+# ---------------------------------------------------------------------
+# Navigation URL validation (E7-01)
+# ---------------------------------------------------------------------
+
+#: The only schemes the agent browser may ever open. The credential
+#: vault's fill path checks the same pair (vault/service.py); this
+#: is that rule, extended with a host guard, for general browsing.
+_ALLOWED_SCHEMES = ("http", "https")
+
+_INTERNAL_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        # IPv4: this-host block, RFC 1918, CGNAT shared space,
+        # loopback, link-local (incl. the cloud metadata address),
+        # multicast, and the reserved block.
+        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+        "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+        "224.0.0.0/4", "240.0.0.0/4",
+        # IPv6: unspecified, loopback, link-local, unique-local,
+        # multicast.
+        "::/128", "::1/128", "fe80::/10", "fc00::/7", "ff00::/8",
+    )
+)
+
+#: Resolves a hostname to its address strings. Injectable so tests
+#: (and embedders with their own resolver) never touch the network;
+#: the default is the system resolver via the event loop.
+HostResolver = Callable[[str], Awaitable[Iterable[str]]]
+
+
+async def _default_host_resolver(host: str) -> tuple[str, ...]:
+    """System-resolver addresses for *host*; empty on any failure.
+
+    The system resolver is deliberate: it honours /etc/hosts and
+    the shorthand forms Chromium accepts (``127.1``, ``0x7f.1``),
+    so a name the browser would map onto this machine is judged by
+    the addresses it would actually reach.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return ()
+    return tuple(sorted({str(info[4][0]) for info in infos}))
+
+
+def _is_internal_address(raw: str) -> bool:
+    """True when *raw* is an IP address on this machine or a
+    private/local network — never a public web address.
+
+    Judged against explicit networks, not ``is_private`` /
+    ``is_global``: those flags also cover documentation and
+    benchmarking ranges that host no services, and their exact
+    membership shifts between Python versions.
+    """
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address):
+        mapped = address.ipv4_mapped
+        if mapped is not None:
+            address = mapped
+    if (
+        address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_unspecified
+    ):
+        return True
+    return any(
+        address.version == network.version and address in network
+        for network in _INTERNAL_NETWORKS
+    )
+
+
+async def validate_navigation_url(
+    url: str, *, resolver: HostResolver | None = None
+) -> None:
+    """Refuse any URL the agent browser must not open (E7-01).
+
+    Allowed: http/https URLs whose host is a public address. The
+    host is judged three ways — as an IP literal, as a
+    ``localhost`` name, and by what it resolves to (any internal
+    answer refuses the name). A hostname that does not resolve at
+    all is NOT refused here: it cannot be proven internal, and
+    the navigation attempt itself fails honestly downstream.
+
+    Raises :class:`BrowserNavigationRejectedError`; returns None
+    when the URL may be opened.
+    """
+    parsed = urlparse(url or "")
+    scheme = parsed.scheme.lower()
+    if scheme not in _ALLOWED_SCHEMES:
+        shown = f"{scheme}:" if scheme else "a scheme-less"
+        raise BrowserNavigationRejectedError(
+            f"Refusing to open {shown} URL in the agent browser: only "
+            "http and https pages can be opened. Local files and "
+            "browser-internal pages are never readable by the agent.",
+            reason="scheme",
+        )
+    host = parsed.hostname or ""
+    if not host:
+        raise BrowserNavigationRejectedError(
+            "Refusing to open the URL in the agent browser: it has no "
+            "host, so there is no web page to go to.",
+            reason="no_host",
+        )
+    if _is_internal_address(host):
+        raise BrowserNavigationRejectedError(
+            f"Refusing to open {host} in the agent browser: that is "
+            "this machine or a private/local network address. The "
+            "agent browser can only open public web pages.",
+            reason="internal_host",
+        )
+    hostname = host.rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise BrowserNavigationRejectedError(
+            f"Refusing to open {host} in the agent browser: localhost "
+            "is this machine. The agent browser can only open public "
+            "web pages.",
+            reason="internal_host",
+        )
+    resolve = resolver if resolver is not None else _default_host_resolver
+    try:
+        addresses = await resolve(host)
+    except Exception:
+        # An unverifiable name is treated like an unresolvable
+        # one (see docstring): the attempt proceeds and fails
+        # honestly in the browser if the host is truly bogus.
+        logger.debug("Host resolution check failed for %s", host, exc_info=True)
+        addresses = ()
+    for raw in addresses or ():
+        if _is_internal_address(str(raw)):
+            raise BrowserNavigationRejectedError(
+                f"Refusing to open {host} in the agent browser: the "
+                "name resolves to this machine or a private/local "
+                "network address. The agent browser can only open "
+                "public web pages.",
+                reason="internal_host",
+            )
 
 
 class PlaywrightDriver:
@@ -222,6 +394,7 @@ class BrowserSession:
         chat_session_id: str | None = None,
         audit_logger: AuditLogger | None = None,
         driver_factory: DriverFactory | None = None,
+        host_resolver: HostResolver | None = None,
     ):
         self.profile_dir = validate_profile_dir(profile_dir)
         self.session_id = session_id or uuid.uuid4().hex
@@ -245,6 +418,9 @@ class BrowserSession:
         self.driving_chat_session_id = chat_session_id
         self._audit_logger = audit_logger or AuditLogger()
         self._driver_factory = driver_factory
+        # E7-01: hostname resolver for the navigation guard
+        # (None = the system resolver; see validate_navigation_url).
+        self._host_resolver = host_resolver
         self._driver: Any = None
         self._state = BrowserControlState.AGENT
         self.current_url = ""
@@ -491,8 +667,42 @@ class BrowserSession:
                 "The page could not be checked after the action."
             ) from None
 
+    async def _validate_navigation(self, url: str) -> None:
+        """Run the E7-01 navigation guard, auditing any refusal.
+
+        The audit event carries the host and the refusal class
+        only — never the full URL (finding M08).
+        """
+        try:
+            await validate_navigation_url(url, resolver=self._host_resolver)
+        except BrowserNavigationRejectedError as exc:
+            self._audit("BROWSER_NAVIGATION_REJECTED", {
+                "session_id": self.session_id,
+                "host": urlparse(url or "").hostname or "",
+                "reason": exc.reason,
+            })
+            raise
+
+    async def _validate_open_page(self) -> None:
+        """Hold the CURRENT page to the same rule as navigate().
+
+        The browser can arrive on a page without an agent
+        navigation — a redirect chain, a link, the owner's own
+        driving while in control. Reading such a page back is
+        refused when its URL is not a public web address, which
+        is what closes the read-back half of E7-01. No page yet
+        (empty URL / about:blank) has nothing to read and passes.
+        """
+        url = self.current_url
+        if not url or url == "about:blank":
+            return
+        await self._validate_navigation(url)
+
     async def navigate(self, url: str) -> dict[str, Any]:
         self._require_agent()
+        # E7-01: the target is validated BEFORE the driver starts,
+        # so a refused URL never reaches Playwright at all.
+        await self._validate_navigation(url)
         driver = await self._ensure_driver()
         await self._guard_challenge()
         try:
@@ -508,6 +718,11 @@ class BrowserSession:
                 "Could not open the page at "
                 f"{urlparse(url).netloc or 'that address'}."
             ) from None
+        # E7-01: the LANDED URL is re-validated — a public page
+        # can redirect (or be redirected) to an internal one, and
+        # the requested URL's clean bill does not transfer.
+        if self.current_url and self.current_url != url:
+            await self._validate_navigation(self.current_url)
         self._audit("BROWSER_NAVIGATED", {
             "session_id": self.session_id,
             # Host only: a full URL can carry tokens in its query.
@@ -529,6 +744,9 @@ class BrowserSession:
             raise BrowserError(
                 f"Could not click {selector!r}."
             ) from None
+        # E7-01: a click can navigate (links, form submits), so
+        # the page it landed on is held to the navigate rule.
+        await self._validate_open_page()
         # A click can land on a 2FA step (post-login), so re-detect.
         challenge = await self._detect_after_action()
         return {"url": self.current_url, "challenge": challenge}
@@ -580,6 +798,11 @@ class BrowserSession:
         self._require_agent()
         driver = await self._ensure_driver()
         await self._guard_challenge()
+        # E7-01: extract is the read-back half of the browsing
+        # path — the page as it stands NOW (refreshed into
+        # current_url by the challenge guard above) must be a
+        # public web page before any of its text reaches the model.
+        await self._validate_open_page()
         try:
             return await driver.extract_text(selector)
         except BrowserError:
@@ -688,6 +911,7 @@ class BrowserSessionManager:
         *,
         audit_logger: AuditLogger | None = None,
         driver_factory: DriverFactory | None = None,
+        host_resolver: HostResolver | None = None,
     ):
         self.profile_dir = (
             validate_profile_dir(profile_dir)
@@ -696,6 +920,7 @@ class BrowserSessionManager:
         )
         self._audit_logger = audit_logger or AuditLogger()
         self._driver_factory = driver_factory
+        self._host_resolver = host_resolver
         self._sessions: dict[str, BrowserSession] = {}
         self._active_id: str | None = None
 
@@ -762,6 +987,7 @@ class BrowserSessionManager:
             chat_session_id=chat_session_id,
             audit_logger=self._audit_logger,
             driver_factory=self._driver_factory,
+            host_resolver=self._host_resolver,
         )
         self._sessions[session.session_id] = session
         self._active_id = session.session_id
