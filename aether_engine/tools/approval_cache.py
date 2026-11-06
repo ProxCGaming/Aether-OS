@@ -174,14 +174,12 @@ class ApprovalCache:
         if call_rank is None:
             return None
         # ADR 0029 D3: floored paths are ungrantable (see module docstring).
-        from aether_engine.tools.policy import _floor_prefixes, _system_prefixes
+        from aether_engine.tools.policy import _floor_prefixes, is_system_floor_path
 
         for candidate in candidates:
             if any(candidate.is_relative_to(p) for p in _floor_prefixes()):
                 return None
-            if risk != ToolRisk.READ_ONLY.value and any(
-                candidate.is_relative_to(p) for p in _system_prefixes()
-            ):
+            if risk != ToolRisk.READ_ONLY.value and is_system_floor_path(candidate):
                 return None
         # The match scan and the last_used_at write are one atomic
         # step under the cache lock (list_grants re-enters it).

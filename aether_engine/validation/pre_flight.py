@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,31 @@ class ValidationResult:
     is_valid: bool
     error: str | None = None
     details: dict[str, Any] | None = None
+
+
+# Executables pre-flight accepts without a PATH lookup — the set the
+# original first-token check used, kept as-is.
+_SHELL_BUILTINS = {"echo", "cd", "pwd", "ls", "dir"}
+
+
+def _segment_executables(segment: str) -> list[str]:
+    """The command words a segment would execute, per the shell-rules
+    grammar: the segment's own command word — with environment
+    assignments (``FOO=bar ls``) and wrappers skipped by the same
+    machinery the safety rules use — plus any ``find … -exec``
+    command word. Glued operators never reach here (segments are
+    split quote-aware), and a glued redirection is cut from the
+    command word (``ls>out`` judges ``ls``)."""
+    from aether_engine.validation.shell_rules import _command_positions, _lex
+
+    executables: list[str] = []
+    tokens = _lex(segment)
+    for pos in _command_positions(tokens):
+        value = tokens[pos].value.lstrip("({!")
+        value = re.split(r"[<>]", value, maxsplit=1)[0]
+        if value:
+            executables.append(value)
+    return executables
 
 
 def validate_tool_request(
@@ -111,17 +137,35 @@ def validate_tool_request(
         # else — a deny verdict fails validation outright (the policy
         # layer independently denies too; this is defence in depth for
         # paths that reach execution without a fresh policy check).
-        from aether_engine.validation.shell_rules import evaluate_shell_command
+        from aether_engine.validation.shell_rules import (
+            evaluate_shell_command,
+            split_segments,
+        )
 
         shell_verdict = evaluate_shell_command(command)
         if shell_verdict.verdict == "deny":
             return ValidationResult(False, f"Shell validation failed: command blocked by safety rule '{shell_verdict.rule}'.")
-        executable = command.split()[0]
-        if executable in {"echo", "cd", "pwd", "ls", "dir"}:
-            return ValidationResult(True, details={"executable": executable, "builtin": True})
-        resolved = shutil.which(executable)
-        if not resolved:
-            return ValidationResult(False, f"Shell validation failed: executable '{executable}' not found in PATH.")
-        return ValidationResult(True, details={"executable": resolved, "builtin": False})
+        # E3-N06: judge the executable of EVERY segment, not the first
+        # whitespace token of the whole string — ``ls; pwd``,
+        # ``ls|head`` and ``FOO=bar ls`` are ordinary shell grammar,
+        # not executable names, and a builtin first segment must not
+        # wave the later segments through unchecked.
+        executables: list[str] = []
+        for segment in split_segments(command):
+            executables.extend(_segment_executables(segment))
+        if not executables:
+            # Assignment-only command (``FOO=bar``): nothing executes.
+            return ValidationResult(True, details={"executable": None, "builtin": True})
+        for executable in executables:
+            if executable in _SHELL_BUILTINS:
+                continue
+            if not shutil.which(executable):
+                return ValidationResult(False, f"Shell validation failed: executable '{executable}' not found in PATH.")
+        first = executables[0]
+        return ValidationResult(True, details={
+            "executable": first if first in _SHELL_BUILTINS else shutil.which(first),
+            "builtin": first in _SHELL_BUILTINS,
+            "executables": executables,
+        })
 
     return ValidationResult(True, details={"tool_name": tool_name})

@@ -32,6 +32,16 @@ each ``rm`` invocation in command position is additionally judged
 in a flag-normalised view (split, reordered and long flags merged
 into one cluster), so ``rm -r -f /`` gets the verdict ``rm -rf /``
 gets instead of slipping between the cluster-shaped patterns.
+
+The table is not POSIX-only (E3-N03): the product's primary platform
+is Windows, so the Windows spellings of the same operations —
+PowerShell ``Remove-Item -Recurse -Force``, cmd ``rd /s /q`` and
+``del /s /f /q``, and ``format`` — carry the verdicts their POSIX
+analogues carry (drive roots, the user profile and system trees are
+the ``/`` / ``~`` targets; recursive+force anywhere else asks).
+``powershell``/``pwsh`` ``-Command`` and ``cmd`` ``/c`` payloads are
+nested carriers just like ``bash -c``: they are extracted and
+recursively evaluated (see :func:`_windows_carrier_payload`).
 """
 
 from __future__ import annotations
@@ -58,6 +68,32 @@ def _rx(p: str) -> re.Pattern:
     return re.compile(p, re.IGNORECASE)
 
 
+# ── Windows target spellings (E3-N03) ────────────────────────────
+# The POSIX rules name ``/``, ``~`` and ``$HOME`` as the catastrophic
+# targets. Their Windows equivalents: a drive root, the user profile
+# (exact — a profile SUBdirectory is the recursive-force "ask", the
+# same split POSIX makes between ``~`` and ``~/docs``), and anything
+# under a drive's system trees or the SystemRoot environment anchor.
+_WIN_DELIM = r"(?=$|[\s;&|\"'])"
+_WIN_DRIVE_ROOT = r"[A-Za-z]:(?:[\\/]+)?" + _WIN_DELIM
+_WIN_SYSTEM_PATH = (
+    r"[A-Za-z]:[\\/]+(?:Windows|Program Files(?: \(x86\))?|ProgramData)"
+    r"(?:[\\/]+[^\s;&|]*)?" + _WIN_DELIM
+)
+_WIN_ENV_SYSTEM = (
+    r"(?:%SystemRoot%|%WinDir%|\$env:(?:SystemRoot|WinDir))"
+    r"(?:[\\/]+[^\s;&|]*)?" + _WIN_DELIM
+)
+_WIN_HOME_ROOT = (
+    r"(?:%USERPROFILE%|%HOMEDRIVE%\s*%HOMEPATH%|"
+    r"\$env:(?:USERPROFILE|HOME)|~|\$HOME)" + _WIN_DELIM
+)
+_WIN_DANGEROUS_TARGET = (
+    rf"(?:{_WIN_DRIVE_ROOT}|{_WIN_SYSTEM_PATH}|{_WIN_ENV_SYSTEM}|{_WIN_HOME_ROOT})"
+)
+_WIN_SYSTEM_TARGET = rf"(?:{_WIN_SYSTEM_PATH}|{_WIN_ENV_SYSTEM})"
+
+
 DEFAULT_RULES: list[ShellRule] = [
     # ── deny ────────────────────────────────────────────────────────
     ShellRule("fork-bomb", _rx(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"), "deny"),
@@ -67,10 +103,19 @@ DEFAULT_RULES: list[ShellRule] = [
     ShellRule("dd-to-device", _rx(r"\bdd\b[^;|&]*\bof=/dev/"), "deny"),
     ShellRule("redirect-to-device", _rx(r">\s*/dev/(sd|hd|nvme|disk)"), "deny"),
     ShellRule("shutdown", _rx(r"\b(shutdown|reboot|poweroff|halt)\b"), "deny"),
+    # ── Windows spellings of the same operations (E3-N03) ───────
+    ShellRule("windows-remove-root", _rx(rf"\b(?:Remove-Item|ri|rm)\b(?=[^;|&]*-Recurse\b)(?=[^;|&]*-Force\b)[^;|&]*?{_WIN_DANGEROUS_TARGET}"), "deny"),
+    ShellRule("windows-rd-root", _rx(rf"\b(?:rmdir|rd)\b(?=[^;|&]*/s\b)(?=[^;|&]*/q\b)[^;|&]*?{_WIN_DANGEROUS_TARGET}"), "deny"),
+    ShellRule("windows-del-root", _rx(rf"\b(?:del|erase)\b(?=[^;|&]*/s\b)(?=[^;|&]*(?:/f|/q)\b)[^;|&]*?{_WIN_DANGEROUS_TARGET}"), "deny"),
+    ShellRule("windows-del-system", _rx(rf"\b(?:del|erase)\b(?=[^;|&]*/f\b)[^;|&]*?{_WIN_SYSTEM_TARGET}"), "deny"),
+    ShellRule("windows-format-volume", _rx(r"\bformat(?:\.com)?\s+(?:/\S+\s+)*[A-Za-z]:(?=$|[\s;&|])"), "deny"),
     # ── ask ─────────────────────────────────────────────────────────
     ShellRule("fetch-execute", _rx(r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z)?sh\b"), "ask"),
     ShellRule("rm-recursive-force", _rx(r"\brm\b[^;|&]*((?<!-)-[a-z]*r[a-z]*f|(?<!-)-[a-z]*f[a-z]*r|--recursive\s+--force|--force\s+--recursive)"), "ask"),
     ShellRule("recursive-chmod-system", _rx(r"\b(chmod|chown)\b[^;|&]*-[a-z]*R[a-z]*[^;|&]*\s/(etc|usr|var|bin|sbin|System|Library)\b"), "ask"),
+    ShellRule("windows-remove-recursive-force", _rx(r"\b(?:Remove-Item|ri)\b[^;|&]*(?:-Recurse\b[^;|&]*-Force\b|-Force\b[^;|&]*-Recurse\b)"), "ask"),
+    ShellRule("windows-rd-recursive", _rx(r"\b(?:rmdir|rd)\b[^;|&]*(?:/s\b[^;|&]*/q\b|/q\b[^;|&]*/s\b)"), "ask"),
+    ShellRule("windows-del-recursive-force", _rx(r"\b(?:del|erase)\b[^;|&]*(?:/s\b[^;|&]*(?:/f|/q)\b|(?:/f|/q)\b[^;|&]*/s\b)"), "ask"),
 ]
 
 
@@ -238,7 +283,14 @@ def _lex(segment: str) -> list[_Token]:
 
 
 def _basename(value: str) -> str:
-    return value.lstrip("({!").rsplit("/", 1)[-1]
+    return value.lstrip("({!").replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _command_name(value: str) -> str:
+    """Case-folded command name without a Windows ``.exe`` suffix —
+    how Windows carriers are recognised (``powershell.exe``,
+    ``C:\\…\\pwsh.EXE``) regardless of spelling."""
+    return _basename(value).lower().removesuffix(".exe")
 
 
 def _skip_to_command_word(tokens: list[_Token], pos: int) -> int:
@@ -285,10 +337,48 @@ def _command_positions(tokens: list[_Token]) -> list[int]:
     return positions
 
 
+# Windows carriers (E3-N03): ``powershell``/``pwsh -Command`` and
+# ``cmd /c`` execute a command line exactly like ``bash -c``, but
+# their quoting is not POSIX — a backslash in a PowerShell string is
+# a literal, not an escape — so their payloads are lifted from the
+# raw segment text, not from the POSIX lexer (which would eat the
+# backslash in a trailing ``C:\`` before the closing quote).
+_WINDOWS_CARRIERS = {"powershell", "pwsh", "cmd"}
+
+
+def _windows_carrier_payload(segment: str) -> list[str]:
+    """The command line a Windows carrier in command position will
+    execute, or [] when the segment's command word is not one."""
+    tokens = _lex(segment)
+    if not tokens:
+        return []
+    first = _skip_to_command_word(tokens, 0)
+    if first >= len(tokens):
+        return []
+    name = _command_name(tokens[first].value)
+    if name not in _WINDOWS_CARRIERS:
+        return []
+    if name in ("powershell", "pwsh"):
+        match = re.search(r"(?:^|\s)-(?:Command|c)\b\s*(?P<payload>.*)$", segment, re.IGNORECASE)
+    else:  # cmd /c (execute and exit) and /k (execute and stay) both run it
+        match = re.search(r"(?:^|\s)/[ck]\b\s*(?P<payload>.*)$", segment, re.IGNORECASE)
+    if not match:
+        return []
+    payload = match.group("payload").strip()
+    # One layer of wrapping quotes is the carrier's string delimiter.
+    if len(payload) >= 2 and payload[0] == payload[-1] and payload[0] in "\"'":
+        payload = payload[1:-1]
+    return [payload] if payload.strip() else []
+
+
 def _segment_payloads(segment: str) -> list[str]:
     """Command lines a segment asks a carrier to execute: the payload
     of a nested shell's ``-c`` (``bash``/``sh``/…/``su``) in command
-    position, and the argument string of ``eval``."""
+    position, the argument string of ``eval``, and the Windows
+    carriers' payloads (``powershell -Command``, ``cmd /c``)."""
+    windows = _windows_carrier_payload(segment)
+    if windows:
+        return windows
     tokens = _lex(segment)
     payloads: list[str] = []
     for idx in _command_positions(tokens):

@@ -30,6 +30,51 @@ def _system_prefixes() -> list[Path]:
     return [Path(p) for p in ("/etc", "/usr", "/bin", "/sbin", "/var", "/System", "/Library")]
 
 
+# Windows system locations (E3-N03). The POSIX prefix list can never
+# match a Windows path — and on a non-Windows host ``Path`` cannot
+# even parse one (``C:\Windows\…`` resolves as a relative name) — so
+# the Windows half of the floor is matched on the path TEXT: a
+# drive-anchored ``Windows`` / ``Program Files`` / ``ProgramData``
+# tree, a bare drive root, or a SystemRoot environment anchor, in
+# whatever spelling reached the check.
+_WINDOWS_SYSTEM_SEGMENTS = {
+    "windows",
+    "program files",
+    "program files (x86)",
+    "programdata",
+    "system volume information",
+    "$recycle.bin",
+}
+_WINDOWS_SYSTEM_ENV_MARKERS = (
+    "%systemroot%",
+    "%windir%",
+    "$env:systemroot",
+    "$env:windir",
+)
+
+
+def is_system_floor_path(path: Path) -> bool:
+    """True when ``path`` sits under a system prefix (POSIX or Windows).
+
+    The single system-floor test both the policy verdict
+    (:func:`_apply_floor`) and the approval cache's ungrantable check
+    apply, so the two layers cannot drift apart on platforms.
+    """
+    if any(path.is_relative_to(p) for p in _system_prefixes()):
+        return True
+    text = str(path).replace("/", "\\").lower()
+    if any(marker in text for marker in _WINDOWS_SYSTEM_ENV_MARKERS):
+        return True
+    segments = [seg for seg in text.split("\\") if seg]
+    for idx, segment in enumerate(segments):
+        if len(segment) == 2 and segment[1] == ":" and segment[0].isalpha():
+            if idx == len(segments) - 1:
+                return True  # a bare drive root (C:\)
+            if segments[idx + 1] in _WINDOWS_SYSTEM_SEGMENTS:
+                return True
+    return False
+
+
 def _candidate_paths(args: dict | None) -> list[Path]:
     """Resolved paths a call would touch (shared: tools.paths)."""
     from aether_engine.tools.paths import candidate_paths
@@ -79,9 +124,7 @@ def _apply_floor(verdict: str, tool: Tool, args: dict | None) -> str:
     for candidate in _candidate_paths(args):
         if any(candidate.is_relative_to(p) for p in _floor_prefixes()):
             return "ask"
-        if tool.risk != ToolRisk.READ_ONLY and any(
-            candidate.is_relative_to(p) for p in _system_prefixes()
-        ):
+        if tool.risk != ToolRisk.READ_ONLY and is_system_floor_path(candidate):
             return "ask"
     return verdict
 
