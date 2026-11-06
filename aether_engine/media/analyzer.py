@@ -980,3 +980,19 @@ def schedule_transcript_backfill() -> None:
     task = loop.create_task(_run())
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)
+
+
+async def cancel_inflight_tasks() -> None:
+    """Cancel every detached analyzer task still in flight.
+
+    Backfills and scheduled per-item analyses are kicked off
+    fire-and-forget and tracked in ``_inflight_tasks``, but nothing
+    ever stopped them: at engine shutdown they kept running against
+    a closing engine (N-35). The app lifespan awaits this on the
+    way down.
+    """
+    tasks = [t for t in _inflight_tasks if not t.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)

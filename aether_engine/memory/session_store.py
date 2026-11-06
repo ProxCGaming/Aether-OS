@@ -387,19 +387,27 @@ def search_sessions(query: str, limit: int = 20) -> list[dict[str, Any]]:
     q = (query or "").strip()
     if not q:
         return []
-    like = f"%{q}%"
+    # N-36: the query is user text, not a pattern — escape the LIKE
+    # metacharacters (the knowledge_graph.search_facts S1-N2 pattern)
+    # so "%" / "_" search literally instead of matching everything.
+    escaped = (
+        q.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    like = f"%{escaped}%"
     with _get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
             """
             SELECT s.id, s.title, s.updated_at, s.workspace,
                    (SELECT substr(m.content, 1, 140) FROM session_messages m
-                     WHERE m.session_id = s.id AND m.content LIKE ?
+                     WHERE m.session_id = s.id AND m.content LIKE ? ESCAPE '\\'
                      ORDER BY m.timestamp ASC, m.rowid ASC LIMIT 1) AS snippet
             FROM sessions s
-            WHERE s.title LIKE ?
+            WHERE s.title LIKE ? ESCAPE '\\'
                OR EXISTS (SELECT 1 FROM session_messages m2
-                          WHERE m2.session_id = s.id AND m2.content LIKE ?)
+                          WHERE m2.session_id = s.id AND m2.content LIKE ? ESCAPE '\\')
             ORDER BY s.updated_at DESC
             LIMIT ?
             """,

@@ -11,7 +11,7 @@ from __future__ import annotations
 import gzip
 import json
 
-from aether_engine.audit import AuditLogger
+from aether_engine.audit import AuditLogger, flush_pending_rotations
 
 
 def _events(path):
@@ -23,6 +23,10 @@ def test_audit_log_rotates_and_keeps_archives(tmp_path):
     logger = AuditLogger(log, max_bytes=400, backup_count=2)
     for i in range(40):
         logger.log_event("ENTRY", {"i": i, "pad": "x" * 40})
+    # N-33: rotation compression is backgrounded — drain it before
+    # asserting on the archives (the rotation contract itself —
+    # archives kept, rotation recorded, no write lost — is unchanged).
+    assert flush_pending_rotations(timeout=10)
     # Current log exists and is under (or near) the cap; archives exist.
     assert log.exists()
     assert (tmp_path / "audit.log.1.gz").exists()
@@ -46,6 +50,8 @@ def test_audit_log_drops_oldest_archive(tmp_path):
     logger = AuditLogger(log, max_bytes=300, backup_count=2)
     for i in range(120):
         logger.log_event("ENTRY", {"i": i, "pad": "y" * 40})
+    # N-33: compression is backgrounded — drain before asserting.
+    assert flush_pending_rotations(timeout=10)
     assert (tmp_path / "audit.log.1.gz").exists()
     assert (tmp_path / "audit.log.2.gz").exists()
     assert not (tmp_path / "audit.log.3.gz").exists()

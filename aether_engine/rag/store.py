@@ -267,6 +267,21 @@ class WorkspaceRagStore:
             rows = conn.execute(sql, params).fetchall()
         return [self._chunk_dict(r) for r in rows]
 
+    def count_pending_chunks(self, doc_id: str | None = None) -> int:
+        """How many chunks still wait for an embedding (the backfill
+        queue's depth) — a COUNT(*), not a materialised queue:
+        ``backfill_pending`` reported this number by loading every
+        pending chunk just to ``len()`` it (N-21)."""
+        self.init_db()
+        sql = ("SELECT COUNT(*) FROM prose_chunks"
+               " WHERE embedding IS NULL")
+        params: list[Any] = []
+        if doc_id is not None:
+            sql += " AND doc_id = ?"
+            params.append(doc_id)
+        with self._get_conn() as conn:
+            return int(conn.execute(sql, params).fetchone()[0])
+
     def set_chunk_embedding(self, chunk_id: str, embedding: list[float]) -> None:
         self.init_db()
         with self._get_conn() as conn:
@@ -301,8 +316,11 @@ class WorkspaceRagStore:
         params: list[Any] = list(workspace_roots)
         sql += " ORDER BY d.file_path, c.chunk_index"
         with self._get_conn() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [self._chunk_dict(r) for r in rows]
+            # N-21: stream the rows — fetchall() materialised every
+            # chunk row in the granted roots (and then every decoded
+            # embedding dict) before the caller could score any of
+            # them; iterating the cursor decodes one chunk at a time.
+            return [self._chunk_dict(r) for r in conn.execute(sql, params)]
 
     @staticmethod
     def _chunk_dict(row: sqlite3.Row) -> dict[str, Any]:

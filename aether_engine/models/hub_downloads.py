@@ -554,7 +554,11 @@ class ModelHubDownloads:
                 "downloaded": True,
                 "path": model.get("path"),
             })
-        rows.extend(self._scan_hf_speech_cache())
+        # N-13: the HF cache scan is a synchronous recursive disk
+        # walk (a stat per file) — off the event loop; the delete
+        # path in this file was already offloaded, this sibling was
+        # missed.
+        rows.extend(await asyncio.to_thread(self._scan_hf_speech_cache))
         rows.sort(key=lambda r: (r["source"], r["name"]))
         return {"models": rows, "error": None}
 

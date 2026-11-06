@@ -1,6 +1,8 @@
+import asyncio
 import json
 import logging
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -57,6 +59,14 @@ def _record_schema_version(conn: sqlite3.Connection, store: str, version: int) -
 # in tests gets its own key, so the migration still runs there on
 # first init.
 _DEDUPED_DB_PATHS = set()
+
+# N-07: serialises extraction stores within this process — two
+# concurrent extract_and_store_facts calls must not interleave
+# their read-modify-write transactions (the E4-02 pattern:
+# learned.py's _RECORD_LOCK). RLock so a store path that re-enters
+# (init's dedupe migration calls back into module functions) can
+# never self-deadlock.
+_STORE_LOCK = threading.RLock()
 
 def _get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -273,14 +283,111 @@ def _ensure_kg_deduped() -> None:
     _DEDUPED_DB_PATHS.add(key)
     dedupe_facts()
 
+def _store_extracted_facts(facts_list: list, task_id: str) -> list[dict]:
+    """Synchronous insert half of extract_and_store_facts — run via
+    ``asyncio.to_thread`` by the caller (N-12): the insert loop,
+    including a full facts-table dedupe scan per fact, is SQLite
+    work and must not run on the event loop.
+
+    N-07: the whole store runs under a module lock (the E4-02 /
+    E4-F06 pattern from learned.py / the LangMem store), the entity
+    upsert is INSERT OR IGNORE + re-SELECT, and every fact is
+    written inside its own SAVEPOINT. The old check-then-insert
+    lost the WHOLE batch when two concurrent extractions named the
+    same new entity: the loser's plain INSERT hit the
+    entities.name UNIQUE constraint (or its WAL transaction hit
+    SQLITE_BUSY on the read-to-write upgrade), the exception
+    escaped the loop, and the transaction rolled back every fact
+    the batch had already written (the broad caller-side except
+    then logged it as a generic extraction failure). Serialised
+    stores cannot race each other; the upsert + savepoints are the
+    second line of defence for writers outside this lock, and one
+    fact's failure now rolls back only that fact.
+    """
+    init_kg_db()
+    now = int(time.time())
+    inserted_facts: list[dict] = []
+    with _STORE_LOCK, _get_conn() as conn:
+        for item in facts_list:
+            entity_name = item.get("entity_name")
+            if not entity_name:
+                continue
+
+            # Phase 10.3 A3: dedupe on (entity, content),
+            # case-insensitively (see _normalise_kg_text). Checked
+            # before the entity upsert, so a skipped duplicate does
+            # not leave behind a fact-less entity row. A duplicate
+            # is skipped, not re-inserted; the surviving copy is
+            # left untouched (no confidence bump — that is
+            # correction of a stored fact, not dedupe, and is out
+            # of scope for this phase).
+            fact_text = item.get("fact", "")
+            cur = conn.cursor()
+            cur.execute("SAVEPOINT kg_fact")
+            try:
+                if _find_duplicate_fact_id(conn, entity_name, fact_text) is not None:
+                    logger.info(
+                        "Skipping duplicate KG fact for entity %r: %r",
+                        entity_name, fact_text,
+                    )
+                    _audit_logger.log_event("KNOWLEDGE_FACT_DUPLICATE_SKIPPED", {
+                        "entity_name": entity_name,
+                        "fact": fact_text,
+                        "task_id": task_id,
+                    })
+                    cur.execute("RELEASE kg_fact")
+                    continue
+
+                # Upsert entity (N-07): INSERT OR IGNORE is atomic,
+                # so a concurrent extraction that created the entity
+                # first is adopted via the re-SELECT instead of
+                # raising into the batch.
+                cur.execute(
+                    "INSERT OR IGNORE INTO entities (id, name, entity_type, first_seen, last_updated) VALUES (?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), entity_name,
+                     item.get("entity_type", "Unknown"), now, now)
+                )
+                cur.execute("SELECT id FROM entities WHERE name = ?", (entity_name,))
+                entity_id = cur.fetchone()["id"]
+                cur.execute("UPDATE entities SET last_updated = ? WHERE id = ?", (now, entity_id))
+
+                # Insert fact
+                fact_id = str(uuid.uuid4())
+                cur.execute(
+                    "INSERT INTO facts (id, entity_id, fact_text, source_task_id, timestamp, confidence) VALUES (?, ?, ?, ?, ?, ?)",
+                    (fact_id, entity_id, fact_text, task_id, now, item.get("confidence", 1.0))
+                )
+
+                _audit_logger.log_event("KNOWLEDGE_FACT_STORED", {
+                    "entity_name": entity_name,
+                    "fact": fact_text,
+                    "task_id": task_id
+                })
+                cur.execute("RELEASE kg_fact")
+            except Exception:
+                cur.execute("ROLLBACK TO kg_fact")
+                cur.execute("RELEASE kg_fact")
+                logger.warning(
+                    "Skipping KG fact for entity %r after a store error",
+                    entity_name, exc_info=True)
+                continue
+            inserted_facts.append({
+                "fact_id": fact_id,
+                "entity_id": entity_id,
+                "entity_name": entity_name,
+                "fact_text": fact_text,
+            })
+        conn.commit()
+    return inserted_facts
+
+
 async def extract_and_store_facts(
-    provider: BaseProvider, 
-    user_prompt: str, 
-    assistant_response: str, 
+    provider: BaseProvider,
+    user_prompt: str,
+    assistant_response: str,
     task_id: str
 ) -> None:
-    init_kg_db()
-    
+
     # Skip pure short greetings with no personal information or substance
     pure_greetings = {"hi", "hello", "hey", "hii", "heyy", "sup", "yo"}
     if user_prompt.strip().lower() in pure_greetings and len(assistant_response) < 40:
@@ -325,67 +432,11 @@ Respond ONLY with raw JSON array, no markdown code blocks, no explanations.
         if not isinstance(facts_list, list):
             return
             
-        now = int(time.time())
-        inserted_facts: list[dict] = []
-        with _get_conn() as conn:
-            for item in facts_list:
-                entity_name = item.get("entity_name")
-                if not entity_name: continue
-
-                # Phase 10.3 A3: dedupe on (entity, content),
-                # case-insensitively (see _normalise_kg_text). Checked
-                # before the entity upsert, so a skipped duplicate does
-                # not leave behind a fact-less entity row. A duplicate
-                # is skipped, not re-inserted; the surviving copy is
-                # left untouched (no confidence bump — that is
-                # correction of a stored fact, not dedupe, and is out
-                # of scope for this phase).
-                fact_text = item.get("fact", "")
-                if _find_duplicate_fact_id(conn, entity_name, fact_text) is not None:
-                    logger.info(
-                        "Skipping duplicate KG fact for entity %r: %r",
-                        entity_name, fact_text,
-                    )
-                    _audit_logger.log_event("KNOWLEDGE_FACT_DUPLICATE_SKIPPED", {
-                        "entity_name": entity_name,
-                        "fact": fact_text,
-                        "task_id": task_id,
-                    })
-                    continue
-
-                # Upsert entity
-                cur = conn.cursor()
-                cur.execute("SELECT id FROM entities WHERE name = ?", (entity_name,))
-                row = cur.fetchone()
-                if row:
-                    entity_id = row["id"]
-                    cur.execute("UPDATE entities SET last_updated = ? WHERE id = ?", (now, entity_id))
-                else:
-                    entity_id = str(uuid.uuid4())
-                    cur.execute(
-                        "INSERT INTO entities (id, name, entity_type, first_seen, last_updated) VALUES (?, ?, ?, ?, ?)",
-                        (entity_id, entity_name, item.get("entity_type", "Unknown"), now, now)
-                    )
-
-                # Insert fact
-                fact_id = str(uuid.uuid4())
-                cur.execute(
-                    "INSERT INTO facts (id, entity_id, fact_text, source_task_id, timestamp, confidence) VALUES (?, ?, ?, ?, ?, ?)",
-                    (fact_id, entity_id, fact_text, task_id, now, item.get("confidence", 1.0))
-                )
-
-                _audit_logger.log_event("KNOWLEDGE_FACT_STORED", {
-                    "entity_name": entity_name,
-                    "fact": fact_text,
-                    "task_id": task_id
-                })
-                inserted_facts.append({
-                    "fact_id": fact_id,
-                    "entity_id": entity_id,
-                    "entity_name": entity_name,
-                    "fact_text": fact_text,
-                })
-            conn.commit()
+        # N-12: the insert loop is synchronous SQLite work — it runs
+        # in a worker thread, never on the event loop (and see
+        # _store_extracted_facts for the N-07 race fix inside it).
+        inserted_facts = await asyncio.to_thread(
+            _store_extracted_facts, facts_list, task_id)
         # Epic 4, E4-02: reconcile the new facts against what the
         # graph already believed about the same entities — a new fact
         # that contradicts an older active one supersedes it (the old

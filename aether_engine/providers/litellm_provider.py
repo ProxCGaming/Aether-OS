@@ -633,6 +633,39 @@ class LiteLLMProvider(BaseProvider):
                 output_tokens=usage[1] if usage else None,
             )
 
+        async def _record_attempt_latency_offloaded(
+            recorded_flag: list[bool],
+            model_idx: int,
+            current_model: str,
+            current_provider: str,
+            usage: tuple[int, int] | None,
+            started: float,
+            first_event: list[float | None],
+        ) -> None:
+            """Success-path twin of _record_attempt_latency (N-11):
+            the identical sample, but the latency store's SQLite
+            write runs off the event loop via to_thread — the inline
+            recorder opened a connection, inserted, pruned and
+            committed on the loop for every provider call. The
+            GeneratorExit firing points cannot use this twin (an
+            async generator being closed may not suspend again), so
+            they keep the inline recorder; the shared flag keeps the
+            pair to exactly one sample per attempt."""
+            if recorded_flag[0]:
+                return
+            recorded_flag[0] = True
+            now = time.perf_counter()
+            first = first_event[0]
+            await asyncio.to_thread(
+                self._record_latency,
+                model_name=self.model if model_idx == 0 else _bare_model_id(current_model),
+                provider_name=current_provider,
+                ttft_ms=(first - started) * 1000.0 if first is not None else None,
+                total_ms=(now - started) * 1000.0,
+                decode_ms=(now - first) * 1000.0 if first is not None else None,
+                output_tokens=usage[1] if usage else None,
+            )
+
         def _record_fallback_triggered(
             recorded_flag: list[bool],
             model_idx: int,
@@ -933,7 +966,10 @@ class LiteLLMProvider(BaseProvider):
                 _record_attempt_usage(
                     attempt_recorded, model_idx, current_model,
                     current_provider, call_usage, call_text_parts)
-                _record_attempt_latency(
+                # N-11: the success path can await, so its latency
+                # sample is written off the event loop (the
+                # GeneratorExit points above keep the inline twin).
+                await _record_attempt_latency_offloaded(
                     attempt_latency_recorded, model_idx, current_model,
                     current_provider, call_usage, attempt_started,
                     attempt_first_event)

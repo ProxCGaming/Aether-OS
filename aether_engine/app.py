@@ -25,6 +25,13 @@ logger = logging.getLogger("aether_engine.app")
 # and media backfills below.
 _startup_discovery_task = None
 
+# N-35: handle for the startup episodic backfill task, so shutdown can
+# cancel and await it with the same discipline as discovery. It used
+# to be fired with no handle at all — unreferenced (exposed to the
+# asyncio GC pitfall) and never stopped, so shutdown could cut the
+# backfill mid-write.
+_episodic_backfill_task = None
+
 
 async def _discover_startup_models():
     """Startup model discovery for configured providers.
@@ -113,7 +120,7 @@ async def _ensure_embedder_then_backfill():
 
 
 async def lifespan(_app: FastAPI):
-    global _startup_discovery_task
+    global _startup_discovery_task, _episodic_backfill_task
     # Epic 10, E10-04: unhandled exceptions land in ~/.aether/logs/crash.log.
     from aether_engine.diagnostics import install_crash_logging, record_crash
 
@@ -173,7 +180,8 @@ async def lifespan(_app: FastAPI):
         if (engine_state.user_config.memory_backend or "native") == "native":
             import asyncio
 
-            asyncio.create_task(_ensure_embedder_then_backfill())
+            _episodic_backfill_task = asyncio.create_task(
+                _ensure_embedder_then_backfill())
     except Exception as e:  # noqa: BLE001 — startup boundary: backfill is best-effort and must never block engine startup
         logger.warning(f"Episodic embedding backfill failed to start: {e}")
 
@@ -211,6 +219,26 @@ async def lifespan(_app: FastAPI):
         except Exception as e:  # noqa: BLE001 — shutdown cleanup boundary: discovery already logs its own failures; a failed stop must not prevent shutdown
             logger.warning(f"Startup discovery stop failed: {e}")
         _startup_discovery_task = None
+    # N-35: cancel the episodic backfill with the same discipline as
+    # discovery — shutdown must not cut it mid-write or let it
+    # outlive the engine.
+    if _episodic_backfill_task is not None:
+        _episodic_backfill_task.cancel()
+        try:
+            await _episodic_backfill_task
+        except asyncio.CancelledError:
+            logger.debug("Episodic backfill cancelled at shutdown")
+        except Exception as e:  # noqa: BLE001 — shutdown cleanup boundary: a failed stop must not prevent shutdown
+            logger.warning(f"Episodic backfill stop failed: {e}")
+        _episodic_backfill_task = None
+    # N-35: media backfills and scheduled analyses are detached too —
+    # stop everything the analyzer still has in flight.
+    try:
+        from aether_engine.media.analyzer import cancel_inflight_tasks
+
+        await cancel_inflight_tasks()
+    except Exception as e:  # noqa: BLE001 — shutdown cleanup boundary: a failed stop must not prevent shutdown
+        logger.warning(f"Media analyzer stop failed: {e}")
     # Issue 004: close any owner-task MCP sessions before shutdown.
     try:
         from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY

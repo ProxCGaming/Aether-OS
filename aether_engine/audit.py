@@ -1,11 +1,17 @@
+import itertools
 import json
+import logging
+import queue
 import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from aether_common.contracts import TaskState
+
+logger = logging.getLogger("aether_engine.audit")
 
 # S1-N1: the audit trail lives at one canonical location under
 # ~/.aether (the README rule: everything lives in ~/.aether). The old
@@ -24,6 +30,64 @@ DEFAULT_AUDIT_LOG_PATH = Path.home() / ".aether" / "logs" / "audit.log"
 # a rotation. Cross-process appends (the worker) are single-line
 # O_APPEND writes and stay best-effort, as before.
 _APPEND_LOCK = threading.Lock()
+
+# N-33: rotation compression runs on ONE background worker thread,
+# never on the caller's stack. Rotating used to gzip up to
+# max_bytes synchronously inside the append — on an async handler's
+# event loop, and under _APPEND_LOCK, so one rotation stalled every
+# audit writer in the process behind a 10 MB compression. A rotation
+# now costs the caller a single rename (see AuditLogger._rotate);
+# this worker performs the archive shift + gzip afterwards. Jobs
+# run strictly FIFO, so each job's shifting sees exactly the
+# archives the previous jobs left — the same end state the
+# synchronous rotation produced.
+_ROTATION_QUEUE: queue.Queue[Callable[[], None]] = queue.Queue()
+_ROTATION_SEQ = itertools.count()
+_rotation_worker_lock = threading.Lock()
+_rotation_worker_started = False
+
+
+def _rotation_worker() -> None:
+    while True:
+        job = _ROTATION_QUEUE.get()
+        try:
+            job()
+        except Exception:
+            logger.exception("Audit log rotation compression failed")
+        finally:
+            _ROTATION_QUEUE.task_done()
+
+
+def _enqueue_rotation(job: Callable[[], None]) -> None:
+    global _rotation_worker_started
+    with _rotation_worker_lock:
+        if not _rotation_worker_started:
+            _rotation_worker_started = True
+            threading.Thread(
+                target=_rotation_worker, daemon=True,
+                name="audit-log-rotation",
+            ).start()
+    _ROTATION_QUEUE.put(job)
+
+
+def flush_pending_rotations(timeout: float | None = None) -> bool:
+    """Wait until every queued rotation compression has finished.
+
+    Returns True when the queue drained, False on timeout. For
+    shutdown and tests — production appends never wait on
+    compression (N-33).
+    """
+    if timeout is None:
+        _ROTATION_QUEUE.join()
+        return True
+    drained = threading.Event()
+
+    def _wait() -> None:
+        _ROTATION_QUEUE.join()
+        drained.set()
+
+    threading.Thread(target=_wait, daemon=True).start()
+    return drained.wait(timeout)
 
 # Phase 10.2, C2: the audit log is plaintext and world-readable by default
 # (critical/07 M2/M5), so no secret value and no full tool payload may ever
@@ -134,16 +198,38 @@ class AuditLogger:
         return self.log_path.with_name(f"{self.log_path.name}.{index}.gz")
 
     def _rotate(self) -> None:
-        import gzip
-        import shutil
+        """Stage the live log for background compression (N-33).
 
-        for i in range(self.backup_count - 1, 0, -1):
-            src = self._archive_path(i)
-            if src.exists():
-                src.replace(self._archive_path(i + 1))
-        with open(self.log_path, "rb") as f_in, gzip.open(self._archive_path(1), "wb") as f_out:
-            shutil.copyfileobj(f_in, f_out)
-        self.log_path.write_text("", encoding="utf-8")
+        The caller pays one rename: the live file moves to a unique
+        staging name (the next append recreates the live file), and
+        the rotation worker performs the archive shift + gzip in
+        FIFO order. If the process dies before the worker runs, the
+        staged file remains next to the log as plain text —
+        recoverable, never silently lost.
+        """
+        staging = self.log_path.with_name(
+            f"{self.log_path.name}.rot-{next(_ROTATION_SEQ)}")
+        try:
+            self.log_path.replace(staging)
+        except FileNotFoundError:
+            return
+        archive_path = self._archive_path
+        backup_count = self.backup_count
+
+        def _compress() -> None:
+            import gzip
+            import shutil
+
+            for i in range(backup_count - 1, 0, -1):
+                src = archive_path(i)
+                if src.exists():
+                    src.replace(archive_path(i + 1))
+            with open(staging, "rb") as f_in, \
+                    gzip.open(archive_path(1), "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
+            staging.unlink()
+
+        _enqueue_rotation(_compress)
 
     def _append_locked(self, line: str) -> bool:
         """Rotate (when due) and append one prepared line.

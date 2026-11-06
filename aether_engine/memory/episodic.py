@@ -675,14 +675,14 @@ def _episode_embed_text(task_summary: str, outcome: str | None) -> str:
     return f"{summary}\n{snippet}" if summary else snippet
 
 
-async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags: list[str], outcome: str, thinking_log: str | None = None) -> None:
-    """Store one episode. Its semantic embedding is computed over
-    ``_episode_embed_text(task_summary, outcome)`` — summary plus the
-    head of the outcome (S1-N3) — not the summary alone."""
+def _write_episode_row(task_id: str, user_prompt: str, task_summary: str,
+                       tags_str: str, outcome: str,
+                       thinking_log: str | None, now: int) -> None:
+    """Synchronous head of store_episode: schema init + the
+    replace-write. Run via ``asyncio.to_thread`` by the caller
+    (N-12) — this is SQLite work and must not run on the event loop."""
     init_episodic_db()
     init_embeddings_db()
-    now = int(time.time())
-    tags_str = ",".join(tags)
     with _get_conn() as conn:
         # Phase 10.3 A2: FTS5 cannot declare UNIQUE / PRIMARY KEY on
         # task_id (SQLite rejects it at CREATE VIRTUAL TABLE time), so
@@ -699,6 +699,16 @@ async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags:
                VALUES (?, ?, ?, ?, ?, ?)""",
             (task_id, now, user_prompt, task_summary, tags_str, outcome)
         )
+        # NOTE (Wave 2 escalation, E4-01): episodic_thinking is
+        # replaced only when the new store carries a truthy
+        # thinking_log; a re-store without one RETAINS the previous
+        # row. Pass A carded that retention as a defect (E4-01), but
+        # the E4-F03 wave pinned it as deliberate facade semantics
+        # (test_epic4_e4f03_backfill_fences.py::
+        # test_completed_re_store_without_thinking_keeps_prior_thinking).
+        # The two programme artefacts assert opposite contracts for
+        # the same mechanism — left exactly as-is pending an owner
+        # ruling; do not "fix" in either direction without one.
         if thinking_log:
             conn.execute(
                 """INSERT OR REPLACE INTO episodic_thinking (task_id, thinking_log)
@@ -706,7 +716,18 @@ async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags:
                 (task_id, thinking_log)
             )
         conn.commit()
-    
+
+
+async def store_episode(task_id: str, user_prompt: str, task_summary: str, tags: list[str], outcome: str, thinking_log: str | None = None) -> None:
+    """Store one episode. Its semantic embedding is computed over
+    ``_episode_embed_text(task_summary, outcome)`` — summary plus the
+    head of the outcome (S1-N3) — not the summary alone."""
+    now = int(time.time())
+    tags_str = ",".join(tags)
+    await asyncio.to_thread(
+        _write_episode_row, task_id, user_prompt, task_summary,
+        tags_str, outcome, thinking_log, now)
+
     # Generate and store embedding
     try:
         embedding = await _embed_text(
@@ -790,118 +811,151 @@ async def query_episodes(query: str, limit: int = 5,
     the next query; pass ``backfill_limit=0`` to skip that.
     """
     threshold = _resolve_similarity_threshold(similarity_threshold, config)
+
+    # E4-F10: never let raw user text reach the FTS5 parser —
+    # build the MATCH expression from word tokens instead.
+    clean_query = _fts_match_expression(query)
+
+    if not clean_query:
+        return []
+
+    # N-12: both retrieval legs are synchronous SQLite work; each
+    # runs in a worker thread on its own short-lived connection.
+    # The previous shape opened one connection before the first
+    # await, held it open across the backfill + embedding awaits,
+    # and reused its cursor afterwards.
+    bm25_rows = await asyncio.to_thread(_bm25_leg, clean_query)
+
+    # Phase 10.3 A2: backfill episodes stored unembedded (Phase 10.1
+    # marker: absent from episodic_embeddings) before the semantic
+    # scan, so they can participate in this query. Bounded per call;
+    # failures stay unembedded and retry on the next query.
+    if backfill_limit and backfill_limit > 0:
+        await backfill_episodic_embeddings(limit=backfill_limit, config=config)
+
+    # 2. Semantic Search
+    query_embedding = await _embed_text(query, context="query")
+    semantic_scores: dict[str, float] = {}
+    if query_embedding:
+        semantic_scores = await asyncio.to_thread(
+            _semantic_scores, query_embedding, threshold)
+
+    # 3. RRF Merge
+    k = 60
+    rrf_scores = {}
+
+    # Rank BM25 results
+    bm25_ranked = sorted(bm25_rows, key=lambda x: x["rank"])
+    for idx, row in enumerate(bm25_ranked):
+        t_id = row["task_id"]
+        if t_id not in rrf_scores:
+            rrf_scores[t_id] = {"row": row, "score": 0.0}
+        rrf_scores[t_id]["score"] += 1.0 / (k + idx + 1)
+
+    # Rank Semantic results. Episodes that matched semantically but
+    # not lexically need their full row fetched — one batched fetch
+    # for all of them, on its own connection.
+    semantic_ranked = sorted(semantic_scores.items(), key=lambda x: x[1], reverse=True)
+    missing_ids = [t_id for t_id, _sim in semantic_ranked
+                   if t_id not in rrf_scores]
+    fetched_rows = await asyncio.to_thread(_fetch_episode_rows, missing_ids)
+    for idx, (t_id, sim) in enumerate(semantic_ranked):
+        if t_id in rrf_scores:
+            rrf_scores[t_id]["score"] += 1.0 / (k + idx + 1)
+        elif t_id in fetched_rows:
+            rrf_scores[t_id] = {"row": fetched_rows[t_id],
+                                "score": 1.0 / (k + idx + 1)}
+
+    # Sort combined results
+    final_results = sorted(rrf_scores.values(), key=lambda x: x["score"], reverse=True)
+    results = [res["row"] for res in final_results[:limit]]
+
+    _audit_logger.log_event("EPISODIC_MEMORY_RETRIEVED", {
+        "query": query,
+        "results_count": len(results),
+        "hybrid": query_embedding is not None,
+        "similarity_threshold": threshold,
+    })
+    return results
+
+
+def _bm25_leg(clean_query: str) -> list[dict[str, Any]]:
+    """Lexical (FTS5 BM25) leg of query_episodes — synchronous, run
+    via to_thread by the caller (N-12)."""
     init_episodic_db()
     init_embeddings_db()
     with _get_conn() as conn:
-        cur = conn.cursor()
-        
-        # E4-F10: never let raw user text reach the FTS5 parser —
-        # build the MATCH expression from word tokens instead.
-        clean_query = _fts_match_expression(query)
-
-        if not clean_query:
-            return []
-            
         try:
-            # We use OR matching for terms or wrap in quotes for phrase match.
-            # Here we wrap the whole thing in quotes for exact phrase, or we can just let it match terms.
-            # Let's just let it match terms by providing the clean string (which acts as AND).
-            # If we want it to be more lenient, we can split and join with OR. Let's just use the clean string.
-            cur.execute(
-                """SELECT e.*, t.thinking_log, e.rank 
+            rows = conn.execute(
+                """SELECT e.*, t.thinking_log, e.rank
                    FROM (
-                       SELECT *, rank 
-                       FROM episodic_memory 
-                       WHERE episodic_memory MATCH ? 
+                       SELECT *, rank
+                       FROM episodic_memory
+                       WHERE episodic_memory MATCH ?
                        ORDER BY rank LIMIT 100
                    ) e
                    LEFT JOIN episodic_thinking t ON e.task_id = t.task_id""",
                 (clean_query,)
-            )
-            bm25_rows = cur.fetchall()
+            ).fetchall()
         except sqlite3.OperationalError:
-            bm25_rows = []
+            return []
+    return [dict(r) for r in rows]
 
-        # Phase 10.3 A2: backfill episodes stored unembedded (Phase 10.1
-        # marker: absent from episodic_embeddings) before the semantic
-        # scan, so they can participate in this query. Bounded per call;
-        # failures stay unembedded and retry on the next query.
-        if backfill_limit and backfill_limit > 0:
-            await backfill_episodic_embeddings(limit=backfill_limit, config=config)
 
-        # 2. Semantic Search
-        query_embedding = await _embed_text(query, context="query")
-        semantic_scores = {}
-        if query_embedding:
-            with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
-                e_cur = e_conn.cursor()
-                # N02: only vectors produced by the ACTIVE embedder
-                # at exactly the query vector's dimension are
-                # eligible. Stale-model and unknown-model (NULL)
-                # rows never reach the scorer — eligibility is
-                # decided here, at recall time, so it holds even if
-                # a switch happened outside the switch handler.
-                e_cur.execute(
-                    "SELECT task_id, embedding FROM episodic_embeddings"
-                    " WHERE model = ? AND dimension = ?",
-                    (resolve_embedder(), len(query_embedding)),
-                )
-                for row in e_cur.fetchall():
-                    # S1-M7: rows without the tagged safe format
-                    # (legacy pickle rows included) are never
-                    # deserialised — the embedding reads as missing
-                    # and the row is skipped; it is recomputable via
-                    # backfill under the new format.
-                    emb = decode_embedding(row["embedding"])
-                    if emb is None:
-                        continue
-                    sim = _cosine_similarity(query_embedding, emb)
-                    # Phase 10.3 A2: below-threshold episodes never enter
-                    # RRF — without this, every episode scored ~0 still
-                    # ranked and diluted the relevant hits.
-                    if sim >= threshold:
-                        semantic_scores[row["task_id"]] = sim
+def _semantic_scores(query_embedding: list[float],
+                     threshold: float) -> dict[str, float]:
+    """Semantic leg of query_episodes — synchronous, run via
+    to_thread by the caller (N-12).
 
-        # 3. RRF Merge
-        k = 60
-        rrf_scores = {}
-        
-        # Rank BM25 results
-        bm25_ranked = sorted(bm25_rows, key=lambda x: x["rank"])
-        for idx, row in enumerate(bm25_ranked):
-            t_id = row["task_id"]
-            if t_id not in rrf_scores:
-                rrf_scores[t_id] = {"row": dict(row), "score": 0.0}
-            rrf_scores[t_id]["score"] += 1.0 / (k + idx + 1)
-            
-        # Rank Semantic results
-        semantic_ranked = sorted(semantic_scores.items(), key=lambda x: x[1], reverse=True)
-        for idx, (t_id, sim) in enumerate(semantic_ranked):
-            if t_id in rrf_scores:
-                rrf_scores[t_id]["score"] += 1.0 / (k + idx + 1)
-            else:
-                # Need to fetch the row from episodic_memory if it matched semantic but not BM25
-                cur.execute("""
-                    SELECT e.*, t.thinking_log, 0 as rank 
-                    FROM episodic_memory e
-                    LEFT JOIN episodic_thinking t ON e.task_id = t.task_id
-                    WHERE e.task_id = ?
-                """, (t_id,))
-                fetched = cur.fetchone()
-                if fetched:
-                    rrf_scores[t_id] = {"row": dict(fetched), "score": 1.0 / (k + idx + 1)}
+    N-20: eligible rows are streamed and scored one at a time; the
+    previous shape fetchall()ed every stored embedding into memory
+    before scoring any of them.
+    """
+    scores: dict[str, float] = {}
+    with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
+        # N02: only vectors produced by the ACTIVE embedder at
+        # exactly the query vector's dimension are eligible.
+        # Stale-model and unknown-model (NULL) rows never reach the
+        # scorer — eligibility is decided here, at recall time, so
+        # it holds even if a switch happened outside the switch
+        # handler.
+        e_cur = e_conn.execute(
+            "SELECT task_id, embedding FROM episodic_embeddings"
+            " WHERE model = ? AND dimension = ?",
+            (resolve_embedder(), len(query_embedding)),
+        )
+        for row in e_cur:
+            # S1-M7: rows without the tagged safe format (legacy
+            # pickle rows included) are never deserialised — the
+            # embedding reads as missing and the row is skipped; it
+            # is recomputable via backfill under the new format.
+            emb = decode_embedding(row["embedding"])
+            if emb is None:
+                continue
+            sim = _cosine_similarity(query_embedding, emb)
+            # Phase 10.3 A2: below-threshold episodes never enter
+            # RRF — without this, every episode scored ~0 still
+            # ranked and diluted the relevant hits.
+            if sim >= threshold:
+                scores[row["task_id"]] = sim
+    return scores
 
-        # Sort combined results
-        final_results = sorted(rrf_scores.values(), key=lambda x: x["score"], reverse=True)
-        results = [res["row"] for res in final_results[:limit]]
-        
-        _audit_logger.log_event("EPISODIC_MEMORY_RETRIEVED", {
-            "query": query,
-            "results_count": len(results),
-            "hybrid": query_embedding is not None,
-            "similarity_threshold": threshold,
-        })
-        return results
+
+def _fetch_episode_rows(task_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Full episode rows by task_id (the RRF merge's fetch for
+    semantic-only hits) — synchronous, run via to_thread (N-12)."""
+    if not task_ids:
+        return {}
+    marks = ", ".join("?" for _ in task_ids)
+    with _get_conn() as conn:
+        rows = conn.execute(
+            f"""SELECT e.*, t.thinking_log, 0 as rank
+                FROM episodic_memory e
+                LEFT JOIN episodic_thinking t ON e.task_id = t.task_id
+                WHERE e.task_id IN ({marks})""",
+            task_ids,
+        ).fetchall()
+    return {r["task_id"]: dict(r) for r in rows}
 
 
 def _resolve_similarity_threshold(similarity_threshold: float | None,
@@ -993,6 +1047,62 @@ async def backfill_episodic_embeddings(limit: int | None = None,
     written. Returns counts and logs them
     (EPISODIC_EMBEDDINGS_BACKFILLED).
     """
+    checked, skipped_empty, missing = await asyncio.to_thread(
+        _backfill_snapshot, limit)
+
+    backfilled = 0
+    fenced = 0
+    failed_ids: list[str] = []
+    for task_id, task_summary, outcome in missing:
+        embedding = await _embed_text(
+            _episode_embed_text(task_summary, outcome),
+            task_id=task_id, context="backfill",
+        )
+        if embedding:
+            # E4-F03 fence: the snapshot above is only a read; the
+            # episode may have been revised (its own store wrote a
+            # newer vector) or deleted while this embed was awaited.
+            # Write only if the episode still exists with exactly
+            # the snapshotted summary — otherwise this vector is
+            # already stale, or an orphan for a deleted episode.
+            if _store_embedding_row_if_current(
+                    task_id, embedding, task_summary):
+                backfilled += 1
+            else:
+                fenced += 1
+        else:
+            failed_ids.append(task_id)
+
+    result: dict[str, Any] = {
+        "backfilled": backfilled,
+        "fenced": fenced,
+        "failed": len(failed_ids),
+        "failed_task_ids": failed_ids,
+        "skipped_empty": skipped_empty,
+        "checked": checked,
+    }
+    _audit_logger.log_event("EPISODIC_EMBEDDINGS_BACKFILLED", result)
+    logger.info("EPISODIC_EMBEDDINGS_BACKFILLED %s", result)
+    return result
+
+
+def _backfill_snapshot(limit: int | None):
+    """Candidate snapshot for backfill_episodic_embeddings —
+    synchronous, run via to_thread by the caller (N-12).
+
+    Returns ``(checked, skipped_empty, candidates)`` where a
+    candidate is ``(task_id, task_summary, outcome)`` for one of the
+    oldest unembedded episodes, at most ``limit`` of them.
+
+    N-20: the previous shape fetchall()ed EVERY episode — including
+    full outcome text — and sliced ``[:limit]`` only afterwards.
+    The scan now streams (task_id, task_summary) and counts as it
+    goes; outcome text (the heavy column) is fetched afterwards for
+    just the candidates that will actually be attempted. The counts
+    are unchanged: ``checked`` is every episode in the store and
+    ``skipped_empty`` every unembedded episode whose summary is
+    empty.
+    """
     init_episodic_db()
     init_embeddings_db()
     with _get_conn(EMBEDDINGS_DB_PATH) as e_conn:
@@ -1006,53 +1116,37 @@ async def backfill_episodic_embeddings(limit: int | None = None,
                 (resolve_embedder(),),
             )
         }
+    checked = 0
+    skipped_empty = 0
+    picked: list[tuple[str, str]] = []
     with _get_conn() as conn:
-        rows = conn.execute(
-            "SELECT task_id, task_summary, outcome FROM episodic_memory"
-            " ORDER BY timestamp ASC"
-        ).fetchall()
-    unembedded = [r for r in rows if r["task_id"] not in embedded_ids]
-    missing = [
-        r for r in unembedded if (r["task_summary"] or "").strip()
-    ]
-    skipped_empty = len(unembedded) - len(missing)
-    if limit is not None:
-        missing = missing[:limit]
-
-    backfilled = 0
-    fenced = 0
-    failed_ids: list[str] = []
-    for r in missing:
-        embedding = await _embed_text(
-            _episode_embed_text(r["task_summary"], r["outcome"]),
-            task_id=r["task_id"], context="backfill",
-        )
-        if embedding:
-            # E4-F03 fence: the snapshot above is only a read; the
-            # episode may have been revised (its own store wrote a
-            # newer vector) or deleted while this embed was awaited.
-            # Write only if the episode still exists with exactly
-            # the snapshotted summary — otherwise this vector is
-            # already stale, or an orphan for a deleted episode.
-            if _store_embedding_row_if_current(
-                    r["task_id"], embedding, r["task_summary"]):
-                backfilled += 1
-            else:
-                fenced += 1
-        else:
-            failed_ids.append(r["task_id"])
-
-    result: dict[str, Any] = {
-        "backfilled": backfilled,
-        "fenced": fenced,
-        "failed": len(failed_ids),
-        "failed_task_ids": failed_ids,
-        "skipped_empty": skipped_empty,
-        "checked": len(rows),
-    }
-    _audit_logger.log_event("EPISODIC_EMBEDDINGS_BACKFILLED", result)
-    logger.info("EPISODIC_EMBEDDINGS_BACKFILLED %s", result)
-    return result
+        for r in conn.execute(
+                "SELECT task_id, task_summary FROM episodic_memory"
+                " ORDER BY timestamp ASC"):
+            checked += 1
+            if r["task_id"] in embedded_ids:
+                continue
+            if not (r["task_summary"] or "").strip():
+                skipped_empty += 1
+            elif limit is None or len(picked) < limit:
+                picked.append((r["task_id"], r["task_summary"]))
+    candidates: list[tuple[str, str, str | None]] = []
+    if picked:
+        ids = [task_id for task_id, _summary in picked]
+        marks = ", ".join("?" for _ in ids)
+        with _get_conn() as conn:
+            outcomes = {
+                r["task_id"]: r["outcome"] for r in conn.execute(
+                    f"SELECT task_id, outcome FROM episodic_memory"
+                    f" WHERE task_id IN ({marks})",
+                    ids,
+                )
+            }
+        candidates = [
+            (task_id, summary, outcomes.get(task_id))
+            for task_id, summary in picked
+        ]
+    return checked, skipped_empty, candidates
 
 def get_all_episodes(limit: int = 50) -> list[dict[str, Any]]:
     init_episodic_db()

@@ -373,7 +373,11 @@ class ProseIndexer:
             for d in self.store.list_documents(root_s)
             if d["status"] in ("indexed", "pending")
         }
-        scan = scan_workspace(root_s, known_indexable=known_indexable)
+        # N-12: the scan is a synchronous full-tree walk (+ per-file
+        # head reads) — it runs in a worker thread, not on the event
+        # loop; the watch loop pays this every cycle per root.
+        scan = await asyncio.to_thread(
+            scan_workspace, root_s, known_indexable=known_indexable)
         self._last_excluded[root_s] = [
             {"file_path": e.rel_path, "reason": e.reason} for e in scan.excluded
         ]
@@ -419,7 +423,8 @@ class ProseIndexer:
                 and doc["file_size"] == st.st_size):
             return  # fast path: unchanged and fully embedded
         try:
-            data = entry.abspath.read_bytes()
+            # N-12: file IO off the event loop.
+            data = await asyncio.to_thread(entry.abspath.read_bytes)
         except OSError:
             return
         sha = hashlib.sha256(data).hexdigest()
@@ -511,7 +516,9 @@ class ProseIndexer:
             self._refresh_doc_status(doc_id)
         return {
             "embedded": embedded,
-            "pending": len(self.store.pending_chunks()),
+            # N-21: a COUNT(*), not a materialised queue loaded
+            # just to be len()ed.
+            "pending": self.store.count_pending_chunks(),
         }
 
     # -- status (the WS STATUS contract core) ----------------------------

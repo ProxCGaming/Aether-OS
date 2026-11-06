@@ -127,7 +127,11 @@ class ModelReachabilityChecker:
         """Check if a single model responds to a 1-token probe request."""
         cache_key = f"{provider_name}@{base_url}" if base_url else provider_name
         if not force:
-            cached = self.get_cached_reachability(cache_key, model_id)
+            # N-11: the cache read is synchronous SQLite (a fresh
+            # connection per call) — off the event loop; probes run
+            # up to 5-concurrent and stalled every other task.
+            cached = await asyncio.to_thread(
+                self.get_cached_reachability, cache_key, model_id)
             if cached is not None:
                 return cached[0]
 
@@ -151,7 +155,8 @@ class ModelReachabilityChecker:
                 # E5-J: a stream that opens and yields zero chunks
                 # proves nothing — record it unreachable instead of
                 # reachable-with-a-latency-sample.
-                self.record_reachability(
+                await asyncio.to_thread(
+                    self.record_reachability,
                     cache_key, model_id, reachable=False,
                     latency_ms=latency_ms,
                     error_detail="Probe stream ended without producing any output")
@@ -159,13 +164,20 @@ class ModelReachabilityChecker:
                     f"Model unreachable: {cache_key}/{model_id} — "
                     "probe stream produced no output")
                 return False
-            self.record_reachability(cache_key, model_id, reachable=True, latency_ms=latency_ms)
+            # N-11: the result write is synchronous SQLite — off the
+            # event loop, like the cache read above.
+            await asyncio.to_thread(
+                self.record_reachability, cache_key, model_id,
+                reachable=True, latency_ms=latency_ms)
             logger.info(f"Model reachable: {cache_key}/{model_id} ({latency_ms:.1f}ms)")
             return True
         except Exception as e:  # noqa: BLE001 — a failed probe records the model unreachable; probing never raises
             latency_ms = (time.time() - start) * 1000.0
             err_msg = str(e)
-            self.record_reachability(cache_key, model_id, reachable=False, latency_ms=latency_ms, error_detail=err_msg)
+            await asyncio.to_thread(
+                self.record_reachability, cache_key, model_id,
+                reachable=False, latency_ms=latency_ms,
+                error_detail=err_msg)
             logger.warning(f"Model unreachable: {cache_key}/{model_id} — {err_msg}")
             return False
 

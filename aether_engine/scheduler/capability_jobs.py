@@ -32,61 +32,11 @@ DEFAULT_DB_PATH = Path.home() / ".aether" / "capabilities.db"
 
 
 # ---------------------------------------------------------------------------
-# Option A: Static benchmark data for known cloud models
+# Option A static benchmark data lives in
+# aether_engine.capability.benchmark_cache (BENCHMARK_CACHE) — the live
+# table _run_option_a imports. A duplicate copy in this module drifted
+# from it (N-38); do not re-add one here.
 # ---------------------------------------------------------------------------
-# Scores are normalized 0-100 from public benchmarks (MMLU, HumanEval, MATH, etc.)
-# Sources: model cards, published evals as of mid-2025. Updated periodically.
-BENCHMARK_CACHE: dict[str, dict[str, Any]] = {
-    # Google Gemini
-    "gemini-2.0-flash": {
-        "mmlu": 84.0, "humaneval": 76.0, "math": 82.0,
-        "capabilities": ["chat", "fast", "tools", "vision"],
-        "tier": "fast", "cost_per_1m_input": 0.10, "cost_per_1m_output": 0.40,
-    },
-    "gemini-2.5-flash": {
-        "mmlu": 85.0, "humaneval": 78.0, "math": 83.0,
-        "capabilities": ["chat", "fast", "tools", "vision", "code"],
-        "tier": "balanced", "cost_per_1m_input": 0.15, "cost_per_1m_output": 0.60,
-    },
-    "gemini-2.5-pro": {
-        "mmlu": 90.0, "humaneval": 84.0, "math": 90.0,
-        "capabilities": ["chat", "tools", "vision", "code", "reasoning"],
-        "tier": "premium", "cost_per_1m_input": 1.25, "cost_per_1m_output": 10.0,
-    },
-    # OpenAI
-    "gpt-4o-mini": {
-        "mmlu": 82.0, "humaneval": 72.0, "math": 74.0,
-        "capabilities": ["chat", "fast", "tools", "vision"],
-        "tier": "fast", "cost_per_1m_input": 0.15, "cost_per_1m_output": 0.60,
-    },
-    "gpt-4o": {
-        "mmlu": 88.0, "humaneval": 90.0, "math": 87.0,
-        "capabilities": ["chat", "tools", "vision", "code", "reasoning"],
-        "tier": "premium", "cost_per_1m_input": 2.50, "cost_per_1m_output": 10.0,
-    },
-    # Anthropic
-    "claude-3-5-haiku": {
-        "mmlu": 80.0, "humaneval": 75.0, "math": 73.0,
-        "capabilities": ["chat", "fast", "tools", "vision"],
-        "tier": "fast", "cost_per_1m_input": 0.25, "cost_per_1m_output": 1.25,
-    },
-    "claude-3-5-sonnet": {
-        "mmlu": 89.0, "humaneval": 92.0, "math": 88.0,
-        "capabilities": ["chat", "tools", "vision", "code", "reasoning"],
-        "tier": "premium", "cost_per_1m_input": 3.00, "cost_per_1m_output": 15.0,
-    },
-    # DeepSeek
-    "deepseek-chat": {
-        "mmlu": 79.0, "humaneval": 80.0, "math": 75.0,
-        "capabilities": ["chat", "fast", "code"],
-        "tier": "fast", "cost_per_1m_input": 0.14, "cost_per_1m_output": 0.28,
-    },
-    "deepseek-reasoner": {
-        "mmlu": 86.0, "humaneval": 85.0, "math": 91.0,
-        "capabilities": ["chat", "reasoning", "code"],
-        "tier": "premium", "cost_per_1m_input": 0.55, "cost_per_1m_output": 2.19,
-    },
-}
 
 
 # ---------------------------------------------------------------------------
@@ -208,12 +158,34 @@ class CapabilitySchedulerManager:
                 logger.info("CapabilitySchedulerManager started.")
             except Exception as e:  # noqa: BLE001 — scheduler start is deferred to the loop's first tick if no loop is running yet
                 logger.warning(f"AsyncIOScheduler start deferred (no running event loop yet): {e}")
+                # N-26: a failed start must not wedge the manager.
+                # This used to leave self.scheduler set but not
+                # running, so every later start() was a no-op and
+                # stop() would not clear it (it only cleared a
+                # running scheduler) — one transient failure disabled
+                # capability checks and the weekly memory jobs for
+                # the process's life. Drop the half-built scheduler
+                # so a later start() retries from scratch.
+                failed, self.scheduler = self.scheduler, None
+                if failed is not None:
+                    try:
+                        failed.shutdown(wait=False)
+                    except Exception:  # already broken; clearing the reference is the fix
+                        logger.debug(
+                            "Half-built scheduler shutdown failed",
+                            exc_info=True)
 
     def stop(self):
-        if self.scheduler and self.scheduler.running:
-            self.scheduler.shutdown(wait=False)
-            self.scheduler = None
-            logger.info("CapabilitySchedulerManager stopped.")
+        if self.scheduler:
+            try:
+                if self.scheduler.running:
+                    self.scheduler.shutdown(wait=False)
+                    logger.info("CapabilitySchedulerManager stopped.")
+            finally:
+                # N-26: always release the reference — a not-running
+                # scheduler (e.g. from a failed start) must not block
+                # a later start() from retrying.
+                self.scheduler = None
 
     def _last_run_started_at(self) -> float | None:
         """Epoch of the most recent recorded run, or None if never run."""
@@ -245,7 +217,16 @@ class CapabilitySchedulerManager:
         if interval == "weekly":
             return IntervalTrigger(weeks=1, start_date=anchor)
         if interval == "monthly":
-            return IntervalTrigger(weeks=4, start_date=anchor)
+            # N-38: a calendar month, not IntervalTrigger(weeks=4) —
+            # four weeks drifts ~1–3 days earlier every cycle and
+            # fires 13x a year. Fire on the anchor's day-of-month at
+            # its time of day; the day is clamped to 28 so every
+            # month fires exactly once.
+            if anchor is not None:
+                return CronTrigger(
+                    day=min(anchor.day, 28), hour=anchor.hour,
+                    minute=anchor.minute, second=anchor.second)
+            return CronTrigger(day=1, hour=0, minute=0, second=0)
         return CronTrigger.from_crontab(interval)
 
     def _recover_missed_run(self, trigger):
@@ -425,7 +406,9 @@ class CapabilitySchedulerManager:
 
         try:
             if run_method in ("Option A", "Both"):
-                count = self._run_option_a()
+                # N-12: Option A is a synchronous SQLite pass — run
+                # it off the event loop.
+                count = await asyncio.to_thread(self._run_option_a)
                 models_tested += count
 
             if run_method in ("Option C", "Both"):
