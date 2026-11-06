@@ -1,9 +1,11 @@
 """Tests for startup consistency matrix across config.json, SecretStore, and model registry."""
-from unittest.mock import patch
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from aether_engine.config import UserConfig
+from aether_engine.config import UserConfig, load_config, save_config
 from aether_engine.routing.health import ProviderHealthManager
 from aether_engine.routing.registry import ModelEntry, ModelRegistry
 from aether_engine.routing.startup import validate_startup_configuration
@@ -132,3 +134,83 @@ class TestStartupValidation:
         assert result.active_provider == "google_gemini"
         assert result.active_model == "gemini-2.5-flash"
         assert result.fallback_reason is None
+
+
+class TestDefaultModelSurvivesDiscoveryReplace:
+    """B10, investigation Case C: the user picked a discovered-only
+    model; a later discovery returns a list that omits it (delisted /
+    renamed upstream). The replace must keep the configured default
+    anchored in the persisted provider_models, so the next launch's
+    startup validation initialises with the user's choice — not the
+    registry default it silently substituted before the fix."""
+
+    def test_discovery_replace_keeps_configured_default(self, fake_keyring, secret_store):
+        from aether_engine.orchestration.core import (
+            _discover_cloud_provider_models,
+            clear_discovery_failure,
+        )
+        from aether_engine.providers.discovery import DiscoveryResult
+        from aether_engine.state import engine_state
+
+        secret_store.save_provider("google_gemini", "dummy-gemini-key")
+
+        cfg = engine_state.user_config
+        snap = {
+            "default_provider": cfg.default_provider,
+            "default_model": cfg.default_model,
+            "provider_models": {k: list(v) for k, v in cfg.provider_models.items()},
+            "provider_excluded_models": {
+                k: list(v) for k, v in cfg.provider_excluded_models.items()
+            },
+        }
+        try:
+            # End of session N: the choice and the persisted list
+            # containing it are on disk.
+            cfg.default_provider = "google_gemini"
+            cfg.default_model = "gemini-3.5-flash-lite"
+            cfg.provider_models = {
+                "google_gemini": [
+                    "gemini-3.5-flash",
+                    "gemini-2.5-pro",
+                    "gemini-3.5-flash-lite",
+                ],
+            }
+            save_config(cfg)
+
+            # Session N+1 discovery: the provider no longer returns
+            # the chosen model.
+            clear_discovery_failure("google_gemini")
+            disc = DiscoveryResult(
+                models=["gemini-3.5-flash", "gemini-2.5-pro"], excluded=[])
+            with patch(
+                "aether_engine.orchestration.core.fetch_available_models",
+                new=AsyncMock(return_value=disc),
+            ):
+                changed = asyncio.run(
+                    _discover_cloud_provider_models(
+                        secret_store, SimpleNamespace(name="google_gemini"))
+                )
+            assert changed is True
+            assert "gemini-3.5-flash-lite" in cfg.provider_models["google_gemini"]
+
+            # Reload + re-register exactly as EngineState.initialize /
+            # resync_active_state does, then validate.
+            reloaded = load_config()
+            assert reloaded.default_model == "gemini-3.5-flash-lite"
+            registry = ModelRegistry()
+            registry.update_provider_models(
+                "google_gemini", reloaded.provider_models.get("google_gemini", []))
+            result = validate_startup_configuration(
+                user_config=reloaded,
+                secret_store=secret_store,
+                health_manager=ProviderHealthManager(),
+                registry=registry,
+            )
+            assert result.was_fallback is False
+            assert result.active_provider == "google_gemini"
+            assert result.active_model == "gemini-3.5-flash-lite"
+        finally:
+            cfg.default_provider = snap["default_provider"]
+            cfg.default_model = snap["default_model"]
+            cfg.provider_models = snap["provider_models"]
+            cfg.provider_excluded_models = snap["provider_excluded_models"]

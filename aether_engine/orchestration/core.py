@@ -31,6 +31,7 @@ def clear_discovery_failure(provider_name: str) -> None:
 
 from aether_engine.config import (
     CLOUD_PROVIDERS,
+    anchor_default_model,
     custom_provider_flavor,
     save_config,
 )
@@ -73,9 +74,11 @@ async def _discover_cloud_provider_models(store: SecretStore, provider) -> bool:
     clear_discovery_failure(pname)
     if not disc.models:
         return False
-    cfg.provider_models[pname] = disc.models
+    # B10: keep the configured default anchored in the replaced list.
+    models = anchor_default_model(cfg, pname, disc.models)
+    cfg.provider_models[pname] = models
     cfg.provider_excluded_models[pname] = disc.excluded
-    engine_state.model_registry.update_provider_models(pname, disc.models)
+    engine_state.model_registry.update_provider_models(pname, models)
     save_config(cfg)
     return True
 
@@ -106,9 +109,11 @@ async def _discover_custom_provider_models(store: SecretStore, pname: str, store
     clear_discovery_failure(pname)
     if not disc.models:
         return False
-    cfg.provider_models[pname] = disc.models
+    # B10: keep the configured default anchored in the replaced list.
+    models = anchor_default_model(cfg, pname, disc.models)
+    cfg.provider_models[pname] = models
     cfg.provider_excluded_models[pname] = disc.excluded
-    engine_state.model_registry.update_provider_models(pname, disc.models)
+    engine_state.model_registry.update_provider_models(pname, models)
     save_config(cfg)
     return True
 
@@ -394,9 +399,14 @@ async def _validate_provider_key_inner(
         latency = result.get("latency_ms", 100.0)
         engine_state.health_manager.record_success(provider_name, latency)
         if discovered_models and persist_models:
-            engine_state.user_config.provider_models[provider_name] = discovered_models
+            # B10: keep the configured default anchored in the
+            # replaced list. (The response payload above keeps the
+            # raw discovery result; only the persisted list anchors.)
+            anchored_models = anchor_default_model(
+                engine_state.user_config, provider_name, discovered_models)
+            engine_state.user_config.provider_models[provider_name] = anchored_models
             engine_state.user_config.provider_excluded_models[provider_name] = disc.excluded
-            engine_state.model_registry.update_provider_models(provider_name, discovered_models)
+            engine_state.model_registry.update_provider_models(provider_name, anchored_models)
             save_config(engine_state.user_config)
     elif result["status"] == "invalid_key":
         engine_state.health_manager.record_failure(provider_name, result["message"], is_retriable=False)

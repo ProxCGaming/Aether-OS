@@ -24,6 +24,7 @@ from aether_common.contracts import (
 from aether_engine.config import (
     AUXILIARY_TASK_CLASSES,
     UserConfig,
+    anchor_default_model,
     canonical_workspace_root,
     custom_provider_flavor,
     find_workspace_root,
@@ -774,8 +775,20 @@ async def ws_tasks(ws: WebSocket):
             elif disc.excluded:
                 cfg.provider_excluded_models[pname_] = disc.excluded
             if disc.models:
-                cfg.provider_models[pname_] = disc.models
-                engine_state.model_registry.update_provider_models(pname_, disc.models)
+                # B10: keep the configured default anchored in the
+                # replaced list — except while resolve_default_ is
+                # pending: then this provider has just become the
+                # default and its model is resolved from this very
+                # discovery below, so cfg.default_model still names
+                # the *previous* provider's model and must not be
+                # pinned into this provider's list.
+                models = (
+                    disc.models
+                    if resolve_default_
+                    else anchor_default_model(cfg, pname_, disc.models)
+                )
+                cfg.provider_models[pname_] = models
+                engine_state.model_registry.update_provider_models(pname_, models)
         if resolve_default_ and cfg.default_provider == pname_:
             # The save branch set this provider as the default but
             # deferred choosing its model until discovery landed —
@@ -873,9 +886,12 @@ async def ws_tasks(ws: WebSocket):
                         # listing/restart. Unsaved templates stay
                         # unpersisted via is_registered above.
                         if disc.models and is_registered:
-                            cfg.provider_models[pname] = disc.models
+                            # B10: keep the configured default anchored
+                            # in the replaced list (anchor_default_model).
+                            models = anchor_default_model(cfg, pname, disc.models)
+                            cfg.provider_models[pname] = models
                             cfg.provider_excluded_models[pname] = disc.excluded
-                            engine_state.model_registry.update_provider_models(pname, disc.models)
+                            engine_state.model_registry.update_provider_models(pname, models)
                             save_config(cfg)
                 except Exception as ref_err:  # noqa: BLE001 — per-provider isolation: one provider's refresh failure must not abort the refresh for the rest
                     record_discovery_failure(pname)
@@ -3468,9 +3484,37 @@ async def ws_tasks(ws: WebSocket):
             elif msg.type == EventType.MODEL_SET_DEFAULT:
                 pname = msg.payload.get("provider", engine_state.user_config.default_provider)
                 model = msg.payload.get("model", "")
-                if model:
+                invalid = (
+                    not model
+                    or not pname
+                    or (isinstance(model, str) and not model.strip())
+                    or (isinstance(pname, str) and not pname.strip())
+                )
+                if invalid:
+                    # E1-07: validate at the boundary. The old code
+                    # answered an empty model with a MODEL_DEFAULT_CHANGED
+                    # echoing the *old* default — a success-shaped lie
+                    # that could even relabel another provider as the
+                    # default in the UI. Mutate nothing, save nothing.
+                    await ws.send_text(Event(
+                        type=EventType.ERROR,
+                        request_id=req_id,
+                        payload={"error": "MODEL_SET_DEFAULT requires a non-empty provider and model"},
+                    ).to_json())
+                else:
                     engine_state.user_config.default_provider = pname
                     engine_state.user_config.default_model = model
+                    # B10 anchor: the applied choice joins the
+                    # provider's persisted model list in the same save,
+                    # so a later discovery replace cannot silently
+                    # orphan it (anchor_default_model keeps it in the
+                    # list from then on). The registry update mirrors
+                    # what resync_active_state would derive at the
+                    # next launch from the same list.
+                    anchored = engine_state.user_config.provider_models.setdefault(pname, [])
+                    if model not in anchored:
+                        anchored.append(model)
+                    engine_state.model_registry.update_provider_models(pname, anchored)
                     engine_state.active_provider = pname
                     engine_state.active_model = model
                     save_config(engine_state.user_config)
@@ -3478,11 +3522,11 @@ async def ws_tasks(ws: WebSocket):
                     # record — a switch that "didn't stick" can now
                     # be checked against what the engine applied.
                     logger.info(f"MODEL_SET_DEFAULT applied: {pname}/{model}")
-                await ws.send_text(Event(
-                    type=EventType.MODEL_DEFAULT_CHANGED,
-                    request_id=req_id,
-                    payload={"provider": pname, "model": engine_state.user_config.default_model},
-                ).to_json())
+                    await ws.send_text(Event(
+                        type=EventType.MODEL_DEFAULT_CHANGED,
+                        request_id=req_id,
+                        payload={"provider": pname, "model": engine_state.user_config.default_model},
+                    ).to_json())
 
             # -----------------------------------------------------------
             # Session Events

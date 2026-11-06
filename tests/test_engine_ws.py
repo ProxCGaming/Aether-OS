@@ -446,6 +446,116 @@ class TestEngineWebSocket(unittest.TestCase):
                 self.assertEqual(resp.type, EventType.MODEL_DEFAULT_CHANGED)
                 self.assertEqual(resp.payload["model"], "gemini-2.5-pro")
 
+    @staticmethod
+    def _snapshot_default_state():
+        cfg = engine_state.user_config
+        return {
+            "default_provider": cfg.default_provider,
+            "default_model": cfg.default_model,
+            "active_provider": engine_state.active_provider,
+            "active_model": engine_state.active_model,
+            "provider_models": {k: list(v) for k, v in cfg.provider_models.items()},
+        }
+
+    @staticmethod
+    def _restore_default_state(snap):
+        cfg = engine_state.user_config
+        cfg.default_provider = snap["default_provider"]
+        cfg.default_model = snap["default_model"]
+        engine_state.active_provider = snap["active_provider"]
+        engine_state.active_model = snap["active_model"]
+        cfg.provider_models = {k: list(v) for k, v in snap["provider_models"].items()}
+
+    def test_model_set_default_empty_model_is_rejected(self):
+        """E1-07: an empty model must not be answered with a
+        success-shaped MODEL_DEFAULT_CHANGED echoing the old default.
+        The handler validates at the boundary: ERROR reply, and no
+        state is mutated (so nothing is saved either)."""
+        with TestClient(app) as client:
+            valid_token = engine_state.auth_token
+            with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
+                ws.receive_text()  # HELLO
+                snap = self._snapshot_default_state()
+                try:
+                    req = Event(
+                        type=EventType.MODEL_SET_DEFAULT,
+                        payload={"provider": "google_gemini", "model": ""},
+                    )
+                    ws.send_text(req.to_json())
+                    resp = Event.from_json(ws.receive_text())
+                    self.assertEqual(resp.type, EventType.ERROR)
+                    self.assertIn("error", resp.payload)
+                    cfg = engine_state.user_config
+                    self.assertEqual(cfg.default_provider, snap["default_provider"])
+                    self.assertEqual(cfg.default_model, snap["default_model"])
+                    self.assertEqual(cfg.provider_models, snap["provider_models"])
+                    self.assertEqual(engine_state.active_model, snap["active_model"])
+                finally:
+                    self._restore_default_state(snap)
+
+    def test_model_set_default_empty_provider_is_rejected(self):
+        """E1-07: an empty provider is rejected the same way — the
+        old code persisted default_provider="" and startup later
+        treated the engine as unconfigured."""
+        with TestClient(app) as client:
+            valid_token = engine_state.auth_token
+            with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
+                ws.receive_text()  # HELLO
+                snap = self._snapshot_default_state()
+                try:
+                    req = Event(
+                        type=EventType.MODEL_SET_DEFAULT,
+                        payload={"provider": "", "model": "gemini-2.5-pro"},
+                    )
+                    ws.send_text(req.to_json())
+                    resp = Event.from_json(ws.receive_text())
+                    self.assertEqual(resp.type, EventType.ERROR)
+                    self.assertIn("error", resp.payload)
+                    cfg = engine_state.user_config
+                    self.assertEqual(cfg.default_provider, snap["default_provider"])
+                    self.assertEqual(cfg.default_model, snap["default_model"])
+                    self.assertEqual(engine_state.active_provider, snap["active_provider"])
+                finally:
+                    self._restore_default_state(snap)
+
+    def test_model_set_default_anchors_model_in_provider_models(self):
+        """B10 (apply-time anchor): the applied model joins the
+        provider's persisted provider_models in the same save, so a
+        later discovery replace cannot silently orphan the choice
+        (see anchor_default_model in aether_engine/config.py)."""
+        from aether_engine.config import load_config
+
+        with TestClient(app) as client:
+            valid_token = engine_state.auth_token
+            with client.websocket_connect("/ws/tasks", headers={"Authorization": f"Bearer {valid_token}"}) as ws:
+                ws.receive_text()  # HELLO
+                snap = self._snapshot_default_state()
+                try:
+                    engine_state.user_config.provider_models["google_gemini"] = [
+                        "gemini-3.5-flash",
+                    ]
+                    req = Event(
+                        type=EventType.MODEL_SET_DEFAULT,
+                        payload={"provider": "google_gemini", "model": "gemini-2.5-pro"},
+                    )
+                    ws.send_text(req.to_json())
+                    resp = Event.from_json(ws.receive_text())
+                    self.assertEqual(resp.type, EventType.MODEL_DEFAULT_CHANGED)
+                    self.assertEqual(resp.payload["model"], "gemini-2.5-pro")
+                    self.assertIn(
+                        "gemini-2.5-pro",
+                        engine_state.user_config.provider_models["google_gemini"],
+                    )
+                    # Persisted by the handler's save, not just in memory.
+                    reloaded = load_config()
+                    self.assertEqual(reloaded.default_model, "gemini-2.5-pro")
+                    self.assertIn(
+                        "gemini-2.5-pro",
+                        reloaded.provider_models.get("google_gemini", []),
+                    )
+                finally:
+                    self._restore_default_state(snap)
+
 
 class TestEditAndResendHardening(unittest.TestCase):
     """Edit-and-resend: client message ids land in the store, and a

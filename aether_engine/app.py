@@ -5,7 +5,11 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from aether_common.contracts import SCHEMA_VERSION
-from aether_engine.config import custom_provider_flavor, save_config
+from aether_engine.config import (
+    anchor_default_model,
+    custom_provider_flavor,
+    save_config,
+)
 from aether_engine.providers.discovery import fetch_available_models
 from aether_engine.routes.websocket import router as ws_router
 from aether_engine.secrets.storage import SecretStore
@@ -51,9 +55,12 @@ async def _discover_startup_models():
                         pname, key, base_url=base_url,
                         provider_flavor=custom_provider_flavor(pname, cfg))
                     if disc.models:
-                        cfg.provider_models[pname] = disc.models
+                        # B10: keep the configured default anchored in
+                        # the replaced list (anchor_default_model).
+                        models = anchor_default_model(cfg, pname, disc.models)
+                        cfg.provider_models[pname] = models
                         cfg.provider_excluded_models[pname] = disc.excluded
-                        engine_state.model_registry.update_provider_models(pname, disc.models)
+                        engine_state.model_registry.update_provider_models(pname, models)
                         # F-10 / ADR 0033: the persisted default wins.
                         # Discovery registers candidates only — it must
                         # never overwrite UserConfig.default_model with

@@ -627,6 +627,31 @@ def _clean_workspace_roots(raw) -> list:
         cleaned.append(canonical)
     return cleaned
 
+
+def anchor_default_model(cfg: UserConfig, provider_name: str, models: list[str]) -> list[str]:
+    """Return ``models`` with the configured default model kept (B10).
+
+    Discovery replaces a provider's persisted model list with whatever
+    the provider currently reports. When the provider is the configured
+    default provider and the user's chosen ``default_model`` is missing
+    from the fresh list (delisted or renamed upstream), startup
+    validation would silently substitute the registry default for the
+    session while the config — and every settings surface — keeps
+    showing the choice: the switch "un-sticks". Keeping the chosen
+    default in the list anchors the switch; the choice stays valid
+    until the user picks another model. Returns the input list
+    unchanged when no anchoring applies, so callers can use the result
+    for both the persisted list and the registry update.
+    """
+    if (
+        provider_name == cfg.default_provider
+        and cfg.default_model
+        and cfg.default_model not in models
+    ):
+        return [*models, cfg.default_model]
+    return models
+
+
 def load_config(path: Path | None = None) -> UserConfig:
     p = path or CONFIG_PATH
     if not p.exists():
