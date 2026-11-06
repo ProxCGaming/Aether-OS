@@ -13,7 +13,9 @@ resolved path lies inside the session's own attachment storage (the
 session's directory under ``attachments_dir()``, or the shared ``global``
 bucket uploads land in before a session exists). A recorded path anywhere
 else on the machine is never read: the attachment is omitted from the ZIP
-and listed by name in the same manifest (E4-05).
+and listed by name in the same manifest (E4-05). The attachments-directory
+sweep follows the same rule on resolved paths, so a symlink planted in
+the session's directory pointing outside it is omitted the same way.
 """
 
 from __future__ import annotations
@@ -253,13 +255,30 @@ def export_session_zip(session_id: str, dest_path: Path | str | None = None) -> 
 
         att_dir = attachments_dir(session_id)
         if att_dir.exists() and att_dir.is_dir():
+            # The sweep reads only what resolves INSIDE the session's
+            # own directory (the E4-05 discipline the message loop
+            # below already applies): a symlink planted in the
+            # directory pointing outside it is not followed — it is
+            # omitted and manifest-listed like any out-of-storage
+            # attachment. A link resolving inside stays legitimate
+            # (containment is judged on the resolved path, F-04).
+            resolved_att_dir = att_dir.resolve()
             for f in sorted(att_dir.iterdir()):
                 if f.is_file():
                     arcname = f"attachments/{f.name}"
                     if arcname in seen_arcnames:
                         continue
+                    try:
+                        resolved = f.resolve()
+                    except OSError:
+                        resolved = None
+                    if resolved is None or not resolved.is_relative_to(
+                            resolved_att_dir):
+                        seen_arcnames.add(arcname)
+                        omitted_outside.append(arcname)
+                        continue
                     seen_arcnames.add(arcname)
-                    if not _write_attachment_scrubbed(zf, f, arcname):
+                    if not _write_attachment_scrubbed(zf, resolved, arcname):
                         omitted_binary.append(arcname)
 
         # Also collect message attachments referenced by path — but only
@@ -316,7 +335,7 @@ def export_session_zip(session_id: str, dest_path: Path | str | None = None) -> 
             if omitted_outside:
                 sections.append(
                     "The following attachments were omitted from this export "
-                    "because their recorded paths point outside this "
+                    "because their paths resolve outside this "
                     "session's attachment storage, and an export never reads "
                     "files from outside that storage:\n"
                     "\n"

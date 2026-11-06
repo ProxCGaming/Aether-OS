@@ -171,7 +171,11 @@ def _is_prose_candidate(name: str) -> bool:
     return p.suffix == "" and p.name.lower().startswith("readme")
 
 
-def scan_workspace(root: str | Path) -> ScanResult:
+def scan_workspace(
+    root: str | Path,
+    *,
+    known_indexable: dict[str, tuple[int, int]] | None = None,
+) -> ScanResult:
     """Walk *root* once, classifying files for the index.
 
     Directory pruning matches the repo map (E8-3.1): the built-in
@@ -179,6 +183,15 @@ def scan_workspace(root: str | Path) -> ScanResult:
     are silently skipped — they were never candidates; prose-shaped
     files that fail a fence are reported in ``excluded`` with the
     reason, which is what the status contract surfaces.
+
+    ``known_indexable`` maps a candidate's relative path to the
+    (mtime_ns, size) the index already holds for it. A candidate
+    whose live stat matches exactly is classified indexable WITHOUT
+    the 8 KB head read the binary test otherwise costs on every
+    scan (E4-06): that (mtime, size) pair is the module's own
+    unchanged-file identity — ``_index_file`` fast-paths on it — so
+    the file's prose classification is already proven. Callers that
+    pass nothing (estimate, first scans) get the full check.
     """
     root_path = Path(root).expanduser()
     result = ScanResult()
@@ -231,11 +244,16 @@ def scan_workspace(root: str | Path) -> ScanResult:
                 result.excluded.append(ExcludedEntry(rel, "symlink_escape"))
                 continue
             try:
-                size = abspath.stat().st_size
+                st = abspath.stat()
             except OSError:
                 continue
+            size = st.st_size
             if size > MAX_FILE_BYTES:
                 result.excluded.append(ExcludedEntry(rel, "too_large"))
+                continue
+            if (known_indexable is not None
+                    and known_indexable.get(rel) == (st.st_mtime_ns, size)):
+                result.indexable.append(ScanEntry(rel, abspath, size))
                 continue
             try:
                 with abspath.open("rb") as fh:
@@ -347,7 +365,15 @@ class ProseIndexer:
 
     async def _index_pass(self, root_s: str, *, progress_cb) -> dict[str, Any]:
         self._reconcile_embedder()
-        scan = scan_workspace(root_s)
+        # Files the store already holds as indexed/pending with this
+        # exact (mtime, size) skip the scan's per-file head read
+        # (E4-06) — an idle watch pass becomes walk + stat only.
+        known_indexable = {
+            d["file_path"]: (d["mtime"], d["file_size"])
+            for d in self.store.list_documents(root_s)
+            if d["status"] in ("indexed", "pending")
+        }
+        scan = scan_workspace(root_s, known_indexable=known_indexable)
         self._last_excluded[root_s] = [
             {"file_path": e.rel_path, "reason": e.reason} for e in scan.excluded
         ]
@@ -528,6 +554,13 @@ class ProseIndexer:
         }
 
     def _excluded_for(self, root_s: str) -> list[dict[str, str]]:
+        # Status reports state, it never produces it (E4-13): the
+        # answer comes from the store plus the last index pass's
+        # recorded exclusions. This used to fall through to a full
+        # synchronous scan_workspace whenever both were empty — and
+        # an exclusion-free workspace leaves them empty, so EVERY
+        # status poll for such a root paid a whole-tree walk + head
+        # reads. Discovery belongs to index passes and the watcher.
         by_path = {
             d["file_path"]: {"file_path": d["file_path"], "reason": "excluded"}
             for d in self.store.list_documents(root_s)
@@ -535,13 +568,6 @@ class ProseIndexer:
         }
         for entry in self._last_excluded.get(root_s, []):
             by_path[entry["file_path"]] = entry
-        if not by_path and Path(root_s).is_dir():
-            scan = scan_workspace(root_s)
-            self._last_excluded[root_s] = [
-                {"file_path": e.rel_path, "reason": e.reason} for e in scan.excluded
-            ]
-            for entry in self._last_excluded[root_s]:
-                by_path[entry["file_path"]] = entry
         return [by_path[k] for k in sorted(by_path)]
 
     # -- watcher -----------------------------------------------------------

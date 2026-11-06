@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -135,6 +136,16 @@ def _write_lessons(lessons: list[str], path: Path) -> None:
         raise
 
 
+# Serialises record_lessons' read-modify-write (E4-02). Atomic
+# replace alone prevents corruption, not lost update: two concurrent
+# callers could both load the same existing lessons, each merge only
+# its own, and the second replace would silently discard the first
+# caller's — while that caller still reported (and audit-logged) its
+# lessons as recorded. The LangMem file store got exactly this lock
+# in E4-F06; this module's RMW needs the same discipline.
+_RECORD_LOCK = threading.RLock()
+
+
 def record_lessons(lessons: list[str], task_id: str = "",
                    path: Path | None = None) -> dict[str, Any]:
     """Append new lessons to learned.md, deduped and capped.
@@ -142,8 +153,16 @@ def record_lessons(lessons: list[str], task_id: str = "",
     Returns {"added": [...], "skipped_duplicates": int,
     "total": int}. The file is only rewritten when something was
     actually added (a cap drop caused by additions rides along).
+    The load → merge → write sequence runs under ``_RECORD_LOCK``
+    so concurrent callers cannot lose each other's lessons.
     """
     target = path if path is not None else LEARNED_MD_PATH
+    with _RECORD_LOCK:
+        return _record_lessons_locked(lessons, task_id, target)
+
+
+def _record_lessons_locked(lessons: list[str], task_id: str,
+                           target: Path) -> dict[str, Any]:
     existing = load_lessons(target)
     seen = {_normalise_lesson(lesson) for lesson in existing}
     added: list[str] = []

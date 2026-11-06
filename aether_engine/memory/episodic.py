@@ -1135,9 +1135,16 @@ def _delete_episode_data(task_ids: list[str] | None) -> dict[str, int]:
 
 
 def delete_episode(task_id: str) -> bool:
+    """Delete one episode from both stores. Returns True only when
+    an episode row actually went away (E4-07): deleting an id that
+    never existed reports False and writes no DELETED audit event —
+    the audit log must not gain deletions of records that were
+    never there."""
     init_episodic_db()
     init_embeddings_db()
-    _delete_episode_data([task_id])
+    counts = _delete_episode_data([task_id])
+    if counts["episodes"] == 0:
+        return False
     _audit_logger.log_event("EPISODIC_MEMORY_DELETED", {"task_id": task_id})
     return True
 

@@ -283,6 +283,33 @@ def _drop_checkpoint_backups(cp_db: Path, rewind_id: str) -> None:
         conn.close()
 
 
+def _abandon_staging(session_id: str, rewind_id: str) -> None:
+    """Best-effort convergence after a failed staging (E4-04).
+
+    A pending row still in the ``staging`` phase committed nothing —
+    the memory transaction never ran — so its intent is dropped and
+    the session is free again. A row that reached ``memory`` carries
+    real staged state (backed-up, deleted messages) and is left
+    exactly where it is: ``reconcile_pending`` completes such rows
+    from their persisted plan by design, and dropping one here would
+    orphan the backups undo needs. Never raises.
+    """
+    try:
+        row = _pending_row(session_id)
+        if (row is not None and row["rewind_id"] == rewind_id
+                and (row["phase"] or "staging") == "staging"):
+            with _get_conn() as conn:
+                _delete_staged_rows(conn, session_id, rewind_id)
+                conn.commit()
+            logger.info(
+                "TASK_REWIND dropped failed staging intent session=%s",
+                session_id)
+    except Exception:
+        logger.exception(
+            "TASK_REWIND could not drop failed staging intent session=%s",
+            session_id)
+
+
 def _set_pending_phase(rewind_id: str, phase: str) -> None:
     with _get_conn() as conn:
         conn.execute(
@@ -652,8 +679,18 @@ def stage_rewind(
     init_rewind_service_db()
     # Converge anything a previous interruption left behind before
     # judging whether this session is free to stage: an expired or
-    # half-staged pending row must not wedge new rewinds.
-    reconcile_pending()
+    # half-staged pending row must not wedge new rewinds. A reconcile
+    # failure is an expected failure like any other here (E4-04):
+    # refuse rather than raise — the staged rows stay put and the
+    # next touch retries the convergence.
+    try:
+        reconcile_pending()
+    except Exception:
+        logger.exception(
+            "TASK_REWIND reconciliation failed for session=%s", session_id)
+        return refusal(
+            "Existing rewind state could not be reconciled; "
+            "the rewind was not staged.")
     if has_staged(session_id):
         return refusal(
             "A rewind is already waiting for undo in this session; "
@@ -674,17 +711,47 @@ def stage_rewind(
     files_not_reverted = _files_not_reverted(entries, target)
     is_graph_task = any(e["checkpoint_id"] for e in entries)
     cp_db = Path(checkpoint_db) if checkpoint_db else _checkpoint_db_path()
-    plan = _plan_checkpoint_prune(cp_db, session_id, is_graph_task, checkpoint_id)
+    try:
+        plan = _plan_checkpoint_prune(
+            cp_db, session_id, is_graph_task, checkpoint_id)
+    except Exception:
+        logger.exception(
+            "TASK_REWIND prune planning failed for session=%s", session_id)
+        return refusal(
+            "The rewind point could not be planned; "
+            "the rewind was not staged.")
     if isinstance(plan, str):
         return refusal(plan)
 
     rewind_id = str(uuid.uuid4())
     expires_at = time.time() + float(undo_window_seconds)
-    _record_staging_intent(
-        session_id, task_id, target, rewind_id, expires_at, plan)
-    _stage_memory_side(session_id, task_id, target, entries, rewind_id)
-    _stage_checkpoint_side(cp_db, session_id, rewind_id, plan)
-    _set_pending_phase(rewind_id, "complete")
+    try:
+        _record_staging_intent(
+            session_id, task_id, target, rewind_id, expires_at, plan)
+    except sqlite3.IntegrityError:
+        # A concurrent staging for this session landed its intent
+        # after our has_staged check (the async wrapper stages via
+        # asyncio.to_thread, so the race is real): the PRIMARY KEY
+        # collision IS the "already waiting" state — refuse with the
+        # same message, never raise (E4-04).
+        return refusal(
+            "A rewind is already waiting for undo in this session; "
+            "undo it or let it expire first.")
+    except Exception:
+        logger.exception(
+            "TASK_REWIND staging intent failed for session=%s", session_id)
+        return refusal("The rewind could not be staged; nothing was changed.")
+    try:
+        _stage_memory_side(session_id, task_id, target, entries, rewind_id)
+        _stage_checkpoint_side(cp_db, session_id, rewind_id, plan)
+        _set_pending_phase(rewind_id, "complete")
+    except Exception:
+        logger.exception(
+            "TASK_REWIND staging failed for session=%s", session_id)
+        _abandon_staging(session_id, rewind_id)
+        return refusal(
+            "The rewind could not be staged; any partially staged "
+            "state is reconciled before the next rewind.")
     logger.info(
         "TASK_REWIND staged session=%s task=%s step=%s files_not_reverted=%s",
         session_id, task_id, step_index, files_not_reverted)

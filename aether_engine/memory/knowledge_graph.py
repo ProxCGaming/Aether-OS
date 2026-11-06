@@ -552,21 +552,34 @@ def update_fact(fact_id: str, new_text: str) -> bool:
     return changed
 
 def delete_fact(fact_id: str) -> bool:
+    """Delete one fact (and any entity it orphans). Returns True
+    only when a fact row actually went away (E4-07) — the rowcount
+    discipline update_fact already follows in this file: a missing
+    id reports False and writes no DELETED audit event."""
     init_kg_db()
     with _get_conn() as conn:
         cur = conn.cursor()
         cur.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+        deleted = cur.rowcount > 0
         cur.execute("DELETE FROM entities WHERE id NOT IN (SELECT DISTINCT entity_id FROM facts)")
         conn.commit()
+    if not deleted:
+        return False
     _audit_logger.log_event("KNOWLEDGE_FACT_DELETED", {"fact_id": fact_id})
     return True
 
 def delete_entity(entity_name: str) -> bool:
+    """Delete one entity by name. Returns True only when an entity
+    row actually went away (E4-07): a missing name reports False
+    and writes no DELETED audit event."""
     init_kg_db()
     with _get_conn() as conn:
         cur = conn.cursor()
         cur.execute("DELETE FROM entities WHERE name = ?", (entity_name,))
+        deleted = cur.rowcount > 0
         conn.commit()
+    if not deleted:
+        return False
     _audit_logger.log_event("KNOWLEDGE_ENTITY_DELETED", {"entity_name": entity_name})
     return True
 

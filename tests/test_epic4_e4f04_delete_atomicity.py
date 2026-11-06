@@ -34,9 +34,10 @@ left on disk by the pre-fix code.
 
 Controls (pass before and after): a failure in the FIRST store
 leaves both sides intact; a clean delete removes all three rows;
-deleting a nonexistent episode behaves as today; pruning with no
-fault still removes old episodes from both stores and keeps fresh
-ones.
+deleting a nonexistent episode leaves the real rows untouched (its
+return value changed under E4-07 — see that test below); pruning
+with no fault still removes old episodes from both stores and
+keeps fresh ones.
 """
 import os
 import sqlite3
@@ -269,10 +270,16 @@ def test_clean_delete_removes_all_three_rows(isolated_episodic):
     assert stats["pending"] == 0
 
 
-def test_delete_nonexistent_episode_behaves_as_today(isolated_episodic):
+def test_delete_nonexistent_episode_reports_not_deleted(isolated_episodic):
+    # E4-07 superseded this test's original "behaves as today" pin:
+    # deleting an id that never existed used to return True (and log
+    # a DELETED audit event) unconditionally. The truthful contract
+    # is False + no event; the full delete-truthfulness matrix lives
+    # in test_e4_07_delete_truthfulness.py. What must NOT change is
+    # that the miss leaves the real episode untouched.
     mem_db, emb_db = isolated_episodic["mem_db"], isolated_episodic["emb_db"]
     _seed_episode(TASK)
-    assert delete_episode("task-never-existed") is True
+    assert delete_episode("task-never-existed") is False
     assert _rows(mem_db, emb_db, TASK) == (1, 1, 1)
 
 

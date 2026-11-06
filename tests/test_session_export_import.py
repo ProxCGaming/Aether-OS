@@ -708,6 +708,62 @@ def test_zip_export_omits_attachment_outside_storage_and_records_omission(tmp_pa
         assert "outside" in omitted.lower()
 
 
+def test_zip_export_omits_symlink_in_attachments_dir_pointing_outside(tmp_path):
+    """Residual of E4-05: the attachments-dir sweep must apply the same
+    containment discipline as the message-referenced loop. A symlink
+    planted inside the session's own attachments directory, pointing at
+    a file outside it, must not be followed into the ZIP — it is
+    omitted and listed in the manifest. A symlink resolving INSIDE the
+    directory stays legitimate (the F-04 doctrine prose indexing uses:
+    containment is judged on the resolved path)."""
+    from aether_engine.session_export.exporter import export_session_zip
+
+    sess_id = session_store.create_session("ZIP Sweep Symlink Containment")
+
+    storage_dir = tmp_path / "attachments" / sess_id
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    inside = storage_dir / "inside.txt"
+    inside.write_text("inside storage keep\n", encoding="utf-8")
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    canary = "<redacted>"
+    outside = outside_dir / "outside-secret.txt"
+    outside.write_text(
+        f"token is {canary}\nprivate outside keep\n", encoding="utf-8"
+    )
+
+    escaping_link = storage_dir / "planted-link.txt"
+    escaping_link.symlink_to(outside)
+    internal_link = storage_dir / "internal-link.txt"
+    internal_link.symlink_to(inside)
+
+    zip_out = tmp_path / "exports" / "sweep-symlink.zip"
+    with patch(
+        "aether_engine.session_export.exporter.attachments_dir",
+        return_value=storage_dir,
+    ):
+        export_session_zip(sess_id, zip_out)
+
+    with zipfile.ZipFile(zip_out, "r") as zf:
+        names = zf.namelist()
+        assert "attachments/inside.txt" in names
+        # A link resolving inside the storage still exports its target.
+        assert "attachments/internal-link.txt" in names
+        # The escaping link is not followed: neither its arcname nor
+        # any of the outside file's content (secret-shaped or plain)
+        # appears anywhere in the archive.
+        assert "attachments/planted-link.txt" not in names
+        for name in names:
+            assert canary.encode() not in zf.read(name)
+            assert b"private outside keep" not in zf.read(name)
+        # The omission is recorded in the manifest.
+        assert "attachments/OMITTED.txt" in names
+        omitted = zf.read("attachments/OMITTED.txt").decode("utf-8")
+        assert "planted-link.txt" in omitted
+        assert "outside" in omitted.lower()
+
+
 def test_zip_import_reroots_attachment_paths_missing_from_archive(tmp_path):
     """An imported attachment whose file is not in the archive must be
     re-rooted under the importing session's attachment storage — the

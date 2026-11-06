@@ -186,6 +186,37 @@ def _copy_checkpoints(
         conn.close()
 
 
+def _drop_copied_checkpoints(cp_db: Path, thread_id: str) -> None:
+    """Best-effort removal of checkpoint/writes rows copied under a
+    fork's thread id (E4-03 compensation). ``_copy_checkpoints``
+    commits only at the end, so a failed copy normally leaves
+    nothing behind; this sweep covers a failure at the commit itself.
+    A cleanup failure is logged, never raised — the fork's session
+    row is deleted regardless, and rows under a dead thread id are
+    inert."""
+    if not cp_db.exists():
+        return
+    try:
+        conn = sqlite3.connect(cp_db)
+        try:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if "checkpoints" in tables:
+                conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = ?",
+                    (thread_id,))
+            if "writes" in tables:
+                conn.execute(
+                    "DELETE FROM writes WHERE thread_id = ?", (thread_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        logger.warning(
+            "Could not sweep copied checkpoints for dead fork thread %s",
+            thread_id, exc_info=True)
+
+
 def fork_session_at(
     source_session_id: str,
     *,
@@ -217,6 +248,7 @@ def fork_session_at(
     cp_db = Path(checkpoint_db) if checkpoint_db else _checkpoint_db_path()
 
     keep: set[tuple[str, str]] | None = None
+    whole_session = False
     if step_index is not None:
         latest_task = rewind_manifest.get_latest_task_id(source_session_id)
         if latest_task is None:
@@ -269,11 +301,32 @@ def fork_session_at(
         if result is None:
             return _refusal(source_session_id, "Session could not be forked.")
         copied = result["messages_copied"]
-        keep = _all_checkpoint_keys(cp_db, source_session_id)
+        whole_session = True
 
-    if keep:
-        _copy_checkpoints(
-            cp_db, source_session_id, result["new_session_id"], keep)
+    # The fork session and its messages are committed at this point;
+    # the checkpoint copy that follows must not orphan them (E4-03).
+    # Any failure here — a constraint conflict, a locked or drifted
+    # checkpoints.db — is compensated exactly as the session importer
+    # compensates a placement failure (M15): the partial fork is
+    # deleted (its messages go with it via ON DELETE CASCADE) along
+    # with any checkpoint rows copied under its thread id, and the
+    # caller gets the refusal this function's contract promises.
+    try:
+        if whole_session:
+            keep = _all_checkpoint_keys(cp_db, source_session_id)
+        if keep:
+            _copy_checkpoints(
+                cp_db, source_session_id, result["new_session_id"], keep)
+    except Exception as exc:
+        logger.exception(
+            "SESSION_FORK checkpoint copy failed for fork of %s; "
+            "removing the partial fork", source_session_id)
+        _drop_copied_checkpoints(cp_db, result["new_session_id"])
+        session_store.delete_session(result["new_session_id"])
+        return _refusal(
+            source_session_id,
+            f"Fork failed while copying checkpoints ({exc}); "
+            "the partial fork was removed.")
     # The retained history as the store now holds it — the same
     # record a later SESSION_GET serves and the executor re-seeds
     # from, returned so the caller renders the engine's truth.

@@ -293,8 +293,14 @@ def test_crash_between_stores_is_reconciled_on_restart(cp_env, monkeypatch):
     original = rewind_service._stage_checkpoint_side
     monkeypatch.setattr(rewind_service, "_stage_checkpoint_side", _crash)
     try:
-        with pytest.raises(RuntimeError):
-            rewind_service.stage_rewind(sid, "task-g", 1, "cp-0002")
+        # E4-04: stage_rewind's contract is "never raise" — the
+        # crash is contained and returned as a refusal. The staged
+        # state it leaves behind (memory side committed, checkpoint
+        # side not) is exactly what reconciliation exists to
+        # converge, which the rest of this test verifies.
+        result = rewind_service.stage_rewind(sid, "task-g", 1, "cp-0002")
+        assert result["ok"] is False
+        assert result["error"]
     finally:
         monkeypatch.setattr(rewind_service, "_stage_checkpoint_side", original)
 
@@ -332,8 +338,13 @@ def test_aborted_staging_leaves_no_pending_rewind(store_env, monkeypatch):
     original = rewind_service._stage_memory_side
     monkeypatch.setattr(rewind_service, "_stage_memory_side", _crash)
     try:
-        with pytest.raises(RuntimeError):
-            rewind_service.stage_rewind(sid, "task-1", 0, "")
+        # E4-04: the crash is contained as a refusal ("never
+        # raise"), and the failed staging drops its own
+        # still-'staging' intent immediately — the invariant below
+        # now holds even before the restart's reconciliation.
+        result = rewind_service.stage_rewind(sid, "task-1", 0, "")
+        assert result["ok"] is False
+        assert result["error"]
     finally:
         monkeypatch.setattr(rewind_service, "_stage_memory_side", original)
 
