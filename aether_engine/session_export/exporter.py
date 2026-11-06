@@ -7,6 +7,13 @@ written to the archive, and a binary attachment — whose content cannot be
 decoded as text and therefore cannot be verified for redaction — is never
 copied byte-identical; it is omitted from the ZIP and listed by name in the
 ``attachments/OMITTED.txt`` manifest entry.
+
+An attachment referenced from a message by path is read only when the
+resolved path lies inside the session's own attachment storage (the
+session's directory under ``attachments_dir()``, or the shared ``global``
+bucket uploads land in before a session exists). A recorded path anywhere
+else on the machine is never read: the attachment is omitted from the ZIP
+and listed by name in the same manifest (E4-05).
 """
 
 from __future__ import annotations
@@ -240,7 +247,8 @@ def export_session_zip(session_id: str, dest_path: Path | str | None = None) -> 
         # Collect attachments from disk. Every attachment goes through
         # _write_attachment_scrubbed: text is included scrubbed, binary is
         # omitted (never copied raw) and recorded for the manifest below.
-        omitted: list[str] = []
+        omitted_binary: list[str] = []
+        omitted_outside: list[str] = []
         seen_arcnames: set[str] = set()
 
         att_dir = attachments_dir(session_id)
@@ -252,9 +260,18 @@ def export_session_zip(session_id: str, dest_path: Path | str | None = None) -> 
                         continue
                     seen_arcnames.add(arcname)
                     if not _write_attachment_scrubbed(zf, f, arcname):
-                        omitted.append(arcname)
+                        omitted_binary.append(arcname)
 
-        # Also collect any message attachments referenced by absolute or relative path
+        # Also collect message attachments referenced by path — but only
+        # from within this session's own attachment storage. A recorded
+        # path can name any file on the machine (a session restored from
+        # a foreign export may carry paths authored elsewhere), and an
+        # export must never read outside the storage roots: such an
+        # attachment is omitted and recorded in the manifest (E4-05).
+        storage_roots = [
+            attachments_dir(session_id).resolve(),
+            attachments_dir("global").resolve(),
+        ]
         messages = sess.get("messages", [])
         for m in messages:
             att_list = m.get("attachments")
@@ -264,23 +281,48 @@ def export_session_zip(session_id: str, dest_path: Path | str | None = None) -> 
                         p = Path(att["path"])
                         name = att.get("name") or p.name
                         arcname = f"attachments/{name}"
-                        if p.exists() and p.is_file() and arcname not in seen_arcnames:
+                        if arcname in seen_arcnames:
+                            continue
+                        if not (p.exists() and p.is_file()):
+                            continue
+                        try:
+                            resolved = p.resolve()
+                        except OSError:
+                            resolved = None
+                        if resolved is None or not any(
+                            resolved.is_relative_to(root) for root in storage_roots
+                        ):
                             seen_arcnames.add(arcname)
-                            if not _write_attachment_scrubbed(zf, p, arcname):
-                                omitted.append(arcname)
+                            omitted_outside.append(arcname)
+                            continue
+                        seen_arcnames.add(arcname)
+                        if not _write_attachment_scrubbed(zf, resolved, arcname):
+                            omitted_binary.append(arcname)
 
-        if omitted:
-            manifest = (
-                "The following attachments were omitted from this export "
-                "because they are binary files and binary content cannot be "
-                "verified for redaction:\n"
-                "\n"
-                + "".join(f"- {name}\n" for name in omitted)
-                + "\n"
-                "Binary attachments are withheld rather than copied "
-                "byte-identical, so that no unredacted secret embedded in "
-                "them can leak through the export.\n"
-            )
+        if omitted_binary or omitted_outside:
+            sections: list[str] = []
+            if omitted_binary:
+                sections.append(
+                    "The following attachments were omitted from this export "
+                    "because they are binary files and binary content cannot be "
+                    "verified for redaction:\n"
+                    "\n"
+                    + "".join(f"- {name}\n" for name in omitted_binary)
+                    + "\n"
+                    "Binary attachments are withheld rather than copied "
+                    "byte-identical, so that no unredacted secret embedded in "
+                    "them can leak through the export.\n"
+                )
+            if omitted_outside:
+                sections.append(
+                    "The following attachments were omitted from this export "
+                    "because their recorded paths point outside this "
+                    "session's attachment storage, and an export never reads "
+                    "files from outside that storage:\n"
+                    "\n"
+                    + "".join(f"- {name}\n" for name in omitted_outside)
+                )
+            manifest = "\n".join(sections)
             manifest_arcname = "attachments/OMITTED.txt"
             if manifest_arcname in seen_arcnames:
                 # A real attachment already occupies the manifest name.

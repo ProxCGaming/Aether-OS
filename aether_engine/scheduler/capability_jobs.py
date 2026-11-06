@@ -568,7 +568,19 @@ class CapabilitySchedulerManager:
                     model_id=model_id,
                     api_key=api_key,
                 )
-                is_reachable = st_result.get("pass_rate", 0) > 0 or not st_result.get("details", {}).get("reasoning", {}).get("error")
+                # Reachability = the model actually answered its
+                # self-test (E6-NEW-07). `details` is keyed by test
+                # name, and an entry carries "error" only when the
+                # provider call itself failed. A passed test proves an
+                # answer; so does a graded failure with no "error" —
+                # the model responded, it was just wrong. Only when
+                # every test errored did the model never respond.
+                details = st_result.get("details", {})
+                answered = any(
+                    isinstance(entry, dict) and "error" not in entry
+                    for entry in details.values()
+                )
+                is_reachable = st_result.get("pass_rate", 0) > 0 or answered
 
                 # Merge with existing benchmark data if available
                 with sqlite3.connect(self.db_path) as conn:

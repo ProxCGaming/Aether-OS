@@ -711,3 +711,29 @@ def test_voice_bench_cli_execution():
     assert "TTS first-audio" in stdout
     assert "Median turn" in stdout
     assert "FAKES DETECTED" in stdout
+
+
+def test_voice_bench_zero_samples_cannot_pass():
+    """E9-V1: a run that measured nothing must fail closed — no PASSED
+    verdict, and the report must say no samples were measured."""
+    from benchmarks.voice_latency_bench import (
+        BenchmarkResult,
+        attribute_shortfall,
+        run_voice_latency_bench,
+    )
+
+    for runs in (0, -1):
+        result = run_voice_latency_bench(runs=runs)
+        assert result.sample_count == 0
+        assert result.meets_target is False
+        # Nothing was measured, so there is no shortfall to attribute.
+        assert attribute_shortfall(result) is None
+
+        report = result.format_report()
+        assert "PASSED" not in report
+        assert "no samples" in report.lower()
+
+    empty = BenchmarkResult(samples=[], is_fake=True, fake_reasons=["no stages ran"])
+    assert empty.sample_count == 0
+    assert empty.meets_target is False
+    assert "PASSED" not in empty.format_report()

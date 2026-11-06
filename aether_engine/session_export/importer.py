@@ -267,7 +267,20 @@ def import_session_json(content: str | None = None, file_path: str | Path | None
         if "messages" not in data or not isinstance(data["messages"], list):
             return {"ok": False, "session_id": "", "title": "", "message_count": 0, "error": "Session JSON missing valid 'messages' list"}
 
-        sess_id, title, count = _restore_session_to_db(data)
+        # JSON imports restore no attachment files, so every recorded
+        # attachment path is foreign by construction: re-root them all
+        # into the restored session's own attachment storage before
+        # persisting, never preserve one verbatim (E4-05).
+        sess_id = _choose_session_id(data.get("id"))
+        final_dir = attachments_dir_for_session(sess_id)
+        data = _rewrite_attachment_paths(data, {}, final_dir)
+        try:
+            sess_id, title, count = _restore_session_to_db(
+                data, session_id=sess_id
+            )
+        except Exception:
+            _remove_empty_dirs(final_dir)
+            raise
         return {
             "ok": True,
             "session_id": sess_id,
@@ -300,6 +313,18 @@ def _validate_zip_member(name: str, target_dir: Path) -> Path:
     return dest
 
 
+def _attachment_storage_name(att: dict[str, Any]) -> str:
+    """Final path component an attachment is known by inside storage.
+
+    Mirrors the exporter's naming: the attachment's ``name`` when it
+    has one, else the basename of its recorded path. Backslashes are
+    normalised first so a Windows-authored path still yields just its
+    final component on any platform.
+    """
+    raw = att.get("name") or att.get("path") or ""
+    return Path(str(raw).replace("\\", "/")).name
+
+
 def _rewrite_attachment_paths(
     session_data: dict[str, Any],
     staged: dict[str, Path],
@@ -314,8 +339,14 @@ def _rewrite_attachment_paths(
     the file's location under the new session's attachments directory,
     so the reference resolves to the restored bytes. Attachments whose
     files are not in the archive (for example binaries the exporter
-    withheld for redaction safety) have nothing to point at and keep
-    their recorded reference untouched.
+    withheld for redaction safety) have nothing restored to point at,
+    but their recorded reference is NOT preserved either: it is foreign
+    by construction (authored on another machine, or carried by a
+    JSON-form import, which restores no files at all), and a preserved
+    path primes a later export into reading whatever that path names
+    on this machine (E4-05). Such references are re-rooted under the
+    new session's attachments directory by storage name — the location
+    the file occupies once it exists in this session's storage.
     """
     by_name: dict[str, str] = {}
     for rel_path in staged:
@@ -350,6 +381,13 @@ def _rewrite_attachment_paths(
                         break
             if rel_path is not None:
                 att["path"] = str(final_dir / rel_path)
+            else:
+                # Re-root, never preserve (E4-05; see the docstring).
+                storage_name = _attachment_storage_name(att)
+                if storage_name:
+                    att["path"] = str(final_dir / storage_name)
+                else:
+                    att.pop("path", None)
     return rewritten
 
 
@@ -477,14 +515,15 @@ def import_session_archive(archive_path: str | Path | None = None, content: str 
                         staged[rel_path] = staged_path
 
                 # 4. Choose the restored session's id and reconnect the
-                # messages' attachment references to the restored files.
+                # messages' attachment references: restored files point
+                # at their new locations, and references without a
+                # restored file are re-rooted into the new session's
+                # attachment storage (never preserved verbatim, E4-05).
                 sess_id = _choose_session_id(session_data.get("id"))
-                final_dir: Path | None = None
-                if staged:
-                    final_dir = attachments_dir_for_session(sess_id)
-                    session_data = _rewrite_attachment_paths(
-                        session_data, staged, final_dir
-                    )
+                final_dir = attachments_dir_for_session(sess_id)
+                session_data = _rewrite_attachment_paths(
+                    session_data, staged, final_dir
+                )
 
                 # 5. Restore database records in a single transaction.
                 try:

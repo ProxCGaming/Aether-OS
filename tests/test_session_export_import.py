@@ -459,6 +459,9 @@ def test_zip_import_reconnects_attachments_under_new_session_id(tmp_path):
     )
 
     # Attachment living elsewhere, referenced by absolute path only.
+    # E4-05: an export never reads outside the session's attachment
+    # storage, so this file is NOT bundled — it is omitted and listed
+    # in the manifest instead.
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir(parents=True, exist_ok=True)
     ext_file = elsewhere / "notes.txt"
@@ -480,7 +483,10 @@ def test_zip_import_reconnects_attachments_under_new_session_id(tmp_path):
     with zipfile.ZipFile(zip_out, "r") as zf:
         names = zf.namelist()
         assert "attachments/diagram.txt" in names
-        assert "attachments/notes.txt" in names
+        assert "attachments/notes.txt" not in names
+        assert "attachments/OMITTED.txt" in names
+        omitted = zf.read("attachments/OMITTED.txt").decode("utf-8")
+        assert "notes.txt" in omitted
 
     # The original session still exists, so import must mint a NEW id and
     # land the files beneath the new session's attachments directory.
@@ -505,17 +511,21 @@ def test_zip_import_reconnects_attachments_under_new_session_id(tmp_path):
             by_name[att["name"]] = att
 
     expected_dir = restore_root / new_id
-    for name, payload in (
-        ("diagram.txt", b"Fake diagram (text) content\n"),
-        ("notes.txt", b"External notes content\n"),
-    ):
-        att = by_name[name]
-        # The recorded path must have been rewritten to the restored file…
-        assert att["path"] == str(expected_dir / name)
-        # …and that path must actually resolve to the restored bytes.
-        restored_file = Path(att["path"])
-        assert restored_file.exists()
-        assert restored_file.read_bytes() == payload
+    # The in-storage attachment round-trips in full: its recorded path
+    # is rewritten to the restored file, which holds the original bytes.
+    att = by_name["diagram.txt"]
+    assert att["path"] == str(expected_dir / "diagram.txt")
+    restored_file = Path(att["path"])
+    assert restored_file.exists()
+    assert restored_file.read_bytes() == b"Fake diagram (text) content\n"
+
+    # The outside-storage attachment was never exported (E4-05), so no
+    # file was restored for it — but its recorded path is still
+    # re-rooted under the new session's attachments directory, never
+    # preserved as the foreign path it arrived with.
+    att = by_name["notes.txt"]
+    assert att["path"] == str(expected_dir / "notes.txt")
+    assert not Path(att["path"]).exists()
 
 
 def test_zip_import_crc_failure_leaves_no_session_or_files(tmp_path):
@@ -589,7 +599,13 @@ def test_zip_export_scrubs_and_omits_message_referenced_attachments(tmp_path):
     canary = "sk-exportcanary1234567890"
     sess_id = session_store.create_session("ZIP Referenced Attachment Redaction")
 
-    ref_dir = tmp_path / "referenced"
+    storage_dir = tmp_path / "attachments" / sess_id
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    # The referenced files live in a subdirectory of the session's
+    # attachment storage: inside the containment roots (E4-05), but not
+    # direct children of the storage dir, so the attachments-dir sweep
+    # does not pick them up — they arrive only via the message loop.
+    ref_dir = storage_dir / "referenced"
     ref_dir.mkdir(parents=True, exist_ok=True)
     text_ref = ref_dir / "ref-notes.txt"
     text_ref.write_text(f"token is {canary}\nreferenced keep\n", encoding="utf-8")
@@ -606,13 +622,10 @@ def test_zip_export_scrubs_and_omits_message_referenced_attachments(tmp_path):
         ],
     )
 
-    empty_attach_dir = tmp_path / "attachments" / sess_id
-    empty_attach_dir.mkdir(parents=True, exist_ok=True)
-
     zip_out = tmp_path / "exports" / "referenced-attachments.zip"
     with patch(
         "aether_engine.session_export.exporter.attachments_dir",
-        return_value=empty_attach_dir,
+        return_value=storage_dir,
     ):
         export_session_zip(sess_id, zip_out)
 
@@ -631,3 +644,147 @@ def test_zip_export_scrubs_and_omits_message_referenced_attachments(tmp_path):
         assert "attachments/OMITTED.txt" in names
         omitted = zf.read("attachments/OMITTED.txt").decode("utf-8")
         assert "ref-secret.bin" in omitted
+
+
+# ---------------------------------------------------------------------------
+# E4-05: ZIP export must only read attachments from the session's own
+# attachment storage; import must never preserve a foreign recorded path.
+# ---------------------------------------------------------------------------
+
+
+def test_zip_export_omits_attachment_outside_storage_and_records_omission(tmp_path):
+    """A message attachment whose path points outside the session's
+    attachment storage (a plain file elsewhere on disk) must NOT be read
+    into the ZIP — only its omission is recorded in the manifest."""
+    from aether_engine.session_export.exporter import export_session_zip
+
+    sess_id = session_store.create_session("ZIP Export Containment")
+
+    storage_dir = tmp_path / "attachments" / sess_id
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    inside = storage_dir / "inside.txt"
+    inside.write_text("inside storage keep\n", encoding="utf-8")
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    canary = "sk-containmentcanary1234567890"
+    outside = outside_dir / "outside-notes.txt"
+    outside.write_text(
+        f"token is {canary}\nprivate outside keep\n", encoding="utf-8"
+    )
+
+    session_store.add_message(
+        sess_id,
+        "user",
+        "Two attachments.",
+        attachments=[
+            {"name": "inside.txt", "path": str(inside)},
+            {"name": "outside-notes.txt", "path": str(outside)},
+        ],
+    )
+
+    zip_out = tmp_path / "exports" / "containment.zip"
+    with patch(
+        "aether_engine.session_export.exporter.attachments_dir",
+        return_value=storage_dir,
+    ):
+        export_session_zip(sess_id, zip_out)
+
+    with zipfile.ZipFile(zip_out, "r") as zf:
+        names = zf.namelist()
+        # The in-storage attachment is still exported.
+        assert "attachments/inside.txt" in names
+        assert b"inside storage keep" in zf.read("attachments/inside.txt")
+        # The outside file is not in the archive, and none of its content
+        # (secret-shaped or plain private text) appears in any member.
+        assert "attachments/outside-notes.txt" not in names
+        for name in names:
+            assert canary.encode() not in zf.read(name)
+            assert b"private outside keep" not in zf.read(name)
+        # The omission is recorded in the manifest.
+        assert "attachments/OMITTED.txt" in names
+        omitted = zf.read("attachments/OMITTED.txt").decode("utf-8")
+        assert "outside-notes.txt" in omitted
+        assert "outside" in omitted.lower()
+
+
+def test_zip_import_reroots_attachment_paths_missing_from_archive(tmp_path):
+    """An imported attachment whose file is not in the archive must be
+    re-rooted under the importing session's attachment storage — the
+    foreign recorded path must never be preserved as-is."""
+    from aether_engine.session_export.importer import import_session_archive
+
+    session_payload = {
+        "format_version": 1,
+        "id": "foreign-path-session",
+        "title": "Foreign Path Import",
+        "created_at": 1700000000,
+        "updated_at": 1700000000,
+        "messages": [
+            {
+                "id": "foreign-msg-1",
+                "role": "user",
+                "content": "see attached",
+                "timestamp": 1700000000,
+                "attachments": [
+                    {"name": "notes.txt", "path": "/foreign/machine/home/notes.txt"},
+                ],
+            }
+        ],
+    }
+    raw_zip = tmp_path / "foreign.zip"
+    with zipfile.ZipFile(raw_zip, "w") as zf:
+        zf.writestr("session.json", json.dumps(session_payload))
+
+    restore_root = tmp_path / "restored_attachments"
+    with patch(
+        "aether_engine.session_export.importer.attachments_dir_for_session",
+        lambda sid: restore_root / sid,
+    ):
+        result = import_session_archive(archive_path=raw_zip)
+
+    assert result["ok"] is True
+    restored = session_store.get_session(result["session_id"])
+    assert restored is not None
+    att = restored["messages"][0]["attachments"][0]
+    assert att["path"] == str(restore_root / result["session_id"] / "notes.txt")
+    assert "/foreign/machine" not in att["path"]
+
+
+def test_json_import_reroots_attachment_paths(tmp_path):
+    """JSON-form imports restore no attachment files, so every recorded
+    path is foreign by construction: it must be re-rooted under the
+    importing session's attachment storage, never preserved verbatim."""
+    from aether_engine.session_export.importer import import_session_json
+
+    payload = {
+        "format_version": 1,
+        "id": "json-foreign-session",
+        "title": "JSON Foreign Import",
+        "created_at": 1700000000,
+        "updated_at": 1700000000,
+        "messages": [
+            {
+                "id": "json-foreign-msg-1",
+                "role": "user",
+                "content": "see attached",
+                "timestamp": 1700000000,
+                "attachments": [
+                    {"name": "report.txt", "path": "C:\\Users\\someone\\report.txt"},
+                ],
+            }
+        ],
+    }
+
+    restore_root = tmp_path / "restored_attachments"
+    with patch(
+        "aether_engine.session_export.importer.attachments_dir_for_session",
+        lambda sid: restore_root / sid,
+    ):
+        result = import_session_json(content=json.dumps(payload))
+
+    assert result["ok"] is True
+    restored = session_store.get_session(result["session_id"])
+    assert restored is not None
+    att = restored["messages"][0]["attachments"][0]
+    assert att["path"] == str(restore_root / result["session_id"] / "report.txt")

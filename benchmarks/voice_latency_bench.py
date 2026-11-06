@@ -157,7 +157,10 @@ class BenchmarkResult:
 
     @property
     def meets_target(self) -> bool:
-        return self.median_e2e_ms < self.target_ms
+        # Fail closed (E9-V1): with no samples there is no measurement,
+        # so the target cannot have been met — a median of 0.0 computed
+        # over zero runs must never read as a pass.
+        return self.sample_count > 0 and self.median_e2e_ms < self.target_ms
 
     def format_report(self) -> str:
         shortfall = attribute_shortfall(self)
@@ -210,6 +213,16 @@ class BenchmarkResult:
                 "--------------------------------------------------------------------------------",
             ])
 
+        if self.sample_count == 0:
+            lines.extend([
+                "",
+                "[NO SAMPLES MEASURED]",
+                "This run collected no samples: no stage was measured, so",
+                "no latency verdict can be issued. The run is FAILED /",
+                "inconclusive — a zero-sample run never counts as a pass.",
+                "--------------------------------------------------------------------------------",
+            ])
+
         lines.extend([
             f"Samples collected: {self.sample_count}",
             f"Target Turn Latency: < {self.target_ms:.0f} ms",
@@ -242,11 +255,18 @@ class BenchmarkResult:
                 f"  {'LLM TTFT':<17} | {STAGE_BUDGETS_MS['LLM TTFT']:>6.1f} ms  | "
                 "     —     | NOT MEASURED")
 
+        if self.sample_count == 0:
+            e2e_verdict = "NOT MEASURED (no samples)"
+        elif self.meets_target:
+            e2e_verdict = "PASSED (<800 ms)"
+        else:
+            e2e_verdict = "SHORTFALL (>=800 ms)"
+
         if is_real:
             lines.extend([
                 "  ------------------+------------+-----------+--------------------",
                 f"  End-to-End (local) | {self.target_ms:>6.1f} ms  | {self.median_e2e_ms:>6.1f} ms | "
-                + ("PASSED (<800 ms)" if self.meets_target else "SHORTFALL (>=800 ms)"),
+                + e2e_verdict,
                 "",
                 f"Median turn: {self.median_e2e_ms:.1f} ms (local stages only)",
                 "End-to-end is the sum of the measured LOCAL stages only — LLM TTFT not measured (no provider configured in the bench env).",
@@ -256,7 +276,7 @@ class BenchmarkResult:
             lines.extend([
                 "  ------------------+------------+-----------+--------------------",
                 f"  End-to-End Turn   | {self.target_ms:>6.1f} ms  | {self.median_e2e_ms:>6.1f} ms | "
-                + ("PASSED (<800 ms)" if self.meets_target else "SHORTFALL (>=800 ms)"),
+                + e2e_verdict,
                 "",
                 f"Median turn: {self.median_e2e_ms:.1f} ms",
             ])
@@ -273,6 +293,12 @@ class BenchmarkResult:
                 lines.append("  Other Stages Over Budget:")
                 for s_name, s_delta in shortfall["other_overages"].items():
                     lines.append(f"    - {s_name}: +{s_delta:.1f} ms")
+        elif self.sample_count == 0:
+            lines.extend([
+                "",
+                ("Turn Latency Result: FAILED — no samples were measured, "
+                 "so the run is inconclusive and cannot pass."),
+            ])
         else:
             lines.extend([
                 "",
@@ -316,6 +342,10 @@ def attribute_shortfall(result: BenchmarkResult) -> dict[str, Any] | None:
     Otherwise returns a dictionary with the primary offending stage, overages,
     and architectural explanations.
     """
+    if result.sample_count == 0:
+        # Nothing was measured (E9-V1): there is no shortfall to
+        # attribute — and no pass either; see BenchmarkResult.meets_target.
+        return None
     if result.meets_target:
         return None
 
