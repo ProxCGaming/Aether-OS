@@ -84,22 +84,3 @@ async def run_model_self_test(
         "details": test_results,
         "tested_at": time.time(),
     }
-
-
-async def run_suite_on_reachable_models(
-    model_pairs: list[tuple[str, str, str]],  # (provider_name, model_id, api_key)
-    max_concurrency: int = 3,
-) -> dict[str, dict[str, Any]]:
-    """Run Option C self-tests across multiple reachable models with concurrency control."""
-    semaphore = asyncio.Semaphore(max_concurrency)
-    results: dict[str, dict[str, Any]] = {}
-
-    async def _test_one(prov: str, mid: str, key: str):
-        async with semaphore:
-            logger.info(f"Option C: Testing {prov}/{mid}...")
-            res = await run_model_self_test(prov, mid, key)
-            results[mid] = res
-
-    tasks = [_test_one(p, m, k) for p, m, k in model_pairs]
-    await asyncio.gather(*tasks, return_exceptions=True)
-    return results

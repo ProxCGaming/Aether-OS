@@ -8,8 +8,14 @@
   estimate prices only those, at the real suite size. An
   Option-A-only run loads static benchmark rows: it must record
   0 models tested and 0 cost, not a fabricated figure.
+- E6-NEW-08: an Option A refresh must not destroy Option C evidence.
+  Its ``INSERT OR REPLACE`` omitted ``selftest_results``, so every
+  benchmark refresh NULLed the column (only ``is_reachable`` was
+  preserved); the refresh now preserves it the same way.
 """
 
+import json
+import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -42,6 +48,37 @@ async def test_option_a_only_run_records_no_models_and_no_cost(mgr):
     # loaded into model_capabilities.
     caps = mgr.get_model_capabilities("gemini-1.5-pro")
     assert caps is not None
+    assert caps["benchmark_data"]["mmlu"] > 0
+
+
+def test_option_a_refresh_preserves_selftest_results(mgr):
+    # Seed a row exactly as a prior Option C run leaves it, including
+    # its self-test evidence and a measured unreachable verdict.
+    evidence = {"pass_rate": 0.75, "details": {"chat": {"passed": True}}}
+    with sqlite3.connect(mgr.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO model_capabilities
+            (model_id, provider, benchmark_data, selftest_results,
+             capabilities, tier, last_tested_at, is_reachable)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "gemini-1.5-pro", "google_gemini", None,
+                json.dumps(evidence), "{}", "S", 0.0, 0,
+            ),
+        )
+        conn.commit()
+
+    mgr._run_option_a()
+
+    caps = mgr.get_model_capabilities("gemini-1.5-pro")
+    assert caps is not None
+    # The Option C evidence survives the benchmark refresh (E6-NEW-08)…
+    assert caps["selftest_results"] == evidence
+    # …the pre-existing is_reachable preservation still holds…
+    assert caps["is_reachable"] == 0
+    # …and Option A genuinely refreshed its own columns.
     assert caps["benchmark_data"]["mmlu"] > 0
 
 

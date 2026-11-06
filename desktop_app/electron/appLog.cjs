@@ -35,7 +35,10 @@ const KEEP_ARCHIVES = 3;
 // Bare-string secret patterns, mirrored from the engine audit
 // redactor (aether_engine/audit.py, _SECRET_PATTERNS) so a log line
 // that somehow contains a key-shaped value is scrubbed before it is
-// ever exported in a diagnostics bundle. Keep the two lists in step.
+// ever exported in a diagnostics bundle. Keep the two lists in
+// step — the parity is enforced, not just requested: both suites
+// assert their runtime list against the canonical fixture
+// tests/fixtures/secret_redaction_patterns.json (Deslop C3).
 const SECRET_PATTERNS = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
   /sk-[A-Za-z0-9_-]{8,}/g,
@@ -251,4 +254,8 @@ module.exports = {
   LEVEL_NAMES,
   MAX_LOG_BYTES,
   KEEP_ARCHIVES,
+  // Exported for the Deslop C3 parity test, which asserts this
+  // runtime list against tests/fixtures/secret_redaction_patterns.json.
+  SECRET_PATTERNS,
+  URL_CREDENTIAL_PATTERN,
 };

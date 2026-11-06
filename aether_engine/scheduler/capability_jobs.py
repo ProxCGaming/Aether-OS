@@ -448,16 +448,23 @@ class CapabilitySchedulerManager:
                     k: v for k, v in bench.items()
                     if k not in ("capabilities", "tier")
                 })
+                # E6-NEW-08: selftest_results is preserved from the
+                # existing row exactly as is_reachable is — REPLACE
+                # with the column omitted would NULL a prior Option C
+                # run's evidence on every benchmark refresh.
                 conn.execute("""
                     INSERT OR REPLACE INTO model_capabilities
-                    (model_id, provider, benchmark_data, capabilities, tier, last_tested_at, is_reachable)
-                    VALUES (?, ?, ?, ?, ?, ?, COALESCE(
+                    (model_id, provider, benchmark_data, selftest_results, capabilities, tier, last_tested_at, is_reachable)
+                    VALUES (?, ?, ?, (
+                        SELECT selftest_results FROM model_capabilities WHERE model_id = ?
+                    ), ?, ?, ?, COALESCE(
                         (SELECT is_reachable FROM model_capabilities WHERE model_id = ?), 1
                     ))
                 """, (
                     model_id,
                     _infer_provider(model_id),
                     bench_json,
+                    model_id,
                     caps,
                     tier,
                     time.time(),
