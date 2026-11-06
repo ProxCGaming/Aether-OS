@@ -45,6 +45,25 @@ from aether_engine.langgraph.compaction import (
     make_provider_summariser,
     resolve_summariser_provider,
 )
+
+# Wave 5: the manifest tracker and the run-config helpers live in
+# their own modules (langgraph.manifest / langgraph.run_config) and
+# are re-exported here — this module's namespace is the historical
+# import/patch surface for both families (see __all__ below).
+from aether_engine.langgraph.manifest import (
+    _WRITE_TOOL_NAMES,
+    _advance_manifest_to_checkpoint,
+    _new_manifest_tracker,
+    _note_manifest_file_write,
+    _record_manifest_point,
+)
+from aether_engine.langgraph.run_config import (
+    _missing_store_turns,
+    _run_config_snapshot,
+    _turn_key,
+    _turn_text,
+    get_persisted_run_config,
+)
 from aether_engine.langgraph.steering import (
     drain_steers,
     enqueue_steer,
@@ -64,6 +83,79 @@ from aether_engine.rewind import manifest as rewind_manifest
 from aether_engine.tools.registry import ToolRegistry
 
 logger = logging.getLogger("aether_engine.langgraph.executor")
+
+# The namespace is contractual: the suites import and patch names
+# here (compile_graph, DEFAULT_CHECKPOINT_DB, the manifest and
+# run-config helpers re-exported above), routes/websocket.py and
+# langgraph/fast_chat.py import through here, and rewind.service
+# reads DEFAULT_CHECKPOINT_DB off this module. __all__ pins the
+# full surface so the Wave 5 splits cannot silently shrink it.
+__all__ = [
+    "DEFAULT_CHECKPOINT_DB",
+    "EVENT_QUEUE_MAXSIZE",
+    "GRAPH_EVENT_IDLE_TIMEOUT_SECONDS",
+    "GRAPH_RECURSION_LIMIT",
+    "_LANGGRAPH_AVAILABLE",
+    "_RUNNER_SHUTDOWN_GRACE_SECONDS",
+    "_SUPERSTEP_LABELS",
+    "_WRITE_TOOL_NAMES",
+    "AetherState",
+    "Any",
+    "AsyncGenerator",
+    "AsyncSqliteSaver",
+    "BaseProvider",
+    "Command",
+    "Event",
+    "EventType",
+    "NetworkError",
+    "ProviderError",
+    "RateLimitError",
+    "RunnableConfig",
+    "TaskState",
+    "TimeoutError",
+    "ToolRegistry",
+    "UserConfig",
+    "_advance_manifest_to_checkpoint",
+    "_is_retriable_error",
+    "_messages_have_images",
+    "_missing_store_turns",
+    "_new_manifest_tracker",
+    "_note_manifest_file_write",
+    "_reap_runner",
+    "_record_manifest_point",
+    "_run_config_snapshot",
+    "_superstep_label",
+    "_turn_key",
+    "_turn_text",
+    "asyncio",
+    "backend_or_none",
+    "compact_history",
+    "compaction_config_from",
+    "compile_graph",
+    "contextlib",
+    "drain_steers",
+    "enqueue_steer",
+    "event_bus",
+    "get_artifact_store",
+    "get_pending_approvals",
+    "get_persisted_run_config",
+    "has_pending_steers",
+    "json",
+    "logger",
+    "logging",
+    "make_provider_summariser",
+    "message_dicts",
+    "multimodal_user_content",
+    "resolve_summariser_provider",
+    "resume_langgraph_task",
+    "rewind_manifest",
+    "run_langgraph_task",
+    "session_store",
+    "steer_state_update",
+    "time",
+    "uuid",
+    "validate_transition",
+]
 
 # N-06: idle bound for the graph consumer loop. Every producer that
 # feeds the event queue is itself bounded — provider streams by
@@ -102,24 +194,6 @@ async def _reap_runner(task: asyncio.Task) -> None:
             logger.debug("Graph runner ended with an error during reap",
                          exc_info=True)
 
-# ---------------------------------------------------------------------------
-# Epic 8, E8-1.1a: rewind manifest recording. As a graph task runs, each
-# landed superstep appends a point (step -> checkpoint, label,
-# files-written-so-far) to the session's manifest for THIS task. The
-# tracker is a plain dict threaded through a run (and re-seeded from
-# the manifest on resume):
-#   {"step_index": int, "last_checkpoint_id": str, "files_written": [str],
-#    "pending_write_events": [str]}
-# "files_written" is the cumulative UNIQUE list (the picker's trail);
-# "pending_write_events" buffers every landed write since the last
-# recorded point — repeats included (N01) — and becomes that point's
-# write events, which is what the not-reverted warning reads.
-# Recording is best-effort by doctrine — like compaction and completion
-# memory, a manifest failure is logged and never fails the task.
-# ---------------------------------------------------------------------------
-
-_WRITE_TOOL_NAMES = frozenset({"write_file", "edit_file"})
-
 _SUPERSTEP_LABELS = {
     "supervisor": "Supervisor",
     "planner": "Planner",
@@ -127,90 +201,6 @@ _SUPERSTEP_LABELS = {
     "researcher": "Researcher",
     "execute_tool": "Tool execution",
 }
-
-
-def _new_manifest_tracker(prior_checkpoint_id: str = "") -> dict[str, Any]:
-    return {
-        "step_index": 0,
-        "last_checkpoint_id": prior_checkpoint_id,
-        "files_written": [],
-        "pending_write_events": [],
-    }
-
-
-def _note_manifest_file_write(
-    tracker: dict[str, Any], msg: dict[str, Any], is_failed: bool
-) -> None:
-    """Track a completed file write from a tool message's args.
-
-    The cumulative list keeps each path once; the event buffer keeps
-    EVERY landed write (N01) — a repeat write to a listed path is
-    invisible in the cumulative list but is exactly what the
-    not-reverted warning needs to see.
-    """
-    if is_failed or msg.get("name") not in _WRITE_TOOL_NAMES:
-        return
-    args = msg.get("args") or {}
-    path = args.get("path") or args.get("file_path")
-    if not path:
-        return
-    tracker["pending_write_events"].append(path)
-    if path not in tracker["files_written"]:
-        tracker["files_written"].append(path)
-
-
-async def _record_manifest_point(
-    session_id: str,
-    task_id: str,
-    step_index: int,
-    checkpoint_id: str,
-    label: str,
-    files_written: list[str],
-    write_events: list[str] | None = None,
-) -> None:
-    try:
-        await asyncio.to_thread(
-            rewind_manifest.record_point,
-            session_id, task_id, step_index, checkpoint_id, label,
-            list(files_written), list(write_events or []),
-        )
-    except Exception:  # best-effort by doctrine (see block comment above)
-        logger.debug("Rewind manifest recording failed", exc_info=True)
-
-
-async def _advance_manifest_to_checkpoint(
-    graph,
-    config,
-    tracker: dict[str, Any],
-    *,
-    session_id: str | None,
-    task_id: str,
-    label: str,
-) -> None:
-    """Append a point if the graph's checkpoint advanced past the
-    tracker's last recorded one (one point per landed superstep)."""
-    if not session_id:
-        return
-    try:
-        snapshot = await graph.aget_state(config)
-        checkpoint_id = (
-            (snapshot.config or {}).get("configurable", {}).get("checkpoint_id")
-            or ""
-        )
-    except Exception:  # noqa: BLE001 — best-effort by doctrine (see block comment above)
-        return
-    if not checkpoint_id or checkpoint_id == tracker["last_checkpoint_id"]:
-        return
-    tracker["last_checkpoint_id"] = checkpoint_id
-    tracker["step_index"] += 1
-    # The writes noted since the previous point become THIS point's
-    # events (N01); the buffer then restarts for the next point.
-    write_events = list(tracker["pending_write_events"])
-    tracker["pending_write_events"] = []
-    await _record_manifest_point(
-        session_id, task_id, tracker["step_index"], checkpoint_id, label,
-        tracker["files_written"], write_events,
-    )
 
 
 def _superstep_label(event: dict, step_index: int) -> str:
@@ -260,119 +250,6 @@ def _messages_have_images(messages: Any) -> bool:
                 if isinstance(part, dict) and part.get("type") == "image_url":
                     return True
     return False
-
-def _run_config_snapshot(
-    *,
-    provider: BaseProvider,
-    session_id: str | None,
-    agent_models: dict[str, str] | None,
-    agent_tools: dict[str, list[str]] | None,
-    workspace_roots: list[str] | None,
-    kwargs: dict[str, Any],
-) -> dict[str, Any]:
-    """The run's effective configuration as plain JSON-safe data.
-
-    Seeded into the graph state (``run_config``) so the checkpointer
-    carries it across an approval pause: E1-F04 — a resume rebuilds
-    the paused task's OWN provider, per-agent models/tools, forced
-    agent, workspace roots and layered user config from this
-    snapshot instead of discarding them for the current globals.
-    Only names and values are recorded; live objects (provider
-    instance, tool registry, secret store) are rebuilt at resume
-    time and never enter the checkpoint.
-    """
-    user_config = kwargs.get("user_config")
-    return {
-        "provider_name": getattr(provider, "provider_name", None),
-        "model": getattr(provider, "model", None),
-        "session_id": session_id,
-        "agent_models": dict(agent_models or {}),
-        "agent_tools": {
-            name: list(tools) for name, tools in (agent_tools or {}).items()
-        },
-        "forced_agent": kwargs.get("forced_agent"),
-        "workspace_roots": [str(root) for root in (workspace_roots or [])],
-        "user_config": (
-            user_config.to_dict() if isinstance(user_config, UserConfig) else None
-        ),
-        "local_only": bool(kwargs.get("local_only")),
-        "require_vision": bool(kwargs.get("require_vision")),
-    }
-
-
-async def get_persisted_run_config(thread_id: str) -> dict[str, Any] | None:
-    """Read the run-config snapshot checkpointed with a thread's state.
-
-    Returns None when the thread has no snapshot (a task paused
-    before snapshots existed, or an unreadable checkpoint) — callers
-    fall back to their previous behaviour for those threads.
-    """
-    db_path = DEFAULT_CHECKPOINT_DB
-    if not db_path.exists():
-        return None
-    try:
-        async with AsyncSqliteSaver.from_conn_string(str(db_path)) as saver:
-            await saver.setup()
-            graph = compile_graph(checkpointer=saver)
-            state = await graph.aget_state(
-                {"configurable": {"thread_id": thread_id}})
-            snapshot = (state.values or {}).get("run_config")
-            return snapshot if isinstance(snapshot, dict) else None
-    except Exception:  # best-effort read: a resume must never fail because the snapshot could not be loaded
-        logger.debug(
-            f"Could not read persisted run config for thread {thread_id}",
-            exc_info=True)
-        return None
-
-
-def _turn_text(content: Any) -> str:
-    """Plain text of a message content: strings pass through;
-    multimodal part lists contribute their text parts."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return " ".join(
-            str(part.get("text", ""))
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        ).strip()
-    return ""
-
-
-def _turn_key(role: str, text: str) -> tuple[str, str]:
-    return role, " ".join(text.split())
-
-
-def _missing_store_turns(
-    checkpoint_messages: Any, store_history: list[dict[str, str]]
-) -> list[dict[str, str]]:
-    """Session-store turns the graph checkpoint does not hold (E1-F05).
-
-    The session store is the visible conversation: it also holds the
-    fast-chat turns, which never enter the graph checkpoint. Matching
-    is an in-order subsequence walk — each store turn consumes the
-    first identical checkpoint turn at or after the previous match —
-    so graph turns are recognised as present (never duplicated) while
-    turns that happened outside the graph are returned, in store
-    order, for the caller to append ahead of the new prompt.
-    """
-    checkpoint_keys: list[tuple[str, str]] = []
-    for msg in message_dicts(checkpoint_messages):
-        role = msg.get("role")
-        if role not in ("user", "assistant"):
-            continue
-        text = _turn_text(msg.get("content"))
-        if text.strip():
-            checkpoint_keys.append(_turn_key(role, text))
-    missing: list[dict[str, str]] = []
-    cursor = 0
-    for turn in store_history:
-        key = _turn_key(turn["role"], turn["content"])
-        try:
-            cursor = checkpoint_keys.index(key, cursor) + 1
-        except ValueError:
-            missing.append({"role": turn["role"], "content": turn["content"]})
-    return missing
 
 
 async def run_langgraph_task(
