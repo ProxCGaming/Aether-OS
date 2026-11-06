@@ -3,7 +3,10 @@ module.exports = {
   setupFilesAfterEnv: ['<rootDir>/src/setupTests.js'],
   moduleNameMapper: {
     '\\.(css|less|scss|sass)$': '<rootDir>/__mocks__/styleMock.js',
-    '\\.(gif|ttf|eot|svg|png)$': '<rootDir>/__mocks__/fileMock.js'
+    '\\.(gif|ttf|eot|svg|png)$': '<rootDir>/__mocks__/fileMock.js',
+    // remark-gfm is ESM-only; Jest (CJS) loads this stub instead.
+    // See __mocks__/remarkGfmMock.js for the verification story.
+    '^remark-gfm$': '<rootDir>/__mocks__/remarkGfmMock.js'
   },
   transform: {
     '^.+\\.jsx?$': 'babel-jest',
