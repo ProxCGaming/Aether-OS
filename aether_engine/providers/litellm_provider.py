@@ -31,6 +31,22 @@ logger = logging.getLogger("aether_engine.providers.litellm_provider")
 # fetch (one short request to a provider endpoint), so it gets the same bound.
 VALIDATION_TIMEOUT = DISCOVERY_TIMEOUT
 
+# Bounded stall timeout for the main streaming call (finding N-01). A
+# generation is not a ping: a cold local model or a reasoning model can
+# legitimately take far longer than VALIDATION_TIMEOUT to produce its
+# first token, so the bound sits at the codebase's long-operation
+# magnitude (cf. _VISION_TIMEOUT_S = 120s in media/analyzer.py). It is
+# an IDLE bound, not a total deadline: it caps how long any single
+# phase of a call — the dispatch, and the wait for each next chunk —
+# may produce nothing before the call fails as a timeout. A slow but
+# progressing stream is never cut. Enforced the validation ping's way:
+# the ``timeout`` kwarg lets LiteLLM's HTTP client enforce it, and
+# ``asyncio.wait_for`` backstops the dispatch and every chunk fetch in
+# call_stream, converting expiry into litellm.Timeout so the existing
+# retriable-error path (fallback, then the typed domain TimeoutError)
+# handles it exactly like a provider-reported timeout.
+STREAM_TIMEOUT = 120.0
+
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 
@@ -291,6 +307,10 @@ class LiteLLMProvider(BaseProvider):
             "api_key": self.api_key,
             "max_tokens": 4096,
             "num_retries": 0,
+            # Finding N-01: bound the call at the HTTP layer too (the
+            # validation ping's pattern); call_stream's wait_for is the
+            # backstop if LiteLLM drops the kwarg for a provider.
+            "timeout": STREAM_TIMEOUT,
         }
 
         # Set base URL if needed
@@ -491,6 +511,10 @@ class LiteLLMProvider(BaseProvider):
         are configured, automatically retries with each fallback in order.
         Logs NODE_FALLBACK_TRIGGERED (distinct from task-level FALLBACK_TRIGGERED)
         when a fallback model succeeds.
+
+        Every attempt is stall-bounded by STREAM_TIMEOUT (finding N-01):
+        the dispatch and each chunk fetch may idle at most that long
+        before the attempt fails as a timeout.
         """
         litellm = _load_litellm()  # Epic 9: deferred import, bound locally
         # Build the list of models to try: primary first, then fallbacks
@@ -668,7 +692,21 @@ class LiteLLMProvider(BaseProvider):
                 # event (stamped in the chunk loop below).
                 attempt_started = time.perf_counter()
 
-                response = await litellm.acompletion(**kwargs)
+                # Finding N-01: bound the dispatch itself — a provider
+                # that accepts the connection and then stalls before
+                # returning a stream must not hang the task. wait_for
+                # is the backstop for the `timeout` kwarg (the
+                # validation ping's pattern); expiry is re-raised as
+                # litellm.Timeout so the retriable-error handling below
+                # treats it exactly like a provider-reported timeout.
+                try:
+                    response = await asyncio.wait_for(
+                        litellm.acompletion(**kwargs), timeout=STREAM_TIMEOUT)
+                except asyncio.TimeoutError:  # noqa: UP041 — qualified on purpose: bare TimeoutError in this module is the domain error imported from providers.base, not the builtin asyncio raises.
+                    raise litellm.Timeout(
+                        f"Provider did not return a stream within {STREAM_TIMEOUT:.0f}s",
+                        current_model, current_provider,
+                    ) from None
 
                 accumulated_tool_calls: dict[int, dict[str, Any]] = {}
                 # Epic 8, E8-A8.1a: per-attempt usage capture for the
@@ -692,7 +730,26 @@ class LiteLLMProvider(BaseProvider):
                 attempt_latency_recorded = [False]
                 attempt_first_event: list[float | None] = [None]
 
-                async for chunk in response:
+                # Finding N-01: iterate manually so every chunk fetch
+                # carries the idle bound. A provider that stalls
+                # mid-stream (connected, then silent) times out instead
+                # of hanging the task forever, while a slow but
+                # progressing stream is never cut — the bound is per
+                # chunk, not a total deadline. Expiry is re-raised as
+                # litellm.Timeout, joining the retriable path below.
+                stream_iter = response.__aiter__()
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(
+                            stream_iter.__anext__(), timeout=STREAM_TIMEOUT)
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:  # noqa: UP041 — qualified on purpose: bare TimeoutError in this module is the domain error imported from providers.base, not the builtin asyncio raises.
+                        raise litellm.Timeout(
+                            f"Stream from '{current_model}' stalled: "
+                            f"no chunk within {STREAM_TIMEOUT:.0f}s",
+                            current_model, current_provider,
+                        ) from None
                     parsed_usage = _parse_usage(getattr(chunk, "usage", None))
                     if parsed_usage is not None:
                         call_usage = parsed_usage
