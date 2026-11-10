@@ -202,13 +202,13 @@ export default function GlobalArtifactsView({
   }, [kindCounts]);
 
   const getArtifactIcon = (art) => {
-    if (art.kind === 'diff') return <GitCommit size={15} color="#c084fc" />;
-    if (art.kind === 'report') return <FileText size={15} color="#38bdf8" />;
+    if (art.kind === 'diff') return <GitCommit size={15} color="var(--accent)" />;
+    if (art.kind === 'report') return <FileText size={15} color="var(--text-secondary)" />;
     const t = (art.title || '').toLowerCase();
-    if (t.endsWith('.md')) return <FileText size={15} color="#60a5fa" />;
-    if (t.endsWith('.json') || t.endsWith('.csv')) return <Database size={15} color="#f59e0b" />;
-    if (/\.(png|jpg|jpeg|gif|webp|svg)$/.test(t)) return <ImageIcon size={15} color="#ec4899" />;
-    return <FileCode size={15} color="#34d399" />;
+    if (t.endsWith('.md')) return <FileText size={15} color="var(--text-secondary)" />;
+    if (t.endsWith('.json') || t.endsWith('.csv')) return <Database size={15} color="var(--accent)" />;
+    if (/\.(png|jpg|jpeg|gif|webp|svg)$/.test(t)) return <ImageIcon size={15} color="var(--text-secondary)" />;
+    return <FileCode size={15} color="var(--success)" />;
   };
 
   const formatTimestamp = (ts) => {
@@ -235,7 +235,7 @@ export default function GlobalArtifactsView({
         flexDirection: 'column',
         height: '100%',
         overflow: 'hidden',
-        color: '#f0f0f5',
+        color: 'var(--text-primary)',
         position: 'relative'
       }}
     >
@@ -247,24 +247,24 @@ export default function GlobalArtifactsView({
               width: '36px',
               height: '36px',
               borderRadius: '10px',
-              background: 'linear-gradient(135deg, rgba(139, 92, 246, 0.3), rgba(99, 102, 241, 0.15))',
+              background: 'rgba(var(--accent-rgb), 0.15)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              border: '1px solid rgba(139, 92, 246, 0.3)'
+              border: '1px solid rgba(var(--accent-rgb), 0.35)'
             }}
           >
-            <Layers size={18} color="#c4b5fd" />
+            <Layers size={18} color="var(--accent)" />
           </div>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <h1 style={{ color: '#fff', fontSize: '24px', fontWeight: 600, margin: 0 }}>Artifacts</h1>
+              <h1 style={{ color: 'var(--text-primary)', fontSize: '24px', fontWeight: 600, margin: 0 }}>Artifacts</h1>
               <span
                 data-testid="artifacts-count-badge"
                 style={{
-                  background: 'rgba(139, 92, 246, 0.25)',
-                  border: '1px solid rgba(139, 92, 246, 0.4)',
-                  color: '#c4b5fd',
+                  background: 'rgba(var(--accent-rgb), 0.18)',
+                  border: '1px solid rgba(var(--accent-rgb), 0.4)',
+                  color: 'var(--accent)',
                   borderRadius: '999px',
                   padding: '2px 8px',
                   fontSize: '11px',
@@ -274,7 +274,7 @@ export default function GlobalArtifactsView({
                 {effectiveArtifacts.length}
               </span>
             </div>
-            <p style={{ margin: 0, fontSize: '12px', color: '#94a3b8' }}>
+            <p style={{ margin: 0, fontSize: '12px', color: 'var(--text-muted)' }}>
               Cross-session deliverables, code files, diffs, and generated reports
             </p>
           </div>
@@ -286,10 +286,10 @@ export default function GlobalArtifactsView({
           <div
             style={{
               display: 'flex',
-              background: 'rgba(255, 255, 255, 0.05)',
+              background: 'var(--bg-raised)',
               borderRadius: '10px',
               padding: '3px',
-              border: '1px solid rgba(255, 255, 255, 0.1)',
+              border: '1px solid var(--border-default)',
               gap: '4px'
             }}
           >
@@ -298,10 +298,10 @@ export default function GlobalArtifactsView({
               data-testid="section-tab-artifacts"
               onClick={() => setActiveSection('artifacts')}
               style={{
-                background: activeSection === 'artifacts' ? 'rgba(139, 92, 246, 0.25)' : 'transparent',
-                border: activeSection === 'artifacts' ? '1px solid rgba(139, 92, 246, 0.45)' : '1px solid transparent',
-                color: activeSection === 'artifacts' ? '#fff' : '#94a3b8',
-                borderRadius: '8px',
+                background: activeSection === 'artifacts' ? 'var(--bg-overlay)' : 'transparent',
+                border: activeSection === 'artifacts' ? '1px solid var(--accent)' : '1px solid transparent',
+                color: activeSection === 'artifacts' ? 'var(--accent)' : 'var(--text-muted)',
+                borderRadius: 'var(--radius-md)',
                 padding: '5px 12px',
                 cursor: 'pointer',
                 display: 'flex',
@@ -320,10 +320,10 @@ export default function GlobalArtifactsView({
               data-testid="section-tab-media"
               onClick={() => setActiveSection('media')}
               style={{
-                background: activeSection === 'media' ? 'rgba(139, 92, 246, 0.25)' : 'transparent',
-                border: activeSection === 'media' ? '1px solid rgba(139, 92, 246, 0.45)' : '1px solid transparent',
-                color: activeSection === 'media' ? '#fff' : '#94a3b8',
-                borderRadius: '8px',
+                background: activeSection === 'media' ? 'var(--bg-overlay)' : 'transparent',
+                border: activeSection === 'media' ? '1px solid var(--accent)' : '1px solid transparent',
+                color: activeSection === 'media' ? 'var(--accent)' : 'var(--text-muted)',
+                borderRadius: 'var(--radius-md)',
                 padding: '5px 12px',
                 cursor: 'pointer',
                 display: 'flex',
@@ -344,10 +344,10 @@ export default function GlobalArtifactsView({
             <div
               style={{
                 display: 'flex',
-                background: 'rgba(255, 255, 255, 0.05)',
-                borderRadius: '8px',
+                background: 'var(--bg-raised)',
+                borderRadius: 'var(--radius-md)',
                 padding: '3px',
-                border: '1px solid rgba(255, 255, 255, 0.1)'
+                border: '1px solid var(--border-default)'
               }}
             >
               <button
@@ -356,10 +356,10 @@ export default function GlobalArtifactsView({
                 onClick={() => setViewMode('table')}
                 title="Table View"
                 style={{
-                  background: viewMode === 'table' ? 'rgba(255, 255, 255, 0.12)' : 'transparent',
+                  background: viewMode === 'table' ? 'var(--bg-hover)' : 'transparent',
                   border: 'none',
-                  color: viewMode === 'table' ? '#fff' : '#94a3b8',
-                  borderRadius: '6px',
+                  color: viewMode === 'table' ? 'var(--text-primary)' : 'var(--text-muted)',
+                  borderRadius: 'var(--radius-sm)',
                   padding: '6px 10px',
                   cursor: 'pointer',
                   display: 'flex',
@@ -379,10 +379,10 @@ export default function GlobalArtifactsView({
                 onClick={() => setViewMode('grid')}
                 title="Grid View"
                 style={{
-                  background: viewMode === 'grid' ? 'rgba(255, 255, 255, 0.12)' : 'transparent',
+                  background: viewMode === 'grid' ? 'var(--bg-hover)' : 'transparent',
                   border: 'none',
-                  color: viewMode === 'grid' ? '#fff' : '#94a3b8',
-                  borderRadius: '6px',
+                  color: viewMode === 'grid' ? 'var(--text-primary)' : 'var(--text-muted)',
+                  borderRadius: 'var(--radius-sm)',
                   padding: '6px 10px',
                   cursor: 'pointer',
                   display: 'flex',
@@ -429,16 +429,16 @@ export default function GlobalArtifactsView({
           style={{
             display: 'flex',
             alignItems: 'center',
-            background: 'rgba(0, 0, 0, 0.25)',
-            border: '1px solid rgba(255, 255, 255, 0.1)',
-            borderRadius: '8px',
+            background: 'var(--bg-base)',
+            border: '1px solid var(--border-default)',
+            borderRadius: 'var(--radius-md)',
             padding: '6px 12px',
             gap: '8px',
             width: '320px',
             maxWidth: '100%'
           }}
         >
-          <Search size={15} color="#94a3b8" />
+          <Search size={15} color="var(--text-muted)" />
           <input
             type="text"
             className="aether-search-input"
@@ -449,7 +449,7 @@ export default function GlobalArtifactsView({
             style={{
               background: 'transparent',
               border: 'none',
-              color: '#fff',
+              color: 'var(--text-primary)',
               fontSize: '12px',
               width: '100%'
             }}
@@ -461,7 +461,7 @@ export default function GlobalArtifactsView({
               style={{
                 background: 'transparent',
                 border: 'none',
-                color: '#94a3b8',
+                color: 'var(--text-muted)',
                 cursor: 'pointer',
                 padding: '2px',
                 display: 'flex',
@@ -484,9 +484,9 @@ export default function GlobalArtifactsView({
                 data-testid={`filter-kind-${k.id}`}
                 onClick={() => setSelectedKind(k.id)}
                 style={{
-                  background: isActive ? 'rgba(139, 92, 246, 0.22)' : 'rgba(255, 255, 255, 0.05)',
-                  border: isActive ? '1px solid rgba(139, 92, 246, 0.45)' : '1px solid rgba(255, 255, 255, 0.08)',
-                  color: isActive ? '#fff' : '#94a3b8',
+                  background: isActive ? 'var(--bg-overlay)' : 'var(--bg-raised)',
+                  border: isActive ? '1px solid var(--accent)' : '1px solid var(--border-default)',
+                  color: isActive ? 'var(--accent)' : 'var(--text-muted)',
                   borderRadius: '20px',
                   padding: '4px 10px',
                   cursor: 'pointer',
@@ -501,7 +501,7 @@ export default function GlobalArtifactsView({
                 <span>{k.label}</span>
                 <span
                   style={{
-                    background: isActive ? 'rgba(139, 92, 246, 0.4)' : 'rgba(255, 255, 255, 0.1)',
+                    background: isActive ? 'rgba(var(--accent-rgb), 0.35)' : 'var(--bg-hover)',
                     padding: '1px 5px',
                     borderRadius: '10px',
                     fontSize: '10px'
@@ -537,7 +537,7 @@ export default function GlobalArtifactsView({
               alignItems: 'center',
               justifyContent: 'center',
               height: '320px',
-              color: '#94a3b8',
+              color: 'var(--text-muted)',
               gap: '12px'
             }}
           >
@@ -546,17 +546,17 @@ export default function GlobalArtifactsView({
                 width: '56px',
                 height: '56px',
                 borderRadius: '50%',
-                background: 'rgba(255, 255, 255, 0.04)',
-                border: '1px solid rgba(255, 255, 255, 0.08)',
+                background: 'var(--bg-raised)',
+                border: '1px solid var(--border-default)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center'
               }}
             >
-              <Layers size={26} color="#64748b" />
+              <Layers size={26} color="var(--text-muted)" />
             </div>
-            <div style={{ fontSize: '15px', fontWeight: 500, color: '#e2e8f0' }}>No artifacts found</div>
-            <div style={{ fontSize: '12px', color: '#64748b', maxWidth: '360px', textAlign: 'center' }}>
+            <div style={{ fontSize: '15px', fontWeight: 500, color: 'var(--text-primary)' }}>No artifacts found</div>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', maxWidth: '360px', textAlign: 'center' }}>
               Files, code changes, and deliverables produced by agents during conversation tasks will be tracked here.
             </div>
           </div>
@@ -569,13 +569,13 @@ export default function GlobalArtifactsView({
               alignItems: 'center',
               justifyContent: 'center',
               height: '240px',
-              color: '#94a3b8',
+              color: 'var(--text-muted)',
               gap: '10px'
             }}
           >
-            <Search size={28} color="#64748b" />
-            <div style={{ fontSize: '14px', fontWeight: 500, color: '#e2e8f0' }}>No artifacts found</div>
-            <div style={{ fontSize: '12px', color: '#64748b' }}>
+            <Search size={28} color="var(--text-muted)" />
+            <div style={{ fontSize: '14px', fontWeight: 500, color: 'var(--text-primary)' }}>No artifacts found</div>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
               No items match &quot;{searchQuery}&quot; with filter &quot;{selectedKind}&quot;.
             </div>
           </div>
@@ -584,21 +584,21 @@ export default function GlobalArtifactsView({
           <div
             data-testid="view-mode-table"
             style={{
-              background: 'rgba(15, 17, 23, 0.5)',
+              background: 'var(--bg-raised)',
               borderRadius: '10px',
-              border: '1px solid rgba(255, 255, 255, 0.08)',
+              border: '1px solid var(--border-default)',
               overflow: 'hidden'
             }}
           >
             <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '12px' }}>
               <thead>
-                <tr style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.08)', background: 'rgba(255, 255, 255, 0.02)' }}>
-                  <th style={{ padding: '12px 16px', color: '#94a3b8', fontWeight: 600 }}>Artifact</th>
-                  <th style={{ padding: '12px 16px', color: '#94a3b8', fontWeight: 600 }}>Kind</th>
-                  <th style={{ padding: '12px 16px', color: '#94a3b8', fontWeight: 600 }}>Session</th>
-                  <th style={{ padding: '12px 16px', color: '#94a3b8', fontWeight: 600 }}>Task</th>
-                  <th style={{ padding: '12px 16px', color: '#94a3b8', fontWeight: 600 }}>Created</th>
-                  <th style={{ padding: '12px 16px', color: '#94a3b8', fontWeight: 600, textAlign: 'right' }}>Action</th>
+                <tr style={{ borderBottom: '1px solid var(--border-default)', background: 'var(--bg-overlay)' }}>
+                  <th style={{ padding: '12px 16px', color: 'var(--text-muted)', fontWeight: 600 }}>Artifact</th>
+                  <th style={{ padding: '12px 16px', color: 'var(--text-muted)', fontWeight: 600 }}>Kind</th>
+                  <th style={{ padding: '12px 16px', color: 'var(--text-muted)', fontWeight: 600 }}>Session</th>
+                  <th style={{ padding: '12px 16px', color: 'var(--text-muted)', fontWeight: 600 }}>Task</th>
+                  <th style={{ padding: '12px 16px', color: 'var(--text-muted)', fontWeight: 600 }}>Created</th>
+                  <th style={{ padding: '12px 16px', color: 'var(--text-muted)', fontWeight: 600, textAlign: 'right' }}>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -610,11 +610,11 @@ export default function GlobalArtifactsView({
                       data-testid={`artifact-item-${art.id}`}
                       onClick={() => onNavigateToSession(art)}
                       style={{
-                        borderBottom: '1px solid rgba(255, 255, 255, 0.04)',
+                        borderBottom: '1px solid var(--border-default)',
                         cursor: 'pointer',
                         transition: 'background 0.15s'
                       }}
-                      onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'; }}
+                      onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
                       onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                     >
                       {/* Title & File path */}
@@ -625,7 +625,7 @@ export default function GlobalArtifactsView({
                             <div
                               data-testid={`artifact-title-${art.id}`}
                               style={{
-                                color: '#f8fafc',
+                                color: 'var(--text-primary)',
                                 fontWeight: 500,
                                 whiteSpace: 'nowrap',
                                 overflow: 'hidden',
@@ -638,7 +638,8 @@ export default function GlobalArtifactsView({
                               <div
                                 style={{
                                   fontSize: '11px',
-                                  color: '#64748b',
+                                  fontFamily: 'var(--font-mono)',
+                                  color: 'var(--text-muted)',
                                   whiteSpace: 'nowrap',
                                   overflow: 'hidden',
                                   textOverflow: 'ellipsis'
@@ -661,16 +662,16 @@ export default function GlobalArtifactsView({
                             borderRadius: '999px',
                             background:
                               art.kind === 'diff'
-                                ? 'rgba(192, 132, 252, 0.18)'
+                                ? 'rgba(var(--accent-rgb), 0.18)'
                                 : art.kind === 'report'
-                                ? 'rgba(56, 189, 248, 0.18)'
-                                : 'rgba(255, 255, 255, 0.08)',
+                                ? 'var(--bg-hover)'
+                                : 'var(--bg-hover)',
                             color:
                               art.kind === 'diff'
-                                ? '#c084fc'
+                                ? 'var(--accent)'
                                 : art.kind === 'report'
-                                ? '#38bdf8'
-                                : '#94a3b8',
+                                ? 'var(--text-secondary)'
+                                : 'var(--text-muted)',
                             textTransform: 'uppercase'
                           }}
                         >
@@ -688,8 +689,8 @@ export default function GlobalArtifactsView({
                             gap: '6px',
                             padding: '2px 8px',
                             borderRadius: '6px',
-                            background: 'rgba(255, 255, 255, 0.05)',
-                            color: '#cbd5e1',
+                            background: 'var(--bg-overlay)',
+                            color: 'var(--text-secondary)',
                             fontSize: '11px',
                             maxWidth: '180px',
                             whiteSpace: 'nowrap',
@@ -697,7 +698,7 @@ export default function GlobalArtifactsView({
                             textOverflow: 'ellipsis'
                           }}
                         >
-                          <FolderGit2 size={12} color="#a78bfa" />
+                          <FolderGit2 size={12} color="var(--accent)" />
                           <span>{sessTitle}</span>
                         </div>
                       </td>
@@ -707,9 +708,9 @@ export default function GlobalArtifactsView({
                         <div
                           data-testid={`artifact-task-${art.id}`}
                           style={{
-                            color: '#94a3b8',
+                            color: 'var(--text-muted)',
                             fontSize: '11px',
-                            fontFamily: 'monospace'
+                            fontFamily: 'var(--font-mono)'
                           }}
                         >
                           {art.task_id}
@@ -717,7 +718,7 @@ export default function GlobalArtifactsView({
                       </td>
 
                       {/* Created Time */}
-                      <td style={{ padding: '12px 16px', color: '#64748b', fontSize: '11px', whiteSpace: 'nowrap' }}>
+                      <td style={{ padding: '12px 16px', color: 'var(--text-muted)', fontSize: '11px', whiteSpace: 'nowrap' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                           <Clock size={11} />
                           <span>{formatTimestamp(art.created_at)}</span>
@@ -735,10 +736,10 @@ export default function GlobalArtifactsView({
                           }}
                           title="Open artifact in originating session canvas"
                           style={{
-                            background: 'rgba(139, 92, 246, 0.15)',
-                            border: '1px solid rgba(139, 92, 246, 0.3)',
-                            borderRadius: '6px',
-                            color: '#c4b5fd',
+                            background: 'rgba(var(--accent-rgb), 0.15)',
+                            border: '1px solid rgba(var(--accent-rgb), 0.35)',
+                            borderRadius: 'var(--radius-sm)',
+                            color: 'var(--accent)',
                             padding: '4px 10px',
                             fontSize: '11px',
                             fontWeight: 500,
@@ -748,8 +749,8 @@ export default function GlobalArtifactsView({
                             gap: '5px',
                             transition: 'all 0.15s'
                           }}
-                          onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(139, 92, 246, 0.3)'; }}
-                          onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(139, 92, 246, 0.15)'; }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(var(--accent-rgb), 0.3)'; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(var(--accent-rgb), 0.15)'; }}
                         >
                           <span>Open in Canvas</span>
                           <ExternalLink size={12} />
@@ -779,8 +780,8 @@ export default function GlobalArtifactsView({
                   data-testid={`artifact-item-${art.id}`}
                   onClick={() => onNavigateToSession(art)}
                   style={{
-                    background: 'rgba(20, 22, 30, 0.6)',
-                    border: '1px solid rgba(255, 255, 255, 0.08)',
+                    background: 'var(--bg-raised)',
+                    border: '1px solid var(--border-default)',
                     borderRadius: '10px',
                     padding: '14px',
                     display: 'flex',
@@ -791,12 +792,12 @@ export default function GlobalArtifactsView({
                     position: 'relative'
                   }}
                   onMouseEnter={(e) => {
-                    e.currentTarget.style.borderColor = 'rgba(139, 92, 246, 0.4)';
-                    e.currentTarget.style.background = 'rgba(25, 28, 38, 0.8)';
+                    e.currentTarget.style.borderColor = 'var(--border-strong)';
+                    e.currentTarget.style.background = 'var(--bg-overlay)';
                   }}
                   onMouseLeave={(e) => {
-                    e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)';
-                    e.currentTarget.style.background = 'rgba(20, 22, 30, 0.6)';
+                    e.currentTarget.style.borderColor = 'var(--border-default)';
+                    e.currentTarget.style.background = 'var(--bg-raised)';
                   }}
                 >
                   <div>
@@ -807,7 +808,7 @@ export default function GlobalArtifactsView({
                         <span
                           data-testid={`artifact-title-${art.id}`}
                           style={{
-                            color: '#fff',
+                            color: 'var(--text-primary)',
                             fontSize: '13px',
                             fontWeight: 600,
                             whiteSpace: 'nowrap',
@@ -826,16 +827,16 @@ export default function GlobalArtifactsView({
                           borderRadius: '999px',
                           background:
                             art.kind === 'diff'
-                              ? 'rgba(192, 132, 252, 0.18)'
+                              ? 'rgba(var(--accent-rgb), 0.18)'
                               : art.kind === 'report'
-                              ? 'rgba(56, 189, 248, 0.18)'
-                              : 'rgba(255, 255, 255, 0.08)',
+                              ? 'var(--bg-hover)'
+                              : 'var(--bg-hover)',
                           color:
                             art.kind === 'diff'
-                              ? '#c084fc'
+                              ? 'var(--accent)'
                               : art.kind === 'report'
-                              ? '#38bdf8'
-                              : '#94a3b8',
+                              ? 'var(--text-secondary)'
+                              : 'var(--text-muted)',
                           textTransform: 'uppercase',
                           flexShrink: 0
                         }}
@@ -849,7 +850,8 @@ export default function GlobalArtifactsView({
                       <div
                         style={{
                           fontSize: '11px',
-                          color: '#64748b',
+                          fontFamily: 'var(--font-mono)',
+                          color: 'var(--text-muted)',
                           whiteSpace: 'nowrap',
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
@@ -869,10 +871,10 @@ export default function GlobalArtifactsView({
                           alignItems: 'center',
                           gap: '6px',
                           fontSize: '11px',
-                          color: '#cbd5e1'
+                          color: 'var(--text-secondary)'
                         }}
                       >
-                        <FolderGit2 size={12} color="#a78bfa" />
+                        <FolderGit2 size={12} color="var(--accent)" />
                         <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                           {sessTitle}
                         </span>
@@ -881,8 +883,8 @@ export default function GlobalArtifactsView({
                         data-testid={`artifact-task-${art.id}`}
                         style={{
                           fontSize: '10px',
-                          color: '#94a3b8',
-                          fontFamily: 'monospace'
+                          color: 'var(--text-muted)',
+                          fontFamily: 'var(--font-mono)'
                         }}
                       >
                         Task: {art.task_id}
@@ -896,12 +898,12 @@ export default function GlobalArtifactsView({
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'space-between',
-                      borderTop: '1px solid rgba(255, 255, 255, 0.06)',
+                      borderTop: '1px solid var(--border-default)',
                       paddingTop: '8px',
                       marginTop: '4px'
                     }}
                   >
-                    <span style={{ fontSize: '10px', color: '#64748b' }}>
+                    <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
                       {formatTimestamp(art.created_at)}
                     </span>
                     <button
@@ -915,7 +917,7 @@ export default function GlobalArtifactsView({
                       style={{
                         background: 'transparent',
                         border: 'none',
-                        color: '#a78bfa',
+                        color: 'var(--accent)',
                         cursor: 'pointer',
                         padding: '4px',
                         display: 'flex',

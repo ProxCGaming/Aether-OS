@@ -52,9 +52,9 @@ export default function MediaDetailModal({
       >
         <div
           style={{
-            background: '#14161f',
-            border: '1px solid rgba(255, 255, 255, 0.15)',
-            borderRadius: '16px',
+            background: 'var(--bg-overlay)',
+            border: '1px solid var(--border-strong)',
+            borderRadius: 'var(--radius-lg)',
             width: '560px',
             maxWidth: '92vw',
             maxHeight: '88vh',
@@ -81,7 +81,7 @@ export default function MediaDetailModal({
               >
                 {getOriginLabel(item.origin, item.collection)}
               </span>
-              <span style={{ fontSize: '11px', color: '#64748b' }}>
+              <span style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
                 {formatBytes(item.file_size)}
               </span>
             </div>
@@ -92,7 +92,7 @@ export default function MediaDetailModal({
               style={{
                 background: 'transparent',
                 border: 'none',
-                color: '#94a3b8',
+                color: 'var(--text-muted)',
                 cursor: 'pointer',
                 padding: '4px'
               }}
@@ -103,10 +103,10 @@ export default function MediaDetailModal({
 
           {/* Title / Path */}
           <div>
-            <h3 style={{ margin: '0 0 4px 0', fontSize: '16px', color: '#fff' }}>
+            <h3 style={{ margin: '0 0 4px 0', fontSize: '16px', color: 'var(--text-primary)' }}>
               {item.file_path.split(/[/\\]/).pop()}
             </h3>
-            <div style={{ fontSize: '11px', color: '#64748b', wordBreak: 'break-all' }}>
+            <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', wordBreak: 'break-all' }}>
               {item.file_path}
             </div>
           </div>
@@ -123,7 +123,7 @@ export default function MediaDetailModal({
                 controls
                 preload="metadata"
                 onError={() => onThumbError(item.id)}
-                style={{ width: '100%', maxHeight: '320px', borderRadius: '10px', background: '#000' }}
+                style={{ width: '100%', maxHeight: '320px', borderRadius: '10px', background: 'var(--bg-base)' }}
               />
             ) : (
               <img
@@ -131,7 +131,7 @@ export default function MediaDetailModal({
                 src={toFileUrl(item.file_path)}
                 alt={item.file_path.split(/[/\\]/).pop()}
                 onError={() => onThumbError(item.id)}
-                style={{ width: '100%', maxHeight: '320px', objectFit: 'contain', borderRadius: '10px', background: '#000' }}
+                style={{ width: '100%', maxHeight: '320px', objectFit: 'contain', borderRadius: '10px', background: 'var(--bg-base)' }}
               />
             )
           )}
@@ -140,14 +140,14 @@ export default function MediaDetailModal({
           {item.file_exists === false && (
             <div
               style={{
-                background: 'rgba(239, 68, 68, 0.12)',
-                border: '1px solid rgba(239, 68, 68, 0.3)',
-                borderRadius: '8px',
+                background: 'rgba(201, 42, 42, 0.12)',
+                border: '1px solid rgba(201, 42, 42, 0.3)',
+                borderRadius: 'var(--radius-md)',
                 padding: '10px 14px',
                 display: 'flex',
                 alignItems: 'center',
                 gap: '10px',
-                color: '#f87171',
+                color: 'var(--danger)',
                 fontSize: '12px'
               }}
             >
@@ -157,10 +157,10 @@ export default function MediaDetailModal({
           )}
 
           {/* Session attribution */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(255, 255, 255, 0.03)', padding: '10px 14px', borderRadius: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'var(--bg-raised)', padding: '10px 14px', borderRadius: 'var(--radius-md)' }}>
             <div>
-              <div style={{ fontSize: '10px', color: '#64748b', textTransform: 'uppercase' }}>Originating Session</div>
-              <div style={{ fontSize: '12px', color: '#e2e8f0', fontWeight: 500 }}>
+              <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Originating Session</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-primary)', fontWeight: 500 }}>
                 {sessionTitle}
               </div>
             </div>
@@ -170,10 +170,10 @@ export default function MediaDetailModal({
                 data-testid={`jump-to-conversation-${item.id}`}
                 onClick={(e) => onJumpToChat(item, e)}
                 style={{
-                  background: 'rgba(139, 92, 246, 0.15)',
-                  border: '1px solid rgba(139, 92, 246, 0.3)',
-                  color: '#c4b5fd',
-                  borderRadius: '6px',
+                  background: 'rgba(var(--accent-rgb), 0.15)',
+                  border: '1px solid rgba(var(--accent-rgb), 0.35)',
+                  color: 'var(--accent)',
+                  borderRadius: 'var(--radius-sm)',
                   padding: '6px 12px',
                   fontSize: '11px',
                   fontWeight: 500,
@@ -191,7 +191,7 @@ export default function MediaDetailModal({
 
           {/* Tags Section */}
           <div>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#cbd5e1', marginBottom: '8px' }}>
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' }}>
               Tags
             </label>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '10px' }}>
@@ -200,12 +200,12 @@ export default function MediaDetailModal({
                   key={idx}
                   data-testid="media-tag-item"
                   style={{
-                    background: 'rgba(139, 92, 246, 0.18)',
-                    border: '1px solid rgba(139, 92, 246, 0.35)',
-                    color: '#c4b5fd',
+                    background: 'var(--bg-overlay)',
+                    border: '1px solid var(--border-strong)',
+                    color: 'var(--text-primary)',
                     fontSize: '11px',
                     padding: '3px 8px',
-                    borderRadius: '6px',
+                    borderRadius: 'var(--radius-sm)',
                     display: 'flex',
                     alignItems: 'center',
                     gap: '5px'
@@ -218,7 +218,7 @@ export default function MediaDetailModal({
                     style={{
                       background: 'transparent',
                       border: 'none',
-                      color: '#c4b5fd',
+                      color: 'var(--text-muted)',
                       cursor: 'pointer',
                       padding: '0',
                       display: 'flex'
@@ -245,11 +245,11 @@ export default function MediaDetailModal({
                 }}
                 style={{
                   flex: 1,
-                  background: 'rgba(0, 0, 0, 0.3)',
-                  border: '1px solid rgba(255, 255, 255, 0.12)',
-                  borderRadius: '8px',
+                  background: 'var(--bg-base)',
+                  border: '1px solid var(--border-default)',
+                  borderRadius: 'var(--radius-md)',
                   padding: '8px 12px',
-                  color: '#fff',
+                  color: 'var(--text-primary)',
                   fontSize: '12px'
                 }}
               />
@@ -258,10 +258,10 @@ export default function MediaDetailModal({
                 data-testid="media-add-tag-btn"
                 onClick={onAddTag}
                 style={{
-                  background: 'rgba(255, 255, 255, 0.08)',
-                  border: '1px solid rgba(255, 255, 255, 0.12)',
-                  color: '#fff',
-                  borderRadius: '8px',
+                  background: 'var(--bg-hover)',
+                  border: '1px solid var(--border-default)',
+                  color: 'var(--text-primary)',
+                  borderRadius: 'var(--radius-md)',
                   padding: '0 12px',
                   cursor: 'pointer',
                   display: 'flex',
@@ -278,7 +278,7 @@ export default function MediaDetailModal({
 
           {/* Notes Section */}
           <div>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#cbd5e1', marginBottom: '8px' }}>
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' }}>
               Notes
             </label>
             <textarea
@@ -290,11 +290,11 @@ export default function MediaDetailModal({
               onChange={(e) => onNotesChange(e.target.value)}
               style={{
                 width: '100%',
-                background: 'rgba(0, 0, 0, 0.3)',
-                border: '1px solid rgba(255, 255, 255, 0.12)',
-                borderRadius: '8px',
+                background: 'var(--bg-base)',
+                border: '1px solid var(--border-default)',
+                borderRadius: 'var(--radius-md)',
                 padding: '10px 12px',
-                color: '#fff',
+                color: 'var(--text-primary)',
                 fontSize: '12px',
                 resize: 'vertical',
                 boxSizing: 'border-box'
@@ -309,7 +309,7 @@ export default function MediaDetailModal({
           {deleteQueued && (
             <div
               data-testid="media-detail-delete-queued"
-              style={{ fontSize: '12px', color: '#fbbf24', background: 'rgba(251, 191, 36, 0.08)', border: '1px solid rgba(251, 191, 36, 0.3)', borderRadius: '8px', padding: '8px 12px' }}
+              style={{ fontSize: '12px', color: 'var(--accent)', background: 'rgba(var(--accent-rgb), 0.08)', border: '1px solid rgba(var(--accent-rgb), 0.3)', borderRadius: 'var(--radius-md)', padding: '8px 12px' }}
             >
               Delete queued — this item will be removed when the engine reconnects.
             </div>
@@ -317,7 +317,7 @@ export default function MediaDetailModal({
           {metaQueued && (
             <div
               data-testid="media-detail-meta-queued"
-              style={{ fontSize: '12px', color: '#fbbf24', background: 'rgba(251, 191, 36, 0.08)', border: '1px solid rgba(251, 191, 36, 0.3)', borderRadius: '8px', padding: '8px 12px' }}
+              style={{ fontSize: '12px', color: 'var(--accent)', background: 'rgba(var(--accent-rgb), 0.08)', border: '1px solid rgba(var(--accent-rgb), 0.3)', borderRadius: 'var(--radius-md)', padding: '8px 12px' }}
             >
               An edit for this item is queued — it will apply when the engine reconnects.
             </div>
@@ -330,9 +330,9 @@ export default function MediaDetailModal({
               onClick={onClose}
               style={{
                 background: 'transparent',
-                border: '1px solid rgba(255, 255, 255, 0.15)',
-                color: '#94a3b8',
-                borderRadius: '8px',
+                border: '1px solid var(--border-strong)',
+                color: 'var(--text-muted)',
+                borderRadius: 'var(--radius-md)',
                 padding: '8px 16px',
                 fontSize: '12px',
                 cursor: 'pointer'
@@ -346,10 +346,10 @@ export default function MediaDetailModal({
               onClick={onSave}
               disabled={metaQueued}
               style={{
-                background: '#8b5cf6',
+                background: 'var(--accent)',
                 border: 'none',
-                color: '#fff',
-                borderRadius: '8px',
+                color: 'var(--accent-on)',
+                borderRadius: 'var(--radius-md)',
                 padding: '8px 18px',
                 fontSize: '12px',
                 fontWeight: 600,

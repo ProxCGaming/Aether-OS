@@ -80,9 +80,9 @@ export default function MediaGrid({
             data-testid={`media-card-${item.id}`}
             onClick={() => onOpenDetail(item)}
             style={{
-              background: 'rgba(20, 22, 30, 0.7)',
-              border: isMissing ? '1px solid rgba(239, 68, 68, 0.4)' : '1px solid rgba(255, 255, 255, 0.08)',
-              borderRadius: '12px',
+              background: 'var(--bg-raised)',
+              border: isMissing ? '1px solid rgba(201, 42, 42, 0.4)' : '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)',
               overflow: 'hidden',
               display: 'flex',
               flexDirection: 'column',
@@ -92,14 +92,14 @@ export default function MediaGrid({
             }}
             onMouseEnter={(e) => {
               e.currentTarget.style.borderColor = isMissing
-                ? 'rgba(239, 68, 68, 0.7)'
-                : 'rgba(139, 92, 246, 0.5)';
+                ? 'rgba(201, 42, 42, 0.7)'
+                : 'var(--border-strong)';
               e.currentTarget.style.transform = 'translateY(-2px)';
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.borderColor = isMissing
-                ? 'rgba(239, 68, 68, 0.4)'
-                : 'rgba(255, 255, 255, 0.08)';
+                ? 'rgba(201, 42, 42, 0.4)'
+                : 'var(--border-default)';
               e.currentTarget.style.transform = 'none';
             }}
           >
@@ -107,12 +107,12 @@ export default function MediaGrid({
             <div
               style={{
                 height: '140px',
-                background: 'rgba(0, 0, 0, 0.4)',
+                background: 'var(--bg-base)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 position: 'relative',
-                borderBottom: '1px solid rgba(255, 255, 255, 0.05)'
+                borderBottom: '1px solid var(--border-default)'
               }}
             >
               {isMissing ? (
@@ -123,7 +123,7 @@ export default function MediaGrid({
                     flexDirection: 'column',
                     alignItems: 'center',
                     gap: '6px',
-                    color: '#f87171'
+                    color: 'var(--danger)'
                   }}
                 >
                   <AlertTriangle size={28} />
@@ -154,7 +154,7 @@ export default function MediaGrid({
                     flexDirection: 'column',
                     alignItems: 'center',
                     gap: '8px',
-                    color: '#94a3b8'
+                    color: 'var(--text-muted)'
                   }}
                 >
                   <div
@@ -162,15 +162,15 @@ export default function MediaGrid({
                       width: '44px',
                       height: '44px',
                       borderRadius: '50%',
-                      background: 'rgba(255, 255, 255, 0.08)',
+                      background: 'var(--bg-hover)',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center'
                     }}
                   >
-                    <VideoIcon size={22} color="#a78bfa" />
+                    <VideoIcon size={22} color="var(--text-secondary)" />
                   </div>
-                  <span style={{ fontSize: '11px', color: '#94a3b8' }}>Video Clip</span>
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Video Clip</span>
                 </div>
               ) : (
                 <div
@@ -179,7 +179,7 @@ export default function MediaGrid({
                     flexDirection: 'column',
                     alignItems: 'center',
                     gap: '8px',
-                    color: '#94a3b8'
+                    color: 'var(--text-muted)'
                   }}
                 >
                   <div
@@ -187,15 +187,15 @@ export default function MediaGrid({
                       width: '44px',
                       height: '44px',
                       borderRadius: '50%',
-                      background: 'rgba(255, 255, 255, 0.08)',
+                      background: 'var(--bg-hover)',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center'
                     }}
                   >
-                    <ImageIcon size={22} color="#f472b6" />
+                    <ImageIcon size={22} color="var(--text-secondary)" />
                   </div>
-                  <span style={{ fontSize: '11px', color: '#94a3b8' }}>Image</span>
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Image</span>
                 </div>
               )}
 
@@ -209,8 +209,8 @@ export default function MediaGrid({
                   fontWeight: 700,
                   padding: '2px 6px',
                   borderRadius: '4px',
-                  background: 'rgba(0, 0, 0, 0.65)',
-                  color: '#cbd5e1',
+                  background: 'var(--bg-overlay)',
+                  color: 'var(--text-secondary)',
                   letterSpacing: '0.5px'
                 }}
               >
@@ -228,10 +228,10 @@ export default function MediaGrid({
                   position: 'absolute',
                   top: '8px',
                   right: '8px',
-                  background: 'rgba(0, 0, 0, 0.65)',
+                  background: 'var(--bg-overlay)',
                   border: 'none',
-                  borderRadius: '6px',
-                  color: '#94a3b8',
+                  borderRadius: 'var(--radius-sm)',
+                  color: 'var(--text-muted)',
                   padding: '5px',
                   cursor: deleteQueued ? 'default' : 'pointer',
                   opacity: deleteQueued ? 0.45 : 1,
@@ -241,12 +241,12 @@ export default function MediaGrid({
                   transition: 'all 0.15s'
                 }}
                 onMouseEnter={(e) => {
-                  e.currentTarget.style.color = '#ef4444';
-                  e.currentTarget.style.background = 'rgba(239, 68, 68, 0.2)';
+                  e.currentTarget.style.color = 'var(--danger)';
+                  e.currentTarget.style.background = 'rgba(201, 42, 42, 0.2)';
                 }}
                 onMouseLeave={(e) => {
-                  e.currentTarget.style.color = '#94a3b8';
-                  e.currentTarget.style.background = 'rgba(0, 0, 0, 0.65)';
+                  e.currentTarget.style.color = 'var(--text-muted)';
+                  e.currentTarget.style.background = 'var(--bg-overlay)';
                 }}
               >
                 <Trash2 size={13} />
@@ -261,7 +261,7 @@ export default function MediaGrid({
                   style={{
                     fontWeight: 600,
                     fontSize: '13px',
-                    color: '#f8fafc',
+                    color: 'var(--text-primary)',
                     whiteSpace: 'nowrap',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
@@ -290,7 +290,8 @@ export default function MediaGrid({
               <div
                 style={{
                   fontSize: '11px',
-                  color: '#64748b',
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--text-muted)',
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis'
@@ -308,9 +309,9 @@ export default function MediaGrid({
                     display: 'inline-flex',
                     alignItems: 'center',
                     gap: '5px',
-                    color: '#a78bfa',
+                    color: 'var(--accent)',
                     fontSize: '11px',
-                    background: 'rgba(139, 92, 246, 0.1)',
+                    background: 'rgba(var(--accent-rgb), 0.1)',
                     padding: '2px 8px',
                     borderRadius: '6px',
                     width: 'fit-content',
@@ -335,15 +336,15 @@ export default function MediaGrid({
                         fontSize: '10px',
                         padding: '1px 6px',
                         borderRadius: '4px',
-                        background: 'rgba(255, 255, 255, 0.08)',
-                        color: '#cbd5e1'
+                        background: 'var(--bg-hover)',
+                        color: 'var(--text-secondary)'
                       }}
                     >
                       #{tag}
                     </span>
                   ))}
                   {item.tags.length > 3 && (
-                    <span style={{ fontSize: '10px', color: '#64748b' }}>+{item.tags.length - 3}</span>
+                    <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>+{item.tags.length - 3}</span>
                   )}
                 </div>
               )}
@@ -356,7 +357,7 @@ export default function MediaGrid({
                   {deleteQueued && (
                     <span
                       data-testid={`media-delete-queued-${item.id}`}
-                      style={{ fontSize: '11px', color: '#fbbf24', fontWeight: 500 }}
+                      style={{ fontSize: '11px', color: 'var(--accent)', fontWeight: 500 }}
                     >
                       Delete queued — will apply when the engine reconnects.
                     </span>
@@ -364,7 +365,7 @@ export default function MediaGrid({
                   {metaQueued && (
                     <span
                       data-testid={`media-meta-queued-${item.id}`}
-                      style={{ fontSize: '11px', color: '#fbbf24', fontWeight: 500 }}
+                      style={{ fontSize: '11px', color: 'var(--accent)', fontWeight: 500 }}
                     >
                       Edit queued — will apply when the engine reconnects.
                     </span>
@@ -380,9 +381,10 @@ export default function MediaGrid({
                   justifyContent: 'space-between',
                   marginTop: 'auto',
                   paddingTop: '8px',
-                  borderTop: '1px solid rgba(255, 255, 255, 0.05)',
+                  borderTop: '1px solid var(--border-default)',
                   fontSize: '11px',
-                  color: '#64748b'
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--text-muted)'
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -400,7 +402,7 @@ export default function MediaGrid({
                     style={{
                       background: 'transparent',
                       border: 'none',
-                      color: '#a78bfa',
+                      color: 'var(--accent)',
                       cursor: 'pointer',
                       display: 'flex',
                       alignItems: 'center',
@@ -412,7 +414,7 @@ export default function MediaGrid({
                       transition: 'all 0.15s'
                     }}
                     onMouseEnter={(e) => {
-                      e.currentTarget.style.background = 'rgba(139, 92, 246, 0.15)';
+                      e.currentTarget.style.background = 'rgba(var(--accent-rgb), 0.15)';
                     }}
                     onMouseLeave={(e) => {
                       e.currentTarget.style.background = 'transparent';

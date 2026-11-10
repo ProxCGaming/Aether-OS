@@ -499,22 +499,22 @@ export default function MediaLibrary({
     const norm = (origin || '').toLowerCase();
     if (norm === 'snip') {
       return {
-        background: 'rgba(236, 72, 153, 0.18)',
-        color: '#f472b6',
-        border: '1px solid rgba(236, 72, 153, 0.35)'
+        background: 'rgba(var(--accent-rgb), 0.18)',
+        color: 'var(--accent)',
+        border: '1px solid rgba(var(--accent-rgb), 0.35)'
       };
     }
     if (norm === 'agent_generated' || collection === 'generated') {
       return {
-        background: 'rgba(52, 211, 153, 0.18)',
-        color: '#34d399',
-        border: '1px solid rgba(52, 211, 153, 0.35)'
+        background: 'rgba(76, 195, 138, 0.18)',
+        color: 'var(--success)',
+        border: '1px solid rgba(76, 195, 138, 0.35)'
       };
     }
     return {
-      background: 'rgba(56, 189, 248, 0.18)',
-      color: '#38bdf8',
-      border: '1px solid rgba(56, 189, 248, 0.35)'
+      background: 'var(--bg-hover)',
+      color: 'var(--text-secondary)',
+      border: '1px solid var(--border-strong)'
     };
   };
 
@@ -525,7 +525,7 @@ export default function MediaLibrary({
         display: 'flex',
         flexDirection: 'column',
         height: '100%',
-        color: '#f0f0f5',
+        color: 'var(--text-primary)',
         position: 'relative'
       }}
     >
@@ -545,16 +545,16 @@ export default function MediaLibrary({
           style={{
             display: 'flex',
             alignItems: 'center',
-            background: 'rgba(0, 0, 0, 0.25)',
-            border: '1px solid rgba(255, 255, 255, 0.1)',
-            borderRadius: '8px',
+            background: 'var(--bg-base)',
+            border: '1px solid var(--border-default)',
+            borderRadius: 'var(--radius-md)',
             padding: '6px 12px',
             gap: '8px',
             width: '320px',
             maxWidth: '100%'
           }}
         >
-          <Search size={15} color="#94a3b8" />
+          <Search size={15} color="var(--text-muted)" />
           <input
             type="text"
             className="aether-search-input"
@@ -565,7 +565,7 @@ export default function MediaLibrary({
             style={{
               background: 'transparent',
               border: 'none',
-              color: '#fff',
+              color: 'var(--text-primary)',
               fontSize: '12px',
               width: '100%'
             }}
@@ -577,7 +577,7 @@ export default function MediaLibrary({
               style={{
                 background: 'transparent',
                 border: 'none',
-                color: '#94a3b8',
+                color: 'var(--text-muted)',
                 cursor: 'pointer',
                 padding: '2px',
                 display: 'flex',
@@ -594,9 +594,9 @@ export default function MediaLibrary({
           <span
             data-testid="media-count-badge"
             style={{
-              background: 'rgba(139, 92, 246, 0.25)',
-              border: '1px solid rgba(139, 92, 246, 0.4)',
-              color: '#c4b5fd',
+              background: 'rgba(var(--accent-rgb), 0.18)',
+              border: '1px solid rgba(var(--accent-rgb), 0.4)',
+              color: 'var(--accent)',
               borderRadius: '999px',
               padding: '2px 8px',
               fontSize: '11px',
@@ -620,9 +620,9 @@ export default function MediaLibrary({
                 data-testid={`collection-tab-${tab.id}`}
                 onClick={() => setActiveCollection(tab.id)}
                 style={{
-                  background: isActive ? 'rgba(139, 92, 246, 0.22)' : 'rgba(255, 255, 255, 0.05)',
-                  border: isActive ? '1px solid rgba(139, 92, 246, 0.45)' : '1px solid rgba(255, 255, 255, 0.08)',
-                  color: isActive ? '#fff' : '#94a3b8',
+                  background: isActive ? 'var(--bg-overlay)' : 'var(--bg-raised)',
+                  border: isActive ? '1px solid var(--accent)' : '1px solid var(--border-default)',
+                  color: isActive ? 'var(--accent)' : 'var(--text-muted)',
                   borderRadius: '20px',
                   padding: '5px 12px',
                   cursor: 'pointer',
@@ -647,7 +647,7 @@ export default function MediaLibrary({
       {searchQuery.trim() && searchResults && searchResults.query === searchQuery.trim() && searchResults.degraded && (
         <div
           data-testid="media-search-degraded"
-          style={{ fontSize: '11px', color: '#fbbf24', marginBottom: '10px' }}
+          style={{ fontSize: '11px', color: 'var(--accent)', marginBottom: '10px' }}
         >
           Semantic search is unavailable right now — showing text matches only.
         </div>
@@ -664,14 +664,14 @@ export default function MediaLibrary({
             alignItems: 'center',
             gap: '8px',
             fontSize: '12px',
-            color: deleteNotice.tone === 'error' ? '#f87171' : '#fbbf24',
+            color: deleteNotice.tone === 'error' ? 'var(--danger)' : 'var(--accent)',
             background: deleteNotice.tone === 'error'
-              ? 'rgba(239, 68, 68, 0.1)'
-              : 'rgba(251, 191, 36, 0.08)',
+              ? 'rgba(201, 42, 42, 0.1)'
+              : 'rgba(var(--accent-rgb), 0.08)',
             border: deleteNotice.tone === 'error'
-              ? '1px solid rgba(239, 68, 68, 0.3)'
-              : '1px solid rgba(251, 191, 36, 0.3)',
-            borderRadius: '8px',
+              ? '1px solid rgba(201, 42, 42, 0.3)'
+              : '1px solid rgba(var(--accent-rgb), 0.3)',
+            borderRadius: 'var(--radius-md)',
             padding: '8px 12px',
             marginBottom: '10px'
           }}
@@ -719,7 +719,7 @@ export default function MediaLibrary({
               alignItems: 'center',
               justifyContent: 'center',
               height: '320px',
-              color: '#94a3b8',
+              color: 'var(--text-muted)',
               gap: '12px'
             }}
           >
@@ -728,17 +728,17 @@ export default function MediaLibrary({
                 width: '56px',
                 height: '56px',
                 borderRadius: '50%',
-                background: 'rgba(255, 255, 255, 0.04)',
-                border: '1px solid rgba(255, 255, 255, 0.08)',
+                background: 'var(--bg-raised)',
+                border: '1px solid var(--border-default)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center'
               }}
             >
-              <ImageIcon size={26} color="#64748b" />
+              <ImageIcon size={26} color="var(--text-muted)" />
             </div>
-            <div style={{ fontSize: '15px', fontWeight: 500, color: '#e2e8f0' }}>No media items yet</div>
-            <div style={{ fontSize: '12px', color: '#64748b', maxWidth: '360px', textAlign: 'center' }}>
+            <div style={{ fontSize: '15px', fontWeight: 500, color: 'var(--text-primary)' }}>No media items yet</div>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', maxWidth: '360px', textAlign: 'center' }}>
               Screen snips, user-uploaded images/videos, and agent-generated visuals will appear here in-place.
             </div>
           </div>
@@ -751,13 +751,13 @@ export default function MediaLibrary({
               alignItems: 'center',
               justifyContent: 'center',
               height: '240px',
-              color: '#94a3b8',
+              color: 'var(--text-muted)',
               gap: '10px'
             }}
           >
-            <Search size={28} color="#64748b" />
-            <div style={{ fontSize: '14px', fontWeight: 500, color: '#e2e8f0' }}>No matching media found</div>
-            <div style={{ fontSize: '12px', color: '#64748b' }}>
+            <Search size={28} color="var(--text-muted)" />
+            <div style={{ fontSize: '14px', fontWeight: 500, color: 'var(--text-primary)' }}>No matching media found</div>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
               No media matches &quot;{searchQuery}&quot; in the {activeCollection} collection.
             </div>
           </div>
@@ -821,9 +821,9 @@ export default function MediaLibrary({
         >
           <div
             style={{
-              background: '#14161f',
-              border: '1px solid rgba(255, 255, 255, 0.15)',
-              borderRadius: '16px',
+              background: 'var(--bg-overlay)',
+              border: '1px solid var(--border-strong)',
+              borderRadius: 'var(--radius-lg)',
               width: '420px',
               maxWidth: '90vw',
               padding: '24px',
@@ -834,13 +834,13 @@ export default function MediaLibrary({
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#ef4444' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--danger)' }}>
               <Trash2 size={22} />
-              <h3 style={{ margin: 0, fontSize: '16px', color: '#fff' }}>Remove Media Entry</h3>
+              <h3 style={{ margin: 0, fontSize: '16px', color: 'var(--text-primary)' }}>Remove Media Entry</h3>
             </div>
-            <p style={{ margin: 0, fontSize: '13px', color: '#94a3b8', lineHeight: 1.5 }}>
+            <p style={{ margin: 0, fontSize: '13px', color: 'var(--text-muted)', lineHeight: 1.5 }}>
               Remove{' '}
-              <span style={{ color: '#e2e8f0', fontWeight: 600 }}>
+              <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
                 {(deleteTarget.file_path || '').split(/[/\\]/).pop() || 'this media item'}
               </span>{' '}
               from your library? The library entry is removed either way — the file itself
@@ -853,11 +853,11 @@ export default function MediaLibrary({
                 alignItems: 'center',
                 gap: '8px',
                 fontSize: '12px',
-                color: '#cbd5e1',
+                color: 'var(--text-secondary)',
                 cursor: 'pointer',
-                background: 'rgba(255, 255, 255, 0.04)',
+                background: 'var(--bg-raised)',
                 padding: '8px 12px',
-                borderRadius: '8px'
+                borderRadius: 'var(--radius-md)'
               }}
             >
               <input
@@ -876,9 +876,9 @@ export default function MediaLibrary({
                 onClick={() => setDeleteTarget(null)}
                 style={{
                   background: 'transparent',
-                  border: '1px solid rgba(255, 255, 255, 0.15)',
-                  color: '#94a3b8',
-                  borderRadius: '8px',
+                  border: '1px solid var(--border-strong)',
+                  color: 'var(--text-muted)',
+                  borderRadius: 'var(--radius-md)',
                   padding: '8px 16px',
                   fontSize: '12px',
                   cursor: 'pointer'
@@ -891,10 +891,10 @@ export default function MediaLibrary({
                 data-testid="confirm-delete-action-btn"
                 onClick={handleConfirmDelete}
                 style={{
-                  background: '#ef4444',
+                  background: 'var(--danger)',
                   border: 'none',
-                  color: '#fff',
-                  borderRadius: '8px',
+                  color: 'var(--text-primary)',
+                  borderRadius: 'var(--radius-md)',
                   padding: '8px 18px',
                   fontSize: '12px',
                   fontWeight: 600,

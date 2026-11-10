@@ -189,7 +189,7 @@ export default function ArtifactsCanvas({
             alignItems: 'center',
             justifyContent: 'center',
             height: '100%',
-            color: 'rgba(255, 255, 255, 0.4)',
+            color: 'var(--text-muted)',
             fontSize: '13px',
             gap: '8px'
           }}
@@ -212,19 +212,19 @@ export default function ArtifactsCanvas({
             height: '100%',
             padding: '24px',
             textAlign: 'center',
-            background: 'rgba(239, 68, 68, 0.08)',
-            border: '1px solid rgba(239, 68, 68, 0.25)',
-            borderRadius: '8px',
-            color: '#fca5a5',
+            background: 'rgba(201, 42, 42, 0.08)',
+            border: '1px solid rgba(201, 42, 42, 0.25)',
+            borderRadius: 'var(--radius-md)',
+            color: 'var(--danger)',
             gap: '12px'
           }}
         >
-          <AlertCircle size={32} color="#ef4444" />
+          <AlertCircle size={32} color="var(--danger)" />
           <div style={{ fontWeight: 600, fontSize: '14px' }}>File No Longer Exists</div>
-          <div style={{ fontSize: '12px', color: '#cbd5e1' }}>
+          <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
             {activeArtifactContent?.error || `File ${currentArtifact.file_path} no longer exists on disk.`}
           </div>
-          <div style={{ fontSize: '11px', color: 'rgba(255, 255, 255, 0.4)' }}>
+          <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
             Metadata is preserved, but file contents cannot be loaded.
           </div>
         </div>
@@ -249,7 +249,7 @@ export default function ArtifactsCanvas({
             alignItems: 'center',
             justifyContent: 'center',
             height: '100%',
-            color: 'rgba(255, 255, 255, 0.4)',
+            color: 'var(--text-muted)',
             fontSize: '13px',
             gap: '8px'
           }}
@@ -302,15 +302,15 @@ export default function ArtifactsCanvas({
   };
 
   const getArtifactIcon = (art) => {
-    if (art.kind === 'diff') return <GitCommit size={14} color="#c084fc" />;
-    if (art.kind === 'report') return <FileText size={14} color="#60a5fa" />;
+    if (art.kind === 'diff') return <GitCommit size={14} color="var(--accent)" />;
+    if (art.kind === 'report') return <FileText size={14} color="var(--text-secondary)" />;
     // D3-17: same effective extension and same image set as the
     // viewer routing above.
     const ext = effectiveExt(art);
-    if (ext === '.md' || ext === '.markdown') return <FileText size={14} color="#60a5fa" />;
-    if (ext === '.json' || ext === '.csv') return <Database size={14} color="#f59e0b" />;
-    if (IMAGE_EXTS.has(ext)) return <Image size={14} color="#ec4899" />;
-    return <FileCode size={14} color="#34d399" />;
+    if (ext === '.md' || ext === '.markdown') return <FileText size={14} color="var(--text-secondary)" />;
+    if (ext === '.json' || ext === '.csv') return <Database size={14} color="var(--accent)" />;
+    if (IMAGE_EXTS.has(ext)) return <Image size={14} color="var(--text-secondary)" />;
+    return <FileCode size={14} color="var(--success)" />;
   };
 
   // N06 / Grill Q9+Q11: the canvas is a DOCKED right panel in the
@@ -346,22 +346,22 @@ export default function ArtifactsCanvas({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
-          background: 'rgba(255, 255, 255, 0.03)'
+          borderBottom: '1px solid var(--border-default)',
+          background: 'var(--bg-raised)'
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ fontSize: '14px', fontWeight: 600, color: '#fff' }}>Artifacts</span>
+          <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>Artifacts</span>
           <span
             data-testid="canvas-total-badge"
             style={{
               fontSize: '11px',
               fontWeight: 600,
-              background: 'rgba(167, 139, 250, 0.2)',
-              color: '#c084fc',
+              background: 'rgba(var(--accent-rgb), 0.18)',
+              color: 'var(--accent)',
               padding: '2px 8px',
               borderRadius: '999px',
-              border: '1px solid rgba(167, 139, 250, 0.35)'
+              border: '1px solid rgba(var(--accent-rgb), 0.35)'
             }}
           >
             {artifacts.length}
@@ -375,7 +375,7 @@ export default function ArtifactsCanvas({
           style={{
             background: 'transparent',
             border: 'none',
-            color: 'rgba(255, 255, 255, 0.6)',
+            color: 'var(--text-muted)',
             cursor: 'pointer',
             padding: '4px',
             borderRadius: '50%',
@@ -396,17 +396,17 @@ export default function ArtifactsCanvas({
           style={{
             maxHeight: '180px',
             overflowY: 'auto',
-            borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+            borderBottom: '1px solid var(--border-default)',
             padding: '8px 12px',
             display: 'flex',
             flexDirection: 'column',
             gap: '8px',
             flexShrink: 0,
-            background: 'rgba(0, 0, 0, 0.2)'
+            background: 'var(--bg-base)'
           }}
         >
           {taskGroups.length === 0 ? (
-            <div style={{ fontSize: '12px', color: 'rgba(255, 255, 255, 0.4)', padding: '8px 0', textAlign: 'center' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', padding: '8px 0', textAlign: 'center' }}>
               No artifacts recorded yet.
             </div>
           ) : (
@@ -417,7 +417,7 @@ export default function ArtifactsCanvas({
                   style={{
                     fontSize: '11px',
                     fontWeight: 600,
-                    color: 'rgba(255, 255, 255, 0.4)',
+                    color: 'var(--text-muted)',
                     textTransform: 'uppercase',
                     letterSpacing: '0.05em',
                     padding: '2px 4px'
@@ -440,8 +440,8 @@ export default function ArtifactsCanvas({
                           padding: '6px 10px',
                           borderRadius: '6px',
                           cursor: 'pointer',
-                          background: isSelected ? 'rgba(167, 139, 250, 0.18)' : 'transparent',
-                          border: isSelected ? '1px solid rgba(167, 139, 250, 0.35)' : '1px solid transparent',
+                          background: isSelected ? 'var(--bg-overlay)' : 'transparent',
+                          border: isSelected ? '1px solid var(--accent)' : '1px solid transparent',
                           transition: 'background 150ms'
                         }}
                       >
@@ -450,7 +450,7 @@ export default function ArtifactsCanvas({
                           <span
                             style={{
                               fontSize: '13px',
-                              color: isSelected ? '#fff' : '#cbd5e1',
+                              color: isSelected ? 'var(--text-primary)' : 'var(--text-secondary)',
                               fontWeight: isSelected ? 600 : 400,
                               whiteSpace: 'nowrap',
                               overflow: 'hidden',
@@ -467,15 +467,15 @@ export default function ArtifactsCanvas({
                             padding: '1px 6px',
                             borderRadius: '999px',
                             background: art.kind === 'diff'
-                              ? 'rgba(192, 132, 252, 0.2)'
+                              ? 'rgba(var(--accent-rgb), 0.18)'
                               : art.kind === 'report'
-                              ? 'rgba(56, 189, 248, 0.2)'
-                              : 'rgba(255, 255, 255, 0.08)',
+                              ? 'var(--bg-hover)'
+                              : 'var(--bg-hover)',
                             color: art.kind === 'diff'
-                              ? '#c084fc'
+                              ? 'var(--accent)'
                               : art.kind === 'report'
-                              ? '#38bdf8'
-                              : '#94a3b8',
+                              ? 'var(--text-secondary)'
+                              : 'var(--text-muted)',
                             textTransform: 'uppercase'
                           }}
                         >
@@ -509,11 +509,11 @@ export default function ArtifactsCanvas({
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 paddingBottom: '8px',
-                borderBottom: '1px solid rgba(255, 255, 255, 0.06)'
+                borderBottom: '1px solid var(--border-default)'
               }}
             >
               <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, gap: '2px' }}>
-                <div data-testid="artifact-title" style={{ fontSize: '14px', fontWeight: 600, color: '#fff' }}>
+                <div data-testid="artifact-title" style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
                   {currentArtifact.title}
                 </div>
                 {currentArtifact.file_path && (
@@ -521,8 +521,8 @@ export default function ArtifactsCanvas({
                     data-testid="artifact-path"
                     style={{
                       fontSize: '11px',
-                      color: 'rgba(255, 255, 255, 0.4)',
-                      fontFamily: 'monospace',
+                      color: 'var(--text-muted)',
+                      fontFamily: 'var(--font-mono)',
                       whiteSpace: 'nowrap',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis'
@@ -541,10 +541,10 @@ export default function ArtifactsCanvas({
                   onClick={handleCopy}
                   title="Copy artifact contents"
                   style={{
-                    background: 'rgba(255, 255, 255, 0.08)',
-                    border: '1px solid rgba(255, 255, 255, 0.1)',
-                    borderRadius: '6px',
-                    color: '#fff',
+                    background: 'var(--bg-hover)',
+                    border: '1px solid var(--border-default)',
+                    borderRadius: 'var(--radius-sm)',
+                    color: 'var(--text-primary)',
                     padding: '4px 8px',
                     cursor: 'pointer',
                     display: 'flex',
@@ -553,7 +553,7 @@ export default function ArtifactsCanvas({
                     fontSize: '11px'
                   }}
                 >
-                  {copied ? <Check size={12} color="#10b981" /> : <Copy size={12} />}
+                  {copied ? <Check size={12} color="var(--success)" /> : <Copy size={12} />}
                   <span>{copied ? 'Copied' : copyFailed ? 'Copy failed' : 'Copy'}</span>
                 </button>
                 <button
@@ -562,10 +562,10 @@ export default function ArtifactsCanvas({
                   onClick={handleSaveCopy}
                   title="Save a copy"
                   style={{
-                    background: 'rgba(255, 255, 255, 0.08)',
-                    border: '1px solid rgba(255, 255, 255, 0.1)',
-                    borderRadius: '6px',
-                    color: '#fff',
+                    background: 'var(--bg-hover)',
+                    border: '1px solid var(--border-default)',
+                    borderRadius: 'var(--radius-sm)',
+                    color: 'var(--text-primary)',
                     padding: '4px 8px',
                     cursor: 'pointer',
                     display: 'flex',
@@ -583,10 +583,10 @@ export default function ArtifactsCanvas({
                   onClick={handleOpenExternally}
                   title="Open externally"
                   style={{
-                    background: 'rgba(255, 255, 255, 0.08)',
-                    border: '1px solid rgba(255, 255, 255, 0.1)',
-                    borderRadius: '6px',
-                    color: '#fff',
+                    background: 'var(--bg-hover)',
+                    border: '1px solid var(--border-default)',
+                    borderRadius: 'var(--radius-sm)',
+                    color: 'var(--text-primary)',
                     padding: '4px 8px',
                     cursor: 'pointer',
                     display: 'flex',
@@ -608,10 +608,10 @@ export default function ArtifactsCanvas({
               role="alert"
               style={{
                 fontSize: '12px',
-                color: '#fca5a5',
-                background: 'rgba(239, 68, 68, 0.08)',
-                border: '1px solid rgba(239, 68, 68, 0.25)',
-                borderRadius: '6px',
+                color: 'var(--danger)',
+                background: 'rgba(201, 42, 42, 0.08)',
+                border: '1px solid rgba(201, 42, 42, 0.25)',
+                borderRadius: 'var(--radius-sm)',
                 padding: '6px 10px',
                 flexShrink: 0
               }}
@@ -638,10 +638,10 @@ export default function ArtifactsCanvas({
                     data-testid={`artifact-tab-${tab.id}`}
                     onClick={() => setViewerTab(tab.id)}
                     style={{
-                      background: isActive ? 'rgba(167, 139, 250, 0.18)' : 'rgba(255, 255, 255, 0.05)',
-                      border: isActive ? '1px solid rgba(167, 139, 250, 0.35)' : '1px solid rgba(255, 255, 255, 0.08)',
-                      borderRadius: '6px',
-                      color: isActive ? '#fff' : '#94a3b8',
+                      background: isActive ? 'var(--bg-overlay)' : 'var(--bg-raised)',
+                      border: isActive ? '1px solid var(--accent)' : '1px solid var(--border-default)',
+                      borderRadius: 'var(--radius-sm)',
+                      color: isActive ? 'var(--accent)' : 'var(--text-muted)',
                       padding: '4px 10px',
                       cursor: 'pointer',
                       display: 'flex',
