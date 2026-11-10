@@ -79,8 +79,8 @@ describe('ToolActivityCard approval preview (Epic 2)', () => {
     expect(del.className).toContain('diff-line-del');
     expect(hunk.className).toContain('diff-line-hunk');
     expect(add.style.color).not.toBe(del.style.color);
-    expect(add.style.color).toBe('rgb(74, 222, 128)');
-    expect(del.style.color).toBe('rgb(248, 113, 113)');
+    expect(add.style.color).toBe('var(--success)');
+    expect(del.style.color).toBe('var(--danger)');
   });
 
   it('renders preview.error as a warning note instead of a diff', () => {

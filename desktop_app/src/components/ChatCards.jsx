@@ -13,7 +13,7 @@ import { parseApprovalEditedArgs, browserEnvelopeGrant } from './approvalLogic';
 export function getNodeStyle(nodeName = '') {
   const n = String(nodeName).toLowerCase();
   if (n.includes('supervisor')) {
-    return { color: '#c4b5fd', bg: 'rgba(167, 139, 250, 0.16)', border: 'rgba(167, 139, 250, 0.35)', name: 'SUPERVISOR' };
+    return { color: 'var(--accent)', bg: 'rgba(var(--accent-rgb), 0.16)', border: 'rgba(var(--accent-rgb), 0.35)', name: 'SUPERVISOR' };
   }
   if (n.includes('plan')) {
     return { color: '#93c5fd', bg: 'rgba(96, 165, 250, 0.16)', border: 'rgba(96, 165, 250, 0.35)', name: 'PLANNER' };
@@ -157,7 +157,7 @@ export function PayloadDrawer({ title, data, icon: Icon, defaultOpen = false, em
             onClick={handleCopy} 
             title="Copy payload to clipboard"
           >
-            {copied ? <CheckCheck size={11} color="#10b981" /> : <Copy size={11} />}
+            {copied ? <CheckCheck size={11} color="#4CC38A" /> : <Copy size={11} />}
             <span>{copied ? 'Copied' : 'Copy'}</span>
           </button>
           <ChevronDown size={13} className={`payload-chevron ${isOpen ? 'rotated' : ''}`} />
@@ -190,35 +190,35 @@ export function ApprovalPreview({ preview }) {
         className="approval-diff-preview"
         data-testid="approval-diff-preview"
         style={{
-          background: 'rgba(0, 0, 0, 0.45)',
-          border: '1px solid rgba(255, 255, 255, 0.1)',
+          background: 'var(--bg-base)',
+          border: '1px solid var(--border-default)',
           borderRadius: '8px',
           padding: '10px 12px',
           maxHeight: '240px',
           overflowY: 'auto',
-          fontFamily: 'monospace',
+          fontFamily: 'var(--font-mono)',
           fontSize: '12px',
           lineHeight: 1.5,
         }}
       >
         {diffLines.map((line, idx) => {
           let cls = 'diff-line diff-line-context';
-          let color = '#cbd5e1';
+          let color = 'var(--text-secondary)';
           let background = 'transparent';
           if (line.startsWith('+++') || line.startsWith('---')) {
             cls = 'diff-line diff-line-meta';
-            color = '#e2e8f0';
+            color = 'var(--text-primary)';
           } else if (line.startsWith('+')) {
             cls = 'diff-line diff-line-add';
-            color = '#4ade80';
-            background = 'rgba(74, 222, 128, 0.08)';
+            color = 'var(--success)';
+            background = 'rgba(76, 195, 138, 0.08)';
           } else if (line.startsWith('-')) {
             cls = 'diff-line diff-line-del';
-            color = '#f87171';
-            background = 'rgba(248, 113, 113, 0.08)';
+            color = 'var(--danger)';
+            background = 'rgba(201, 42, 42, 0.08)';
           } else if (line.startsWith('@@')) {
             cls = 'diff-line diff-line-hunk';
-            color = '#9090a0';
+            color = 'var(--text-muted)';
           }
           return (
             <div key={idx} className={cls} style={{ color, background, whiteSpace: 'pre', padding: '0 4px', borderRadius: '3px' }}>
@@ -236,9 +236,9 @@ export function ApprovalPreview({ preview }) {
         data-testid="approval-preview-error"
         style={{
           fontSize: '12px',
-          color: '#fbbf24',
-          background: 'rgba(245, 158, 11, 0.1)',
-          border: '1px solid rgba(245, 158, 11, 0.3)',
+          color: 'var(--accent)',
+          background: 'rgba(var(--accent-rgb), 0.1)',
+          border: '1px solid rgba(var(--accent-rgb), 0.3)',
           borderRadius: '8px',
           padding: '8px 10px',
         }}
@@ -286,16 +286,16 @@ export function BrowserConfirmationControl({ confirmation, grantChecked = false,
     <>
       <div
         data-testid="browser-confirmation-description"
-        style={{ background: 'rgba(59, 130, 246, 0.12)', border: '1px solid rgba(59, 130, 246, 0.35)', padding: '12px', borderRadius: '8px', fontSize: '14px', color: '#bfdbfe' }}
+        style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-strong)', padding: '12px', borderRadius: '8px', fontSize: '14px', color: 'var(--text-primary)' }}
       >
         {confirmation.description}
       </div>
       {confirmation.category === 'payments' ? (
-        <div style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
+        <div style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px' }}>
           Payments are always confirmed individually — no envelope can cover them.
         </div>
       ) : (
-        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#e2e8f0', marginTop: '10px', cursor: 'pointer' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'var(--text-primary)', marginTop: '10px', cursor: 'pointer' }}>
           <input
             type="checkbox"
             data-testid="browser-envelope-checkbox"
@@ -384,16 +384,6 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                 if (onOpenArtifact) onOpenArtifact(tool_args.path);
               }}
               title={`View in artifacts: ${tool_args.path}`}
-              style={{
-                background: 'rgba(167, 139, 250, 0.15)',
-                border: '1px solid rgba(167, 139, 250, 0.3)',
-                color: '#c084fc',
-                borderRadius: '4px',
-                padding: '1px 6px',
-                fontSize: '11px',
-                cursor: 'pointer',
-                fontFamily: 'monospace'
-              }}
             >
               {tool_args.path.split(/[\/]/).pop()}
             </button>
@@ -403,10 +393,10 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
           </span>
         </div>
         {edited && (
-          <span data-testid="tool-edited-badge" style={{ fontSize: '10px', fontWeight: 600, color: '#fbbf24', background: 'rgba(251, 191, 36, 0.15)', border: '1px solid rgba(251, 191, 36, 0.4)', borderRadius: '999px', padding: '2px 8px', marginRight: '8px' }}>edited by you</span>
+          <span data-testid="tool-edited-badge" style={{ fontSize: '10px', fontWeight: 600, color: 'var(--accent)', background: 'rgba(var(--accent-rgb), 0.15)', border: '1px solid rgba(var(--accent-rgb), 0.4)', borderRadius: '999px', padding: '2px 8px', marginRight: '8px' }}>edited by you</span>
         )}
-        <div className={`tool-status-pill tool-status-${needsApproval ? 'approval' : (status || 'pending')}`} style={needsApproval ? { background: 'rgba(239, 68, 68, 0.2)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.4)' } : {}}>
-          {needsApproval ? <ShieldAlert size={11} color="#ef4444" /> : isPending ? <span className="tool-spinner-dot" /> : isFailed ? <AlertCircle size={11} /> : <CheckCircle2 size={11} />}
+        <div className={`tool-status-pill tool-status-${needsApproval ? 'approval' : (status || 'pending')}`}>
+          {needsApproval ? <ShieldAlert size={11} color="#F5B942" /> : isPending ? <span className="tool-spinner-dot" /> : isFailed ? <AlertCircle size={11} /> : <CheckCircle2 size={11} />}
           <span>{needsApproval ? 'approval required' : (status || 'pending')}</span>
         </div>
       </div>
@@ -423,19 +413,19 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
         {needsApproval ? (
           <div style={{
             padding: '14px 16px',
-            background: 'rgba(239, 68, 68, 0.12)',
-            border: '1px solid rgba(239, 68, 68, 0.35)',
+            background: 'rgba(var(--accent-rgb), 0.08)',
+            border: '1px solid rgba(var(--accent-rgb), 0.35)',
             borderRadius: '10px',
             marginTop: '8px',
             display: 'flex',
             flexDirection: 'column',
             gap: '10px'
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#fca5a5', fontSize: '13px', fontWeight: 600 }}>
-              <ShieldAlert size={16} color="#ef4444" />
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--accent)', fontSize: '13px', fontWeight: 600 }}>
+              <ShieldAlert size={16} color="#F5B942" />
               <span>Execution Approval Required</span>
             </div>
-            <div style={{ fontSize: '12px', color: '#cbd5e1' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
               The agent is requesting permission to execute <strong>{tool_name}</strong>.
             </div>
             <ApprovalPreview preview={approvalPreview} />
@@ -451,7 +441,7 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                 data-testid="approval-edit-args-btn"
                 onClick={openArgsEditor}
                 disabled={decisionQueued}
-                style={{ alignSelf: 'flex-start', padding: '6px 12px', borderRadius: '8px', background: 'rgba(255, 255, 255, 0.08)', color: '#e2e8f0', border: '1px solid rgba(255, 255, 255, 0.15)', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>
+                style={{ alignSelf: 'flex-start', padding: '6px 12px', borderRadius: '8px', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>
                 Edit arguments
               </button>
             ) : (
@@ -462,15 +452,15 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                   onChange={(e) => setArgsText(e.target.value)}
                   rows={6}
                   spellCheck={false}
-                  style={{ width: '100%', boxSizing: 'border-box', background: 'rgba(0,0,0,0.5)', color: '#a78bfa', border: '1px solid rgba(255, 255, 255, 0.15)', borderRadius: '8px', padding: '10px', fontFamily: 'monospace', fontSize: '12px' }}
+                  style={{ width: '100%', boxSizing: 'border-box', background: 'var(--bg-base)', color: 'var(--text-primary)', border: '1px solid var(--border-default)', borderRadius: '8px', padding: '10px', fontFamily: 'var(--font-mono)', fontSize: '12px' }}
                 />
                 {argsError && (
-                  <div data-testid="approval-args-error" style={{ fontSize: '12px', color: '#fca5a5' }}>{argsError}</div>
+                  <div data-testid="approval-args-error" style={{ fontSize: '12px', color: 'var(--danger)' }}>{argsError}</div>
                 )}
               </div>
             )}
             {decisionQueued && (
-              <div data-testid="approval-decision-queued" style={{ padding: '8px 12px', borderRadius: '8px', background: 'rgba(251, 191, 36, 0.15)', border: '1px solid rgba(251, 191, 36, 0.35)', color: '#fbbf24', fontSize: '12px' }}>
+              <div data-testid="approval-decision-queued" style={{ padding: '8px 12px', borderRadius: '8px', background: 'rgba(var(--accent-rgb), 0.15)', border: '1px solid rgba(var(--accent-rgb), 0.35)', color: 'var(--accent)', fontSize: '12px' }}>
                 {pendingApproval.decisionApproved ? 'Approval' : 'Rejection'} queued — will send when the engine reconnects.
               </div>
             )}
@@ -481,9 +471,9 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                 style={{
                   padding: '6px 14px',
                   borderRadius: '8px',
-                  background: 'rgba(255, 255, 255, 0.08)',
-                  color: '#e2e8f0',
-                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  background: 'var(--bg-hover)',
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--border-strong)',
                   cursor: 'pointer',
                   fontSize: '12px',
                   fontWeight: 500
@@ -500,9 +490,9 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                     style={{
                       padding: '6px 14px',
                       borderRadius: '8px',
-                      background: 'rgba(255, 255, 255, 0.08)',
-                      color: '#e2e8f0',
-                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      background: 'var(--bg-hover)',
+                      color: 'var(--text-primary)',
+                      border: '1px solid var(--border-strong)',
                       cursor: 'pointer',
                       fontSize: '12px',
                       fontWeight: 500
@@ -517,9 +507,9 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                     style={{
                       padding: '6px 14px',
                       borderRadius: '8px',
-                      background: 'rgba(255, 255, 255, 0.08)',
-                      color: '#e2e8f0',
-                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      background: 'var(--bg-hover)',
+                      color: 'var(--text-primary)',
+                      border: '1px solid var(--border-strong)',
                       cursor: 'pointer',
                       fontSize: '12px',
                       fontWeight: 500
@@ -536,8 +526,8 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                 style={{
                   padding: '6px 14px',
                   borderRadius: '8px',
-                  background: '#ef4444',
-                  color: '#fff',
+                  background: 'var(--accent)',
+                  color: 'var(--accent-on)',
                   border: 'none',
                   cursor: 'pointer',
                   fontSize: '12px',
@@ -596,8 +586,8 @@ export function NodeActivityCard({ activity, nestedTools = [], rawDelta, onOpenA
 
       {(reason || briefing) && (
         <div className="node-intent-banner">
-          {reason && <div className="node-intent-reason"><strong style={{ color: '#c4b5fd' }}>Goal:</strong> {reason}</div>}
-          {briefing && <div className="node-intent-briefing"><strong style={{ color: '#93c5fd' }}>Briefing:</strong> {briefing}</div>}
+          {reason && <div className="node-intent-reason"><strong style={{ color: 'var(--accent)' }}>Goal:</strong> {reason}</div>}
+          {briefing && <div className="node-intent-briefing"><strong style={{ color: 'var(--text-secondary)' }}>Briefing:</strong> {briefing}</div>}
         </div>
       )}
 
@@ -620,7 +610,7 @@ export function NodeActivityCard({ activity, nestedTools = [], rawDelta, onOpenA
         {nestedTools && nestedTools.length > 0 && (
           <div className="nested-tools-wrapper">
             <div className="nested-tools-header">
-              <TerminalSquare size={12} color="#fbbf24" />
+              <TerminalSquare size={12} color="#F5B942" />
               <span>Nested Tool Calls ({nestedTools.length})</span>
             </div>
             <div className="nested-tools-list">
@@ -770,12 +760,12 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
   return (
     <div style={{
       marginBottom: '12px',
-      borderRadius: '14px',
-      background: 'rgba(10, 10, 20, 0.45)',
-      border: isExpanded ? '1px solid rgba(167, 139, 250, 0.3)' : '1px solid rgba(255, 255, 255, 0.08)',
+      borderRadius: 'var(--radius-lg)',
+      background: 'var(--bg-raised)',
+      border: isExpanded ? '1px solid var(--border-strong)' : '1px solid var(--border-default)',
       overflow: 'hidden',
       transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
-      boxShadow: isExpanded ? '0 8px 24px rgba(0, 0, 0, 0.4)' : 'none'
+      boxShadow: 'none'
     }}>
       <div 
         onClick={() => setIsExpanded(!isExpanded)}
@@ -785,8 +775,8 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
           alignItems: 'center',
           gap: '8px',
           padding: '9px 13px',
-          background: isExpanded ? 'rgba(255, 255, 255, 0.04)' : 'transparent',
-          color: isThinking ? '#c4b5fd' : '#9090a0',
+          background: isExpanded ? 'var(--bg-overlay)' : 'transparent',
+          color: isThinking ? 'var(--accent)' : 'var(--text-secondary)',
           fontSize: '12px',
           cursor: 'pointer',
           userSelect: 'none',
@@ -797,21 +787,21 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
         {isThinking ? (
           <div className="spinner" style={{ 
             width: '12px', height: '12px', 
-            border: '2px solid rgba(167, 139, 250, 0.3)',
-            borderTopColor: '#a78bfa', 
+            border: '2px solid rgba(var(--accent-rgb), 0.3)',
+            borderTopColor: 'var(--accent)', 
             borderRadius: '50%',
             animation: 'spin 1s linear infinite',
             flexShrink: 0
           }} />
         ) : hasError ? (
-          <X size={13} color="#ef4444" style={{ flexShrink: 0 }} />
+          <X size={13} color="#C92A2A" style={{ flexShrink: 0 }} />
         ) : (
-          <CheckCircle2 size={13} color="#10b981" style={{ flexShrink: 0 }} />
+          <CheckCircle2 size={13} color="#4CC38A" style={{ flexShrink: 0 }} />
         )}
         
         <span style={{ flex: 1, textAlign: 'left', fontWeight: '500', display: 'flex', alignItems: 'center', gap: '6px' }}>
           <span>{isThinking ? 'Agent is thinking...' : hasError ? 'Task Stopped' : `Execution Pipeline (${treeNodes.length} steps)`}</span>
-          <span style={{ fontSize: '10.5px', opacity: 0.65, fontWeight: 400, color: '#a78bfa' }}>
+          <span style={{ fontSize: '10.5px', opacity: 0.65, fontWeight: 400, color: 'var(--text-muted)' }}>
             {isExpanded ? '(click to collapse)' : '(click to inspect payloads)'}
           </span>
         </span>
@@ -832,21 +822,21 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
           style={{
             padding: '12px',
             fontSize: '12px',
-            color: '#d4d4d8',
+            color: 'var(--text-primary)',
             maxHeight: '380px',
             overflowY: 'auto',
-            borderTop: '1px solid rgba(255, 255, 255, 0.06)',
-            background: 'rgba(0, 0, 0, 0.25)'
+            borderTop: '1px solid var(--border-default)',
+            background: 'var(--bg-base)'
           }} 
           className="chat-thought-container chat-scroll"
         >
           {(!treeNodes || treeNodes.length === 0) ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '6px 0', color: '#a1a1aa' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: hasError ? '#ef4444' : '#c4b5fd' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '6px 0', color: 'var(--text-secondary)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: hasError ? 'var(--danger)' : 'var(--accent)' }}>
                 {!hasError && <span className="dot-typing" style={{ width: '5px', height: '5px', display: 'inline-block' }}></span>}
                 <span>{hasError ? 'Task was stopped before supervisor node could initialize.' : 'Initializing supervisor node & analyzing prompt requirements...'}</span>
               </div>
-              <div style={{ fontSize: '11px', color: '#71717a' }}>
+              <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
                 Evaluating available specialists, memory context, and provider route...
               </div>
             </div>
@@ -880,7 +870,7 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
               // Text item
               const nodeStyle = getNodeStyle(item.node);
               return (
-                <div key={item.key} style={{ marginBottom: '10px', padding: '8px 10px', borderRadius: '8px', background: 'rgba(255, 255, 255, 0.02)', border: '1px solid rgba(255, 255, 255, 0.04)' }}>
+                <div key={item.key} style={{ marginBottom: '10px', padding: '8px 10px', borderRadius: '8px', background: 'var(--bg-raised)', border: '1px solid var(--border-default)' }}>
                   <span style={{ 
                     color: nodeStyle.color, 
                     background: nodeStyle.bg,

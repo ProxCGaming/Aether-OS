@@ -36,7 +36,7 @@ export default function ChatComposer({
   onDismissDictationError,
 }) {
   return (
-    <div style={{ padding: '16px', borderTop: '1px solid rgba(255,255,255,0.08)', position: 'relative' }}>
+    <div style={{ padding: '16px', background: 'var(--bg-raised)', borderTop: '1px solid var(--border-default)', position: 'relative' }}>
       {showSlashPopup && filteredCommands.length > 0 && (
         <div 
           ref={slashPopupRef}
@@ -68,7 +68,7 @@ export default function ChatComposer({
               style={{
                 padding: '8px 12px',
                 borderRadius: '8px',
-                background: idx === slashIndex ? 'rgba(59, 130, 246, 0.2)' : 'transparent',
+                background: idx === slashIndex ? 'rgba(var(--accent-rgb), 0.18)' : 'transparent',
                 cursor: 'pointer',
                 display: 'flex',
                 flexDirection: 'column',
@@ -76,12 +76,12 @@ export default function ChatComposer({
               }}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ color: idx === slashIndex ? '#60a5fa' : '#e2e8f0', fontWeight: 'bold' }}>{cmd.command}</span>
+                <span style={{ color: idx === slashIndex ? 'var(--accent)' : 'var(--text-primary)', fontWeight: 'bold' }}>{cmd.command}</span>
                 {cmd.type === 'skill_invoke' && (
-                  <span style={{ fontSize: '10px', background: 'rgba(52, 211, 153, 0.2)', color: '#6ee7b7', padding: '2px 6px', borderRadius: '4px' }}>SKILL</span>
+                  <span style={{ fontSize: '10px', background: 'rgba(76, 195, 138, 0.18)', color: 'var(--success)', padding: '2px 6px', borderRadius: '4px' }}>SKILL</span>
                 )}
               </div>
-              <span style={{ color: '#94a3b8', fontSize: '12px' }}>{cmd.description}</span>
+              <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>{cmd.description}</span>
             </div>
           ))}
         </div>
@@ -106,11 +106,11 @@ export default function ChatComposer({
           onClick={onTriggerSnip}
           style={{
             marginLeft: '8px',
-            background: 'rgba(255,255,255,0.06)',
-            border: '1px solid rgba(255,255,255,0.12)',
+            background: 'var(--bg-hover)',
+            border: '1px solid var(--border-default)',
             borderRadius: '8px',
             padding: '4px 10px',
-            color: '#cbd5e1',
+            color: 'var(--text-secondary)',
             fontSize: '12px',
             fontWeight: 500,
             cursor: 'pointer',
@@ -120,7 +120,7 @@ export default function ChatComposer({
             transition: 'all 0.15s',
           }}
         >
-          <Scissors size={13} color="#a78bfa" />
+          <Scissors size={13} color="#F5B942" />
           Snip &amp; ask
         </button>
       </div>
@@ -137,7 +137,7 @@ export default function ChatComposer({
                   data-testid="composer-attachment-thumbnail"
                   src={att.data || att.url || (att.path ? `file://${att.path}` : '')}
                   alt={att.name || 'Attached snip'}
-                  style={{ width: '56px', height: '56px', objectFit: 'cover', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.2)' }}
+                  style={{ width: '56px', height: '56px', objectFit: 'cover', borderRadius: '8px', border: '1px solid var(--border-strong)' }}
                 />
                 <button
                   type="button"
@@ -150,8 +150,8 @@ export default function ChatComposer({
                     width: '18px',
                     height: '18px',
                     borderRadius: '50%',
-                    background: '#ef4444',
-                    color: '#fff',
+                    background: 'var(--danger)',
+                    color: 'var(--text-primary)',
                     border: 'none',
                     display: 'flex',
                     alignItems: 'center',
@@ -178,7 +178,7 @@ export default function ChatComposer({
             flex: 1,
             background: 'transparent',
             border: 'none',
-            color: '#fff',
+            color: 'var(--text-primary)',
             outline: 'none',
             resize: 'none',
             minHeight: '24px',
@@ -205,23 +205,23 @@ export default function ChatComposer({
           onKeyDown={onMicKeyDown}
           onKeyUp={onMicKeyUp}
           style={{
-            background: isDictating ? 'rgba(239, 68, 68, 0.25)' : 'rgba(255, 255, 255, 0.08)',
-            border: isDictating ? '1px solid rgba(239, 68, 68, 0.5)' : '1px solid rgba(255, 255, 255, 0.12)',
+            background: isDictating ? 'rgba(201, 42, 42, 0.25)' : 'var(--bg-hover)',
+            border: isDictating ? '1px solid rgba(201, 42, 42, 0.5)' : '1px solid var(--border-default)',
             borderRadius: '50%',
             width: '32px',
             height: '32px',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            color: isDictating ? '#ef4444' : '#cbd5e1',
+            color: isDictating ? 'var(--danger)' : 'var(--text-secondary)',
             cursor: 'pointer',
             transition: 'all 0.2s',
             marginLeft: '8px',
             flexShrink: 0,
-            boxShadow: isDictating ? '0 0 10px rgba(239, 68, 68, 0.35)' : 'none',
+            boxShadow: isDictating ? '0 0 10px rgba(201, 42, 42, 0.35)' : 'none',
           }}
         >
-          <Mic size={14} color={isDictating ? '#ef4444' : '#cbd5e1'} />
+          <Mic size={14} color={isDictating ? '#C92A2A' : '#A7A7A3'} />
         </button>
         {isThinking ? (
           <>
@@ -239,7 +239,7 @@ export default function ChatComposer({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                color: '#fff',
+                color: 'var(--accent-on)',
                 cursor: 'pointer',
                 transition: 'all 0.2s',
                 marginLeft: '8px',
@@ -256,20 +256,20 @@ export default function ChatComposer({
             aria-label="Stop generation"
             className="ios-chat-stop-btn"
             style={{
-              background: 'rgba(239, 68, 68, 0.2)',
-              border: '1px solid rgba(239, 68, 68, 0.4)',
+              background: 'rgba(201, 42, 42, 0.2)',
+              border: '1px solid rgba(201, 42, 42, 0.4)',
               borderRadius: '50%',
               width: '32px',
               height: '32px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              color: '#ef4444',
+              color: 'var(--danger)',
               cursor: 'pointer',
               transition: 'all 0.2s',
               marginLeft: '8px',
               flexShrink: 0,
-              boxShadow: '0 0 10px rgba(239, 68, 68, 0.25)'
+              boxShadow: '0 0 10px rgba(201, 42, 42, 0.25)'
             }}
           >
             <Square size={12} fill="currentColor" />
@@ -280,7 +280,7 @@ export default function ChatComposer({
             type="submit"
             disabled={!input.trim() && attachments.length === 0}
             style={{
-              background: (input.trim() || attachments.length > 0) ? 'var(--accent)' : 'rgba(255,255,255,0.1)',
+              background: (input.trim() || attachments.length > 0) ? 'var(--accent)' : 'var(--bg-hover)',
               border: 'none',
               borderRadius: '50%',
               width: '32px',
@@ -288,7 +288,7 @@ export default function ChatComposer({
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              color: (input.trim() || attachments.length > 0) ? '#fff' : 'rgba(255,255,255,0.4)',
+              color: (input.trim() || attachments.length > 0) ? 'var(--accent-on)' : 'var(--text-muted)',
               cursor: (input.trim() || attachments.length > 0) ? 'pointer' : 'default',
               transition: 'all 0.2s',
               marginLeft: '8px',
@@ -304,11 +304,11 @@ export default function ChatComposer({
         <div
           data-testid="dictation-error"
           style={{
-            color: '#ef4444',
+            color: 'var(--danger)',
             fontSize: '11px',
             marginTop: '6px',
             padding: '4px 8px',
-            background: 'rgba(239, 68, 68, 0.1)',
+            background: 'rgba(201, 42, 42, 0.1)',
             borderRadius: '4px',
             display: 'flex',
             alignItems: 'center',
@@ -319,13 +319,13 @@ export default function ChatComposer({
           <button
             type="button"
             onClick={onDismissDictationError}
-            style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '0 4px' }}
+            style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', padding: '0 4px' }}
           >
             ×
           </button>
         </div>
       )}
-      <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.3)', textAlign: 'center', marginTop: '8px' }}>
+      <div style={{ fontSize: '10px', color: 'var(--text-muted)', textAlign: 'center', marginTop: '8px' }}>
         Press Enter to send, Shift+Enter for new line
       </div>
     </div>

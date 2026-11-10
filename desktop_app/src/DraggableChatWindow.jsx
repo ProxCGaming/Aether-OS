@@ -1119,8 +1119,8 @@ export default function DraggableChatWindow({
                 width: '8px', 
                 height: '8px', 
                 borderRadius: '50%', 
-                background: status.includes('Online') ? '#10b981' : '#ef4444',
-                boxShadow: status.includes('Online') ? '0 0 8px #10b981' : '0 0 8px #ef4444',
+                background: status.includes('Online') ? '#4CC38A' : '#C92A2A',
+                boxShadow: status.includes('Online') ? '0 0 8px #4CC38A' : '0 0 8px #C92A2A',
                 flexShrink: 0
               }}></div>
               
@@ -1172,8 +1172,8 @@ export default function DraggableChatWindow({
                 title="Session cost"
                 aria-label="Session cost"
                 style={{
-                  background: showCostPopover ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
-                  border: showCostPopover ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                  background: showCostPopover ? 'rgba(var(--accent-rgb), 0.22)' : 'var(--bg-hover)',
+                  border: showCostPopover ? '1px solid rgba(var(--accent-rgb), 0.5)' : '1px solid var(--border-default)',
                   color: '#fff',
                   cursor: 'pointer',
                   padding: '6px 10px',
@@ -1210,8 +1210,8 @@ export default function DraggableChatWindow({
                 title="Context window breakdown"
                 aria-label="Context window breakdown"
                 style={{
-                  background: showContextPopover ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
-                  border: showContextPopover ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                  background: showContextPopover ? 'rgba(var(--accent-rgb), 0.22)' : 'var(--bg-hover)',
+                  border: showContextPopover ? '1px solid rgba(var(--accent-rgb), 0.5)' : '1px solid var(--border-default)',
                   color: '#fff',
                   cursor: 'pointer',
                   padding: '6px 10px',
@@ -1239,8 +1239,8 @@ export default function DraggableChatWindow({
               title="Artifacts"
               aria-label="Toggle Artifacts Canvas"
               style={{
-                background: isCanvasOpen ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
-                border: isCanvasOpen ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                background: isCanvasOpen ? 'rgba(var(--accent-rgb), 0.22)' : 'var(--bg-hover)',
+                border: isCanvasOpen ? '1px solid rgba(var(--accent-rgb), 0.5)' : '1px solid var(--border-default)',
                 color: '#fff',
                 cursor: 'pointer',
                 padding: '6px 10px',
@@ -1258,8 +1258,8 @@ export default function DraggableChatWindow({
               <span
                 data-testid="artifacts-badge"
                 style={{
-                  background: isCanvasOpen ? '#8b5cf6' : 'rgba(255, 255, 255, 0.15)',
-                  color: '#fff',
+                  background: isCanvasOpen ? 'var(--accent)' : 'var(--bg-hover)',
+                  color: isCanvasOpen ? 'var(--accent-on)' : 'var(--text-secondary)',
                   borderRadius: '999px',
                   padding: '1px 6px',
                   fontSize: '10px',
@@ -1282,8 +1282,8 @@ export default function DraggableChatWindow({
               title="Voice mode"
               aria-label="Toggle voice mode"
               style={{
-                background: voiceState && voiceState.status === 'active' ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
-                border: voiceState && voiceState.status === 'active' ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                background: voiceState && voiceState.status === 'active' ? 'rgba(var(--accent-rgb), 0.22)' : 'var(--bg-hover)',
+                border: voiceState && voiceState.status === 'active' ? '1px solid rgba(var(--accent-rgb), 0.5)' : '1px solid var(--border-default)',
                 color: '#fff',
                 cursor: 'pointer',
                 padding: '6px 10px',
@@ -1327,8 +1327,8 @@ export default function DraggableChatWindow({
                 title="Rewind / Fork…"
                 aria-label="Rewind or fork from a recorded step"
                 style={{
-                  background: showStepPicker ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
-                  border: showStepPicker ? '1px solid rgba(167, 139, 250, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                  background: showStepPicker ? 'rgba(var(--accent-rgb), 0.22)' : 'var(--bg-hover)',
+                  border: showStepPicker ? '1px solid rgba(var(--accent-rgb), 0.5)' : '1px solid var(--border-default)',
                   color: '#fff',
                   cursor: 'pointer',
                   padding: '6px 10px',
@@ -1439,7 +1439,7 @@ export default function DraggableChatWindow({
                 title="Export Session"
                 aria-label="Export Session"
                 style={{
-                  background: showExportMenu ? 'rgba(167, 139, 250, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                  background: showExportMenu ? 'rgba(var(--accent-rgb), 0.22)' : 'var(--bg-hover)',
                   border: '1px solid rgba(255, 255, 255, 0.1)',
                   color: '#fff',
                   cursor: 'pointer',
@@ -1656,7 +1656,7 @@ export default function DraggableChatWindow({
         {/* Copy Success Floating Toast */}
         {toastMessage && (
           <div className="ios-copy-toast">
-            <Check size={14} color="#10b981" />
+            <Check size={14} color="#4CC38A" />
             <span>{toastMessage}</span>
           </div>
         )}

@@ -25,9 +25,9 @@ global.WebSocket = { OPEN: 1, CLOSED: 3, CONNECTING: 0, CLOSING: 2 };
 describe('getNodeStyle', () => {
   it('maps the supervisor node to the SUPERVISOR style', () => {
     expect(getNodeStyle('supervisor')).toEqual({
-      color: '#c4b5fd',
-      bg: 'rgba(167, 139, 250, 0.16)',
-      border: 'rgba(167, 139, 250, 0.35)',
+      color: 'var(--accent)',
+      bg: 'rgba(var(--accent-rgb), 0.16)',
+      border: 'rgba(var(--accent-rgb), 0.35)',
       name: 'SUPERVISOR',
     });
   });

@@ -35,7 +35,7 @@ describe('D3-08 — tool activity card and status pills have single definitions'
     expect(chatCss).not.toContain('blur(20px) saturate(200%)');
     const start = chatCss.indexOf('.tool-activity-card {');
     const block = chatCss.slice(start, chatCss.indexOf('}', start));
-    expect(block).toContain('background: rgba(15, 15, 26, 0.7)');
+    expect(block).toContain('background: var(--bg-raised)');
     expect(block).not.toContain('backdrop-filter');
   });
 
