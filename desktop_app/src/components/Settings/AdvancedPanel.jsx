@@ -11,10 +11,10 @@ import ProjectConfigPanel from './ProjectConfigPanel';
 // sends; this panel is the controlled rendering.
 export default function AdvancedPanel({ configAnswered, isConnected, resetArmed, resetDone, resetError, onResetClick, includeSecrets, onIncludeSecretsChange, backupStatus, onCreateBackup, restorePath, onRestorePathChange, restoreStatus, onRestoreBackup, versionCheck, onCheckUpdates, onExportDiagnostics, configUpdateError, disableFallbacks, onDisableFallbacksChange, fallbackChain, onFallbackChainChange, onFallbackChainCommit, projectConfigReady, projectLayer, onProjectLayerSave, snipHotkey, onSnipHotkeyChange, onSnipHotkeyBlur, onSnipHotkeyReset, snipHotkeyError, pendingSnipValue }) {
   return (
-    <div style={{ color: '#f0f0f5', display: 'flex', flexDirection: 'column', gap: '24px' }}>
+    <div style={{ color: 'var(--text-primary)', display: 'flex', flexDirection: 'column', gap: '24px' }}>
       <div>
         <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Advanced Settings</h2>
-        <p style={{ color: '#9090a0', fontSize: '14px' }}>System configurations and developer options.</p>
+        <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>System configurations and developer options.</p>
       </div>
 
       {/* RUX-C-01: the routing/fallback controls and the
@@ -32,30 +32,30 @@ export default function AdvancedPanel({ configAnswered, isConnected, resetArmed,
         />
       )}
 
-      <div style={{ background: 'rgba(239,68,68,0.05)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: '12px', padding: '24px' }}>
-        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Reset all settings</h3>
-        <p style={{ color: '#9090a0', fontSize: '13px', margin: '0 0 16px 0' }}>
+      <div style={{ background: 'rgba(201,42,42,0.05)', border: '1px solid rgba(201,42,42,0.25)', borderRadius: '12px', padding: '24px' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)' }}>Reset all settings</h3>
+        <p style={{ color: 'var(--text-muted)', fontSize: '13px', margin: '0 0 16px 0' }}>
           Restores every engine setting to its default and saves immediately. Your API keys (held in the
           encrypted secret store), your files, and your memory are NOT touched.
         </p>
         {resetError && (
-          <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '12px' }}>Reset failed: {resetError}</div>
+          <div style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '12px' }}>Reset failed: {resetError}</div>
         )}
         {resetDone ? (
-          <div style={{ color: '#10b981', fontSize: '13px' }}>Settings were reset to defaults.</div>
+          <div style={{ color: 'var(--success)', fontSize: '13px' }}>Settings were reset to defaults.</div>
         ) : (
           <button
             onClick={onResetClick}
-            style={{ background: resetArmed ? '#ef4444' : 'rgba(239,68,68,0.15)', color: resetArmed ? '#fff' : '#f87171', border: '1px solid rgba(239,68,68,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+            style={{ background: resetArmed ? 'var(--danger)' : 'rgba(201,42,42,0.15)', color: resetArmed ? 'var(--text-primary)' : 'var(--danger)', border: '1px solid rgba(201,42,42,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
           >
             {resetArmed ? 'Click again to confirm reset' : 'Reset all settings'}
           </button>
         )}
       </div>
             
-      <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>
-        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Backup & restore</h3>
-        <p style={{ color: '#9090a0', fontSize: '13px', margin: '0 0 16px 0' }}>
+      <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '24px' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)' }}>Backup & restore</h3>
+        <p style={{ color: 'var(--text-muted)', fontSize: '13px', margin: '0 0 16px 0' }}>
           A backup snapshots your settings, memory, sessions and skills into one zip in your workspace's
           AetherBackups folder. API keys stay out unless you include the (encrypted) secret store.
           Restoring replaces those files on disk — restart Aether afterwards for it to take effect.
@@ -63,78 +63,78 @@ export default function AdvancedPanel({ configAnswered, isConnected, resetArmed,
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
           <button
             onClick={onCreateBackup}
-            style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+            style={{ background: 'rgba(var(--accent-rgb),0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb),0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
           >
             Create backup
           </button>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#c0c0cc', cursor: 'pointer' }}>
-            <input type="checkbox" checked={includeSecrets} onChange={(e) => onIncludeSecretsChange(e.target.checked)} />
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+            <input type="checkbox" checked={includeSecrets} onChange={(e) => onIncludeSecretsChange(e.target.checked)} style={{ accentColor: 'var(--accent)' }} />
             Include encrypted secret store
           </label>
         </div>
-        {backupStatus && <div style={{ fontSize: '13px', color: '#a0a0b0', marginBottom: '16px', wordBreak: 'break-all' }}>{backupStatus}</div>}
+        {backupStatus && <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', wordBreak: 'break-all' }}>{backupStatus}</div>}
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
           <input
             value={restorePath}
             onChange={(e) => onRestorePathChange(e.target.value)}
             placeholder="Path to a backup zip…"
             aria-label="Backup zip path"
-            style={{ flex: 1, minWidth: '220px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', padding: '9px 12px', color: '#f0f0f5', fontSize: '13px' }}
+            style={{ flex: 1, minWidth: '220px', background: 'var(--bg-base)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', padding: '9px 12px', color: 'var(--text-primary)', fontSize: '13px' }}
           />
           <button
             onClick={onRestoreBackup}
-            style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+            style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
           >
             Restore
           </button>
         </div>
-        {restoreStatus && <div style={{ fontSize: '13px', color: '#a0a0b0', marginTop: '12px' }}>{restoreStatus}</div>}
-        <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', marginTop: '20px', paddingTop: '16px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+        {restoreStatus && <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '12px' }}>{restoreStatus}</div>}
+        <div style={{ borderTop: '1px solid var(--border-default)', marginTop: '20px', paddingTop: '16px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
           <button
             onClick={onCheckUpdates}
-            style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+            style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
           >
             Check for updates
           </button>
           <button
             onClick={onExportDiagnostics}
-            style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+            style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
           >
             Export diagnostics
           </button>
           <button
             onClick={() => { if (window.electronAPI && window.electronAPI.openLogsFolder) window.electronAPI.openLogsFolder(); }}
-            style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+            style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
           >
             Open logs folder
           </button>
-          {versionCheck && <span style={{ fontSize: '13px', color: '#a0a0b0' }}>{versionCheck}</span>}
+          {versionCheck && <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{versionCheck}</span>}
         </div>
       </div>
 
-      <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>
-        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '16px', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <Network size={18} style={{ color: '#a78bfa' }} /> Model Routing & Fallbacks
+      <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '24px' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '16px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Network size={18} style={{ color: 'var(--accent)' }} /> Model Routing & Fallbacks
         </h3>
 
         {/* D2-06: this tab's own config writes report their
             refusal HERE — the error used to be passed only to
             panels on other tabs. */}
         {configUpdateError && (
-          <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '16px' }}>{configUpdateError}</div>
+          <div style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '16px' }}>{configUpdateError}</div>
         )}
 
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
           <div>
             <div style={{ fontWeight: 500, fontSize: '14px', marginBottom: '4px' }}>Disable Fallback System</div>
-            <div style={{ fontSize: '12px', color: '#9090a0' }}>Prevent the system from automatically trying alternative models when the current one fails.</div>
+            <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Prevent the system from automatically trying alternative models when the current one fails.</div>
           </div>
           <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
             <input
               type="checkbox"
               checked={disableFallbacks}
               onChange={(e) => onDisableFallbacksChange(e.target.checked)}
-              style={{ accentColor: '#7c3aed', width: '18px', height: '18px' }}
+              style={{ accentColor: 'var(--accent)', width: '18px', height: '18px' }}
             />
           </label>
         </div>
@@ -142,7 +142,7 @@ export default function AdvancedPanel({ configAnswered, isConnected, resetArmed,
         {!disableFallbacks && (
           <div>
             <div style={{ fontWeight: 500, fontSize: '14px', marginBottom: '8px' }}>Fallback Provider Chain (Optional)</div>
-            <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
               Comma-separated list of providers to try in order (e.g., <code>openrouter, groq, google_gemini</code>). Leave empty for automatic selection.
             </div>
             <input
@@ -153,11 +153,11 @@ export default function AdvancedPanel({ configAnswered, isConnected, resetArmed,
               placeholder="E.g. openrouter, groq, anthropic"
               style={{
                 width: '100%',
-                background: 'rgba(0,0,0,0.2)',
-                border: '1px solid rgba(255,255,255,0.1)',
+                background: 'var(--bg-base)',
+                border: '1px solid var(--border-default)',
                 borderRadius: '6px',
                 padding: '10px 12px',
-                color: '#fff',
+                color: 'var(--text-primary)',
                 fontSize: '13px'
               }}
             />
@@ -177,20 +177,20 @@ export default function AdvancedPanel({ configAnswered, isConnected, resetArmed,
       />
 
       <div style={{
-        background: 'rgba(255,255,255,0.02)',
-        border: '1px solid rgba(255,255,255,0.06)',
+        background: 'var(--bg-raised)',
+        border: '1px solid var(--border-default)',
         borderRadius: '8px',
         padding: '16px',
         marginTop: '16px'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-          <Scissors size={16} color="#7c3aed" />
+          <Scissors size={16} color="var(--accent)" />
           <div style={{ fontWeight: 500, fontSize: '14px' }}>Screen Snip Hotkey</div>
         </div>
-        <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
+        <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
           Accelerator to trigger screen region snipping (e.g., <code>Ctrl+Alt+S</code>). Applies as soon as you leave the field — no restart needed.
         </div>
-        <div data-testid="snip-hotkey-note" style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
+        <div data-testid="snip-hotkey-note" style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
           This shortcut is global: it works system-wide while Aether is running, so it can override the same keys in other apps.
         </div>
         <input
@@ -202,21 +202,21 @@ export default function AdvancedPanel({ configAnswered, isConnected, resetArmed,
           placeholder={defaultSnipHotkey()}
           style={{
             width: '100%',
-            background: 'rgba(0,0,0,0.2)',
-            border: '1px solid rgba(255,255,255,0.1)',
+            background: 'var(--bg-base)',
+            border: '1px solid var(--border-default)',
             borderRadius: '6px',
             padding: '10px 12px',
-            color: '#fff',
+            color: 'var(--text-primary)',
             fontSize: '13px'
           }}
         />
         {snipHotkeyError && (
-          <div data-testid="snip-hotkey-error" style={{ fontSize: '12px', color: '#f87171', marginTop: '8px' }}>
+          <div data-testid="snip-hotkey-error" style={{ fontSize: '12px', color: 'var(--danger)', marginTop: '8px' }}>
             {snipHotkeyError}
           </div>
         )}
         {pendingSnipValue !== undefined && (
-          <div data-testid="snip-hotkey-queued" style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
+          <div data-testid="snip-hotkey-queued" style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px' }}>
             Snip hotkey change to {pendingSnipValue} queued — will be saved when the engine reconnects.
           </div>
         )}
@@ -226,11 +226,11 @@ export default function AdvancedPanel({ configAnswered, isConnected, resetArmed,
           onClick={onSnipHotkeyReset}
           style={{
             marginTop: '12px',
-            background: 'rgba(255,255,255,0.06)',
-            border: '1px solid rgba(255,255,255,0.1)',
+            background: 'var(--bg-hover)',
+            border: '1px solid var(--border-default)',
             borderRadius: '6px',
             padding: '8px 12px',
-            color: '#fff',
+            color: 'var(--text-primary)',
             fontSize: '12px',
             cursor: 'pointer'
           }}

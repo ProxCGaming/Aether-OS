@@ -19,11 +19,11 @@ const VERDICTS = ['Always Allow', 'Require Approval', 'Deny'];
 const RISK_VALUES = ['read_only', 'write', 'execute', 'destructive'];
 
 const inputStyle = {
-  background: 'rgba(0,0,0,0.2)',
-  border: '1px solid rgba(255,255,255,0.1)',
-  borderRadius: '6px',
+  background: 'var(--bg-base)',
+  border: '1px solid var(--border-default)',
+  borderRadius: 'var(--radius-md)',
   padding: '9px 12px',
-  color: '#fff',
+  color: 'var(--text-primary)',
   fontSize: '13px',
 };
 
@@ -83,7 +83,7 @@ export default function PathRulesPanel({ rules, configError, onConfigUpdate }) {
   return (
     <div data-testid="path-rules-panel" style={{ marginBottom: '24px' }}>
       <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '4px' }}>Path rules</h3>
-      <p style={{ fontSize: '13px', color: '#9090a0', marginBottom: '12px' }}>
+      <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '12px' }}>
         Per-path refinements to the tool policies above, for calls whose arguments point
         under a prefix. Rules are checked in order — the first match wins — and a rule can
         never override an explicit per-tool Deny or Require Approval, or the sensitive-path floor.
@@ -91,21 +91,21 @@ export default function PathRulesPanel({ rules, configError, onConfigUpdate }) {
       {error && (
         <div
           data-testid="path-rules-error"
-          style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '10px', padding: '10px 14px', fontSize: '13px', color: '#fca5a5', marginBottom: '12px' }}
+          style={{ background: 'rgba(201,42,42,0.08)', border: '1px solid rgba(201,42,42,0.3)', borderRadius: '10px', padding: '10px 14px', fontSize: '13px', color: 'var(--danger)', marginBottom: '12px' }}
         >
           {error}
         </div>
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '12px' }}>
         {rows.length === 0 ? (
-          <div style={{ color: '#9090a0', fontSize: '14px', padding: '16px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '14px', padding: '16px', textAlign: 'center', background: 'var(--bg-base)', borderRadius: '12px' }}>
             No path rules. Tool policies apply as-is.
           </div>
         ) : (
           rows.map((row, i) => (
             <div
               key={i}
-              style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '14px 16px' }}
+              style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '14px 16px' }}
             >
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
                 <input
@@ -114,7 +114,7 @@ export default function PathRulesPanel({ rules, configError, onConfigUpdate }) {
                   onChange={(e) => updateRow(i, { prefix: e.target.value })}
                   placeholder="/path/prefix (e.g. ~/projects)"
                   aria-label={`Rule ${i + 1} path prefix`}
-                  style={{ ...inputStyle, flex: 1, fontFamily: 'monospace' }}
+                  style={{ ...inputStyle, flex: 1, fontFamily: 'var(--font-mono)' }}
                 />
                 <select
                   data-testid={`path-rule-verdict-${i}`}
@@ -124,7 +124,7 @@ export default function PathRulesPanel({ rules, configError, onConfigUpdate }) {
                   style={{ ...inputStyle, width: '190px' }}
                 >
                   {VERDICTS.map((v) => (
-                    <option key={v} value={v} style={{ background: '#1a1a22' }}>{v}</option>
+                    <option key={v} value={v} style={{ background: 'var(--bg-raised)' }}>{v}</option>
                   ))}
                 </select>
                 <button
@@ -135,7 +135,7 @@ export default function PathRulesPanel({ rules, configError, onConfigUpdate }) {
                     setSaved(false);
                   }}
                   aria-label={`Remove rule ${i + 1}`}
-                  style={{ background: 'rgba(239,68,68,0.12)', color: '#f87171', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '8px', padding: '8px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+                  style={{ background: 'rgba(201,42,42,0.12)', color: 'var(--danger)', border: '1px solid rgba(201,42,42,0.3)', borderRadius: '8px', padding: '8px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
                 >
                   <Trash2 size={14} />
                 </button>
@@ -170,7 +170,7 @@ export default function PathRulesPanel({ rules, configError, onConfigUpdate }) {
             setRows((prev) => [...prev, toRow(null)]);
             setSaved(false);
           }}
-          style={{ background: 'rgba(255,255,255,0.06)', color: '#f0f0f5', border: '1px solid rgba(255,255,255,0.15)', padding: '8px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+          style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '8px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
         >
           Add rule
         </button>
@@ -178,11 +178,11 @@ export default function PathRulesPanel({ rules, configError, onConfigUpdate }) {
           type="button"
           data-testid="path-rules-save"
           onClick={handleSave}
-          style={{ background: 'rgba(124,58,237,0.15)', color: '#c4b5fd', border: '1px solid rgba(124,58,237,0.4)', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: 500 }}
+          style={{ background: 'rgba(var(--accent-rgb),0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb),0.4)', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: 500 }}
         >
           Save path rules
         </button>
-        {saved && !error && <span style={{ fontSize: '13px', color: '#10b981' }}>Saved.</span>}
+        {saved && !error && <span style={{ fontSize: '13px', color: 'var(--success)' }}>Saved.</span>}
       </div>
     </div>
   );

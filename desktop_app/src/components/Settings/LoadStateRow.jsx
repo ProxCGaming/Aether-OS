@@ -55,26 +55,26 @@ export function loadDisplay(loadState, isConnected) {
 }
 
 const boxBase = {
-  color: '#9090a0',
+  color: 'var(--text-secondary)',
   fontSize: '14px',
   padding: '24px',
   textAlign: 'center',
-  background: 'rgba(0,0,0,0.2)',
+  background: 'var(--bg-base)',
   borderRadius: '12px',
 };
 
 const boxError = {
-  color: '#fca5a5',
+  color: 'var(--danger)',
   fontSize: '13px',
   padding: '16px',
   textAlign: 'center',
-  background: 'rgba(239,68,68,0.08)',
-  border: '1px solid rgba(239,68,68,0.3)',
+  background: 'rgba(201,42,42,0.08)',
+  border: '1px solid rgba(201,42,42,0.3)',
   borderRadius: '12px',
 };
 
-const plainBase = { color: '#9090a0', fontSize: '13px' };
-const plainError = { color: '#fca5a5', fontSize: '13px' };
+const plainBase = { color: 'var(--text-secondary)', fontSize: '13px' };
+const plainError = { color: 'var(--danger)', fontSize: '13px' };
 
 export default function LoadStateRow({
   loadState,

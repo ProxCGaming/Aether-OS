@@ -65,13 +65,13 @@ export default function PluginsPanel() {
   }, [wsRef, sendMessage]);
 
   return (
-    <div style={{ color: '#f0f0f5' }}>
+    <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Plugins</h2>
-      <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Manage active plugins and extensions for Aether-OS.</p>
+      <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>Manage active plugins and extensions for Aether-OS.</p>
 
       <PluginsNotice />
 
-      <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', marginBottom: '24px' }}>
+      <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px', marginBottom: '24px' }}>
         <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Install New Plugin</h3>
         <div style={{ display: 'flex', gap: '12px' }}>
           <input
@@ -80,7 +80,7 @@ export default function PluginsPanel() {
             onChange={(e) => setNewPluginSource(e.target.value)}
             className="ios-glass-input"
             placeholder="GitHub URL or local path"
-            style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+            style={{ flex: 1, padding: '12px 16px', color: 'var(--text-primary)', outline: 'none' }}
           />
           <button
             onClick={() => {
@@ -89,7 +89,7 @@ export default function PluginsPanel() {
                 setNewPluginSource('');
               }
             }}
-            style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '0 24px', borderRadius: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 500 }}
+            style={{ background: 'var(--accent)', color: 'var(--accent-on)', border: 'none', padding: '0 24px', borderRadius: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 500 }}
           >
             <Download size={16} />
             Install
@@ -98,7 +98,7 @@ export default function PluginsPanel() {
       </div>
 
       {pluginActionResult && (
-        <div style={{ color: '#fbbf24', fontSize: '13px', marginBottom: '16px' }}>{pluginActionResult}</div>
+        <div style={{ color: 'var(--accent)', fontSize: '13px', marginBottom: '16px' }}>{pluginActionResult}</div>
       )}
 
       <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Installed Plugins</h3>
@@ -113,31 +113,31 @@ export default function PluginsPanel() {
             errorText="The plugin list could not be loaded."
           />
         ) : plugins.length === 0 ? (
-          <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'var(--bg-base)', borderRadius: '12px' }}>
             No plugins installed.
           </div>
         ) : (
           plugins.map(plugin => (
-            <div key={plugin.manifest?.name || plugin.name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div key={plugin.manifest?.name || plugin.name} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <h4 style={{ fontSize: '15px', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '8px' }}>
                   {plugin.manifest?.name || plugin.name}
-                  <span style={{ fontSize: '11px', background: 'rgba(255,255,255,0.1)', padding: '2px 6px', borderRadius: '4px' }}>v{plugin.manifest?.version || '1.0'}</span>
+                  <span style={{ fontSize: '11px', background: 'var(--bg-hover)', padding: '2px 6px', borderRadius: '4px' }}>v{plugin.manifest?.version || '1.0'}</span>
                 </h4>
-                <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>
+                <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
                   {plugin.manifest?.description || 'No description available.'}
                 </p>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                 <button
                   onClick={() => sendMessage('PLUGIN_TOGGLE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: plugin.manifest?.name || plugin.name, enabled: !plugin.enabled } })}
-                  style={{ background: plugin.enabled ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255, 255, 255, 0.1)', color: plugin.enabled ? '#10b981' : '#fff', border: `1px solid ${plugin.enabled ? 'rgba(16, 185, 129, 0.3)' : 'rgba(255, 255, 255, 0.2)'}`, padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', width: '80px' }}
+                  style={{ background: plugin.enabled ? 'rgba(76, 195, 138, 0.15)' : 'rgba(255, 255, 255, 0.1)', color: plugin.enabled ? 'var(--success)' : 'var(--text-primary)', border: `1px solid ${plugin.enabled ? 'rgba(76, 195, 138, 0.3)' : 'rgba(255, 255, 255, 0.2)'}`, padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', width: '80px' }}
                 >
                   {plugin.enabled ? 'Enabled' : 'Disabled'}
                 </button>
                 <button
                   onClick={() => sendMessage('PLUGIN_UNINSTALL_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: plugin.manifest?.name || plugin.name } })}
-                  style={{ background: 'rgba(242, 65, 91, 0.15)', color: '#FA5870', border: '1px solid rgba(242, 65, 91, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                  style={{ background: 'rgba(201, 42, 42, 0.15)', color: 'var(--danger)', border: '1px solid rgba(201, 42, 42, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
                 >
                   Uninstall
                 </button>

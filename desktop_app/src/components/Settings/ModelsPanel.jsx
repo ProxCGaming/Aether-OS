@@ -13,20 +13,20 @@ import SpeechSettingsPanel from './SpeechSettingsPanel';
 export default function ModelsPanel({ providers, wsRef, safeSend, pendingMessages, reconnectCount, isConnected, configAnswered, configLoadError, onRetryConfigLoad, modelSwitchQueued, pendingModelSwitch, onModelDefaultChange, reasoningEffort, onReasoningEffortChange, controlRefusal, auxModels, onAuxModelChange, onAuxResetAll, engineConfig, configUpdateError, onConfigUpdate }) {
   const [modelTab, setModelTab] = useState('cloud'); // 'cloud' or 'local'
   return (
-    <div style={{ color: '#f0f0f5' }}>
+    <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Models & Tasks</h2>
-      <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Assign default models globally, or route specific tasks to specialized models.</p>
+      <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>Assign default models globally, or route specific tasks to specialized models.</p>
             
       {/* Toggle Switch */}
-      <div style={{ display: 'flex', background: 'rgba(255,255,255,0.05)', padding: '4px', borderRadius: '12px', marginBottom: '24px', width: 'fit-content' }}>
+      <div style={{ display: 'flex', background: 'var(--bg-overlay)', padding: '4px', borderRadius: '12px', marginBottom: '24px', width: 'fit-content' }}>
          <button 
             onClick={() => setModelTab('cloud')}
-            style={{ background: modelTab === 'cloud' ? 'rgba(124,58,237,0.4)' : 'transparent', color: '#fff', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
+            style={{ background: modelTab === 'cloud' ? 'rgba(var(--accent-rgb), 0.18)' : 'transparent', color: modelTab === 'cloud' ? 'var(--accent)' : 'var(--text-secondary)', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
             Cloud Models
          </button>
          <button 
             onClick={() => setModelTab('local')}
-            style={{ background: modelTab === 'local' ? 'rgba(124,58,237,0.4)' : 'transparent', color: '#fff', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
+            style={{ background: modelTab === 'local' ? 'rgba(var(--accent-rgb), 0.18)' : 'transparent', color: modelTab === 'local' ? 'var(--accent)' : 'var(--text-secondary)', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
             Local Models
          </button>
       </div>
@@ -49,13 +49,13 @@ export default function ModelsPanel({ providers, wsRef, safeSend, pendingMessage
                  errorText={configLoadError || 'Your saved model settings could not be loaded.'}
                />
                {configLoadError && (
-                 <button type="button" onClick={onRetryConfigLoad} style={{ marginTop: '8px', background: 'transparent', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
+                 <button type="button" onClick={onRetryConfigLoad} style={{ marginTop: '8px', background: 'transparent', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb),0.4)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
                    Retry
                  </button>
                )}
              </div>
            )}
-           <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', marginBottom: '24px' }}>
+           <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px', marginBottom: '24px' }}>
              <div style={{ display: 'flex', gap: '24px' }}>
                <div style={{ flex: 1 }}>
                  <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Global Default Model</h3>
@@ -80,7 +80,7 @@ export default function ModelsPanel({ providers, wsRef, safeSend, pendingMessage
                  />
                  </div>
                  {modelSwitchQueued && (
-                   <div style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
+                   <div style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px' }}>
                      Model switch{pendingModelSwitch.payload && pendingModelSwitch.payload.model ? ` to ${pendingModelSwitch.payload.model}` : ''} queued — will apply when the engine reconnects.
                    </div>
                  )}
@@ -102,17 +102,17 @@ export default function ModelsPanel({ providers, wsRef, safeSend, pendingMessage
            </div>
 
            {controlRefusal && (
-             <div style={{ color: '#f87171', fontSize: '13px', marginTop: '16px' }}>{controlRefusal}</div>
+             <div style={{ color: 'var(--danger)', fontSize: '13px', marginTop: '16px' }}>{controlRefusal}</div>
            )}
 
            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '32px', marginBottom: '16px' }}>
              <h3 style={{ fontSize: '18px', fontWeight: 500, margin: 0 }}>⚙ Auxiliary models</h3>
              <button
-               style={{ background: 'transparent', color: '#a78bfa', border: 'none', fontSize: '13px', cursor: 'pointer' }}
+               style={{ background: 'transparent', color: 'var(--accent)', border: 'none', fontSize: '13px', cursor: 'pointer' }}
                onClick={onAuxResetAll}
              >Reset all to main</button>
            </div>
-           <p style={{ color: '#9090a0', fontSize: '13px', marginBottom: '16px' }}>Helper tasks run on the main model by default. Assign a dedicated model to any task to override.</p>
+           <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '16px' }}>Helper tasks run on the main model by default. Assign a dedicated model to any task to override.</p>
                  
            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
              {[
@@ -122,13 +122,13 @@ export default function ModelsPanel({ providers, wsRef, safeSend, pendingMessage
                // is rendered for them instead of a placebo dropdown.
                { id: 'vision', name: 'Vision', desc: 'Image analysis' },
              ].map(task => (
-               <div key={task.id} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+               <div key={task.id} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <h4 style={{ fontSize: '14px', fontWeight: 600, margin: 0 }}>{task.name}</h4>
-                      <span style={{ fontSize: '11px', color: '#9090a0' }}>{task.desc}</span>
+                      <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{task.desc}</span>
                     </div>
-                    <p style={{ fontSize: '12px', color: '#a78bfa', marginTop: '4px', fontFamily: 'monospace' }}>{auxModels[task.id] ? auxModels[task.id].split(':::')[1] || auxModels[task.id] : 'auto · use main model'}</p>
+                    <p style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '4px', fontFamily: 'var(--font-mono)' }}>{auxModels[task.id] ? auxModels[task.id].split(':::')[1] || auxModels[task.id] : 'auto · use main model'}</p>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Dropdown 

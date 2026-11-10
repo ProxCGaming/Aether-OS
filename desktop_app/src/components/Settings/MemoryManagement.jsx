@@ -209,20 +209,20 @@ export default function MemoryManagement() {
   };
 
   return (
-    <div style={{ color: '#f0f0f5' }}>
+    <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Memory & Storage</h2>
-      <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Manage the internal knowledge graph and episodic memory.</p>
+      <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>Manage the internal knowledge graph and episodic memory.</p>
       
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-        <div style={{ display: 'flex', background: 'rgba(255,255,255,0.05)', padding: '4px', borderRadius: '12px', width: 'fit-content' }}>
+        <div style={{ display: 'flex', background: 'var(--bg-overlay)', padding: '4px', borderRadius: '12px', width: 'fit-content' }}>
             <button 
               onClick={() => setMemoryTab('episodic')}
-              style={{ background: memoryTab === 'episodic' ? 'rgba(124,58,237,0.4)' : 'transparent', color: '#fff', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
+              style={{ background: memoryTab === 'episodic' ? 'rgba(var(--accent-rgb), 0.18)' : 'transparent', color: memoryTab === 'episodic' ? 'var(--accent)' : 'var(--text-secondary)', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
               Episodic Memory
             </button>
             <button 
               onClick={() => setMemoryTab('kg')}
-              style={{ background: memoryTab === 'kg' ? 'rgba(124,58,237,0.4)' : 'transparent', color: '#fff', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
+              style={{ background: memoryTab === 'kg' ? 'rgba(var(--accent-rgb), 0.18)' : 'transparent', color: memoryTab === 'kg' ? 'var(--accent)' : 'var(--text-secondary)', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
               Knowledge Graph
             </button>
         </div>
@@ -230,10 +230,10 @@ export default function MemoryManagement() {
           <button
             onClick={handleClearAllEpisodes}
             style={{
-              display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#f87171', padding: '8px 16px', borderRadius: '10px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s'
+              display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--danger)', border: '1px solid var(--danger)', color: 'var(--text-primary)', padding: '8px 16px', borderRadius: '10px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s'
             }}
-            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.22)'}
-            onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.12)'}
+            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(201,42,42, 0.85)'}
+            onMouseLeave={(e) => e.currentTarget.style.background = 'var(--danger)'}
           >
             <Trash2 size={15} />
             Clear All Memory
@@ -243,10 +243,10 @@ export default function MemoryManagement() {
           <button
             onClick={handleClearAllFacts}
             style={{
-              display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#f87171', padding: '8px 16px', borderRadius: '10px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s'
+              display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--danger)', border: '1px solid var(--danger)', color: 'var(--text-primary)', padding: '8px 16px', borderRadius: '10px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s'
             }}
-            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.22)'}
-            onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.12)'}
+            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(201,42,42, 0.85)'}
+            onMouseLeave={(e) => e.currentTarget.style.background = 'var(--danger)'}
           >
             <Trash2 size={15} />
             Clear All Knowledge
@@ -255,13 +255,13 @@ export default function MemoryManagement() {
       </div>
 
       {memoryError && (
-        <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '16px' }}>{memoryError}</div>
+        <div style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '16px' }}>{memoryError}</div>
       )}
 
       {memoryTab === 'episodic' && (
         <div>
           {episodesMeta && (episodesMeta.backend || episodesMeta.embedding_stats) && (
-            <div style={{ fontSize: '13px', color: '#9090a0', marginBottom: '16px' }}>
+            <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
               {episodesMeta.backend && <span>Backend: {episodesMeta.backend}</span>}
               {episodesMeta.embedding_stats && (
                 <span>
@@ -271,7 +271,7 @@ export default function MemoryManagement() {
                 </span>
               )}
               {episodesMeta.embedding_stats?.last_failure && (
-                <div style={{ color: '#fbbf24', marginTop: '4px' }}>
+                <div style={{ color: 'var(--accent)', marginTop: '4px' }}>
                   ⚠ Last embedding failure: {episodesMeta.embedding_stats.last_failure.error_type}
                   {episodesMeta.embedding_stats.last_failure.error ? ` — ${episodesMeta.embedding_stats.last_failure.error}` : ''}
                 </div>
@@ -289,7 +289,7 @@ export default function MemoryManagement() {
                 return (
                   <div
                     data-testid="embedder-unavailable-note"
-                    style={{ color: '#fbbf24', background: 'rgba(251, 191, 36, 0.08)', border: '1px solid rgba(251, 191, 36, 0.25)', borderRadius: '8px', padding: '8px 12px', marginTop: '8px', fontSize: '13px', lineHeight: '1.5' }}
+                    style={{ color: 'var(--accent)', background: 'rgba(var(--accent-rgb), 0.08)', border: '1px solid rgba(var(--accent-rgb), 0.25)', borderRadius: '8px', padding: '8px 12px', marginTop: '8px', fontSize: '13px', lineHeight: '1.5' }}
                   >
                     ⚠ Embedder unavailable — {reason}
                     {embedderStatus.model ? ` (model: ${embedderStatus.model})` : ''}.
@@ -303,7 +303,7 @@ export default function MemoryManagement() {
           <div style={{ width: '320px', display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto', paddingRight: '8px' }} className="chat-scroll">
             {episodes.length === 0 ? (
               memoryError ? (
-                <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center' }}>Episodes could not be loaded.</div>
+                <div style={{ color: 'var(--text-secondary)', fontSize: '14px', padding: '24px', textAlign: 'center' }}>Episodes could not be loaded.</div>
               ) : episodesLoad !== 'ready' ? (
                 <div style={{ padding: '24px', textAlign: 'center' }}>
                   <LoadStateRow
@@ -318,7 +318,7 @@ export default function MemoryManagement() {
                   />
                 </div>
               ) : (
-                <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center' }}>No episodes found.</div>
+                <div style={{ color: 'var(--text-secondary)', fontSize: '14px', padding: '24px', textAlign: 'center' }}>No episodes found.</div>
               )
             ) : (
               episodes.map(ep => (
@@ -326,8 +326,8 @@ export default function MemoryManagement() {
                   key={ep.task_id || ep.id} 
                   onClick={() => setSelectedEpisode(ep)}
                   style={{ 
-                    background: selectedEpisode?.task_id === ep.task_id ? 'rgba(124,58,237,0.2)' : 'rgba(255,255,255,0.02)', 
-                    border: `1px solid ${selectedEpisode?.task_id === ep.task_id ? 'rgba(124,58,237,0.5)' : 'rgba(255,255,255,0.05)'}`, 
+                    background: selectedEpisode?.task_id === ep.task_id ? 'rgba(var(--accent-rgb),0.2)' : 'var(--bg-raised)', 
+                    border: `1px solid ${selectedEpisode?.task_id === ep.task_id ? 'rgba(var(--accent-rgb),0.5)' : 'var(--border-default)'}`, 
                     borderRadius: '12px', padding: '14px 16px', cursor: 'pointer', transition: 'all 0.2s', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px'
                   }}
                 >
@@ -335,7 +335,7 @@ export default function MemoryManagement() {
                     <h4 style={{ fontSize: '14px', fontWeight: 500, margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {ep.user_prompt || 'System event'}
                     </h4>
-                    <p style={{ fontSize: '12px', color: '#9090a0', marginTop: '4px', margin: 0 }}>
+                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px', margin: 0 }}>
                       {new Date(ep.timestamp * 1000).toLocaleString()}
                     </p>
                   </div>
@@ -345,9 +345,9 @@ export default function MemoryManagement() {
                       e.stopPropagation();
                       handleDeleteEpisode(ep.task_id);
                     }}
-                    style={{ background: 'transparent', border: 'none', color: '#9090a0', padding: '6px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s', flexShrink: 0 }}
-                    onMouseEnter={(e) => { e.currentTarget.style.color = '#ef4444'; e.currentTarget.style.background = 'rgba(239, 68, 68, 0.15)'; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.color = '#9090a0'; e.currentTarget.style.background = 'transparent'; }}
+                    style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', padding: '6px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s', flexShrink: 0 }}
+                    onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--danger)'; e.currentTarget.style.background = 'rgba(201,42,42, 0.15)'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-secondary)'; e.currentTarget.style.background = 'transparent'; }}
                   >
                     <Trash2 size={16} />
                   </button>
@@ -355,46 +355,46 @@ export default function MemoryManagement() {
               ))
             )}
           </div>
-          <div style={{ flex: 1, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '16px', padding: '24px', overflowY: 'auto' }} className="chat-scroll">
+          <div style={{ flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '24px', overflowY: 'auto' }} className="chat-scroll">
             {selectedEpisode ? (
               <div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                   <h3 style={{ fontSize: '18px', fontWeight: 500, margin: 0 }}>Episode Details</h3>
                   <button
                     onClick={() => handleDeleteEpisode(selectedEpisode.task_id)}
-                    style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.25)', color: '#f87171', padding: '6px 14px', borderRadius: '8px', fontSize: '12px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s' }}
-                    onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.22)'}
-                    onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.12)'}
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(201,42,42, 0.12)', border: '1px solid rgba(201,42,42, 0.25)', color: 'var(--danger)', padding: '6px 14px', borderRadius: '8px', fontSize: '12px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s' }}
+                    onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(201,42,42, 0.85)'}
+                    onMouseLeave={(e) => e.currentTarget.style.background = 'var(--danger)'}
                   >
                     <Trash2 size={14} />
                     Delete Episode
                   </button>
                 </div>
                 <div style={{ marginBottom: '16px' }}>
-                  <div style={{ fontSize: '12px', color: '#a78bfa', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>User Prompt</div>
-                  <div style={{ background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px', fontSize: '14px', whiteSpace: 'pre-wrap' }}>{selectedEpisode.user_prompt}</div>
+                  <div style={{ fontSize: '12px', color: 'var(--accent)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>User Prompt</div>
+                  <div style={{ background: 'var(--bg-base)', padding: '12px', borderRadius: '8px', fontSize: '14px', whiteSpace: 'pre-wrap' }}>{selectedEpisode.user_prompt}</div>
                 </div>
                 <div style={{ marginBottom: '16px' }}>
-                  <div style={{ fontSize: '12px', color: '#10b981', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Response</div>
-                  <div style={{ background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px', fontSize: '14px', whiteSpace: 'pre-wrap' }}>{selectedEpisode.outcome}</div>
+                  <div style={{ fontSize: '12px', color: 'var(--success)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Response</div>
+                  <div style={{ background: 'var(--bg-base)', padding: '12px', borderRadius: '8px', fontSize: '14px', whiteSpace: 'pre-wrap' }}>{selectedEpisode.outcome}</div>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
                   <div>
-                    <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '4px' }}>Task ID</div>
-                    <div style={{ fontSize: '13px', fontFamily: 'monospace' }}>{selectedEpisode.task_id}</div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>Task ID</div>
+                    <div style={{ fontSize: '13px', fontFamily: 'var(--font-mono)' }}>{selectedEpisode.task_id}</div>
                   </div>
                   <div>
-                    <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '4px' }}>Timestamp</div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>Timestamp</div>
                     <div style={{ fontSize: '13px' }}>{new Date(selectedEpisode.timestamp * 1000).toLocaleString()}</div>
                   </div>
                   <div>
-                    <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '4px' }}>Vector ID</div>
-                    <div style={{ fontSize: '13px', fontFamily: 'monospace' }}>{selectedEpisode.vector_id || 'N/A'}</div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>Vector ID</div>
+                    <div style={{ fontSize: '13px', fontFamily: 'var(--font-mono)' }}>{selectedEpisode.vector_id || 'N/A'}</div>
                   </div>
                 </div>
               </div>
             ) : (
-              <div style={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center', color: '#9090a0', fontSize: '14px' }}>
+              <div style={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', fontSize: '14px' }}>
                 Select an episode to view details.
               </div>
             )}
@@ -411,32 +411,33 @@ export default function MemoryManagement() {
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               placeholder="Search facts…"
-              style={{ background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', color: '#f0f0f5', padding: '8px 12px', fontSize: '13px', minWidth: '220px', outline: 'none' }}
+              style={{ background: 'var(--bg-base)', border: '1px solid var(--border-default)', borderRadius: '8px', color: 'var(--text-primary)', padding: '8px 12px', fontSize: '13px', minWidth: '220px', outline: 'none' }}
             />
-            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#c9c9d4', cursor: 'pointer' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: 'var(--text-secondary)', cursor: 'pointer' }}>
               <input
                 type="checkbox"
                 checked={includeHistory}
                 onChange={(e) => setIncludeHistory(e.target.checked)}
+                style={{ accentColor: 'var(--accent)' }}
               />
               Show superseded
             </label>
             <button
               onClick={handleExport}
-              style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(124,58,237,0.15)', border: '1px solid rgba(124,58,237,0.35)', color: '#c4b5fd', padding: '8px 14px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s' }}
-              onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(124,58,237,0.28)'}
-              onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(124,58,237,0.15)'}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(var(--accent-rgb),0.15)', border: '1px solid rgba(var(--accent-rgb),0.35)', color: 'var(--accent)', padding: '8px 14px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.2s' }}
+              onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(var(--accent-rgb),0.28)'}
+              onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(var(--accent-rgb),0.15)'}
             >
               <Download size={14} />
               Export Memory
             </button>
           </div>
           {exportStatus && (
-            <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '16px' }}>{exportStatus}</div>
+            <div style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '16px' }}>{exportStatus}</div>
           )}
           {facts.length === 0 ? (
             memoryError ? (
-              <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'var(--bg-base)', borderRadius: '12px' }}>
                 Facts could not be loaded.
               </div>
             ) : factsLoad !== 'ready' ? (
@@ -449,7 +450,7 @@ export default function MemoryManagement() {
                 errorText="Facts could not be loaded."
               />
             ) : (
-              <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'var(--bg-base)', borderRadius: '12px' }}>
                 No facts in Knowledge Graph.
               </div>
             )
@@ -460,20 +461,20 @@ export default function MemoryManagement() {
                 acc[f.entity_name].push(f);
                 return acc;
               }, {})).map(([entityName, entityFacts]) => (
-                <div key={entityName} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px' }}>
+                <div key={entityName} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <h3 style={{ fontSize: '16px', fontWeight: 500, margin: 0, color: '#a78bfa' }}>{entityName}</h3>
-                      <span style={{ fontSize: '11px', background: 'rgba(255,255,255,0.1)', padding: '2px 8px', borderRadius: '12px', color: '#9090a0' }}>
+                      <h3 style={{ fontSize: '16px', fontWeight: 500, margin: 0, color: 'var(--accent)' }}>{entityName}</h3>
+                      <span style={{ fontSize: '11px', background: 'var(--bg-hover)', padding: '2px 8px', borderRadius: '12px', color: 'var(--text-secondary)' }}>
                         {entityFacts[0]?.entity_type || 'Entity'}
                       </span>
                     </div>
                     <button
                       title={`Delete all facts for ${entityName}`}
                       onClick={() => handleDeleteEntity(entityName)}
-                      style={{ background: 'transparent', border: 'none', color: '#9090a0', padding: '4px 6px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', transition: 'all 0.2s' }}
-                      onMouseEnter={(e) => { e.currentTarget.style.color = '#ef4444'; e.currentTarget.style.background = 'rgba(239, 68, 68, 0.15)'; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.color = '#9090a0'; e.currentTarget.style.background = 'transparent'; }}
+                      style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', padding: '4px 6px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', transition: 'all 0.2s' }}
+                      onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--danger)'; e.currentTarget.style.background = 'rgba(201,42,42, 0.15)'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-secondary)'; e.currentTarget.style.background = 'transparent'; }}
                     >
                       <Trash2 size={16} />
                     </button>
@@ -483,31 +484,31 @@ export default function MemoryManagement() {
                       const isSuperseded = fact.status === 'superseded';
                       const isEditing = editingFactId === fact.fact_id;
                       return (
-                        <div key={fact.fact_id} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px', opacity: isSuperseded ? 0.55 : 1 }}>
+                        <div key={fact.fact_id} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', background: 'var(--bg-base)', padding: '12px', borderRadius: '8px', opacity: isSuperseded ? 0.55 : 1 }}>
                           {isEditing ? (
                             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '8px' }}>
                               <textarea
                                 value={editText}
                                 onChange={(e) => setEditText(e.target.value)}
                                 rows={3}
-                                style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(124,58,237,0.4)', borderRadius: '6px', color: '#f0f0f5', padding: '8px', fontSize: '13px', lineHeight: '1.5', resize: 'vertical', outline: 'none', fontFamily: 'inherit' }}
+                                style={{ background: 'var(--bg-base)', border: '1px solid rgba(var(--accent-rgb),0.4)', borderRadius: '6px', color: 'var(--text-primary)', padding: '8px', fontSize: '13px', lineHeight: '1.5', resize: 'vertical', outline: 'none', fontFamily: 'inherit' }}
                               />
                               <div style={{ display: 'flex', gap: '8px' }}>
                                 <button
                                   onClick={() => handleSaveEdit(fact)}
-                                  style={{ background: 'rgba(124,58,237,0.35)', border: '1px solid rgba(124,58,237,0.5)', color: '#fff', padding: '5px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 500, cursor: 'pointer' }}
+                                  style={{ background: 'rgba(var(--accent-rgb),0.35)', border: '1px solid rgba(var(--accent-rgb),0.5)', color: 'var(--text-primary)', padding: '5px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 500, cursor: 'pointer' }}
                                 >
                                   Save
                                 </button>
                                 <button
                                   onClick={() => { setEditingFactId(null); setEditError(null); }}
-                                  style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#c9c9d4', padding: '5px 12px', borderRadius: '6px', fontSize: '12px', cursor: 'pointer' }}
+                                  style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', padding: '5px 12px', borderRadius: '6px', fontSize: '12px', cursor: 'pointer' }}
                                 >
                                   Cancel
                                 </button>
                               </div>
                               {editError && (
-                                <div style={{ color: '#f87171', fontSize: '12px' }}>{editError}</div>
+                                <div style={{ color: 'var(--danger)', fontSize: '12px' }}>{editError}</div>
                               )}
                             </div>
                           ) : (
@@ -515,15 +516,15 @@ export default function MemoryManagement() {
                               <div style={{ flex: 1, fontSize: '13px', lineHeight: '1.5' }}>
                                 {fact.fact_text ?? fact.content}
                                 {isSuperseded && (
-                                  <span style={{ marginLeft: '8px', fontSize: '10px', background: 'rgba(251,191,36,0.15)', color: '#fbbf24', padding: '1px 6px', borderRadius: '8px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>superseded</span>
+                                  <span style={{ marginLeft: '8px', fontSize: '10px', background: 'rgba(var(--accent-rgb),0.15)', color: 'var(--accent)', padding: '1px 6px', borderRadius: '8px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>superseded</span>
                                 )}
                               </div>
                               <button
                                 title="Edit this fact"
                                 onClick={() => handleStartEdit(fact)}
-                                style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'transparent', border: '1px solid rgba(255,255,255,0.12)', color: '#9090a0', padding: '4px 8px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', flexShrink: 0, transition: 'all 0.2s' }}
-                                onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.borderColor = 'rgba(124,58,237,0.5)'; }}
-                                onMouseLeave={(e) => { e.currentTarget.style.color = '#9090a0'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.12)'; }}
+                                style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'transparent', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', padding: '4px 8px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', flexShrink: 0, transition: 'all 0.2s' }}
+                                onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--text-primary)'; e.currentTarget.style.borderColor = 'rgba(var(--accent-rgb),0.5)'; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-secondary)'; e.currentTarget.style.borderColor = 'var(--border-default)'; }}
                               >
                                 <Pencil size={13} />
                                 Edit
@@ -531,9 +532,9 @@ export default function MemoryManagement() {
                               <button
                                 title="Delete this fact"
                                 onClick={() => handleDeleteFact(fact)}
-                                style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'transparent', border: '1px solid rgba(255,255,255,0.12)', color: '#9090a0', padding: '4px 8px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', flexShrink: 0, transition: 'all 0.2s' }}
-                                onMouseEnter={(e) => { e.currentTarget.style.color = '#ef4444'; e.currentTarget.style.borderColor = 'rgba(239,68,68,0.5)'; }}
-                                onMouseLeave={(e) => { e.currentTarget.style.color = '#9090a0'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.12)'; }}
+                                style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'transparent', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', padding: '4px 8px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', flexShrink: 0, transition: 'all 0.2s' }}
+                                onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--danger)'; e.currentTarget.style.borderColor = 'rgba(201,42,42,0.5)'; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-secondary)'; e.currentTarget.style.borderColor = 'var(--border-default)'; }}
                               >
                                 <Trash2 size={13} />
                                 Delete

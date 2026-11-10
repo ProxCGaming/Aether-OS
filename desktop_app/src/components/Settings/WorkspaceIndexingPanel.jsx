@@ -18,11 +18,11 @@ import LoadStateRow from './LoadStateRow';
 import { formatBytes } from '../../formatBytes';
 
 const REASON_METADATA = {
-  gitignore: { label: 'Gitignored', color: '#818cf8', bg: 'rgba(99, 102, 241, 0.15)' },
-  too_large: { label: 'Too large (>512 KB)', color: '#f87171', bg: 'rgba(239, 68, 68, 0.15)' },
-  binary: { label: 'Binary', color: '#fb923c', bg: 'rgba(249, 115, 22, 0.15)' },
-  lockfile: { label: 'Lockfile', color: '#fbbf24', bg: 'rgba(245, 158, 11, 0.15)' },
-  not_prose: { label: 'Not prose', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.15)' },
+  gitignore: { label: 'Gitignored', color: 'var(--accent)', bg: 'rgba(var(--accent-rgb), 0.15)' },
+  too_large: { label: 'Too large (>512 KB)', color: 'var(--danger)', bg: 'rgba(201,42,42, 0.15)' },
+  binary: { label: 'Binary', color: 'var(--text-secondary)', bg: 'rgba(148, 148, 143, 0.15)' },
+  lockfile: { label: 'Lockfile', color: 'var(--accent)', bg: 'rgba(var(--accent-rgb), 0.15)' },
+  not_prose: { label: 'Not prose', color: 'var(--text-muted)', bg: 'rgba(148, 148, 143, 0.15)' },
 };
 
 export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorkspace = '' }) {
@@ -478,15 +478,15 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
   }, [status.excluded_files, filterQuery]);
 
   return (
-    <div style={{ color: '#f0f0f5', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ color: 'var(--text-primary)', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <Layers size={22} style={{ color: '#818cf8' }} />
+            <Layers size={22} style={{ color: 'var(--accent)' }} />
             <h2 style={{ fontSize: '20px', fontWeight: 600, margin: 0 }}>Workspace Indexing</h2>
           </div>
-          <p style={{ color: '#9090a0', fontSize: '13px', margin: '4px 0 0 0' }}>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '13px', margin: '4px 0 0 0' }}>
             Local prose embedding index for workspace RAG and deep file search citations.
           </p>
         </div>
@@ -494,23 +494,23 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
         {/* Workspace Root Selector */}
         {workspaces.length > 1 && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Folder size={14} style={{ color: '#9090a0' }} />
+            <Folder size={14} style={{ color: 'var(--text-secondary)' }} />
             <select
               value={activeWorkspace}
               onChange={(e) => setActiveWorkspace(e.target.value)}
               aria-label="Workspace Root"
               style={{
-                background: 'rgba(255,255,255,0.06)',
-                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'var(--bg-hover)',
+                border: '1px solid var(--border-default)',
                 borderRadius: '8px',
-                color: '#fff',
+                color: 'var(--text-primary)',
                 padding: '6px 12px',
                 fontSize: '12px',
                 outline: 'none',
               }}
             >
               {workspaces.map((w) => (
-                <option key={w.path} value={w.path} style={{ background: '#181824' }}>
+                <option key={w.path} value={w.path} style={{ background: 'var(--bg-raised)' }}>
                   {w.name || w.path}
                 </option>
               ))}
@@ -527,11 +527,11 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
           data-testid="indexing-action-error"
           role="alert"
           style={{
-            background: 'rgba(239,68,68,0.08)',
-            border: '1px solid rgba(239,68,68,0.3)',
+            background: 'rgba(201,42,42,0.08)',
+            border: '1px solid rgba(201,42,42,0.3)',
             borderRadius: '10px',
             padding: '12px 16px',
-            color: '#fca5a5',
+            color: 'var(--danger)',
             fontSize: '13px',
           }}
         >
@@ -555,8 +555,8 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
       ) : (
       <div
         style={{
-          background: 'rgba(255, 255, 255, 0.03)',
-          border: '1px solid rgba(255, 255, 255, 0.08)',
+          background: 'var(--bg-raised)',
+          border: '1px solid var(--border-default)',
           borderRadius: '14px',
           padding: '16px 20px',
           display: 'flex',
@@ -578,16 +578,16 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                 fontWeight: 500,
                 background:
                   status.status === 'indexing'
-                    ? 'rgba(59, 130, 246, 0.2)'
+                    ? 'rgba(var(--accent-rgb), 0.2)'
                     : status.status === 'paused' || status.paused
-                    ? 'rgba(245, 158, 11, 0.2)'
-                    : 'rgba(34, 197, 94, 0.2)',
+                    ? 'rgba(148, 148, 143, 0.2)'
+                    : 'rgba(76, 195, 138, 0.2)',
                 color:
                   status.status === 'indexing'
-                    ? '#60a5fa'
+                    ? 'var(--accent)'
                     : status.status === 'paused' || status.paused
-                    ? '#fbbf24'
-                    : '#4ade80',
+                    ? 'var(--text-secondary)'
+                    : 'var(--success)',
               }}
             >
               <span
@@ -607,7 +607,7 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
 
             {/* Path indicator */}
             {activeWorkspace && (
-              <span style={{ fontSize: '12px', color: '#9090a0', fontFamily: 'monospace' }}>
+              <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
                 {activeWorkspace}
               </span>
             )}
@@ -624,9 +624,9 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                 gap: '6px',
                 padding: '7px 14px',
                 borderRadius: '8px',
-                border: '1px solid rgba(255,255,255,0.12)',
-                background: status.paused ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255,255,255,0.06)',
-                color: status.paused ? '#4ade80' : '#fff',
+                border: '1px solid var(--border-default)',
+                background: status.paused ? 'rgba(76, 195, 138, 0.15)' : 'var(--bg-hover)',
+                color: status.paused ? 'var(--success)' : 'var(--text-primary)',
                 fontSize: '12px',
                 fontWeight: 500,
                 cursor: 'pointer',
@@ -655,9 +655,9 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                 gap: '6px',
                 padding: '7px 14px',
                 borderRadius: '8px',
-                border: '1px solid rgba(124, 58, 237, 0.4)',
-                background: 'rgba(124, 58, 237, 0.2)',
-                color: '#c4b5fd',
+                border: '1px solid rgba(var(--accent-rgb), 0.4)',
+                background: 'rgba(var(--accent-rgb), 0.2)',
+                color: 'var(--accent)',
                 fontSize: '12px',
                 fontWeight: 500,
                 cursor: 'pointer',
@@ -673,7 +673,7 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
         {/* Progress Bar (Visible while indexing) */}
         {progress && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#a5b4fc' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: 'var(--accent)' }}>
               <span>
                 {progress.current_file
                   ? `Processing ${progress.current_file}`
@@ -688,7 +688,7 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                 width: '100%',
                 height: '6px',
                 borderRadius: '3px',
-                background: 'rgba(255,255,255,0.1)',
+                background: 'var(--bg-hover)',
                 overflow: 'hidden',
               }}
             >
@@ -696,7 +696,7 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                 style={{
                   height: '100%',
                   width: `${progress.total > 0 ? (progress.indexed / progress.total) * 100 : 0}%`,
-                  background: 'linear-gradient(90deg, #6366f1, #8b5cf6)',
+                  background: 'var(--accent)',
                   transition: 'width 0.3s ease',
                 }}
               />
@@ -710,34 +710,34 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
             gap: '12px',
-            borderTop: '1px solid rgba(255,255,255,0.06)',
+            borderTop: '1px solid var(--border-default)',
             paddingTop: '12px',
           }}
         >
           <div>
-            <div style={{ fontSize: '11px', color: '#9090a0', textTransform: 'uppercase' }}>Indexed Files</div>
-            <div style={{ fontSize: '18px', fontWeight: 600, color: '#fff', marginTop: '2px' }}>
+            <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Indexed Files</div>
+            <div style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)', marginTop: '2px' }}>
               {status.indexed_files || 0}
             </div>
           </div>
 
           <div>
-            <div style={{ fontSize: '11px', color: '#9090a0', textTransform: 'uppercase' }}>Excluded Files</div>
-            <div style={{ fontSize: '18px', fontWeight: 600, color: '#f87171', marginTop: '2px' }}>
+            <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Excluded Files</div>
+            <div style={{ fontSize: '18px', fontWeight: 600, color: 'var(--danger)', marginTop: '2px' }}>
               {Array.isArray(status.excluded_files) ? status.excluded_files.length : 0}
             </div>
           </div>
 
           <div>
-            <div style={{ fontSize: '11px', color: '#9090a0', textTransform: 'uppercase' }}>Total Chunks</div>
-            <div style={{ fontSize: '18px', fontWeight: 600, color: '#fff', marginTop: '2px' }}>
+            <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Total Chunks</div>
+            <div style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)', marginTop: '2px' }}>
               {status.total_chunks || 0}
             </div>
           </div>
 
           <div>
-            <div style={{ fontSize: '11px', color: '#9090a0', textTransform: 'uppercase' }}>Embedder Model</div>
-            <div style={{ fontSize: '13px', fontWeight: 500, color: '#818cf8', marginTop: '4px' }}>
+            <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Embedder Model</div>
+            <div style={{ fontSize: '13px', fontWeight: 500, color: 'var(--accent)', marginTop: '4px' }}>
               {status.embedder || 'qwen3-embedding:0.6b'}
             </div>
           </div>
@@ -748,8 +748,8 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
       {/* Embedder Configuration Box */}
       <div
         style={{
-          background: 'rgba(255, 255, 255, 0.03)',
-          border: '1px solid rgba(255, 255, 255, 0.08)',
+          background: 'var(--bg-raised)',
+          border: '1px solid var(--border-default)',
           borderRadius: '14px',
           padding: '16px 20px',
           display: 'flex',
@@ -760,10 +760,10 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
       >
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Sliders size={15} style={{ color: '#818cf8' }} />
+            <Sliders size={15} style={{ color: 'var(--accent)' }} />
             <span style={{ fontSize: '14px', fontWeight: 500 }}>Embedding Model Selection</span>
           </div>
-          <p style={{ color: '#9090a0', fontSize: '12px', margin: '3px 0 0 0' }}>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '12px', margin: '3px 0 0 0' }}>
             Unified local model for workspace RAG and episodic memory. Changing models requires a full re-index.
           </p>
         </div>
@@ -777,10 +777,10 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
             onChange={handleEmbedderSelectChange}
             style={{
               width: '100%',
-              background: 'rgba(255,255,255,0.06)',
-              border: '1px solid rgba(255,255,255,0.12)',
+              background: 'var(--bg-hover)',
+              border: '1px solid var(--border-default)',
               borderRadius: '8px',
-              color: '#fff',
+              color: 'var(--text-primary)',
               padding: '8px 12px',
               fontSize: '13px',
               outline: 'none',
@@ -788,7 +788,7 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
             }}
           >
             {embedderOptions.map((option) => (
-              <option key={option.value} value={option.value} style={{ background: '#181824' }}>
+              <option key={option.value} value={option.value} style={{ background: 'var(--bg-raised)' }}>
                 {option.label}
               </option>
             ))}
@@ -799,8 +799,8 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
       {/* Files Browser Tabs & Filter */}
       <div
         style={{
-          background: 'rgba(255, 255, 255, 0.03)',
-          border: '1px solid rgba(255, 255, 255, 0.08)',
+          background: 'var(--bg-raised)',
+          border: '1px solid var(--border-default)',
           borderRadius: '14px',
           overflow: 'hidden',
           display: 'flex',
@@ -814,7 +814,7 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
             justifyContent: 'space-between',
             alignItems: 'center',
             padding: '12px 16px',
-            borderBottom: '1px solid rgba(255,255,255,0.06)',
+            borderBottom: '1px solid var(--border-default)',
             flexWrap: 'wrap',
             gap: '10px',
           }}
@@ -832,8 +832,8 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                 padding: '6px 14px',
                 borderRadius: '8px',
                 border: 'none',
-                background: activeTab === 'indexed' ? 'rgba(124, 58, 237, 0.3)' : 'transparent',
-                color: activeTab === 'indexed' ? '#fff' : '#9090a0',
+                background: activeTab === 'indexed' ? 'rgba(var(--accent-rgb), 0.3)' : 'transparent',
+                color: activeTab === 'indexed' ? 'var(--text-primary)' : 'var(--text-secondary)',
                 fontSize: '13px',
                 fontWeight: 500,
                 cursor: 'pointer',
@@ -854,8 +854,8 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                 padding: '6px 14px',
                 borderRadius: '8px',
                 border: 'none',
-                background: activeTab === 'excluded' ? 'rgba(239, 68, 68, 0.2)' : 'transparent',
-                color: activeTab === 'excluded' ? '#fca5a5' : '#9090a0',
+                background: activeTab === 'excluded' ? 'rgba(201,42,42, 0.2)' : 'transparent',
+                color: activeTab === 'excluded' ? 'var(--danger)' : 'var(--text-secondary)',
                 fontSize: '13px',
                 fontWeight: 500,
                 cursor: 'pointer',
@@ -872,14 +872,14 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
-              background: 'rgba(255,255,255,0.05)',
-              border: '1px solid rgba(255,255,255,0.08)',
-              borderRadius: '8px',
+              background: 'var(--bg-base)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)',
               padding: '6px 12px',
               width: '240px',
             }}
           >
-            <Search size={13} style={{ color: '#9090a0' }} />
+            <Search size={13} style={{ color: 'var(--text-secondary)' }} />
             <input
               type="text"
               placeholder="Filter files or reasons…"
@@ -888,7 +888,7 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
               style={{
                 background: 'transparent',
                 border: 'none',
-                color: '#fff',
+                color: 'var(--text-primary)',
                 fontSize: '12px',
                 outline: 'none',
                 width: '100%',
@@ -916,14 +916,14 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                     />
                   </div>
                 ) : (
-                  <div style={{ padding: '36px 16px', textAlign: 'center', color: '#9090a0', fontSize: '13px' }}>
+                  <div style={{ padding: '36px 16px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '13px' }}>
                     No indexed prose files found.
                   </div>
                 )
               ) : (
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                   <thead>
-                    <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.06)', color: '#9090a0', textAlign: 'left' }}>
+                    <tr style={{ borderBottom: '1px solid var(--border-default)', color: 'var(--text-secondary)', textAlign: 'left' }}>
                       <th style={{ padding: '10px 16px', fontWeight: 500 }}>File Path</th>
                       <th style={{ padding: '10px 16px', fontWeight: 500, width: '110px' }}>Size</th>
                       <th style={{ padding: '10px 16px', fontWeight: 500, width: '110px' }}>Status</th>
@@ -934,14 +934,14 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                       <tr
                         key={doc.file_path || idx}
                         style={{
-                          borderBottom: '1px solid rgba(255,255,255,0.03)',
-                          background: idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.015)',
+                          borderBottom: '1px solid var(--border-default)',
+                          background: idx % 2 === 0 ? 'transparent' : 'var(--bg-raised)',
                         }}
                       >
-                        <td style={{ padding: '10px 16px', fontFamily: 'monospace', color: '#e2e8f0' }}>
+                        <td style={{ padding: '10px 16px', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
                           {doc.file_path}
                         </td>
-                        <td style={{ padding: '10px 16px', color: '#9090a0' }}>
+                        <td style={{ padding: '10px 16px', color: 'var(--text-secondary)' }}>
                           {formatBytes(doc.file_size)}
                         </td>
                         <td style={{ padding: '10px 16px' }}>
@@ -955,9 +955,9 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                               fontSize: '11px',
                               background:
                                 doc.status === 'pending'
-                                  ? 'rgba(245, 158, 11, 0.15)'
-                                  : 'rgba(34, 197, 94, 0.15)',
-                              color: doc.status === 'pending' ? '#fbbf24' : '#4ade80',
+                                  ? 'rgba(var(--accent-rgb), 0.15)'
+                                  : 'rgba(76, 195, 138, 0.15)',
+                              color: doc.status === 'pending' ? 'var(--accent)' : 'var(--success)',
                             }}
                           >
                             {doc.status === 'pending' ? (
@@ -997,14 +997,14 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                     />
                   </div>
                 ) : (
-                  <div style={{ padding: '36px 16px', textAlign: 'center', color: '#9090a0', fontSize: '13px' }}>
+                  <div style={{ padding: '36px 16px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '13px' }}>
                     No excluded files found.
                   </div>
                 )
               ) : (
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                   <thead>
-                    <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.06)', color: '#9090a0', textAlign: 'left' }}>
+                    <tr style={{ borderBottom: '1px solid var(--border-default)', color: 'var(--text-secondary)', textAlign: 'left' }}>
                       <th style={{ padding: '10px 16px', fontWeight: 500 }}>File Path</th>
                       <th style={{ padding: '10px 16px', fontWeight: 500, width: '180px' }}>Exclusion Reason</th>
                     </tr>
@@ -1013,18 +1013,18 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                     {filteredExcludedFiles.map((file, idx) => {
                       const reasonMeta = REASON_METADATA[file.reason] || {
                         label: file.reason || 'Excluded',
-                        color: '#94a3b8',
-                        bg: 'rgba(148, 163, 184, 0.15)',
+                        color: 'var(--text-muted)',
+                        bg: 'rgba(148, 148, 143, 0.15)',
                       };
                       return (
                         <tr
                           key={file.file_path || idx}
                           style={{
-                            borderBottom: '1px solid rgba(255,255,255,0.03)',
-                            background: idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.015)',
+                            borderBottom: '1px solid var(--border-default)',
+                            background: idx % 2 === 0 ? 'transparent' : 'var(--bg-raised)',
                           }}
                         >
-                          <td style={{ padding: '10px 16px', fontFamily: 'monospace', color: '#cbd5e1' }}>
+                          <td style={{ padding: '10px 16px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
                             {file.file_path}
                           </td>
                           <td style={{ padding: '10px 16px' }}>
@@ -1070,9 +1070,9 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
         >
           <div
             style={{
-              background: '#1a1a24',
-              border: '1px solid rgba(239, 68, 68, 0.3)',
-              borderRadius: '16px',
+              background: 'var(--bg-raised)',
+              border: '1px solid rgba(201,42,42, 0.3)',
+              borderRadius: 'var(--radius-lg)',
               padding: '24px',
               maxWidth: '460px',
               width: '90%',
@@ -1085,20 +1085,20 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
               <div
                 style={{
-                  background: 'rgba(239, 68, 68, 0.15)',
+                  background: 'rgba(201,42,42, 0.15)',
                   padding: '10px',
                   borderRadius: '10px',
-                  color: '#f87171',
+                  color: 'var(--danger)',
                 }}
               >
                 <AlertTriangle size={22} />
               </div>
-              <h3 style={{ margin: 0, fontSize: '17px', fontWeight: 600, color: '#fff' }}>
+              <h3 style={{ margin: 0, fontSize: '17px', fontWeight: 600, color: 'var(--text-primary)' }}>
                 Full Re-index Required
               </h3>
             </div>
 
-            <p style={{ margin: 0, fontSize: '13px', color: '#cbd5e1', lineHeight: '1.5' }}>
+            <p style={{ margin: 0, fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
               Switching the embedder model from <strong>{status.embedder}</strong> to{' '}
               <strong>{warningModal.pendingEmbedder}</strong> will drop all existing vector embeddings. Vectors are
               incomparable across different model architectures, requiring a full re-index of the workspace.
@@ -1117,9 +1117,9 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                 style={{
                   padding: '8px 16px',
                   borderRadius: '8px',
-                  border: '1px solid rgba(255,255,255,0.12)',
+                  border: '1px solid var(--border-default)',
                   background: 'transparent',
-                  color: '#9090a0',
+                  color: 'var(--text-secondary)',
                   fontSize: '13px',
                   cursor: 'pointer',
                 }}
@@ -1133,8 +1133,8 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
                   padding: '8px 16px',
                   borderRadius: '8px',
                   border: 'none',
-                  background: 'linear-gradient(135deg, #ef4444, #dc2626)',
-                  color: '#fff',
+                  background: 'var(--danger)',
+                  color: 'var(--text-primary)',
                   fontSize: '13px',
                   fontWeight: 500,
                   cursor: 'pointer',

@@ -129,13 +129,13 @@ export default function McpPanel({ activeSession = null }) {
   }, [wsRef, sendMessage]);
 
   return (
-    <div style={{ color: '#f0f0f5' }}>
+    <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>MCP Connections</h2>
-      <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Manage remote Model Context Protocol servers.</p>
+      <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>Manage remote Model Context Protocol servers.</p>
 
       <MCPNotice />
 
-      <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', marginBottom: '24px' }}>
+      <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px', marginBottom: '24px' }}>
         <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Add New Server</h3>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <input
@@ -144,7 +144,7 @@ export default function McpPanel({ activeSession = null }) {
             onChange={(e) => setNewMcpServer({...newMcpServer, name: e.target.value})}
             className="ios-glass-input"
             placeholder="Server Name (e.g. SQLite DB)"
-            style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
+            style={{ padding: '12px 16px', color: 'var(--text-primary)', outline: 'none' }}
           />
           <input
             type="text"
@@ -152,7 +152,7 @@ export default function McpPanel({ activeSession = null }) {
             onChange={(e) => setNewMcpServer({...newMcpServer, command: e.target.value})}
             className="ios-glass-input"
             placeholder="Command (e.g. python, npx)"
-            style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
+            style={{ padding: '12px 16px', color: 'var(--text-primary)', outline: 'none' }}
           />
           <input
             type="text"
@@ -160,7 +160,7 @@ export default function McpPanel({ activeSession = null }) {
             onChange={(e) => setNewMcpServer({...newMcpServer, args: e.target.value})}
             className="ios-glass-input"
             placeholder="Arguments (comma separated)"
-            style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
+            style={{ padding: '12px 16px', color: 'var(--text-primary)', outline: 'none' }}
           />
           <input
             type="text"
@@ -168,7 +168,7 @@ export default function McpPanel({ activeSession = null }) {
             onChange={(e) => setNewMcpServer({...newMcpServer, url: e.target.value})}
             className="ios-glass-input"
             placeholder="Server URL for remote (Streamable HTTP, e.g. https://21st.dev/api/mcp)"
-            style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
+            style={{ padding: '12px 16px', color: 'var(--text-primary)', outline: 'none' }}
           />
           <div style={{ display: 'flex', gap: '12px' }}>
             <input
@@ -177,7 +177,7 @@ export default function McpPanel({ activeSession = null }) {
               onChange={(e) => setNewMcpServer({...newMcpServer, headerKey: e.target.value})}
               className="ios-glass-input"
               placeholder="Header name (e.g. x-api-key)"
-              style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+              style={{ flex: 1, padding: '12px 16px', color: 'var(--text-primary)', outline: 'none' }}
             />
             <input
               type="text"
@@ -185,7 +185,7 @@ export default function McpPanel({ activeSession = null }) {
               onChange={(e) => setNewMcpServer({...newMcpServer, headerValue: e.target.value})}
               className="ios-glass-input"
               placeholder="Header value (use ${VAR_NAME} for secrets)"
-              style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+              style={{ flex: 1, padding: '12px 16px', color: 'var(--text-primary)', outline: 'none' }}
             />
           </div>
           <div style={{ display: 'flex', gap: '12px' }}>
@@ -195,7 +195,7 @@ export default function McpPanel({ activeSession = null }) {
               onChange={(e) => setNewMcpServer({...newMcpServer, envKey: e.target.value})}
               className="ios-glass-input"
               placeholder="Env var name (local servers)"
-              style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+              style={{ flex: 1, padding: '12px 16px', color: 'var(--text-primary)', outline: 'none' }}
             />
             <input
               type="text"
@@ -203,7 +203,7 @@ export default function McpPanel({ activeSession = null }) {
               onChange={(e) => setNewMcpServer({...newMcpServer, envValue: e.target.value})}
               className="ios-glass-input"
               placeholder="Env var value"
-              style={{ flex: 1, padding: '12px 16px', color: '#fff', outline: 'none' }}
+              style={{ flex: 1, padding: '12px 16px', color: 'var(--text-primary)', outline: 'none' }}
             />
           </div>
           <input
@@ -212,7 +212,7 @@ export default function McpPanel({ activeSession = null }) {
             onChange={(e) => setNewMcpServer({...newMcpServer, cwd: e.target.value})}
             className="ios-glass-input"
             placeholder="Working directory (cwd, local servers)"
-            style={{ padding: '12px 16px', color: '#fff', outline: 'none' }}
+            style={{ padding: '12px 16px', color: 'var(--text-primary)', outline: 'none' }}
           />
           <button
             onClick={() => {
@@ -269,7 +269,7 @@ export default function McpPanel({ activeSession = null }) {
                   : 'Give the server a name, plus a command (local server) or a URL (remote server) — nothing was sent.');
               }
             }}
-            style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '12px 24px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, alignSelf: 'flex-start' }}
+            style={{ background: 'var(--accent)', color: 'var(--accent-on)', border: 'none', padding: '12px 24px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500, alignSelf: 'flex-start' }}
           >
             Add Server
           </button>
@@ -277,7 +277,7 @@ export default function McpPanel({ activeSession = null }) {
       </div>
 
       {mcpTestResult && (
-        <div style={{ color: '#fbbf24', fontSize: '13px', marginBottom: '16px' }}>{mcpTestResult}</div>
+        <div style={{ color: 'var(--accent)', fontSize: '13px', marginBottom: '16px' }}>{mcpTestResult}</div>
       )}
 
       <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Configured Servers</h3>
@@ -292,51 +292,51 @@ export default function McpPanel({ activeSession = null }) {
             errorText="The MCP server list could not be loaded — the configuration file could not be read."
           />
         ) : Object.keys(mcpServers).length === 0 ? (
-          <div style={{ color: '#9090a0', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'var(--bg-base)', borderRadius: '12px' }}>
             No MCP servers configured.
           </div>
         ) : (
           Object.entries(mcpServers).map(([name, config]) => (
-            <div key={name} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div key={name} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <h4 style={{ fontSize: '15px', fontWeight: 500 }}>{name}</h4>
-                <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px', fontFamily: 'monospace' }}>
+                <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px', fontFamily: 'var(--font-mono)' }}>
                   {config.url ? config.url : `${config.command || ''} ${config.args?.join(' ') || ''}`}
                 </p>
-                <p style={{ fontSize: '13px', color: '#9090a0', marginTop: '4px' }}>
+                <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
                   Status: {config.status || 'unknown'}{config.tool_count ? ` — ${config.tool_count} tool(s)` : ''}{config.error ? ` — ${config.error}` : ''}
                 </p>
                 <div style={{ display: 'flex', gap: '16px', marginTop: '8px' }}>
-                  <label style={{ fontSize: '13px', color: '#c0c0d0', cursor: 'pointer' }}>
+                  <label style={{ fontSize: '13px', color: 'var(--text-secondary)', cursor: 'pointer' }}>
                     <input
                       type="checkbox"
                       checked={config.auto_connect !== false}
                       onChange={(e) => sendMessage('MCP_SERVER_UPDATE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, auto_connect: e.target.checked } })}
-                      style={{ marginRight: '6px' }}
+                      style={{ marginRight: '6px', accentColor: 'var(--accent)' }}
                     />
                     Auto-connect on startup
                   </label>
-                  <label style={{ fontSize: '13px', color: '#c0c0d0', cursor: 'pointer' }}>
+                  <label style={{ fontSize: '13px', color: 'var(--text-secondary)', cursor: 'pointer' }}>
                     <input
                       type="checkbox"
                       checked={config.enabled !== false}
                       onChange={(e) => sendMessage('MCP_SERVER_UPDATE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, enabled: e.target.checked } })}
-                      style={{ marginRight: '6px' }}
+                      style={{ marginRight: '6px', accentColor: 'var(--accent)' }}
                     />
                     Enabled
                   </label>
                 </div>
                 {(mcpResources[name] || []).length > 0 && (
                   <div style={{ marginTop: '12px' }}>
-                    <div style={{ fontSize: '13px', color: '#c0c0d0', marginBottom: '6px' }}>Resources:</div>
+                    <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '6px' }}>Resources:</div>
                     {(mcpResources[name] || []).map((res) => (
                       <div key={res.uri} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', padding: '6px 0' }}>
-                        <span style={{ fontSize: '13px', color: '#9090a0', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={res.description || res.uri}>
+                        <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={res.description || res.uri}>
                           {res.name || res.uri}
                         </span>
                         <button
                           onClick={() => sendMessage('MCP_RESOURCE_READ_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, uri: res.uri, session_id: activeSession } })}
-                          style={{ background: 'rgba(124, 58, 237, 0.15)', color: '#a78bfa', border: '1px solid rgba(124, 58, 237, 0.4)', padding: '4px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}
+                          style={{ background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.4)', padding: '4px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}
                         >
                           Load into chat
                         </button>
@@ -346,16 +346,16 @@ export default function McpPanel({ activeSession = null }) {
                 )}
                 {(mcpPrompts[name] || []).length > 0 && (
                   <div style={{ marginTop: '12px' }}>
-                    <div style={{ fontSize: '13px', color: '#c0c0d0', marginBottom: '6px' }}>Prompts:</div>
+                    <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '6px' }}>Prompts:</div>
                     {(mcpPrompts[name] || []).map((pr) => (
                       <div key={pr.name} style={{ padding: '6px 0' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
-                          <span style={{ fontSize: '13px', color: '#9090a0', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={pr.description || pr.name}>
+                          <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={pr.description || pr.name}>
                             {pr.name}
                           </span>
                           <button
                             onClick={() => sendMessage('MCP_PROMPT_RUN_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, prompt: pr.name, arguments: mcpPromptArgs[`${name}:${pr.name}`] || {}, session_id: activeSession } })}
-                            style={{ background: 'rgba(124, 58, 237, 0.15)', color: '#a78bfa', border: '1px solid rgba(124, 58, 237, 0.4)', padding: '4px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}
+                            style={{ background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.4)', padding: '4px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}
                           >
                             Run in chat
                           </button>
@@ -377,7 +377,7 @@ export default function McpPanel({ activeSession = null }) {
                                   },
                                 }))}
                                 className="ios-glass-input"
-                                style={{ flex: 1, minWidth: '120px', padding: '8px 12px', color: '#fff', outline: 'none', fontSize: '13px' }}
+                                style={{ flex: 1, minWidth: '120px', padding: '8px 12px', color: 'var(--text-primary)', outline: 'none', fontSize: '13px' }}
                               />
                             ))}
                           </div>
@@ -390,19 +390,19 @@ export default function McpPanel({ activeSession = null }) {
               <div style={{ display: 'flex', gap: '8px' }}>
                 <button
                   onClick={() => sendMessage('MCP_SERVER_TEST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
-                  style={{ background: 'rgba(124, 58, 237, 0.15)', color: '#a78bfa', border: '1px solid rgba(124, 58, 237, 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                  style={{ background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
                 >
                   Test
                 </button>
                 <button
                   onClick={() => sendMessage('MCP_SERVER_CONNECT_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
-                  style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                  style={{ background: 'rgba(76, 195, 138, 0.15)', color: 'var(--success)', border: '1px solid rgba(76, 195, 138, 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
                 >
                   Connect
                 </button>
                 <button
                   onClick={() => sendMessage('MCP_SERVER_DISCONNECT_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
-                  style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                  style={{ background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
                 >
                   Disconnect
                 </button>
@@ -417,7 +417,7 @@ export default function McpPanel({ activeSession = null }) {
                     if (!window.confirm(`Remove the MCP server "${name}"? Its configuration will be deleted.`)) return;
                     sendMessage('MCP_SERVER_REMOVE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } });
                   }}
-                  style={{ background: 'rgba(242, 65, 91, 0.15)', color: '#FA5870', border: '1px solid rgba(242, 65, 91, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                  style={{ background: 'rgba(201, 42, 42, 0.15)', color: 'var(--danger)', border: '1px solid rgba(201, 42, 42, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
                 >
                   Remove
                 </button>

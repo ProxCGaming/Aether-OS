@@ -197,10 +197,10 @@ export default function UsageSettingsPanel({
   const breakdownComponents = breakdown?.components || [];
 
   return (
-    <div data-testid="usage-settings-panel" style={{ color: '#f0f0f5', display: 'flex', flexDirection: 'column', gap: '24px' }}>
+    <div data-testid="usage-settings-panel" style={{ color: 'var(--text-primary)', display: 'flex', flexDirection: 'column', gap: '24px' }}>
       <div>
         <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Usage & Budget</h2>
-        <p style={{ color: '#9090a0', fontSize: '14px' }}>
+        <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>
           Historical token usage and cost metrics across all tasks, and daily budget alerting.
         </p>
       </div>
@@ -210,14 +210,14 @@ export default function UsageSettingsPanel({
         <div
           data-testid="budget-exceeded-banner"
           style={{
-            background: 'rgba(245, 158, 11, 0.1)',
-            border: '1px solid rgba(245, 158, 11, 0.3)',
+            background: 'rgba(var(--accent-rgb), 0.1)',
+            border: '1px solid rgba(var(--accent-rgb), 0.3)',
             borderRadius: '12px',
             padding: '16px',
             display: 'flex',
             alignItems: 'center',
             gap: '12px',
-            color: '#fbbf24',
+            color: 'var(--accent)',
           }}
         >
           <AlertTriangle size={20} />
@@ -225,7 +225,7 @@ export default function UsageSettingsPanel({
             <div style={{ fontWeight: 600, fontSize: '14px' }}>
               Daily Budget Exceeded ({currentTodaySpend != null ? `${formatUsd(currentTodaySpend)} spent today` : 'spend today not reported'})
             </div>
-            <div style={{ fontSize: '12px', color: 'rgba(255, 255, 255, 0.7)', marginTop: '2px' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
               Running tasks finish uninterrupted. Budget limits are soft alerts and never halt work mid-flight.
             </div>
           </div>
@@ -235,24 +235,24 @@ export default function UsageSettingsPanel({
       {/* Budget Control Card */}
       <div
         style={{
-          background: 'rgba(255, 255, 255, 0.02)',
-          border: '1px solid rgba(255, 255, 255, 0.08)',
+          background: 'var(--bg-raised)',
+          border: '1px solid var(--border-default)',
           borderRadius: '12px',
           padding: '20px',
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
           <div>
-            <h3 style={{ fontSize: '16px', fontWeight: 500, color: '#fff', marginBottom: '4px' }}>
+            <h3 style={{ fontSize: '16px', fontWeight: 500, color: 'var(--text-primary)', marginBottom: '4px' }}>
               Daily Spending Alert
             </h3>
-            <p style={{ fontSize: '13px', color: '#9090a0' }}>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
               Set an optional soft threshold in USD. You will be notified when exceeded.
             </p>
           </div>
           <div style={{ textAlign: 'right' }}>
-            <span style={{ fontSize: '12px', color: '#9090a0' }}>Today's spend</span>
-            <div style={{ fontSize: '16px', fontWeight: 600, color: '#fff' }}>
+            <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Today's spend</span>
+            <div style={{ fontSize: '16px', fontWeight: 600, color: 'var(--text-primary)' }}>
               {currentTodaySpend != null ? formatUsd(currentTodaySpend) : '—'}
             </div>
           </div>
@@ -260,7 +260,7 @@ export default function UsageSettingsPanel({
 
         <form onSubmit={handleSaveBudget} style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
           <div style={{ position: 'relative', width: '220px' }}>
-            <span style={{ position: 'absolute', left: '12px', top: '10px', color: '#9090a0', fontSize: '14px' }}>$</span>
+            <span style={{ position: 'absolute', left: '12px', top: '10px', color: 'var(--text-secondary)', fontSize: '14px' }}>$</span>
             <input
               type="number"
               step="0.01"
@@ -276,9 +276,9 @@ export default function UsageSettingsPanel({
                 width: '100%',
                 padding: '9px 12px 9px 26px',
                 borderRadius: '8px',
-                background: 'rgba(255, 255, 255, 0.05)',
-                border: '1px solid rgba(255, 255, 255, 0.12)',
-                color: '#fff',
+                background: 'var(--bg-base)',
+                border: '1px solid var(--border-default)',
+                color: 'var(--text-primary)',
                 fontSize: '13px',
                 outline: 'none',
               }}
@@ -291,9 +291,9 @@ export default function UsageSettingsPanel({
             style={{
               padding: '9px 18px',
               borderRadius: '8px',
-              background: '#3b82f6',
+              background: 'var(--accent)',
               border: 'none',
-              color: '#fff',
+              color: 'var(--accent-on)',
               fontSize: '13px',
               fontWeight: 500,
               cursor: 'pointer',
@@ -305,7 +305,7 @@ export default function UsageSettingsPanel({
             {savedSuccess ? <><Check size={14} /> Saved</> : 'Save Budget'}
           </button>
           {pendingBudgetEntry && (
-            <span data-testid="daily-budget-queued" style={{ fontSize: '12px', color: '#fbbf24' }}>
+            <span data-testid="daily-budget-queued" style={{ fontSize: '12px', color: 'var(--accent)' }}>
               {pendingBudgetEntry.payload && pendingBudgetEntry.payload.daily_budget_usd != null
                 ? `Daily budget change to $${pendingBudgetEntry.payload.daily_budget_usd} queued — will apply when the engine reconnects.`
                 : 'Daily budget clear queued — will apply when the engine reconnects.'}
@@ -323,7 +323,7 @@ export default function UsageSettingsPanel({
               style={{
                 background: 'transparent',
                 border: 'none',
-                color: '#9090a0',
+                color: 'var(--text-secondary)',
                 fontSize: '12px',
                 cursor: 'pointer',
                 textDecoration: 'underline',
@@ -337,7 +337,7 @@ export default function UsageSettingsPanel({
           <div
             data-testid="daily-budget-input-error"
             role="alert"
-            style={{ color: '#f87171', fontSize: '12px', marginTop: '10px' }}
+            style={{ color: 'var(--danger)', fontSize: '12px', marginTop: '10px' }}
           >
             {budgetInputError}
           </div>
@@ -349,17 +349,17 @@ export default function UsageSettingsPanel({
       <div
         data-testid="usage-current-context"
         style={{
-          background: 'rgba(255, 255, 255, 0.02)',
-          border: '1px solid rgba(255, 255, 255, 0.08)',
+          background: 'var(--bg-raised)',
+          border: '1px solid var(--border-default)',
           borderRadius: '12px',
           padding: '20px',
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <h3 style={{ fontSize: '16px', fontWeight: 500, color: '#fff' }}>Current Context</h3>
+          <h3 style={{ fontSize: '16px', fontWeight: 500, color: 'var(--text-primary)' }}>Current Context</h3>
           {breakdown && (
-            <span style={{ fontSize: '13px', color: '#9090a0' }}>
-              <strong style={{ color: '#fff' }}>{breakdown.model}</strong>
+            <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+              <strong style={{ color: 'var(--text-primary)' }}>{breakdown.model}</strong>
               {' · '}
               {breakdownCapacity != null
                 ? `${(breakdown.total_tokens || 0).toLocaleString()} / ${breakdownCapacity.toLocaleString()} tokens (${breakdown.percent_used != null ? breakdown.percent_used : 0}%)`
@@ -387,7 +387,7 @@ export default function UsageSettingsPanel({
               style={{
                 width: '100%',
                 height: '10px',
-                background: 'rgba(255, 255, 255, 0.08)',
+                background: 'var(--bg-hover)',
                 borderRadius: '5px',
                 overflow: 'hidden',
                 display: 'flex',
@@ -404,7 +404,7 @@ export default function UsageSettingsPanel({
                     style={{
                       width: `${componentSharePct(c, breakdown)}%`,
                       height: '100%',
-                      background: COMPONENT_COLORS[c.name] || '#94a3b8',
+                      background: COMPONENT_COLORS[c.name] || 'var(--text-muted)',
                       transition: 'width 0.3s ease',
                     }}
                   />
@@ -412,7 +412,7 @@ export default function UsageSettingsPanel({
               })}
             </div>
             {breakdownBasis === 'used' && (
-              <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
                 Window size unknown — shares are of used tokens, not of the full window.
               </div>
             )}
@@ -432,7 +432,7 @@ export default function UsageSettingsPanel({
                       justifyContent: 'space-between',
                       alignItems: 'center',
                       padding: '8px 12px',
-                      background: 'rgba(255, 255, 255, 0.03)',
+                      background: 'var(--bg-raised)',
                       borderRadius: '8px',
                       fontSize: '13px',
                     }}
@@ -443,14 +443,14 @@ export default function UsageSettingsPanel({
                           width: '8px',
                           height: '8px',
                           borderRadius: '50%',
-                          background: !isUnknown && c.tokens > 0 ? (COMPONENT_COLORS[c.name] || '#94a3b8') : 'rgba(255, 255, 255, 0.2)',
+                          background: !isUnknown && c.tokens > 0 ? (COMPONENT_COLORS[c.name] || 'var(--text-muted)') : 'var(--bg-hover)',
                           display: 'inline-block',
                         }}
                       />
                       <span style={{ textTransform: 'capitalize' }}>{c.name}</span>
                     </div>
                     <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-                      <span style={{ color: '#9090a0', fontSize: '12px' }}>
+                      <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
                         {isUnknown ? '—' : `${pct.toFixed(1)}%`}
                       </span>
                       <span style={{ fontWeight: 500, minWidth: '60px', textAlign: 'right' }}>
@@ -462,7 +462,7 @@ export default function UsageSettingsPanel({
               })}
             </div>
             {breakdown.partial && (
-              <div style={{ fontSize: '12px', color: '#9090a0', marginTop: '12px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '12px' }}>
                 Some components could not be measured — the total is a lower bound.
               </div>
             )}
@@ -476,8 +476,8 @@ export default function UsageSettingsPanel({
       {ledgerState !== 'ready' ? (
         <div
           style={{
-            background: 'rgba(255, 255, 255, 0.02)',
-            border: '1px solid rgba(255, 255, 255, 0.08)',
+            background: 'var(--bg-raised)',
+            border: '1px solid var(--border-default)',
             borderRadius: '12px',
             padding: '20px',
           }}
@@ -498,21 +498,21 @@ export default function UsageSettingsPanel({
       {/* Usage by Model */}
       <div
         style={{
-          background: 'rgba(255, 255, 255, 0.02)',
-          border: '1px solid rgba(255, 255, 255, 0.08)',
+          background: 'var(--bg-raised)',
+          border: '1px solid var(--border-default)',
           borderRadius: '12px',
           padding: '20px',
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <h3 style={{ fontSize: '16px', fontWeight: 500, color: '#fff' }}>Usage by Model</h3>
-          <span style={{ fontSize: '13px', color: '#9090a0' }}>
-            Total: <strong style={{ color: '#fff' }}>{formatUsd(totalCost)}</strong> ({totalIn.toLocaleString()} in / {totalOut.toLocaleString()} out)
+          <h3 style={{ fontSize: '16px', fontWeight: 500, color: 'var(--text-primary)' }}>Usage by Model</h3>
+          <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+            Total: <strong style={{ color: 'var(--text-primary)' }}>{formatUsd(totalCost)}</strong> ({totalIn.toLocaleString()} in / {totalOut.toLocaleString()} out)
           </span>
         </div>
 
         {Object.keys(byModel).length === 0 ? (
-          <div style={{ color: '#9090a0', fontSize: '13px', padding: '12px 0' }}>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '13px', padding: '12px 0' }}>
             No model calls recorded in the ledger yet.
           </div>
         ) : (
@@ -525,7 +525,7 @@ export default function UsageSettingsPanel({
                   justifyContent: 'space-between',
                   alignItems: 'center',
                   padding: '10px 12px',
-                  background: 'rgba(255, 255, 255, 0.03)',
+                  background: 'var(--bg-raised)',
                   borderRadius: '8px',
                   fontSize: '13px',
                 }}
@@ -536,8 +536,8 @@ export default function UsageSettingsPanel({
                     <span
                       data-testid={`badge-local-${modelName}`}
                       style={{
-                        background: 'rgba(255, 255, 255, 0.1)',
-                        color: 'rgba(255, 255, 255, 0.8)',
+                        background: 'var(--bg-hover)',
+                        color: 'var(--text-secondary)',
                         padding: '1px 8px',
                         borderRadius: '999px',
                         fontSize: '11px',
@@ -550,8 +550,8 @@ export default function UsageSettingsPanel({
                     <span
                       data-testid={`badge-unpriced-${modelName}`}
                       style={{
-                        background: 'rgba(245, 158, 11, 0.15)',
-                        color: '#fbbf24',
+                        background: 'rgba(var(--accent-rgb), 0.15)',
+                        color: 'var(--accent)',
                         padding: '1px 8px',
                         borderRadius: '999px',
                         fontSize: '11px',
@@ -562,7 +562,7 @@ export default function UsageSettingsPanel({
                   )}
                 </div>
                 <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-                  <span style={{ color: '#9090a0', fontSize: '12px' }}>
+                  <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
                     {m.calls || 0} calls · {m.input_tokens.toLocaleString()} in · {m.output_tokens.toLocaleString()} out
                   </span>
                   <span style={{ fontWeight: 600, minWidth: '60px', textAlign: 'right' }}>
@@ -578,18 +578,18 @@ export default function UsageSettingsPanel({
       {/* Usage by Agent */}
       <div
         style={{
-          background: 'rgba(255, 255, 255, 0.02)',
-          border: '1px solid rgba(255, 255, 255, 0.08)',
+          background: 'var(--bg-raised)',
+          border: '1px solid var(--border-default)',
           borderRadius: '12px',
           padding: '20px',
         }}
       >
-        <h3 style={{ fontSize: '16px', fontWeight: 500, color: '#fff', marginBottom: '16px' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, color: 'var(--text-primary)', marginBottom: '16px' }}>
           Usage by Agent
         </h3>
 
         {Object.keys(byAgent).length === 0 ? (
-          <div style={{ color: '#9090a0', fontSize: '13px', padding: '12px 0' }}>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '13px', padding: '12px 0' }}>
             No agent attribution recorded yet.
           </div>
         ) : (
@@ -602,14 +602,14 @@ export default function UsageSettingsPanel({
                   justifyContent: 'space-between',
                   alignItems: 'center',
                   padding: '10px 12px',
-                  background: 'rgba(255, 255, 255, 0.03)',
+                  background: 'var(--bg-raised)',
                   borderRadius: '8px',
                   fontSize: '13px',
                 }}
               >
                 <span style={{ fontWeight: 500, textTransform: 'capitalize' }}>{agentName}</span>
                 <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-                  <span style={{ color: '#9090a0', fontSize: '12px' }}>
+                  <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
                     {a.calls || 0} calls · {a.input_tokens.toLocaleString()} in · {a.output_tokens.toLocaleString()} out
                   </span>
                   <span style={{ fontWeight: 600, minWidth: '60px', textAlign: 'right' }}>

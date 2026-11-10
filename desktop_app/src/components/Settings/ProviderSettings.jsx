@@ -256,9 +256,9 @@ export default function ProviderSettings({ providers = [], health = {}, provider
   };
 
   return (
-    <div style={{ color: '#f0f0f5' }}>
+    <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>API Providers</h2>
-      <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Configure your API keys for cloud-based inference.</p>
+      <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>Configure your API keys for cloud-based inference.</p>
       
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
         {/* RUX-C-03 (Wave 3 slice 1): an empty providers prop used to
@@ -277,7 +277,7 @@ export default function ProviderSettings({ providers = [], health = {}, provider
           />
         )}
         {(Array.isArray(providers) ? providers : []).length === 0 && providersLoaded && (
-          <div data-testid="providers-empty" style={{ color: '#9090a0', fontSize: '13px' }}>
+          <div data-testid="providers-empty" style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
             No providers were reported by the engine.
           </div>
         )}
@@ -291,13 +291,13 @@ export default function ProviderSettings({ providers = [], health = {}, provider
           // E5-F15: the engine reports 'standby' for unprobed /
           // unconfigured providers — an honest "not checked yet",
           // rendered neutral grey, never the red failure colour.
-          const healthColor = !healthInfo ? null : healthInfo.status === 'healthy' ? '#10b981' : healthInfo.status === 'degraded' ? '#f59e0b' : healthInfo.status === 'standby' ? '#9090a0' : '#ef4444';
+          const healthColor = !healthInfo ? null : healthInfo.status === 'healthy' ? 'var(--success)' : healthInfo.status === 'degraded' ? 'var(--accent)' : healthInfo.status === 'standby' ? 'var(--text-secondary)' : 'var(--danger)';
           
           return (
-            <div key={providerName} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', overflow: 'hidden', transition: 'all 0.3s' }}>
+            <div key={providerName} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', overflow: 'hidden', transition: 'all 0.3s' }}>
               <div 
                 onClick={() => setExpandedProvider(isExpanded ? null : providerName)}
-                style={{ padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', background: isExpanded ? 'rgba(255,255,255,0.02)' : 'transparent' }}
+                style={{ padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', background: isExpanded ? 'var(--bg-raised)' : 'transparent' }}
               >
                 <h3 style={{ fontSize: '16px', margin: 0 }}>{displayName}</h3>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
@@ -309,21 +309,21 @@ export default function ProviderSettings({ providers = [], health = {}, provider
                   )}
                   {isConfigured ? (
                     <>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#10b981', fontSize: '13px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--success)', fontSize: '13px' }}>
                         <CheckCircle2 size={16} /> Configured
                       </div>
                       <button 
                         onClick={(e) => handleDisconnect(e, providerName)}
-                        style={{ background: 'rgba(242, 65, 91, 0.15)', color: '#FA5870', border: '1px solid rgba(242, 65, 91, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', fontSize: '13px' }}
+                        style={{ background: 'rgba(201, 42, 42, 0.15)', color: 'var(--danger)', border: '1px solid rgba(201, 42, 42, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', fontSize: '13px' }}
                       >
                         Disconnect
                       </button>
                     </>
                   ) : (
                     <>
-                      <div style={{ fontSize: '13px', color: '#9090a0' }}>Not Configured</div>
+                      <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Not Configured</div>
                       <button 
-                        style={{ background: 'rgba(255,255,255,0.1)', color: '#fff', border: '1px solid rgba(255,255,255,0.2)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', fontSize: '13px' }}
+                        style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', fontSize: '13px' }}
                       >
                         {isExpanded ? 'Close' : 'Connect'}
                       </button>
@@ -333,7 +333,7 @@ export default function ProviderSettings({ providers = [], health = {}, provider
               </div>
               
               {isExpanded && (
-                <div style={{ padding: '0 20px 20px 20px', display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '16px' }}>
+                <div style={{ padding: '0 20px 20px 20px', display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid var(--border-default)', paddingTop: '16px' }}>
                   {providerName === 'custom_openai' && (
                     <input 
                       type="text" 
@@ -341,7 +341,7 @@ export default function ProviderSettings({ providers = [], health = {}, provider
                       onChange={(e) => setCustomDisplayNames({...customDisplayNames, [providerName]: e.target.value})}
                       className="ios-glass-input" 
                       placeholder="Display Name (e.g. LM Studio)" 
-                      style={{ padding: '12px 16px', color: '#fff', outline: 'none', width: '100%', marginBottom: '4px' }}
+                      style={{ padding: '12px 16px', color: 'var(--text-primary)', outline: 'none', width: '100%', marginBottom: '4px' }}
                     />
                   )}
                   {isCustom && (
@@ -351,7 +351,7 @@ export default function ProviderSettings({ providers = [], health = {}, provider
                       onChange={(e) => setBaseUrls({...baseUrls, [providerName]: e.target.value})}
                       className="ios-glass-input" 
                       placeholder="Base URL (e.g. http://localhost:1234/v1)" 
-                      style={{ padding: '12px 16px', color: '#fff', outline: 'none', width: '100%', marginBottom: '4px' }}
+                      style={{ padding: '12px 16px', color: 'var(--text-primary)', outline: 'none', width: '100%', marginBottom: '4px' }}
                     />
                   )}
                   <input 
@@ -360,25 +360,25 @@ export default function ProviderSettings({ providers = [], health = {}, provider
                     onChange={(e) => setKeys({...keys, [providerName]: e.target.value})}
                     className="ios-glass-input" 
                     placeholder={isConfigured ? `API Key (Stored Securely)` : `Enter ${displayName} API Key`} 
-                    style={{ padding: '12px 16px', color: '#fff', outline: 'none', width: '100%' }}
+                    style={{ padding: '12px 16px', color: 'var(--text-primary)', outline: 'none', width: '100%' }}
                   />
                   
                   {validationState[providerName] === 'error' && (
-                    <div style={{ color: '#ef4444', fontSize: '13px', marginTop: '4px' }}>{validationMsg[providerName]}</div>
+                    <div style={{ color: 'var(--danger)', fontSize: '13px', marginTop: '4px' }}>{validationMsg[providerName]}</div>
                   )}
                   {validationState[providerName] === 'success' && (
-                    <div style={{ color: '#10b981', fontSize: '13px', marginTop: '4px' }}>{validationMsg[providerName]}</div>
+                    <div style={{ color: 'var(--success)', fontSize: '13px', marginTop: '4px' }}>{validationMsg[providerName]}</div>
                   )}
 
                   <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '8px', gap: '8px' }}>
                     <button 
                       onClick={() => handleTestKey(providerName)}
                       disabled={validationState[providerName] === 'testing'}
-                      style={{ background: 'rgba(255,255,255,0.1)', color: '#fff', border: '1px solid rgba(255,255,255,0.2)', padding: '8px 24px', borderRadius: '12px', cursor: 'pointer', transition: 'all 0.2s', fontWeight: 500 }}
+                      style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '8px 24px', borderRadius: '12px', cursor: 'pointer', transition: 'all 0.2s', fontWeight: 500 }}
                     >
                       {validationState[providerName] === 'testing' ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
-                          <span className="aether-spinner" style={{ width: '12px', height: '12px', borderRadius: '50%', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', display: 'inline-block' }} />
+                          <span className="aether-spinner" style={{ width: '12px', height: '12px', borderRadius: '50%', border: '2px solid var(--border-strong)', borderTopColor: 'var(--text-primary)', display: 'inline-block' }} />
                           Testing…{testingSince[providerName] ? ` ${Math.max(0, Math.floor((nowTick - testingSince[providerName]) / 1000))}s` : ''}
                         </span>
                       ) : 'Test'}
@@ -386,37 +386,37 @@ export default function ProviderSettings({ providers = [], health = {}, provider
                     <button 
                       onClick={() => handleSaveKey(providerName)}
                       disabled={validationState[providerName] === 'saving'}
-                      style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '8px 24px', borderRadius: '12px', cursor: 'pointer', transition: 'all 0.2s', fontWeight: 500 }}
+                      style={{ background: 'var(--accent)', color: 'var(--accent-on)', border: 'none', padding: '8px 24px', borderRadius: '12px', cursor: 'pointer', transition: 'all 0.2s', fontWeight: 500 }}
                     >
                       {validationState[providerName] === 'saving' ? 'Saving...' : 'Save Configuration'}
                     </button>
                   </div>
 
                   {validationState[providerName] === 'testing' && (
-                    <div style={{ color: '#9090a0', fontSize: '12px', marginTop: '6px' }}>Checking the key with the provider — this can take up to ~30s.</div>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '12px', marginTop: '6px' }}>Checking the key with the provider — this can take up to ~30s.</div>
                   )}
 
                   {((p.models && p.models.length > 0) || (p.excluded_models && p.excluded_models.length > 0)) && (
-                    <div style={{ marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '12px' }}>
+                    <div style={{ marginTop: '12px', borderTop: '1px solid var(--border-default)', paddingTop: '12px' }}>
                       <button
                         onClick={() => setExpandedModels(prev => ({ ...prev, [providerName]: !prev[providerName] }))}
-                        style={{ background: 'transparent', color: '#a78bfa', border: 'none', fontSize: '13px', cursor: 'pointer', padding: 0 }}
+                        style={{ background: 'transparent', color: 'var(--accent)', border: 'none', fontSize: '13px', cursor: 'pointer', padding: 0 }}
                       >
                         {expandedModels[providerName] ? '▾ Hide' : `▸ View all ${(p.models?.length || 0) + (p.excluded_models?.length || 0)} models`}
                       </button>
                       {expandedModels[providerName] && (
                         <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: '220px', overflowY: 'auto' }}>
                           {(p.models || []).map(m => (
-                            <div key={m} style={{ fontSize: '13px', color: '#e2e8f0', fontFamily: 'monospace', padding: '4px 8px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
+                            <div key={m} style={{ fontSize: '13px', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', padding: '4px 8px', background: 'var(--bg-raised)', borderRadius: '6px' }}>
                               {m}
                             </div>
                           ))}
                           {(p.excluded_models || []).map(m => {
                             const id = typeof m === 'string' ? m : m.id;
                             const kind = typeof m === 'string' ? 'other' : (m.kind || 'other');
-                            const kindColors = { embedding: '#60a5fa', image: '#c084fc', audio: '#34d399', other: '#9ca3af' };
+                            const kindColors = { embedding: 'var(--accent)', image: 'var(--accent)', audio: 'var(--success)', other: 'var(--text-muted)' };
                             return (
-                              <div key={id} style={{ fontSize: '13px', color: '#9ca3af', fontFamily: 'monospace', padding: '4px 8px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <div key={id} style={{ fontSize: '13px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', padding: '4px 8px', background: 'var(--bg-raised)', borderRadius: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <span>{id}</span>
                                 <span style={{ fontSize: '11px', color: kindColors[kind] || kindColors.other, border: `1px solid ${kindColors[kind] || kindColors.other}`, borderRadius: '8px', padding: '1px 8px', fontFamily: 'sans-serif' }}>{kind}</span>
                               </div>

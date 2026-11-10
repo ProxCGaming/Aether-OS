@@ -13,22 +13,22 @@ import LoadStateRow from './LoadStateRow';
 export default function AboutPanel({ workspaces, workspacesAnswered, isConnected }) {
   const [guideStatus, setGuideStatus] = useState('');
   return (
-    <div style={{ color: '#f0f0f5' }}>
+    <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>About Aether-OS</h2>
-      <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>
+      <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>
         A local-first desktop agent: a Python engine with a persistent memory, driven from this shell.
       </p>
 
-      <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px', marginBottom: '20px' }}>
+      <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '24px', marginBottom: '20px' }}>
         {/* E6-F14: the version comes from the package manifest
             (the APP_VERSION mirror), never a literal here. */}
         <div style={{ fontSize: '15px', fontWeight: 500, marginBottom: '4px' }}>Aether-OS</div>
-        <div style={{ fontSize: '13px', color: '#9090a0' }}>Version {appPackage.version}</div>
+        <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Version {appPackage.version}</div>
       </div>
 
-      <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '24px' }}>
-        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Local documentation</h3>
-        <p style={{ color: '#9090a0', fontSize: '13px', margin: '0 0 16px 0' }}>
+      <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '24px' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)' }}>Local documentation</h3>
+        <p style={{ color: 'var(--text-muted)', fontSize: '13px', margin: '0 0 16px 0' }}>
           The system guide ships with the project (docs/AETHER_SYSTEM_GUIDE.md) and opens with your
           default Markdown reader — nothing is fetched from the network.
         </p>
@@ -42,7 +42,7 @@ export default function AboutPanel({ workspaces, workspacesAnswered, isConnected
             offlineText="Waiting for the engine — your workspaces will appear here once it connects."
           />
         ) : workspaces.length === 0 ? (
-          <div style={{ fontSize: '13px', color: '#9090a0' }}>
+          <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
             Add a workspace that contains the Aether-OS project and the guide can be opened from here.
           </div>
         ) : (
@@ -62,16 +62,16 @@ export default function AboutPanel({ workspaces, workspacesAnswered, isConnected
                     const err = await window.electronAPI.openPath(`${root.path}/docs/AETHER_SYSTEM_GUIDE.md`);
                     setGuideStatus(err ? `Could not open the guide: ${err}` : '');
                   }}
-                  style={{ background: 'rgba(124,58,237,0.15)', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+                  style={{ background: 'rgba(var(--accent-rgb),0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb),0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
                 >
                   Open the system guide
                 </button>
-                <span style={{ fontSize: '12px', color: '#9090a0', fontFamily: 'monospace' }}>{root.path}</span>
+                <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>{root.path}</span>
               </div>
             ))}
           </div>
         )}
-        {guideStatus && <div style={{ fontSize: '13px', color: '#f87171', marginTop: '12px' }}>{guideStatus}</div>}
+        {guideStatus && <div style={{ fontSize: '13px', color: 'var(--danger)', marginTop: '12px' }}>{guideStatus}</div>}
       </div>
     </div>
   );

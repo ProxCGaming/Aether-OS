@@ -402,7 +402,7 @@ describe('ProviderSettings standby health (E5-F15 renderer polish)', () => {
     expect(el.textContent).toContain('standby');
     // Neutral grey — standby must not fall into the red
     // "everything else" branch used for offline/failure.
-    expect(el.style.color).toBe('rgb(144, 144, 160)');
+    expect(el.style.color).toBe('var(--text-secondary)');
   });
 });
 

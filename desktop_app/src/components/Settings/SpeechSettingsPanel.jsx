@@ -126,8 +126,8 @@ function voiceOptions(currentValue) {
 }
 
 const rowStyle = {
-  background: 'rgba(255,255,255,0.02)',
-  border: '1px solid rgba(255,255,255,0.05)',
+  background: 'var(--bg-raised)',
+  border: '1px solid var(--border-default)',
   borderRadius: '12px',
   padding: '12px 16px',
   display: 'flex',
@@ -203,7 +203,7 @@ export default function SpeechSettingsPanel({ config, configError, onConfigUpdat
     (m) => m && m.type === 'CONFIG_UPDATE_REQUEST'
       && m.payload && m.payload.config && key in m.payload.config,
   );
-  const queuedHintStyle = { fontSize: '12px', color: '#fbbf24', marginTop: '8px', width: '280px' };
+  const queuedHintStyle = { fontSize: '12px', color: 'var(--accent)', marginTop: '8px', width: '280px' };
   const inertWrap = (pending) => ({
     opacity: pending ? 0.55 : 1,
     pointerEvents: pending ? 'none' : 'auto',
@@ -222,14 +222,14 @@ export default function SpeechSettingsPanel({ config, configError, onConfigUpdat
           <Mic size={18} /> Speech
         </h3>
       </div>
-      <p style={{ color: '#9090a0', fontSize: '13px', marginBottom: '16px' }}>
+      <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '16px' }}>
         The ears and mouth Aether uses for dictation, voice mode and transcription. Speech models run in the app — download more in the Local Models hub.
       </p>
 
       {error && (
         <div
           data-testid="speech-error"
-          style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '10px', padding: '12px 16px', fontSize: '13px', color: '#fca5a5', marginBottom: '16px' }}
+          style={{ background: 'rgba(201,42,42,0.08)', border: '1px solid rgba(201,42,42,0.3)', borderRadius: '10px', padding: '12px 16px', fontSize: '13px', color: 'var(--danger)', marginBottom: '16px' }}
         >
           {error}
         </div>
@@ -248,9 +248,9 @@ export default function SpeechSettingsPanel({ config, configError, onConfigUpdat
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <h4 style={{ fontSize: '14px', fontWeight: 600, margin: 0 }}>Speech-to-text model</h4>
-              <span style={{ fontSize: '11px', color: '#9090a0' }}>Dictation &amp; voice mode</span>
+              <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Dictation &amp; voice mode</span>
             </div>
-            <p style={{ fontSize: '12px', color: '#9090a0', marginTop: '4px', marginBottom: 0 }}>
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px', marginBottom: 0 }}>
               A new model applies to dictation right away, and to voice mode from your next voice session — a session already talking keeps the model it started with.
             </p>
           </div>
@@ -276,9 +276,9 @@ export default function SpeechSettingsPanel({ config, configError, onConfigUpdat
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <h4 style={{ fontSize: '14px', fontWeight: 600, margin: 0 }}>Voice</h4>
-              <span style={{ fontSize: '11px', color: '#9090a0' }}>Kokoro text-to-speech</span>
+              <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Kokoro text-to-speech</span>
             </div>
-            <p style={{ fontSize: '12px', color: '#9090a0', marginTop: '4px', marginBottom: 0 }}>
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px', marginBottom: 0 }}>
               The voice can change mid-conversation — a new voice speaks from the next sentence.
             </p>
           </div>
@@ -304,9 +304,9 @@ export default function SpeechSettingsPanel({ config, configError, onConfigUpdat
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <h4 style={{ fontSize: '14px', fontWeight: 600, margin: 0 }}>Transcription model</h4>
-              <span style={{ fontSize: '11px', color: '#9090a0' }}>Media library</span>
+              <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Media library</span>
             </div>
-            <p style={{ fontSize: '12px', color: '#9090a0', marginTop: '4px', marginBottom: 0 }}>
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px', marginBottom: 0 }}>
               The model used for video transcription, kept separate from dictation so a heavy model never slows down your typing.
             </p>
           </div>

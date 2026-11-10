@@ -42,21 +42,21 @@ export default function ProjectConfigPanel({
   return (
     <div
       style={{
-        background: 'rgba(255,255,255,0.02)',
-        border: '1px solid rgba(255,255,255,0.05)',
+        background: 'var(--bg-raised)',
+        border: '1px solid var(--border-default)',
         borderRadius: '12px',
         padding: '24px',
       }}
     >
-      <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
-        <Layers size={18} style={{ color: '#a78bfa' }} /> Project config layer
+      <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <Layers size={18} style={{ color: 'var(--accent)' }} /> Project config layer
       </h3>
-      <p style={{ color: '#9090a0', fontSize: '13px', margin: '0 0 12px 0' }}>
+      <p style={{ color: 'var(--text-secondary)', fontSize: '13px', margin: '0 0 12px 0' }}>
         The <code>.aether/config.json</code> file in the active workspace is merged over your
         global settings for tasks in that workspace (objects merge key by key; any other
         value replaces). This editor shows the layer itself — not the merged result.
       </p>
-      <div data-testid="project-config-root" style={{ fontSize: '13px', color: '#c0c0cc', marginBottom: '12px', fontFamily: 'monospace' }}>
+      <div data-testid="project-config-root" style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '12px', fontFamily: 'var(--font-mono)' }}>
         {!configReady
           ? 'Loading the project layer…'
           : workspaceRoot ? `Workspace: ${workspaceRoot}` : 'No active workspace.'}
@@ -64,7 +64,7 @@ export default function ProjectConfigPanel({
       {warning && (
         <div
           data-testid="project-config-warning"
-          style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: '10px', padding: '10px 14px', fontSize: '13px', color: '#fcd34d', marginBottom: '12px' }}
+          style={{ background: 'rgba(var(--accent-rgb),0.08)', border: '1px solid rgba(var(--accent-rgb),0.3)', borderRadius: '10px', padding: '10px 14px', fontSize: '13px', color: 'var(--accent)', marginBottom: '12px' }}
         >
           {warning}
         </div>
@@ -80,20 +80,20 @@ export default function ProjectConfigPanel({
         aria-label="Project config layer JSON"
         style={{
           width: '100%',
-          background: 'rgba(0,0,0,0.2)',
-          border: '1px solid rgba(255,255,255,0.1)',
+          background: 'var(--bg-base)',
+          border: '1px solid var(--border-default)',
           borderRadius: '6px',
           padding: '10px 12px',
-          color: '#fff',
+          color: 'var(--text-primary)',
           fontSize: '13px',
-          fontFamily: 'monospace',
+          fontFamily: 'var(--font-mono)',
           resize: 'vertical',
           boxSizing: 'border-box',
           marginBottom: '12px',
         }}
       />
       {forbiddenKeys && forbiddenKeys.length > 0 && (
-        <div data-testid="project-config-forbidden" style={{ fontSize: '12px', color: '#9090a0', marginBottom: '12px' }}>
+        <div data-testid="project-config-forbidden" style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
           Global-only keys are ignored in this file (a project must not loosen safety,
           routing or spend): {forbiddenKeys.join(', ')}.
         </div>
@@ -105,9 +105,9 @@ export default function ProjectConfigPanel({
           onClick={() => onSave && onSave(content)}
           disabled={!workspaceRoot || !configReady}
           style={{
-            background: 'rgba(124,58,237,0.15)',
-            color: workspaceRoot && configReady ? '#c4b5fd' : '#6b6b7a',
-            border: '1px solid rgba(124,58,237,0.4)',
+            background: 'rgba(var(--accent-rgb),0.15)',
+            color: workspaceRoot && configReady ? 'var(--accent)' : 'var(--text-muted)',
+            border: '1px solid rgba(var(--accent-rgb),0.4)',
             padding: '8px 16px',
             borderRadius: '8px',
             cursor: workspaceRoot ? 'pointer' : 'default',
@@ -118,7 +118,7 @@ export default function ProjectConfigPanel({
           Save project layer
         </button>
         {status && (
-          <span data-testid="project-config-status" style={{ fontSize: '13px', color: '#10b981' }}>
+          <span data-testid="project-config-status" style={{ fontSize: '13px', color: 'var(--success)' }}>
             {status}
           </span>
         )}

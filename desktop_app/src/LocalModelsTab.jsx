@@ -484,22 +484,22 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
       <div
         key={variant.file || variant.kind}
         data-testid={variant.quant ? `variant-${variant.quant}` : undefined}
-        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', padding: '8px 10px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '10px' }}
+        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', padding: '8px 10px', background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '10px' }}
       >
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary, #fff)' }}>
+          <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
             {label}
-            {variant.kind ? <span style={{ color: 'var(--text-secondary, #9090a0)', fontWeight: 500 }}> · {variant.kind}</span> : null}
+            {variant.kind ? <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}> · {variant.kind}</span> : null}
           </div>
           {variant.file && (
-            <div style={{ fontSize: '11px', color: 'var(--text-secondary, #9090a0)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{variant.file}</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{variant.file}</div>
           )}
           {Array.isArray(variant.files) && (
-            <div style={{ fontSize: '11px', color: 'var(--text-secondary, #9090a0)', fontFamily: 'monospace' }}>{variant.files.length} files</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{variant.files.length} files</div>
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
-          <span style={{ fontSize: '12px', color: 'var(--text-secondary, #9090a0)' }}>
+          <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
             {variant.size_bytes ? formatBytes(variant.size_bytes) : 'Size not reported'}
           </span>
           {downloadable && (
@@ -515,17 +515,17 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
   const renderDetail = (row) => {
     const entry = details[rowKey(row)];
     if (!entry) {
-      return <div style={{ fontSize: '13px', color: 'var(--text-secondary, #9090a0)' }}>Loading details…</div>;
+      return <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Loading details…</div>;
     }
     if (entry.queued && !entry.detail) {
       return (
-        <div data-testid={`detail-queued-${rowKey(row)}`} style={{ fontSize: '13px', color: '#fbbf24' }}>
+        <div data-testid={`detail-queued-${rowKey(row)}`} style={{ fontSize: '13px', color: 'var(--accent)' }}>
           Details queued — will load when the engine reconnects.
         </div>
       );
     }
     if (entry.error) {
-      return <div style={{ fontSize: '13px', color: '#f87171' }}>{entry.error}</div>;
+      return <div style={{ fontSize: '13px', color: 'var(--danger)' }}>{entry.error}</div>;
     }
     const detail = entry.detail;
     if (!detail) return null;
@@ -533,12 +533,12 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
         {detail.size_bytes ? (
-          <div style={{ fontSize: '12px', color: 'var(--text-secondary, #9090a0)' }}>
+          <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
             Total size: {formatBytes(detail.size_bytes)}
           </div>
         ) : null}
         {variants.length === 0 && (
-          <div style={{ fontSize: '13px', color: 'var(--text-secondary, #9090a0)' }}>No downloadable variants listed.</div>
+          <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>No downloadable variants listed.</div>
         )}
         {variants.map(v => renderVariant(row, v))}
       </div>
@@ -563,29 +563,29 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
         key={rowKey(row)}
         data-testid={`result-row-${rowKey(row)}`}
         className="ios-glass"
-        style={{ padding: '20px', borderRadius: '16px', display: 'flex', flexDirection: 'column', transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)', position: 'relative', overflow: 'hidden' }}
+        style={{ padding: '20px', borderRadius: 'var(--radius-lg)', display: 'flex', flexDirection: 'column', transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)', position: 'relative', overflow: 'hidden' }}
       >
         {progress && (
-          <div style={{ position: 'absolute', bottom: 0, left: 0, height: '4px', background: 'linear-gradient(90deg, rgba(var(--accent-rgb, 124, 58, 237), 1), rgba(var(--accent-rgb, 167, 139, 250), 1))', width: `${progress.percent || 0}%`, transition: 'width 0.3s linear' }} />
+          <div style={{ position: 'absolute', bottom: 0, left: 0, height: '4px', background: 'var(--accent)', width: `${progress.percent || 0}%`, transition: 'width 0.3s linear' }} />
         )}
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px', gap: '12px' }}>
-          <h4 style={{ fontSize: '16px', fontWeight: 600, margin: 0, color: 'var(--text-primary, #fff)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.name}</h4>
+          <h4 style={{ fontSize: '16px', fontWeight: 600, margin: 0, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.name}</h4>
           {alreadyDownloaded ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', padding: '4px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, letterSpacing: '0.05em', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(76, 195, 138, 0.15)', color: 'var(--success)', padding: '4px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, letterSpacing: '0.05em', flexShrink: 0 }}>
               <CheckCircle2 size={12} /> DOWNLOADED
             </div>
           ) : sizeText ? (
-            <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '12px', fontWeight: 500, flexShrink: 0 }}>{sizeText}</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: '12px', fontWeight: 500, flexShrink: 0, fontFamily: 'var(--font-mono)' }}>{sizeText}</div>
           ) : null}
         </div>
 
         {row.id !== row.name && (
-          <div style={{ fontSize: '11px', color: 'var(--text-secondary, #9090a0)', fontFamily: 'monospace', marginBottom: '8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.id}</div>
+          <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginBottom: '8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.id}</div>
         )}
 
         {row.description && (
-          <p style={{ color: 'var(--text-secondary, #a0a0b0)', fontSize: '13px', lineHeight: '1.5', margin: '0 0 12px 0' }}>{row.description}</p>
+          <p style={{ color: 'var(--text-muted)', fontSize: '13px', lineHeight: '1.5', margin: '0 0 12px 0' }}>{row.description}</p>
         )}
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '12px' }}>
@@ -602,21 +602,21 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
           <span title={row.runnability_reason || ''} style={{ background: badge.bg, color: badge.color, border: `1px solid ${badge.border}`, padding: '4px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, letterSpacing: '0.03em' }}>
             {badge.label}
           </span>
-          <span style={{ fontSize: '12px', color: 'var(--text-secondary, #9090a0)' }}>
+          <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
             {row.licence ? `Licence: ${row.licence}` : 'Licence unknown'}
           </span>
         </div>
 
         {row.runnability === 'not-runnable' && row.runnability_reason && (
-          <p style={{ color: '#f87171', fontSize: '12px', lineHeight: '1.5', margin: '0 0 16px 0' }}>{row.runnability_reason}</p>
+          <p style={{ color: 'var(--danger)', fontSize: '12px', lineHeight: '1.5', margin: '0 0 16px 0' }}>{row.runnability_reason}</p>
         )}
         {row.runnability === 'unknown' && row.runnability_reason && (
-          <p style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '12px', lineHeight: '1.5', margin: '0 0 16px 0' }}>{row.runnability_reason}</p>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '12px', lineHeight: '1.5', margin: '0 0 16px 0' }}>{row.runnability_reason}</p>
         )}
 
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center', justifyContent: 'space-between', marginTop: 'auto' }}>
           {progress ? renderProgress(progress) : pendingDownloadFor(row) ? (
-            <span data-testid={`download-queued-${rowKey(row)}`} style={{ fontSize: '12px', color: '#fbbf24', fontWeight: 500 }}>
+            <span data-testid={`download-queued-${rowKey(row)}`} style={{ fontSize: '12px', color: 'var(--accent)', fontWeight: 500 }}>
               Download queued — will start when the engine reconnects.
             </span>
           ) : wholeRepoDownloadable ? (
@@ -624,20 +624,20 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
               <Download size={16} /> Download
             </button>
           ) : row.runnability === 'ollama' && row.source === 'hf' && !alreadyDownloaded ? (
-            <span style={{ fontSize: '12px', color: 'var(--text-secondary, #9090a0)' }}>Pick a variant below to download via Ollama.</span>
+            <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Pick a variant below to download via Ollama.</span>
           ) : <span />}
           <button
             onClick={() => toggleDetails(row)}
             className="ios-glass"
             aria-expanded={expanded}
-            style={{ padding: '8px 12px', borderRadius: '10px', color: 'var(--text-primary, #e2e8f0)', cursor: 'pointer', border: '1px solid rgba(255,255,255,0.12)', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 500, flexShrink: 0 }}
+            style={{ padding: '8px 12px', borderRadius: '10px', color: 'var(--text-primary)', cursor: 'pointer', border: '1px solid var(--border-default)', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 500, flexShrink: 0 }}
           >
             {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />} Details
           </button>
         </div>
 
         {expanded && (
-          <div style={{ marginTop: '16px', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '16px' }}>
+          <div style={{ marginTop: '16px', borderTop: '1px solid var(--border-default)', paddingTop: '16px' }}>
             {renderDetail(row)}
           </div>
         )}
@@ -649,9 +649,9 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', paddingBottom: '32px' }}>
 
       {/* Header */}
-      <div style={{ background: 'var(--bg-secondary, rgba(255,255,255,0.02))', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '16px', padding: '20px' }}>
-        <h3 style={{ fontSize: '18px', fontWeight: 600, margin: '0 0 8px 0', color: 'var(--text-primary, #fff)' }}>Model Hub</h3>
-        <p style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px', margin: 0, maxWidth: '560px', lineHeight: '1.5' }}>
+      <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
+        <h3 style={{ fontSize: '18px', fontWeight: 600, margin: '0 0 8px 0', color: 'var(--text-primary)' }}>Model Hub</h3>
+        <p style={{ color: 'var(--text-secondary)', fontSize: '14px', margin: 0, maxWidth: '560px', lineHeight: '1.5' }}>
           Search Hugging Face and the Ollama library, and download models in one click.
           Every model is labelled by how it runs: in the app itself (speech),
           via Ollama (GGUF brains), or not locally runnable — those are shown
@@ -662,7 +662,7 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
       {/* Source switch + search */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
         <div style={{ display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
-          <div role="group" aria-label="Model source" style={{ display: 'flex', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '12px', padding: '4px', gap: '4px' }}>
+          <div role="group" aria-label="Model source" style={{ display: 'flex', background: 'var(--bg-overlay)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '4px', gap: '4px' }}>
             {SOURCES.map(s => (
               <button
                 key={s.value}
@@ -671,8 +671,8 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
                 style={{
                   padding: '8px 16px', borderRadius: '9px', border: 'none', cursor: 'pointer',
                   fontSize: '13px', fontWeight: 600,
-                  background: source === s.value ? 'rgba(245, 181, 52, 0.18)' : 'transparent',
-                  color: source === s.value ? '#f5b544' : 'var(--text-secondary, #9090a0)',
+                  background: source === s.value ? 'rgba(var(--accent-rgb), 0.18)' : 'transparent',
+                  color: source === s.value ? 'var(--accent)' : 'var(--text-secondary)',
                   transition: 'all 0.2s',
                 }}
               >
@@ -681,14 +681,14 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
             ))}
           </div>
           <div style={{ position: 'relative', flex: 1, minWidth: '220px' }}>
-            <Search size={16} color="var(--text-secondary, #9090a0)" style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)' }} />
+            <Search size={16} color="var(--text-secondary)" style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)' }} />
             <input
               type="text"
               placeholder="Search models…"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               className="ios-glass-input"
-              style={{ width: '100%', padding: '12px 16px 12px 42px', color: 'var(--text-primary, #fff)', fontSize: '14px', background: 'var(--bg-secondary, rgba(0, 0, 0, 0.15))' }}
+              style={{ width: '100%', padding: '12px 16px 12px 42px', color: 'var(--text-primary)', fontSize: '14px', background: 'var(--bg-base)' }}
             />
           </div>
         </div>
@@ -700,9 +700,9 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
               aria-pressed={family === chip.value}
               style={{
                 padding: '6px 12px', borderRadius: '20px', cursor: 'pointer', fontSize: '12px', fontWeight: 600,
-                background: family === chip.value ? 'rgba(245, 181, 52, 0.18)' : 'rgba(255,255,255,0.04)',
-                color: family === chip.value ? '#f5b544' : 'var(--text-secondary, #9090a0)',
-                border: `1px solid ${family === chip.value ? 'rgba(245, 181, 52, 0.4)' : 'rgba(255,255,255,0.08)'}`,
+                background: family === chip.value ? 'rgba(var(--accent-rgb), 0.18)' : 'var(--bg-raised)',
+                color: family === chip.value ? 'var(--accent)' : 'var(--text-secondary)',
+                border: `1px solid ${family === chip.value ? 'rgba(var(--accent-rgb), 0.4)' : 'var(--border-default)'}`,
                 transition: 'all 0.2s',
               }}
             >
@@ -714,10 +714,10 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
 
       {/* Inline hub error (download refusals, failures, delete errors) */}
       {hubError && (
-        <div role="alert" style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#fca5a5', borderRadius: '12px', padding: '12px 16px', fontSize: '13px', lineHeight: '1.5' }}>
+        <div role="alert" style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', background: 'rgba(201,42,42, 0.1)', border: '1px solid rgba(201,42,42, 0.3)', color: 'var(--danger)', borderRadius: '12px', padding: '12px 16px', fontSize: '13px', lineHeight: '1.5' }}>
           <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: '1px' }} />
           <span style={{ flex: 1 }}>{hubError}</span>
-          <button onClick={() => setHubError(null)} aria-label="Dismiss" style={{ background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', padding: 0 }}>
+          <button onClick={() => setHubError(null)} aria-label="Dismiss" style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', padding: 0 }}>
             <X size={14} />
           </button>
         </div>
@@ -726,19 +726,19 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
       {/* Results */}
       <div>
         {resultsError ? (
-          <div role="alert" style={{ background: 'rgba(239, 68, 68, 0.08)', border: '1px solid rgba(239, 68, 68, 0.25)', color: '#fca5a5', borderRadius: '12px', padding: '16px', fontSize: '14px', lineHeight: '1.5' }}>
+          <div role="alert" style={{ background: 'rgba(201,42,42, 0.08)', border: '1px solid rgba(201,42,42, 0.25)', color: 'var(--danger)', borderRadius: '12px', padding: '16px', fontSize: '14px', lineHeight: '1.5' }}>
             {resultsError}
           </div>
         ) : searching && results.length === 0 ? (
-          <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
             <RefreshCw size={14} className="spin-animation" /> Searching {SOURCE_LABELS[source]}…
           </div>
         ) : searchQueued && results.length === 0 ? (
-          <div data-testid="hub-search-queued" style={{ color: '#fbbf24', fontSize: '14px' }}>
+          <div data-testid="hub-search-queued" style={{ color: 'var(--accent)', fontSize: '14px' }}>
             Search queued — the engine is offline. Results will load when it reconnects.
           </div>
         ) : searched && results.length === 0 ? (
-          <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px' }}>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
             No models found on {SOURCE_LABELS[source]} for this search.
           </div>
         ) : (

@@ -22,16 +22,16 @@ export function DownloadProgressRow({ progress, cancelQueued = false, onCancel }
   // running until TASK_CANCELLED says otherwise.
   return (
     <>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'rgb(var(--accent-rgb, 167, 139, 250))', fontSize: '13px', fontWeight: 600 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'rgb(var(--accent-rgb))', fontSize: '13px', fontWeight: 600 }}>
         <RefreshCw size={14} className="spin-animation" /> {Math.round(progress.percent || 0)}%
-        {progress.status ? <span style={{ color: 'var(--text-secondary, #9090a0)', fontWeight: 500 }}>{progress.status}</span> : null}
+        {progress.status ? <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>{progress.status}</span> : null}
         {cancelQueued && (
-          <span data-testid={`cancel-queued-${progress.key}`} style={{ color: '#fbbf24', fontWeight: 500 }}>
+          <span data-testid={`cancel-queued-${progress.key}`} style={{ color: 'var(--accent)', fontWeight: 500 }}>
             Cancel queued — still downloading
           </span>
         )}
       </div>
-      <button onClick={() => onCancel(progress.key)} disabled={cancelQueued} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: '#ef4444', cursor: cancelQueued ? 'default' : 'pointer', opacity: cancelQueued ? 0.45 : 1, border: '1px solid rgba(239,68,68,0.3)' }} title={cancelQueued ? 'Cancel already queued — will apply when the engine reconnects' : 'Cancel Download'}>
+      <button onClick={() => onCancel(progress.key)} disabled={cancelQueued} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: 'var(--danger)', cursor: cancelQueued ? 'default' : 'pointer', opacity: cancelQueued ? 0.45 : 1, border: '1px solid rgba(201,42,42,0.3)' }} title={cancelQueued ? 'Cancel already queued — will apply when the engine reconnects' : 'Cancel Download'}>
         <X size={14} />
       </button>
     </>
@@ -63,70 +63,70 @@ export function DownloadedModelRow({
   return (
     <div
       data-testid={`downloaded-row-${rowKey}`}
-      style={{ display: 'flex', alignItems: 'center', gap: '16px', padding: '14px 16px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '12px' }}
+      style={{ display: 'flex', alignItems: 'center', gap: '16px', padding: '14px 16px', background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px' }}
     >
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary, #fff)' }}>{row.name}</span>
+          <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>{row.name}</span>
           <span style={chipStyle}>{SOURCE_LABELS[row.source] || row.source}</span>
           <span style={chipStyle}>{FAMILY_LABELS[row.family] || 'Other'}</span>
           {row.type && (
-            <span data-testid={`downloaded-type-${rowKey}`} style={{ ...chipStyle, color: row.type === 'embedding' || row.type === 'both' ? '#93c5fd' : chipStyle.color }}>
+            <span data-testid={`downloaded-type-${rowKey}`} style={{ ...chipStyle, color: row.type === 'embedding' || row.type === 'both' ? 'var(--accent)' : chipStyle.color }}>
               {TYPE_LABELS[row.type] || row.type}
             </span>
           )}
           {row.params && <span style={chipStyle}>{row.params} Params</span>}
           {row.quant && <span style={chipStyle}>{row.quant}</span>}
-          {sizeText && <span style={{ fontSize: '12px', color: 'var(--text-secondary, #9090a0)' }}>{sizeText}</span>}
+          {sizeText && <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{sizeText}</span>}
         </div>
         {row.path && (
-          <div style={{ fontSize: '11px', color: 'var(--text-secondary, #9090a0)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '4px' }} title={row.path}>{row.path}</div>
+          <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '4px' }} title={row.path}>{row.path}</div>
         )}
       </div>
       {canEmbed && (
         isEmbedder ? (
-          <button disabled data-testid={`embedder-active-${rowKey}`} title="Currently the embedding model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(59, 130, 246, 0.15)', color: '#93c5fd', border: '1px solid rgba(59, 130, 246, 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+          <button disabled data-testid={`embedder-active-${rowKey}`} title="Currently the embedding model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
             Embedder
           </button>
         ) : embedderQueued ? (
-          <button disabled data-testid={`embedder-queued-${rowKey}`} title="Embedder switch queued — will apply when the engine reconnects" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(251, 191, 36, 0.12)', color: '#fbbf24', border: '1px solid rgba(251, 191, 36, 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+          <button disabled data-testid={`embedder-queued-${rowKey}`} title="Embedder switch queued — will apply when the engine reconnects" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb), 0.12)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
             Embedder Queued
           </button>
         ) : embedderPending ? (
-          <button disabled data-testid={`embedder-pending-${rowKey}`} title="Waiting for the engine to confirm the embedder switch" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(255,255,255,0.06)', color: 'var(--text-secondary, #9090a0)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+          <button disabled data-testid={`embedder-pending-${rowKey}`} title="Waiting for the engine to confirm the embedder switch" className="ios-glass" style={{ padding: '8px 16px', background: 'var(--bg-hover)', color: 'var(--text-secondary)', border: '1px solid var(--border-strong)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
             Setting…
           </button>
         ) : (
-          <button onClick={() => onUseAsEmbedder(row.id)} data-testid={`use-as-embedder-${rowKey}`} title="Use this model for memory + workspace embeddings" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(59, 130, 246, 0.15)', color: '#93c5fd', border: '1px solid rgba(59, 130, 246, 0.35)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+          <button onClick={() => onUseAsEmbedder(row.id)} data-testid={`use-as-embedder-${rowKey}`} title="Use this model for memory + workspace embeddings" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.35)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
             Use as Embedder
           </button>
         )
       )}
       {row.source === 'ollama' && (
         isActive ? (
-          <button disabled title="Currently the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+          <button disabled title="Currently the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(76, 195, 138, 0.15)', color: 'var(--success)', border: '1px solid rgba(76, 195, 138, 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
             Active
           </button>
         ) : setActiveQueued ? (
-          <button disabled data-testid={`set-active-queued-${rowKey}`} title="Set-active queued — will apply when the engine reconnects" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(251, 191, 36, 0.12)', color: '#fbbf24', border: '1px solid rgba(251, 191, 36, 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+          <button disabled data-testid={`set-active-queued-${rowKey}`} title="Set-active queued — will apply when the engine reconnects" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb), 0.12)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
             Set Active Queued
           </button>
         ) : setActivePending === row.id ? (
-          <button disabled data-testid={`set-active-pending-${rowKey}`} title="Waiting for the engine to confirm the switch" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(255,255,255,0.06)', color: 'var(--text-secondary, #9090a0)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+          <button disabled data-testid={`set-active-pending-${rowKey}`} title="Waiting for the engine to confirm the switch" className="ios-glass" style={{ padding: '8px 16px', background: 'var(--bg-hover)', color: 'var(--text-secondary)', border: '1px solid var(--border-strong)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
             Setting…
           </button>
         ) : (
-          <button onClick={() => onSetActive(row.id)} title="Set as the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb, 124, 58, 237), 0.2)', color: 'var(--text-primary, #fff)', border: '1px solid rgba(var(--accent-rgb, 124, 58, 237), 0.5)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+          <button onClick={() => onSetActive(row.id)} title="Set as the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'var(--accent)', color: 'var(--accent-on)', border: '1px solid var(--accent)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
             Set Active
           </button>
         )
       )}
       {deleteQueued && (
-        <span data-testid={`hub-delete-queued-${rowKey}`} style={{ fontSize: '12px', color: '#fbbf24', fontWeight: 500 }}>
+        <span data-testid={`hub-delete-queued-${rowKey}`} style={{ fontSize: '12px', color: 'var(--accent)', fontWeight: 500 }}>
           Delete queued
         </span>
       )}
-      <button onClick={() => onDeleteDownloaded(row)} disabled={deleteQueued} className="ios-glass" style={{ padding: '8px 10px', background: 'rgba(239,68,68,0.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '10px', cursor: deleteQueued ? 'default' : 'pointer', opacity: deleteQueued ? 0.45 : 1 }} title={deleteQueued ? 'Delete already queued — will apply when the engine reconnects' : 'Delete Model'}>
+      <button onClick={() => onDeleteDownloaded(row)} disabled={deleteQueued} className="ios-glass" style={{ padding: '8px 10px', background: 'rgba(201,42,42,0.1)', color: 'var(--danger)', border: '1px solid rgba(201,42,42,0.2)', borderRadius: '10px', cursor: deleteQueued ? 'default' : 'pointer', opacity: deleteQueued ? 0.45 : 1 }} title={deleteQueued ? 'Delete already queued — will apply when the engine reconnects' : 'Delete Model'}>
         <Trash2 size={16} />
       </button>
     </div>
@@ -151,25 +151,25 @@ export function DownloadedModelsSection({
   return (
     <div data-testid="downloaded-section">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-        <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0, color: 'var(--text-primary, #fff)' }}>Downloaded</h3>
-        <button onClick={onRefresh} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: 'var(--text-secondary, #9090a0)', cursor: 'pointer', border: '1px solid rgba(255,255,255,0.1)' }} title="Refresh downloaded models">
+        <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0, color: 'var(--text-primary)' }}>Downloaded</h3>
+        <button onClick={onRefresh} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: 'var(--text-secondary)', cursor: 'pointer', border: '1px solid var(--border-default)' }} title="Refresh downloaded models">
           <RefreshCw size={14} />
         </button>
       </div>
       {inventoryLoad === 'loading' ? (
-        <div data-testid="downloaded-loading" style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <div data-testid="downloaded-loading" style={{ color: 'var(--text-secondary)', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <RefreshCw size={14} className="spin-animation" /> Loading downloaded models…
         </div>
       ) : inventoryLoad === 'queued' ? (
-        <div data-testid="downloaded-queued" style={{ color: '#fbbf24', fontSize: '14px' }}>
+        <div data-testid="downloaded-queued" style={{ color: 'var(--accent)', fontSize: '14px' }}>
           Downloaded list queued — will load when the engine reconnects.
         </div>
       ) : inventoryLoad === 'error' ? (
-        <div data-testid="downloaded-error" role="alert" style={{ color: '#f87171', fontSize: '14px' }}>
+        <div data-testid="downloaded-error" role="alert" style={{ color: 'var(--danger)', fontSize: '14px' }}>
           The downloaded model list could not be loaded — use Refresh above to try again.
         </div>
       ) : downloaded.length === 0 ? (
-        <div style={{ color: 'var(--text-secondary, #9090a0)', fontSize: '14px' }}>
+        <div style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
           No models downloaded yet — download one from the catalogue above and it will appear here.
         </div>
       ) : (

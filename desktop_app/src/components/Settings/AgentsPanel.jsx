@@ -104,30 +104,30 @@ export default function AgentsPanel() {
   }, [wsRef, sendMessage]);
 
   return (
-    <div style={{ color: '#f0f0f5' }}>
+    <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Agents (LangGraph Nodes)</h2>
-      <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Assign specialized models to individual agent nodes in the Aether execution graph.</p>
+      <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>Assign specialized models to individual agent nodes in the Aether execution graph.</p>
 
       {agentUpdateError && (
-        <div data-testid="agent-update-error" style={{ color: '#f87171', fontSize: '13px', marginBottom: '16px' }}>
+        <div data-testid="agent-update-error" style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '16px' }}>
           {agentUpdateError}
         </div>
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
          {agents.map(agent => (
-           <div key={agent.id} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(124, 58, 237, 0.2)', borderRadius: '16px', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+           <div key={agent.id} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
              <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-               <div style={{ background: 'rgba(124,58,237,0.2)', padding: '10px', borderRadius: '10px', color: '#a78bfa' }}>
+               <div style={{ background: 'rgba(var(--accent-rgb),0.2)', padding: '10px', borderRadius: '10px', color: 'var(--accent)' }}>
                   <Box size={24} />
                </div>
                <div>
                  <h3 style={{ fontSize: '16px', marginBottom: '4px' }}>{agent.name}</h3>
-                 <p style={{ color: '#9090a0', fontSize: '13px' }}>{agent.description}</p>
+                 <p style={{ color: 'var(--text-muted)', fontSize: '13px' }}>{agent.description}</p>
                  {/* Epic 1, E1-05: the EFFECTIVE model — the agent's
                      own override when set, otherwise the global
                      default it inherits. */}
-                 <p data-testid={`effective-model-${agent.id}`} style={{ color: '#a78bfa', fontSize: '12px', marginTop: '6px', fontFamily: 'monospace' }}>
+                 <p data-testid={`effective-model-${agent.id}`} style={{ color: 'var(--accent)', fontSize: '12px', marginTop: '6px', fontFamily: 'var(--font-mono)' }}>
                    {(() => {
                      const override = agent.model && agent.model !== 'inherit' ? agent.model : null;
                      if (override) {
@@ -167,12 +167,12 @@ export default function AgentsPanel() {
                />
 
                <div style={{ marginTop: '8px', width: '220px' }}>
-                  <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '4px' }}>Allowed Tools:</div>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', maxHeight: '100px', overflowY: 'auto', background: 'rgba(0,0,0,0.2)', padding: '8px', borderRadius: '8px' }}>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>Allowed Tools:</div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', maxHeight: '100px', overflowY: 'auto', background: 'var(--bg-base)', padding: '8px', borderRadius: '8px' }}>
                     {tools.map(t => {
                       const isAllowed = !agent.tools || agent.tools.includes(t.function.name);
                       return (
-                        <label key={t.function.name} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', cursor: 'pointer', color: isAllowed ? '#a78bfa' : '#9090a0' }}>
+                        <label key={t.function.name} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', cursor: 'pointer', color: isAllowed ? 'var(--accent)' : 'var(--text-secondary)' }}>
                           <input
                             type="checkbox"
                             checked={!!isAllowed}
@@ -188,7 +188,7 @@ export default function AgentsPanel() {
 
                               sendMessage('AGENT_UPDATE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { agent_id: agent.id, tools: nextTools } });
                             }}
-                            style={{ accentColor: '#7c3aed', transform: 'scale(0.8)' }}
+                            style={{ accentColor: 'var(--accent)', transform: 'scale(0.8)' }}
                           />
                           {t.function.name}
                         </label>
@@ -213,7 +213,7 @@ export default function AgentsPanel() {
              />
            </div>
          ) : (
-           <div style={{ textAlign: 'center', color: '#9090a0', marginTop: '16px', fontSize: '13px' }}>
+           <div style={{ textAlign: 'center', color: 'var(--text-secondary)', marginTop: '16px', fontSize: '13px' }}>
              No agents were reported by the engine.
            </div>
          ))}

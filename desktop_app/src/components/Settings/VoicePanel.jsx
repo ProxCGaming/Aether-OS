@@ -8,9 +8,9 @@ import LoadStateRow from './LoadStateRow';
 // this panel is the controlled rendering.
 export default function VoicePanel({ configAnswered, configLoadError, isConnected, onRetryConfigLoad, vadThreshold, setVadThreshold, commitVadThreshold, pendingVadValue, silenceDurationMs, setSilenceDurationMs, commitSilenceDuration, pendingSilenceValue }) {
   return (
-    <div style={{ color: '#f0f0f5' }}>
+    <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Voice Tuning</h2>
-      <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>
+      <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>
         Fine-tune speech detection and endpointing thresholds. Changes take effect on the next voice session.
       </p>
 
@@ -30,7 +30,7 @@ export default function VoicePanel({ configAnswered, configLoadError, isConnecte
             errorText={configLoadError || 'Your saved voice settings could not be loaded.'}
           />
           {configLoadError && (
-            <button type="button" onClick={onRetryConfigLoad} style={{ marginTop: '8px', background: 'transparent', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
+            <button type="button" onClick={onRetryConfigLoad} style={{ marginTop: '8px', background: 'transparent', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb),0.4)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
               Retry
             </button>
           )}
@@ -38,27 +38,27 @@ export default function VoicePanel({ configAnswered, configLoadError, isConnecte
       )}
 
       <div style={{
-        background: 'rgba(255,255,255,0.02)',
-        border: '1px solid rgba(255,255,255,0.05)',
+        background: 'var(--bg-raised)',
+        border: '1px solid var(--border-default)',
         borderRadius: '12px',
         padding: '24px',
         marginBottom: '20px'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-          <Sliders size={18} style={{ color: '#a78bfa' }} />
-          <h3 style={{ fontSize: '16px', fontWeight: 500, color: '#fff', margin: 0 }}>Endpointing Thresholds</h3>
+          <Sliders size={18} style={{ color: 'var(--accent)' }} />
+          <h3 style={{ fontSize: '16px', fontWeight: 500, color: 'var(--text-primary)', margin: 0 }}>Endpointing Thresholds</h3>
         </div>
 
         <div style={{ marginBottom: '24px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-            <label htmlFor="vad-threshold-slider" style={{ fontWeight: 500, fontSize: '14px', color: '#fff' }}>
+            <label htmlFor="vad-threshold-slider" style={{ fontWeight: 500, fontSize: '14px', color: 'var(--text-primary)' }}>
               VAD Speech Threshold
             </label>
-            <span data-testid="vad-threshold-value" style={{ fontSize: '13px', color: '#a78bfa', fontWeight: 600 }}>
+            <span data-testid="vad-threshold-value" style={{ fontSize: '13px', color: 'var(--accent)', fontWeight: 600 }}>
               {vadThreshold.toFixed(2)}
             </span>
           </div>
-          <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '10px' }}>
+          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '10px' }}>
             Confidence threshold for Silero VAD to register voice activity (default: 0.50). Higher values reduce false triggers from background noise; lower values catch softer speech.
           </div>
           <input
@@ -87,10 +87,10 @@ export default function VoicePanel({ configAnswered, configLoadError, isConnecte
             onPointerUp={commitVadThreshold}
             onKeyUp={commitVadThreshold}
             onBlur={commitVadThreshold}
-            style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
+            style={{ width: '100%', accentColor: 'var(--accent)', cursor: 'pointer' }}
           />
           {pendingVadValue !== undefined && (
-            <div data-testid="vad-threshold-queued" style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
+            <div data-testid="vad-threshold-queued" style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px' }}>
               VAD threshold change to {Number(pendingVadValue).toFixed(2)} queued — will apply when the engine reconnects.
             </div>
           )}
@@ -98,14 +98,14 @@ export default function VoicePanel({ configAnswered, configLoadError, isConnecte
 
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-            <label htmlFor="silence-duration-slider" style={{ fontWeight: 500, fontSize: '14px', color: '#fff' }}>
+            <label htmlFor="silence-duration-slider" style={{ fontWeight: 500, fontSize: '14px', color: 'var(--text-primary)' }}>
               Silence Duration
             </label>
-            <span data-testid="silence-duration-value" style={{ fontSize: '13px', color: '#a78bfa', fontWeight: 600 }}>
+            <span data-testid="silence-duration-value" style={{ fontSize: '13px', color: 'var(--accent)', fontWeight: 600 }}>
               {silenceDurationMs} ms
             </span>
           </div>
-          <div style={{ fontSize: '12px', color: '#9090a0', marginBottom: '10px' }}>
+          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '10px' }}>
             Trailing silence window required before the turn is marked complete (default: 700 ms). Lower values produce faster turn-taking; higher values allow natural pauses while speaking.
           </div>
           <input
@@ -126,10 +126,10 @@ export default function VoicePanel({ configAnswered, configLoadError, isConnecte
             onPointerUp={commitSilenceDuration}
             onKeyUp={commitSilenceDuration}
             onBlur={commitSilenceDuration}
-            style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
+            style={{ width: '100%', accentColor: 'var(--accent)', cursor: 'pointer' }}
           />
           {pendingSilenceValue !== undefined && (
-            <div data-testid="silence-duration-queued" style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>
+            <div data-testid="silence-duration-queued" style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px' }}>
               Silence duration change to {pendingSilenceValue} ms queued — will apply when the engine reconnects.
             </div>
           )}

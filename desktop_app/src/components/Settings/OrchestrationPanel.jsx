@@ -20,25 +20,25 @@ import React, { useState, useEffect } from 'react';
 const SPECIALISTS = ['researcher', 'planner', 'coder'];
 
 const cardStyle = {
-  background: 'rgba(255,255,255,0.02)',
-  border: '1px solid rgba(255,255,255,0.05)',
+  background: 'var(--bg-raised)',
+  border: '1px solid var(--border-default)',
   borderRadius: '12px',
   padding: '24px',
 };
 
 const inputStyle = {
-  background: 'rgba(0,0,0,0.2)',
-  border: '1px solid rgba(255,255,255,0.1)',
-  borderRadius: '6px',
+  background: 'var(--bg-base)',
+  border: '1px solid var(--border-default)',
+  borderRadius: 'var(--radius-md)',
   padding: '10px 12px',
-  color: '#fff',
+  color: 'var(--text-primary)',
   fontSize: '13px',
 };
 
 const saveButtonStyle = {
-  background: 'rgba(124,58,237,0.15)',
-  color: '#c4b5fd',
-  border: '1px solid rgba(124,58,237,0.4)',
+  background: 'rgba(var(--accent-rgb),0.15)',
+  color: 'var(--accent)',
+  border: '1px solid rgba(var(--accent-rgb),0.4)',
   padding: '8px 16px',
   borderRadius: '8px',
   cursor: 'pointer',
@@ -194,7 +194,7 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
   const checkboxRow = (testId, name, checked, onChange, disabled = false) => (
     <label
       key={name}
-      style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', color: disabled ? '#6b6b7a' : '#f0f0f5', cursor: disabled ? 'default' : 'pointer' }}
+      style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', color: disabled ? 'var(--text-muted)' : 'var(--text-primary)', cursor: disabled ? 'default' : 'pointer' }}
     >
       <input
         type="checkbox"
@@ -202,17 +202,17 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
         checked={checked}
         disabled={disabled}
         onChange={(e) => onChange(name, e.target.checked)}
-        style={{ accentColor: '#7c3aed', width: '16px', height: '16px' }}
+        style={{ accentColor: 'var(--accent)', width: '16px', height: '16px' }}
       />
       {name}
     </label>
   );
 
   return (
-    <div style={{ color: '#f0f0f5', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ color: 'var(--text-primary)', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <div>
         <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Agent Orchestration</h2>
-        <p style={{ color: '#9090a0', fontSize: '14px', margin: 0 }}>
+        <p style={{ color: 'var(--text-muted)', fontSize: '14px', margin: 0 }}>
           How the supervisor delegates, when specialists switch to their execution model,
           what shape their answers must take, and when long conversations are compacted.
         </p>
@@ -221,7 +221,7 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
       {error && (
         <div
           data-testid="orchestration-error"
-          style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '10px', padding: '12px 16px', fontSize: '13px', color: '#fca5a5' }}
+          style={{ background: 'rgba(201,42,42,0.08)', border: '1px solid rgba(201,42,42,0.3)', borderRadius: '10px', padding: '12px 16px', fontSize: '13px', color: 'var(--danger)' }}
         >
           {error}
         </div>
@@ -238,8 +238,8 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
       >
 
       <div style={cardStyle}>
-        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Supervisor spawn policy</h3>
-        <p style={{ fontSize: '13px', color: '#9090a0', margin: '0 0 16px 0' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)' }}>Supervisor spawn policy</h3>
+        <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: '0 0 16px 0' }}>
           Restrict which specialists the supervisor may start, and how many delegations
           it may make per user turn. A blocked delegation is explained in the chat, never silent.
         </p>
@@ -249,7 +249,7 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
             data-testid="spawn-restrict-toggle"
             checked={spawnRestricted}
             onChange={(e) => handleRestrictToggle(e.target.checked)}
-            style={{ accentColor: '#7c3aed', width: '16px', height: '16px' }}
+            style={{ accentColor: 'var(--accent)', width: '16px', height: '16px' }}
           />
           Restrict which specialists may be started
         </label>
@@ -275,13 +275,13 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
             onBlur={handleCapBlur}
             style={{ ...inputStyle, width: '110px' }}
           />
-          <span style={{ fontSize: '12px', color: '#9090a0' }}>0 blocks all delegation. Applies when you leave the field.</span>
+          <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>0 blocks all delegation. Applies when you leave the field.</span>
         </div>
       </div>
 
       <div style={cardStyle}>
-        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Prewalk</h3>
-        <p style={{ fontSize: '13px', color: '#9090a0', margin: '0 0 16px 0' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)' }}>Prewalk</h3>
+        <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: '0 0 16px 0' }}>
           A prewalk specialist plans on the run&apos;s model and switches to its own
           Agents-tab model only when it first writes or executes something.
         </p>
@@ -292,8 +292,8 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
       </div>
 
       <div style={cardStyle}>
-        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Agent output schemas</h3>
-        <p style={{ fontSize: '13px', color: '#9090a0', margin: '0 0 16px 0' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)' }}>Agent output schemas</h3>
+        <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: '0 0 16px 0' }}>
           A JSON Schema for a specialist&apos;s final answer. The answer is validated
           before it is accepted; a mismatch gets one correction retry, then fails loudly.
           Leave empty for free-form answers.
@@ -323,7 +323,7 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
                 placeholder='{"type": "object", "required": ["summary"]}'
                 rows={4}
                 spellCheck={false}
-                style={{ ...inputStyle, width: '100%', fontFamily: 'monospace', resize: 'vertical', boxSizing: 'border-box' }}
+                style={{ ...inputStyle, width: '100%', fontFamily: 'var(--font-mono)', resize: 'vertical', boxSizing: 'border-box' }}
               />
             </div>
           ))}
@@ -331,8 +331,8 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
       </div>
 
       <div style={cardStyle}>
-        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: '#fff' }}>Compaction thresholds</h3>
-        <p style={{ fontSize: '13px', color: '#9090a0', margin: '0 0 16px 0' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)' }}>Compaction thresholds</h3>
+        <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: '0 0 16px 0' }}>
           When a conversation&apos;s model-facing history passes either trigger, the older
           turns fold into a summary; the most recent messages always stay verbatim.
         </p>

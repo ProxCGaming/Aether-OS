@@ -1066,7 +1066,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         display: 'flex',
         flexDirection: 'column',
         gap: '8px',
-        borderRight: '1px solid rgba(255,255,255,0.08)',
+        borderRight: '1px solid var(--border-default)',
         paddingRight: '24px'
       }}>
         <input
@@ -1082,7 +1082,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               setActiveMenu(visibleMenuItems[0].id);
             }
           }}
-          style={{ padding: '10px 14px', borderRadius: '10px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', fontSize: '13px', marginBottom: '4px' }}
+          style={{ padding: '10px 14px', borderRadius: 'var(--radius-md)', background: 'var(--bg-base)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', fontSize: '13px', marginBottom: '4px' }}
         />
         {visibleMenuItems.map(item => (
           <div
@@ -1106,21 +1106,21 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               padding: '12px 16px',
               borderRadius: '12px',
               cursor: 'pointer',
-              color: activeMenu === item.id ? '#fff' : '#9090a0',
-              background: activeMenu === item.id ? 'rgba(255, 255, 255, 0.1)' : 'transparent',
+              color: activeMenu === item.id ? 'var(--text-primary)' : 'var(--text-secondary)',
+              background: activeMenu === item.id ? 'var(--bg-hover)' : 'transparent',
               transition: 'all 0.2s',
               fontWeight: activeMenu === item.id ? '500' : '400'
             }}
             onMouseEnter={(e) => {
               if (activeMenu !== item.id) {
-                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
-                e.currentTarget.style.color = '#fff';
+                e.currentTarget.style.background = 'var(--bg-overlay)';
+                e.currentTarget.style.color = 'var(--text-primary)';
               }
             }}
             onMouseLeave={(e) => {
               if (activeMenu !== item.id) {
                 e.currentTarget.style.background = 'transparent';
-                e.currentTarget.style.color = '#9090a0';
+                e.currentTarget.style.color = 'var(--text-secondary)';
               }
             }}
           >
@@ -1189,7 +1189,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
                   errorText={configLoadError || 'Your saved agent settings could not be loaded.'}
                 />
                 {configLoadError && (
-                  <button type="button" onClick={retryConfigLoad} style={{ marginTop: '8px', background: 'transparent', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.4)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
+                  <button type="button" onClick={retryConfigLoad} style={{ marginTop: '8px', background: 'transparent', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb),0.4)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
                     Retry
                   </button>
                 )}
@@ -1245,7 +1245,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             {/* P-2: plugin action failures surface here as well as in
                 DiagnosticsPanel, which renders the plugin UI. */}
             {pluginActionResult && (
-              <div style={{ color: '#fbbf24', fontSize: '13px', marginBottom: '16px' }}>{pluginActionResult}</div>
+              <div style={{ color: 'var(--accent)', fontSize: '13px', marginBottom: '16px' }}>{pluginActionResult}</div>
             )}
             <DiagnosticsPanel activeMenu='Plugins' />
           </div>

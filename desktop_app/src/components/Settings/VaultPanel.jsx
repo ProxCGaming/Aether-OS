@@ -26,16 +26,16 @@ const rowStyle = {
   alignItems: 'flex-start',
   justifyContent: 'space-between',
   gap: '16px',
-  background: 'rgba(255,255,255,0.03)',
-  border: '1px solid rgba(255,255,255,0.08)',
+  background: 'var(--bg-raised)',
+  border: '1px solid var(--border-default)',
   borderRadius: '12px',
   padding: '16px',
 };
 
 const inputStyle = {
-  background: 'rgba(0,0,0,0.4)',
-  color: '#f0f0f5',
-  border: '1px solid rgba(255,255,255,0.15)',
+  background: 'var(--bg-base)',
+  color: 'var(--text-primary)',
+  border: '1px solid var(--border-default)',
   borderRadius: '8px',
   padding: '9px 11px',
   fontSize: '13px',
@@ -46,7 +46,7 @@ const inputStyle = {
 const labelStyle = {
   display: 'block',
   fontSize: '12px',
-  color: '#9090a0',
+  color: 'var(--text-secondary)',
   marginBottom: '6px',
 };
 
@@ -55,16 +55,16 @@ const badgeStyle = {
   fontSize: '11px',
   padding: '2px 8px',
   borderRadius: '999px',
-  border: '1px solid rgba(255,255,255,0.15)',
-  color: '#c9c9d4',
+  border: '1px solid var(--border-strong)',
+  color: 'var(--text-secondary)',
   marginRight: '6px',
   marginTop: '6px',
 };
 
 const smallButtonStyle = {
-  background: 'rgba(255,255,255,0.05)',
-  color: '#f0f0f5',
-  border: '1px solid rgba(255,255,255,0.12)',
+  background: 'var(--bg-hover)',
+  color: 'var(--text-primary)',
+  border: '1px solid var(--border-strong)',
   borderRadius: '8px',
   padding: '6px 10px',
   fontSize: '12px',
@@ -350,10 +350,10 @@ export default function VaultPanel({ wsRef: propWsRef }) {
   };
 
   return (
-    <div style={{ color: '#f0f0f5', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ color: 'var(--text-primary)', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <div>
         <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Password Vault</h2>
-        <p style={{ color: '#9090a0', fontSize: '14px', margin: 0, lineHeight: 1.5 }}>
+        <p style={{ color: 'var(--text-secondary)', fontSize: '14px', margin: 0, lineHeight: 1.5 }}>
           Logins the agent browser may fill for you, each bound to its own site. A saved password
           travels from the vault straight into the site&apos;s login form — it is never shown to
           the agent, and it can be replaced here but never viewed. Whether agents may fill at all
@@ -364,11 +364,11 @@ export default function VaultPanel({ wsRef: propWsRef }) {
       {error && (
         <div
           style={{
-            background: 'rgba(239,68,68,0.08)',
-            border: '1px solid rgba(239,68,68,0.3)',
+            background: 'rgba(201,42,42,0.08)',
+            border: '1px solid rgba(201,42,42,0.3)',
             borderRadius: '10px',
             padding: '12px 16px',
-            color: '#fca5a5',
+            color: 'var(--danger)',
             fontSize: '13px',
           }}
         >
@@ -388,7 +388,7 @@ export default function VaultPanel({ wsRef: propWsRef }) {
             errorText="Your saved credentials could not be loaded."
           />
         ) : entries.length === 0 && (
-          <div style={{ color: '#9090a0', fontSize: '13px' }}>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
             No credentials saved yet. Add one below, or let an agent save a login it creates
             during a signup task — it will appear here for your review.
           </div>
@@ -396,16 +396,16 @@ export default function VaultPanel({ wsRef: propWsRef }) {
         {entries.map((entry) => (
           <div key={entry.id} data-testid={`vault-entry-${entry.id}`} style={rowStyle}>
             <div style={{ display: 'flex', gap: '12px' }}>
-              <KeyRound size={20} color="#fbbf24" style={{ marginTop: '2px', flexShrink: 0 }} />
+              <KeyRound size={20} color="var(--accent)" style={{ marginTop: '2px', flexShrink: 0 }} />
               <div>
                 <div style={{ fontSize: '15px', fontWeight: 500 }}>
                   {entry.site}
-                  <span style={{ color: '#9090a0', fontWeight: 400 }}> — {entry.username}</span>
+                  <span style={{ color: 'var(--text-secondary)', fontWeight: 400 }}> — {entry.username}</span>
                 </div>
                 <div>
                   {entry.ask_every_time && <span style={badgeStyle}>Ask every time</span>}
                   {entry.created_by === 'agent' ? (
-                    <span style={{ ...badgeStyle, borderColor: 'rgba(251,191,36,0.4)', color: '#fbbf24' }}>
+                    <span style={{ ...badgeStyle, borderColor: 'rgba(var(--accent-rgb),0.4)', color: 'var(--accent)' }}>
                       Added by an agent — review it
                     </span>
                   ) : (
@@ -443,7 +443,7 @@ export default function VaultPanel({ wsRef: propWsRef }) {
 
       <div style={{ ...rowStyle, display: 'block' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
-          <ShieldCheck size={18} color="#34d399" />
+          <ShieldCheck size={18} color="var(--success)" />
           <h3 style={{ fontSize: '16px', fontWeight: 500, margin: 0 }}>
             {form.id ? 'Edit credential' : 'Add a credential'}
           </h3>
@@ -496,7 +496,7 @@ export default function VaultPanel({ wsRef: propWsRef }) {
             />
           </div>
         </div>
-        <p style={{ color: '#9090a0', fontSize: '12px', lineHeight: 1.5, margin: '12px 0 0' }}>
+        <p style={{ color: 'var(--text-secondary)', fontSize: '12px', lineHeight: 1.5, margin: '12px 0 0' }}>
           The TOTP secret is stored encrypted for your own manual use only — agents can never
           read it, and the agent never enters 2FA codes.
         </p>
@@ -525,8 +525,8 @@ export default function VaultPanel({ wsRef: propWsRef }) {
             data-testid="vault-save-button"
             onClick={saveForm}
             style={{
-              background: '#fbbf24',
-              color: '#1a1a22',
+              background: 'var(--accent)',
+              color: 'var(--accent-on)',
               border: 'none',
               borderRadius: '8px',
               padding: '9px 18px',
@@ -552,7 +552,7 @@ export default function VaultPanel({ wsRef: propWsRef }) {
 
       <div
         style={{
-          borderTop: '1px solid rgba(255,255,255,0.08)',
+          borderTop: '1px solid var(--border-default)',
           paddingTop: '20px',
           display: 'flex',
           flexDirection: 'column',
@@ -561,7 +561,7 @@ export default function VaultPanel({ wsRef: propWsRef }) {
       >
         <div>
           <h3 style={{ fontSize: '18px', fontWeight: 500, margin: '0 0 6px' }}>Authenticator</h3>
-          <p style={{ color: '#9090a0', fontSize: '13px', margin: 0, lineHeight: 1.5 }}>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '13px', margin: 0, lineHeight: 1.5 }}>
             Two-factor codes for your own manual use. The engine computes them from the
             encrypted secrets and they are shown only here — agents never see the codes and
             never enter 2FA codes; on a 2FA prompt the agent hands you the browser instead.
@@ -572,11 +572,11 @@ export default function VaultPanel({ wsRef: propWsRef }) {
           <div
             data-testid="vault-totp-error"
             style={{
-              background: 'rgba(239,68,68,0.08)',
-              border: '1px solid rgba(239,68,68,0.3)',
+              background: 'rgba(201,42,42,0.08)',
+              border: '1px solid rgba(201,42,42,0.3)',
               borderRadius: '10px',
               padding: '12px 16px',
-              color: '#fca5a5',
+              color: 'var(--danger)',
               fontSize: '13px',
             }}
           >
@@ -595,7 +595,7 @@ export default function VaultPanel({ wsRef: propWsRef }) {
             errorText="Your authenticator codes could not be loaded."
           />
         ) : codes.length === 0 && (
-          <div style={{ color: '#9090a0', fontSize: '13px' }}>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
             No authenticator codes yet. Add one below with the setup key a site shows beside
             its QR code, or save a TOTP secret on a credential above.
           </div>
@@ -603,25 +603,25 @@ export default function VaultPanel({ wsRef: propWsRef }) {
         {codes.map((row) => (
           <div key={row.entry_id} data-testid={`vault-totp-entry-${row.entry_id}`} style={rowStyle}>
             <div style={{ display: 'flex', gap: '12px' }}>
-              <Timer size={20} color="#fbbf24" style={{ marginTop: '2px', flexShrink: 0 }} />
+              <Timer size={20} color="var(--accent)" style={{ marginTop: '2px', flexShrink: 0 }} />
               <div>
                 <div style={{ fontSize: '15px', fontWeight: 500 }}>
                   {row.issuer ? `${row.issuer} — ` : ''}
                   {row.label}
                   {row.kind === 'login' && row.username ? (
-                    <span style={{ color: '#9090a0', fontWeight: 400 }}> — {row.username}</span>
+                    <span style={{ color: 'var(--text-secondary)', fontWeight: 400 }}> — {row.username}</span>
                   ) : null}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: '12px', marginTop: '4px' }}>
                   <span
                     data-testid={`vault-totp-code-${row.entry_id}`}
-                    style={{ fontFamily: 'monospace', fontSize: '22px', letterSpacing: '3px' }}
+                    style={{ fontFamily: 'var(--font-mono)', fontSize: '22px', letterSpacing: '3px' }}
                   >
                     {row.code}
                   </span>
                   <span
                     data-testid={`vault-totp-countdown-${row.entry_id}`}
-                    style={{ color: '#9090a0', fontSize: '12px' }}
+                    style={{ color: 'var(--text-secondary)', fontSize: '12px' }}
                   >
                     {countdown}s
                   </span>
@@ -660,7 +660,7 @@ export default function VaultPanel({ wsRef: propWsRef }) {
 
         <div style={{ ...rowStyle, display: 'block' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
-            <Timer size={18} color="#34d399" />
+            <Timer size={18} color="var(--success)" />
             <h4 style={{ fontSize: '16px', fontWeight: 500, margin: 0 }}>
               {totpForm.id ? 'Edit authenticator entry' : 'Add an authenticator entry'}
             </h4>
@@ -701,7 +701,7 @@ export default function VaultPanel({ wsRef: propWsRef }) {
               />
             </div>
           </div>
-          <p style={{ color: '#9090a0', fontSize: '12px', lineHeight: 1.5, margin: '12px 0 0' }}>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '12px', lineHeight: 1.5, margin: '12px 0 0' }}>
             The setup key is validated and stored encrypted, and it is never shown again —
             only the live code above is ever displayed.
           </p>
@@ -711,8 +711,8 @@ export default function VaultPanel({ wsRef: propWsRef }) {
               data-testid="vault-totp-save-button"
               onClick={saveTotpForm}
               style={{
-                background: '#fbbf24',
-                color: '#1a1a22',
+                background: 'var(--accent)',
+                color: 'var(--accent-on)',
                 border: 'none',
                 borderRadius: '8px',
                 padding: '9px 18px',

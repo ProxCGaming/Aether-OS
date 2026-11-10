@@ -29,7 +29,7 @@ import appPackage from '../../../package.json';
 
 const POLL_MS = 3000;
 const LEVEL_SEVERITY = { DEBUG: 10, INFO: 20, WARN: 30, ERROR: 40 };
-const LEVEL_COLORS = { DEBUG: '#9090a0', INFO: '#d4d4d8', WARN: '#fbbf24', ERROR: '#fca5a5' };
+const LEVEL_COLORS = { DEBUG: 'var(--text-secondary)', INFO: 'var(--text-secondary)', WARN: 'var(--accent)', ERROR: 'var(--danger)' };
 const LINE_RE = /^(\S+) \[([a-z]+)\]\s+(?:(DEBUG|INFO|WARN|ERROR)\s+)?(.*)$/;
 
 function parseLine(raw, fallbackSource) {
@@ -76,17 +76,17 @@ function formatWhen(iso) {
 }
 
 const cardStyle = {
-  background: 'rgba(255,255,255,0.03)',
-  border: '1px solid rgba(255,255,255,0.08)',
-  borderRadius: '16px',
+  background: 'var(--bg-raised)',
+  border: '1px solid var(--border-default)',
+  borderRadius: 'var(--radius-lg)',
   padding: '24px',
   marginTop: '24px',
 };
 
 const buttonStyle = {
-  background: 'rgba(255,255,255,0.06)',
-  color: '#f0f0f5',
-  border: '1px solid rgba(255,255,255,0.15)',
+  background: 'var(--bg-hover)',
+  color: 'var(--text-primary)',
+  border: '1px solid var(--border-strong)',
   padding: '9px 18px',
   borderRadius: '10px',
   cursor: 'pointer',
@@ -94,8 +94,8 @@ const buttonStyle = {
 };
 
 const tabStyle = (active) => ({
-  background: active ? 'rgba(124,58,237,0.4)' : 'transparent',
-  color: '#fff',
+  background: active ? 'rgba(var(--accent-rgb), 0.18)' : 'transparent',
+  color: active ? 'var(--accent)' : 'var(--text-secondary)',
   border: 'none',
   padding: '7px 18px',
   borderRadius: '8px',
@@ -104,10 +104,10 @@ const tabStyle = (active) => ({
 });
 
 const selectStyle = {
-  background: 'rgba(255,255,255,0.06)',
-  color: '#f0f0f5',
-  border: '1px solid rgba(255,255,255,0.15)',
-  borderRadius: '8px',
+  background: 'var(--bg-base)',
+  color: 'var(--text-primary)',
+  border: '1px solid var(--border-default)',
+  borderRadius: 'var(--radius-md)',
   padding: '7px 10px',
   fontSize: '13px',
 };
@@ -271,9 +271,9 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
 
   if (!logsAvailable) {
     return (
-      <div data-testid="logs-panel" style={{ ...cardStyle, color: '#f0f0f5' }}>
+      <div data-testid="logs-panel" style={{ ...cardStyle, color: 'var(--text-primary)' }}>
         <h3 style={{ fontSize: '16px', marginBottom: '8px' }}>Logs &amp; Diagnostics</h3>
-        <p style={{ color: '#9090a0', fontSize: '14px', margin: 0 }}>
+        <p style={{ color: 'var(--text-muted)', fontSize: '14px', margin: 0 }}>
           Logs are only available in the desktop app — this view is running without the desktop bridge.
         </p>
       </div>
@@ -287,13 +287,13 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
   ];
 
   return (
-    <div data-testid="logs-panel" style={{ color: '#f0f0f5' }}>
+    <div data-testid="logs-panel" style={{ color: 'var(--text-primary)' }}>
       {/* Status card */}
       <div data-testid="logs-status-card" style={cardStyle}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-          <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: isConnected ? '#10b981' : '#6b7280', boxShadow: isConnected ? '0 0 10px rgba(16,185,129,0.5)' : 'none' }} />
+          <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: isConnected ? 'var(--success)' : 'var(--text-muted)', boxShadow: isConnected ? '0 0 10px rgba(76, 195, 138,0.5)' : 'none' }} />
           <h3 style={{ fontSize: '16px', margin: 0 }}>{isConnected ? 'Engine Connected' : 'Waiting for the Engine'}</h3>
-          <span style={{ fontSize: '13px', color: '#9090a0' }}>App version {appPackage.version}</span>
+          <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>App version {appPackage.version}</span>
         </div>
         {loadState !== 'ready' ? (
           <LoadStateRow
@@ -308,16 +308,16 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
         ) : (
           <div data-testid="logs-inventory" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             {data && data.logBroken ? (
-              <p data-testid="logs-broken-note" style={{ fontSize: '13px', color: '#fca5a5', margin: 0 }}>
+              <p data-testid="logs-broken-note" style={{ fontSize: '13px', color: 'var(--danger)', margin: 0 }}>
                 app.log writes are failing — new shell lines are not being recorded. Restarting the app usually clears it; the lines already on disk are unaffected.
               </p>
             ) : null}
             {sourceRows.map((row) => {
               const item = inventoryByName[row.file];
               return (
-                <div key={row.file} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '10px', padding: '10px 14px' }}>
+                <div key={row.file} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '10px', padding: '10px 14px' }}>
                   <span style={{ fontSize: '13px' }}>{row.label}</span>
-                  <span style={{ fontSize: '12px', color: '#9090a0' }}>
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
                     {item ? `${row.file} · ${formatSize(item.size)} · last write ${formatWhen(item.mtime)}` : `${row.file} · no writes yet`}
                   </span>
                 </div>
@@ -330,7 +330,7 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
       {/* Log viewer card */}
       <div data-testid="logs-viewer-card" style={cardStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
-          <div style={{ display: 'flex', background: 'rgba(255,255,255,0.05)', padding: '4px', borderRadius: '10px' }}>
+          <div style={{ display: 'flex', background: 'var(--bg-overlay)', padding: '4px', borderRadius: '10px' }}>
             <button type="button" style={tabStyle(tab === 'all')} onClick={() => setTab('all')}>All</button>
             <button type="button" style={tabStyle(tab === 'app')} onClick={() => setTab('app')}>App</button>
             <button type="button" style={tabStyle(tab === 'engine')} onClick={() => setTab('engine')}>Engine</button>
@@ -371,13 +371,13 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
           <div
             data-testid="logs-lines"
             className="chat-scroll"
-            style={{ background: 'rgba(0,0,0,0.5)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', padding: '16px', fontFamily: 'monospace', fontSize: '12px', lineHeight: 1.7, height: '320px', overflowY: 'auto' }}
+            style={{ background: 'var(--bg-base)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '16px', fontFamily: 'var(--font-mono)', fontSize: '12px', lineHeight: 1.7, height: '320px', overflowY: 'auto' }}
           >
             {visible.length === 0 ? (
-              <div style={{ color: '#9090a0' }}>No log lines match the current filters.</div>
+              <div style={{ color: 'var(--text-secondary)' }}>No log lines match the current filters.</div>
             ) : (
               visible.map((entry, idx) => (
-                <div key={idx} data-log-level={entry.level} style={{ color: LEVEL_COLORS[entry.level] || '#d4d4d8', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                <div key={idx} data-log-level={entry.level} style={{ color: LEVEL_COLORS[entry.level] || 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                   {entry.raw}
                 </div>
               ))
@@ -385,7 +385,7 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
           </div>
         )}
         {paused && (
-          <div style={{ fontSize: '12px', color: '#fbbf24', marginTop: '8px' }}>Live tail paused — new lines are still being recorded.</div>
+          <div style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px' }}>Live tail paused — new lines are still being recorded.</div>
         )}
       </div>
 
@@ -393,7 +393,7 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
       <div data-testid="logs-controls-card" style={cardStyle}>
         <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Log Controls</h3>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-          <button type="button" style={{ ...buttonStyle, background: 'rgba(124,58,237,0.25)', border: '1px solid rgba(124,58,237,0.5)', color: '#e9d5ff' }} onClick={handleExport}>
+          <button type="button" style={{ ...buttonStyle, background: 'rgba(var(--accent-rgb),0.25)', border: '1px solid rgba(var(--accent-rgb),0.5)', color: 'var(--accent)' }} onClick={handleExport}>
             Export full bundle
           </button>
           {typeof api.openLogsFolder === 'function' && (
@@ -407,7 +407,7 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
             </button>
           )}
           {typeof api.setLogLevel === 'function' && (
-            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#9090a0' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'var(--text-secondary)' }}>
               Log level
               <select aria-label="Log level" value={logLevel} onChange={(e) => handleLevelChange(e.target.value)} style={selectStyle}>
                 <option value="INFO">Info</option>
@@ -422,21 +422,21 @@ export default function LogsPanel({ isConnected = null, sendSettingsAction = nul
               type="button"
               onClick={handleClear}
               style={clearArmed
-                ? { ...buttonStyle, background: 'rgba(239,68,68,0.2)', border: '1px solid rgba(239,68,68,0.5)', color: '#fca5a5' }
-                : { ...buttonStyle, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', color: '#fca5a5' }}
+                ? { ...buttonStyle, background: 'rgba(201,42,42,0.2)', border: '1px solid rgba(201,42,42,0.5)', color: 'var(--danger)' }
+                : { ...buttonStyle, background: 'rgba(201,42,42,0.08)', border: '1px solid rgba(201,42,42,0.3)', color: 'var(--danger)' }}
             >
               {clearArmed ? 'Confirm clear logs' : 'Clear logs'}
             </button>
           )}
         </div>
         {clearArmed && (
-          <div style={{ fontSize: '13px', color: '#fbbf24', marginTop: '12px' }}>
+          <div style={{ fontSize: '13px', color: 'var(--accent)', marginTop: '12px' }}>
             This empties app.log and engine.log (crash logs are kept). Click again to confirm.
           </div>
         )}
-        {exportNote && <div style={{ fontSize: '13px', color: '#a0a0b0', marginTop: '12px' }}>{exportNote}</div>}
-        {clearStatus && <div style={{ fontSize: '13px', color: '#a0a0b0', marginTop: '12px' }}>{clearStatus}</div>}
-        <p style={{ fontSize: '12px', color: '#9090a0', marginTop: '16px', marginBottom: 0 }}>
+        {exportNote && <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '12px' }}>{exportNote}</div>}
+        {clearStatus && <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '12px' }}>{clearStatus}</div>}
+        <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '16px', marginBottom: 0 }}>
           The exported bundle contains no API keys and no memory content — log lines are scrubbed for key-shaped values before they are included.
         </p>
       </div>

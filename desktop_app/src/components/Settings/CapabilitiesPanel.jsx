@@ -9,23 +9,23 @@ import LogsPanel from './LogsPanel';
 // is given.
 export default function CapabilitiesPanel({ capabilityStatus, capabilityHistory, isDiagnosticsRunning, diagnosticsQueued, diagnosticsError, onRunDiagnostics, isConnected, sendSettingsAction, onExportBundle }) {
   return (
-    <div style={{ color: '#f0f0f5' }}>
+    <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Engine Capabilities</h2>
-      <p style={{ color: '#9090a0', fontSize: '14px', marginBottom: '24px' }}>Monitor the health and capabilities of the Aether execution environment.</p>
+      <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>Monitor the health and capabilities of the Aether execution environment.</p>
             
-      <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '24px' }}>
+      <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '24px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: capabilityStatus && capabilityStatus.failed_count === 0 ? '#10b981' : (capabilityStatus && capabilityStatus.failed_count > 0 ? '#ef4444' : '#6b7280'), boxShadow: capabilityStatus && capabilityStatus.failed_count === 0 ? '0 0 10px rgba(16,185,129,0.5)' : 'none' }}></div>
+            <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: capabilityStatus && capabilityStatus.failed_count === 0 ? 'var(--success)' : (capabilityStatus && capabilityStatus.failed_count > 0 ? 'var(--danger)' : 'var(--text-muted)'), boxShadow: capabilityStatus && capabilityStatus.failed_count === 0 ? '0 0 10px rgba(76, 195, 138,0.5)' : 'none' }}></div>
             <h3 style={{ fontSize: '16px' }}>{capabilityStatus ? (capabilityStatus.failed_count === 0 ? 'System Healthy' : `${capabilityStatus.failed_count} Issues Detected`) : 'Status Unknown'}</h3>
           </div>
           <button
             onClick={onRunDiagnostics}
             disabled={isDiagnosticsRunning || diagnosticsQueued}
             style={{ 
-              background: isDiagnosticsRunning ? 'rgba(124, 58, 237, 0.2)' : 'transparent', 
-              color: isDiagnosticsRunning ? '#a78bfa' : '#7c3aed', 
-              border: '1px solid rgba(124, 58, 237, 0.5)', 
+              background: isDiagnosticsRunning ? 'rgba(var(--accent-rgb), 0.2)' : 'transparent', 
+              color: isDiagnosticsRunning ? 'var(--accent)' : 'var(--accent)', 
+              border: '1px solid rgba(var(--accent-rgb), 0.5)', 
               padding: '8px 16px', 
               borderRadius: '8px', 
               cursor: isDiagnosticsRunning ? 'wait' : 'pointer',
@@ -51,23 +51,23 @@ export default function CapabilitiesPanel({ capabilityStatus, capabilityHistory,
         </div>
 
         {diagnosticsQueued && (
-          <div data-testid="diagnostics-run-queued" style={{ fontSize: '13px', color: '#fbbf24', marginBottom: '16px' }}>
+          <div data-testid="diagnostics-run-queued" style={{ fontSize: '13px', color: 'var(--accent)', marginBottom: '16px' }}>
             Diagnostics run queued — will run when the engine reconnects.
           </div>
         )}
 
         {diagnosticsError && (
-          <div data-testid="diagnostics-run-error" style={{ fontSize: '13px', color: '#f87171', marginBottom: '16px' }}>
+          <div data-testid="diagnostics-run-error" style={{ fontSize: '13px', color: 'var(--danger)', marginBottom: '16px' }}>
             {diagnosticsError}
           </div>
         )}
               
-        <div style={{ background: 'rgba(0,0,0,0.5)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', padding: '16px', fontFamily: 'monospace', fontSize: '13px', color: '#10b981', height: '200px', overflowY: 'auto' }} className="chat-scroll">
+        <div style={{ background: 'var(--bg-base)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '16px', fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--success)', height: '200px', overflowY: 'auto' }} className="chat-scroll">
           {capabilityHistory.length === 0 ? (
-            <div style={{ color: '#9090a0', marginBottom: '8px' }}>[System] Ready to run diagnostics. Click the button above.</div>
+            <div style={{ color: 'var(--text-secondary)', marginBottom: '8px' }}>[System] Ready to run diagnostics. Click the button above.</div>
           ) : (
             capabilityHistory.map((log, idx) => (
-              <div key={idx} style={{ color: log.status === 'OK' || log.status === 'RUNNING' ? '#10b981' : (log.status === 'WARN' ? '#fbbf24' : '#ef4444') }}>
+              <div key={idx} style={{ color: log.status === 'OK' || log.status === 'RUNNING' ? 'var(--success)' : (log.status === 'WARN' ? 'var(--accent)' : 'var(--danger)') }}>
                 [{new Date(log.timestamp * 1000).toLocaleTimeString()}] {log.target_name}: {log.status} {log.details ? `(${log.details})` : ''}
               </div>
             ))

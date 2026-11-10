@@ -76,17 +76,17 @@ const rowStyle = {
   alignItems: 'flex-start',
   justifyContent: 'space-between',
   gap: '16px',
-  background: 'rgba(255,255,255,0.03)',
-  border: '1px solid rgba(255,255,255,0.08)',
+  background: 'var(--bg-raised)',
+  border: '1px solid var(--border-default)',
   borderRadius: '12px',
   padding: '16px',
 };
 
 const selectStyle = {
-  background: 'rgba(0,0,0,0.4)',
-  color: '#f0f0f5',
-  border: '1px solid rgba(255,255,255,0.15)',
-  borderRadius: '8px',
+  background: 'var(--bg-base)',
+  color: 'var(--text-primary)',
+  border: '1px solid var(--border-default)',
+  borderRadius: 'var(--radius-md)',
   padding: '8px 10px',
   fontSize: '13px',
   cursor: 'pointer',
@@ -187,10 +187,10 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
   };
 
   return (
-    <div style={{ color: '#f0f0f5', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ color: 'var(--text-primary)', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <div>
         <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Browser Agent Policy</h2>
-        <p style={{ color: '#9090a0', fontSize: '14px', margin: 0 }}>
+        <p style={{ color: 'var(--text-muted)', fontSize: '14px', margin: 0 }}>
           What the agent browser may do without stopping to ask. Browsing, reading, searching, and
           filling ordinary form fields are always free; the consequential categories below are
           governed by the mode you choose for each.
@@ -200,11 +200,11 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
       {error && (
         <div
           style={{
-            background: 'rgba(239,68,68,0.08)',
-            border: '1px solid rgba(239,68,68,0.3)',
+            background: 'rgba(201,42,42,0.08)',
+            border: '1px solid rgba(201,42,42,0.3)',
             borderRadius: '10px',
             padding: '12px 16px',
-            color: '#fca5a5',
+            color: 'var(--danger)',
             fontSize: '13px',
           }}
         >
@@ -226,10 +226,10 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
 
       <div style={rowStyle}>
         <div style={{ display: 'flex', gap: '12px' }}>
-          <Globe size={20} color="#60a5fa" style={{ marginTop: '2px', flexShrink: 0 }} />
+          <Globe size={20} color="var(--accent)" style={{ marginTop: '2px', flexShrink: 0 }} />
           <div>
             <div style={{ fontSize: '15px', fontWeight: 500 }}>Browser agent</div>
-            <div style={{ color: '#9090a0', fontSize: '13px', marginTop: '4px', lineHeight: 1.5 }}>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '4px', lineHeight: 1.5 }}>
               The master switch. Turning it off blocks new browser tasks outright; a task that is
               already running is not interrupted mid-action.
             </div>
@@ -240,16 +240,16 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
           data-testid="browser-policy-enabled"
           checked={!!policy.enabled}
           onChange={(e) => setToggle('enabled', e.target.checked)}
-          style={{ width: '18px', height: '18px', cursor: 'pointer', flexShrink: 0 }}
+          style={{ width: '18px', height: '18px', cursor: 'pointer', flexShrink: 0, accentColor: 'var(--accent)' }}
         />
       </div>
 
       <div style={rowStyle}>
         <div style={{ display: 'flex', gap: '12px' }}>
-          <Layers size={20} color="#a78bfa" style={{ marginTop: '2px', flexShrink: 0 }} />
+          <Layers size={20} color="var(--accent)" style={{ marginTop: '2px', flexShrink: 0 }} />
           <div>
             <div style={{ fontSize: '15px', fontWeight: 500 }}>Per-task envelopes</div>
-            <div style={{ color: '#9090a0', fontSize: '13px', marginTop: '4px', lineHeight: 1.5 }}>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '4px', lineHeight: 1.5 }}>
               Allow the “for this task” grant on a confirmation card: a bounded pre-authorisation
               for one task, one category, one site. Envelopes never cover payments.
             </div>
@@ -260,16 +260,16 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
           data-testid="browser-policy-envelopes"
           checked={!!policy.envelopes_enabled}
           onChange={(e) => setToggle('envelopes_enabled', e.target.checked)}
-          style={{ width: '18px', height: '18px', cursor: 'pointer', flexShrink: 0 }}
+          style={{ width: '18px', height: '18px', cursor: 'pointer', flexShrink: 0, accentColor: 'var(--accent)' }}
         />
       </div>
 
       <div style={rowStyle}>
         <div style={{ display: 'flex', gap: '12px' }}>
-          <KeyRound size={20} color="#fbbf24" style={{ marginTop: '2px', flexShrink: 0 }} />
+          <KeyRound size={20} color="var(--accent)" style={{ marginTop: '2px', flexShrink: 0 }} />
           <div>
             <div style={{ fontSize: '15px', fontWeight: 500 }}>Vault autofill</div>
-            <div style={{ color: '#9090a0', fontSize: '13px', marginTop: '4px', lineHeight: 1.5 }}>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '4px', lineHeight: 1.5 }}>
               Let the credential vault fill logins on their own sites. Entries marked
               ask-every-time still prompt before every fill.
             </div>
@@ -280,13 +280,13 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
           data-testid="browser-policy-vault-autofill"
           checked={!!policy.vault_autofill}
           onChange={(e) => setToggle('vault_autofill', e.target.checked)}
-          style={{ width: '18px', height: '18px', cursor: 'pointer', flexShrink: 0 }}
+          style={{ width: '18px', height: '18px', cursor: 'pointer', flexShrink: 0, accentColor: 'var(--accent)' }}
         />
       </div>
 
       <div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-          <ShieldAlert size={18} color="#f87171" />
+          <ShieldAlert size={18} color="var(--danger)" />
           <h3 style={{ fontSize: '16px', fontWeight: 500, margin: 0 }}>Consequential actions</h3>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -294,11 +294,11 @@ export default function BrowserPolicyPanel({ wsRef: propWsRef }) {
             <div key={category.id} style={rowStyle}>
               <div>
                 <div style={{ fontSize: '15px', fontWeight: 500 }}>{category.label}</div>
-                <div style={{ color: '#9090a0', fontSize: '13px', marginTop: '4px', lineHeight: 1.5 }}>
+                <div style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '4px', lineHeight: 1.5 }}>
                   {category.desc}
                 </div>
                 {category.note && (
-                  <div style={{ color: '#fbbf24', fontSize: '12px', marginTop: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <div style={{ color: 'var(--accent)', fontSize: '12px', marginTop: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <Wallet size={13} />
                     {category.note}
                   </div>
