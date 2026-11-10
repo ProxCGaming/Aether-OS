@@ -166,23 +166,23 @@ export default function Onboarding({ providers = [], onDone }) {
   };
 
   const panelStyle = {
-    background: 'rgba(20,20,28,0.97)', border: '1px solid rgba(255,255,255,0.1)',
-    borderRadius: '20px', padding: '32px', width: '440px', maxWidth: '92vw', color: '#f0f0f5',
+    background: 'var(--bg-raised)', border: '1px solid var(--border-default)',
+    borderRadius: 'var(--radius-lg)', padding: '32px', width: '440px', maxWidth: '92vw', color: 'var(--text-primary)',
   };
   const primaryBtn = {
-    background: '#7c3aed', color: '#fff', border: 'none', padding: '10px 22px',
-    borderRadius: '12px', cursor: 'pointer', fontWeight: 500,
+    background: 'var(--accent)', color: 'var(--accent-on)', border: 'none', padding: '10px 22px',
+    borderRadius: 'var(--radius-lg)', cursor: 'pointer', fontWeight: 500,
   };
   const ghostBtn = {
-    background: 'transparent', color: '#9090a0', border: 'none', padding: '10px 14px',
+    background: 'transparent', color: 'var(--text-secondary)', border: 'none', padding: '10px 14px',
     cursor: 'pointer', fontSize: '13px',
   };
   const inputStyle = {
-    padding: '12px 16px', color: '#fff', outline: 'none', width: '100%',
-    background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '10px',
+    padding: '12px 16px', color: 'var(--text-primary)', outline: 'none', width: '100%',
+    background: 'var(--bg-base)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)',
   };
-  const queuedStyle = { color: '#f59e0b', fontSize: '13px' };
-  const errorStyle = { color: '#ef4444', fontSize: '13px' };
+  const queuedStyle = { color: 'var(--accent)', fontSize: '13px' };
+  const errorStyle = { color: 'var(--danger)', fontSize: '13px' };
 
   // The summary may claim a full save only for choices the engine has
   // actually acknowledged. A choice whose save is still queued (sent
@@ -217,19 +217,19 @@ export default function Onboarding({ providers = [], onDone }) {
     <div
       data-testid="onboarding-overlay"
       style={{
-        position: 'fixed', inset: 0, background: 'rgba(5,5,10,0.72)',
+        position: 'fixed', inset: 0, background: 'var(--bg-base)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200,
       }}
     >
       <div style={panelStyle}>
-        <div style={{ fontSize: '12px', color: '#a78bfa', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '8px' }}>
+        <div style={{ fontSize: '12px', color: 'var(--accent)', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '8px' }}>
           Welcome to Aether-OS · Step {Math.min(step + 1, 3)} of 3
         </div>
 
         {!isConnected && (
           <div style={{
-            background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.4)', color: '#fbbf24',
-            borderRadius: '10px', padding: '10px 12px', fontSize: '13px', marginBottom: '16px',
+            background: 'rgba(var(--accent-rgb), 0.12)', border: '1px solid rgba(var(--accent-rgb), 0.4)', color: 'var(--accent)',
+            borderRadius: 'var(--radius-md)', padding: '10px 12px', fontSize: '13px', marginBottom: '16px',
           }}>
             You're not connected to the engine. Nothing is saved yet — saves are queued and sent when the connection returns, or skip setup and finish later in Settings.
           </div>
@@ -238,7 +238,7 @@ export default function Onboarding({ providers = [], onDone }) {
         {step === 0 && (
           <>
             <h2 style={{ margin: '0 0 8px 0', fontSize: '22px' }}>Connect a model provider</h2>
-            <p style={{ color: '#9090a0', fontSize: '14px', marginTop: 0 }}>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0 }}>
               Add an API key so Aether can think. Keys are stored in the engine's encrypted secret store — never in the app.
             </p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -287,17 +287,17 @@ export default function Onboarding({ providers = [], onDone }) {
         {step === 1 && (
           <>
             <h2 style={{ margin: '0 0 8px 0', fontSize: '22px' }}>Choose your workspace</h2>
-            <p style={{ color: '#9090a0', fontSize: '14px', marginTop: 0 }}>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0 }}>
               The folder Aether works in by default. Tools stay inside your workspace roots unless you approve otherwise.
             </p>
             {workspacePath ? (
-              <div style={{ fontFamily: 'monospace', fontSize: '13px', color: workspaceSaved ? '#10b981' : '#f0f0f5' }}>{workspacePath}</div>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: workspaceSaved ? 'var(--success)' : 'var(--text-primary)' }}>{workspacePath}</div>
             ) : null}
             {(!workspacePath || workspaceState === 'error' || workspaceState === 'timeout') && (
               <button style={{ ...primaryBtn, marginTop: workspacePath ? '10px' : 0 }} onClick={pickWorkspace}>Choose folder…</button>
             )}
             {workspaceState === 'saving' && isConnected && (
-              <div style={{ color: '#9090a0', fontSize: '13px', marginTop: '10px' }}>Saving…</div>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '10px' }}>Saving…</div>
             )}
             {workspaceState === 'saving' && !isConnected && (
               <div style={{ ...queuedStyle, marginTop: '10px' }}>
@@ -329,17 +329,17 @@ export default function Onboarding({ providers = [], onDone }) {
         {step === 2 && (
           <>
             <h2 style={{ margin: '0 0 8px 0', fontSize: '22px' }}>Approval default</h2>
-            <p style={{ color: '#9090a0', fontSize: '14px', marginTop: 0 }}>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0 }}>
               How Aether handles tools that change files or run commands. You can change this any time in Settings.
             </p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
               <label style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', cursor: 'pointer' }}>
-                <input type="radio" name="approval-mode" value="ask" checked={approvalMode === 'ask'} onChange={() => setApprovalMode('ask')} />
-                <span><strong>Ask me</strong><br /><span style={{ color: '#9090a0', fontSize: '13px' }}>Every write or command needs your approval (recommended).</span></span>
+                <input type="radio" name="approval-mode" value="ask" checked={approvalMode === 'ask'} onChange={() => setApprovalMode('ask')} style={{ accentColor: 'var(--accent)' }} />
+                <span><strong>Ask me</strong><br /><span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>Every write or command needs your approval (recommended).</span></span>
               </label>
               <label style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', cursor: 'pointer' }}>
-                <input type="radio" name="approval-mode" value="write" checked={approvalMode === 'write'} onChange={() => setApprovalMode('write')} />
-                <span><strong>Write freely</strong><br /><span style={{ color: '#9090a0', fontSize: '13px' }}>File writes inside the workspace run without asking; risky actions still ask.</span></span>
+                <input type="radio" name="approval-mode" value="write" checked={approvalMode === 'write'} onChange={() => setApprovalMode('write')} style={{ accentColor: 'var(--accent)' }} />
+                <span><strong>Write freely</strong><br /><span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>File writes inside the workspace run without asking; risky actions still ask.</span></span>
               </label>
             </div>
             {approvalState === 'error' && (
@@ -363,7 +363,7 @@ export default function Onboarding({ providers = [], onDone }) {
         {step === 3 && (
           <>
             <h2 style={{ margin: '0 0 8px 0', fontSize: '22px' }}>You're set</h2>
-            <p style={{ color: '#9090a0', fontSize: '14px', marginTop: 0 }}>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0 }}>
               {summaryText}
             </p>
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '20px' }}>
