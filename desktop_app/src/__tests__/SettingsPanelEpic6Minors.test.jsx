@@ -209,6 +209,6 @@ describe('SettingsPanel Epic 6 minors', () => {
 describe('E6-F16 stylesheet contract', () => {
   it('index.css gives .aether-search-input the standard focus-visible ring', () => {
     const css = fs.readFileSync(path.join(__dirname, '..', 'index.css'), 'utf8');
-    expect(css).toMatch(/\.aether-search-input:focus-visible\s*\{[^}]*outline:\s*2px solid #a78bfa/);
+    expect(css).toMatch(/\.aether-search-input:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/);
   });
 });

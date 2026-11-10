@@ -922,6 +922,21 @@
   border-radius: 4px;
 }
 
+/* Wave 6 Slice 1: the file link in a tool card's identity row
+   (ChatCards.jsx renders it as a <button>). Carried from the
+   Wave 4 sweep: the class was used but had no rule. The button
+   still carries inline styles today; this is its stylesheet
+   home — accent link, mono face, underline on hover only. */
+.tool-card-file-link {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  text-decoration: none;
+}
+
+.tool-card-file-link:hover {
+  text-decoration: underline;
+}
+
 .tool-status-pill {
   font-size: 10px;
   font-weight: 700;
@@ -954,6 +969,19 @@
   background: rgba(239, 68, 68, 0.15);
   color: #fca5a5;
   border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* Wave 6 Slice 1: the approval state of the dynamic
+   tool-status-* classes (ChatCards.jsx builds
+   `tool-status-${needsApproval ? 'approval' : status}`).
+   Carried from the Wave 4 sweep: the class was used but had
+   no rule. Amber, from the accent token, in the same shape
+   as the sibling states above (the rgba literals are the
+   accent's RGB at the siblings' 0.15 / 0.3 tint alphas). */
+.tool-status-pill.tool-status-approval {
+  background: rgba(245, 185, 66, 0.15);
+  color: var(--accent);
+  border: 1px solid rgba(245, 185, 66, 0.3);
 }
 
 .tool-spinner-dot {
