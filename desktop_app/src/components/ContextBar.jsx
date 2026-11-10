@@ -60,9 +60,9 @@ export function CompactContextBar({ breakdown, onClick }) {
         ? `Default model context: ${model} (${totalTokens.toLocaleString()} / ${capacity.toLocaleString()} tokens - ${percentUsed}%)`
         : `Default model context: ${model} (${totalTokens.toLocaleString()} tokens, window size unknown)`}
       style={{
-        background: 'rgba(255, 255, 255, 0.08)',
-        border: '1px solid rgba(255, 255, 255, 0.12)',
-        color: '#fff',
+        background: 'var(--bg-hover)',
+        border: '1px solid var(--border-default)',
+        color: 'var(--text-primary)',
         cursor: 'pointer',
         padding: '5px 10px',
         borderRadius: '999px',
@@ -74,15 +74,15 @@ export function CompactContextBar({ breakdown, onClick }) {
         fontWeight: 500,
       }}
     >
-      <Layers size={13} style={{ color: '#a78bfa' }} />
-      <span style={{ color: 'rgba(255, 255, 255, 0.75)', fontSize: '11px', maxWidth: '110px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      <Layers size={13} style={{ color: '#F5B942' }} />
+      <span style={{ color: 'var(--text-secondary)', fontSize: '11px', maxWidth: '110px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {model}
       </span>
       <div
         style={{
           width: '42px',
           height: '5px',
-          background: 'rgba(255, 255, 255, 0.15)',
+          background: 'var(--bg-hover)',
           borderRadius: '3px',
           overflow: 'hidden',
           display: 'flex',
@@ -97,7 +97,7 @@ export function CompactContextBar({ breakdown, onClick }) {
           }}
         />
       </div>
-      <span style={{ fontSize: '11px', color: '#fff', fontWeight: 600 }}>
+      <span style={{ fontSize: '11px', color: 'var(--text-primary)', fontWeight: 600 }}>
         {percentUsed}%
       </span>
     </button>
@@ -120,34 +120,35 @@ export default function ContextBar({ breakdown = null }) {
         top: '100%',
         right: 0,
         marginTop: '6px',
-        background: 'rgba(23, 23, 30, 0.95)',
-        backdropFilter: 'blur(20px)',
-        border: '1px solid rgba(255, 255, 255, 0.12)',
-        borderRadius: '8px',
+        background: 'rgba(16, 16, 18, 0.66)',
+        backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        border: '1px solid var(--glass-edge)',
+        borderRadius: 'var(--radius-lg)',
         padding: '12px 14px',
         minWidth: '340px',
         maxWidth: '400px',
-        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.45)',
-        color: '#fff',
+        boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
+        color: 'var(--text-primary)',
         fontSize: '12px',
         zIndex: 1100,
       }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <Layers size={14} style={{ color: '#a78bfa' }} />
+          <Layers size={14} style={{ color: '#F5B942' }} />
           <span style={{ fontWeight: 600, fontSize: '13px' }}>Context Window</span>
         </div>
-        <span style={{ color: 'rgba(255, 255, 255, 0.65)', fontSize: '11px' }}>
+        <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
           {model}
         </span>
       </div>
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px', fontSize: '11px', color: 'rgba(255, 255, 255, 0.75)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px', fontSize: '11px', color: 'var(--text-secondary)' }}>
         <span>{capacity != null
           ? `${totalTokens.toLocaleString()} / ${capacity.toLocaleString()} tokens`
           : `${totalTokens.toLocaleString()} tokens`}</span>
-        <span style={{ fontWeight: 600, color: '#fff' }}>{capacity != null ? `${percentUsed}%` : '—'}</span>
+        <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{capacity != null ? `${percentUsed}%` : '—'}</span>
       </div>
 
       {/* Segmented Bar */}
@@ -156,7 +157,7 @@ export default function ContextBar({ breakdown = null }) {
         style={{
           width: '100%',
           height: '10px',
-          background: 'rgba(255, 255, 255, 0.1)',
+          background: 'var(--bg-hover)',
           borderRadius: '5px',
           overflow: 'hidden',
           display: 'flex',
@@ -164,7 +165,7 @@ export default function ContextBar({ breakdown = null }) {
         }}
       >
         {totalTokens === 0 ? (
-          <div style={{ width: '100%', height: '100%', background: 'rgba(255, 255, 255, 0.05)' }} />
+          <div style={{ width: '100%', height: '100%', background: 'var(--bg-hover)' }} />
         ) : (
           components.map((c) => {
             // Unmeasured components (M20) get no segment: their size
@@ -194,7 +195,7 @@ export default function ContextBar({ breakdown = null }) {
       {basis === 'used' && (
         <div
           data-testid="context-share-basis-note"
-          style={{ fontSize: '11px', color: 'rgba(255, 255, 255, 0.5)', marginTop: '-6px', marginBottom: '10px' }}
+          style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '-6px', marginBottom: '10px' }}
         >
           Window size unknown — shares are of used tokens, not of the full window.
         </div>
@@ -207,7 +208,7 @@ export default function ContextBar({ breakdown = null }) {
           display: 'flex',
           flexDirection: 'column',
           gap: '6px',
-          borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+          borderTop: '1px solid var(--border-default)',
           paddingTop: '8px',
         }}
       >
@@ -231,7 +232,7 @@ export default function ContextBar({ breakdown = null }) {
                 justifyContent: 'space-between',
                 alignItems: 'center',
                 fontSize: '11px',
-                color: c.tokens > 0 ? '#fff' : 'rgba(255, 255, 255, 0.4)',
+                color: c.tokens > 0 ? 'var(--text-primary)' : 'var(--text-muted)',
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -240,14 +241,14 @@ export default function ContextBar({ breakdown = null }) {
                     width: '8px',
                     height: '8px',
                     borderRadius: '50%',
-                    background: c.tokens > 0 ? color : 'rgba(255, 255, 255, 0.2)',
+                    background: c.tokens > 0 ? color : 'var(--border-strong)',
                     display: 'inline-block',
                   }}
                 />
                 <span style={{ textTransform: 'capitalize' }}>{c.name}</span>
               </div>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <span style={{ color: 'rgba(255, 255, 255, 0.5)' }}>{isUnknown ? sharePct : `${sharePct}%`}</span>
+                <span style={{ color: 'var(--text-muted)' }}>{isUnknown ? sharePct : `${sharePct}%`}</span>
                 <span style={{ fontWeight: 500, minWidth: '45px', textAlign: 'right' }}>
                   {isUnknown ? 'unknown' : c.tokens.toLocaleString()}
                 </span>

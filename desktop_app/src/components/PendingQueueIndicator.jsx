@@ -22,14 +22,16 @@ export default function PendingQueueIndicator() {
         left: '20px',
         bottom: '20px',
         zIndex: 200,
-        background: 'rgba(251, 191, 36, 0.15)',
-        border: '1px solid rgba(251, 191, 36, 0.35)',
-        color: '#fbbf24',
+        background: 'rgba(16, 16, 18, 0.66)',
+        backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        border: '1px solid rgba(var(--accent-rgb), 0.35)',
+        boxShadow: 'inset 0 1px 0 var(--glass-specular)',
+        color: 'var(--accent)',
         fontSize: '12px',
         padding: '6px 12px',
         borderRadius: '999px',
         pointerEvents: 'none',
-        backdropFilter: 'blur(8px)',
       }}
     >
       {pendingCount} action{pendingCount === 1 ? '' : 's'} queued — will send when the engine reconnects

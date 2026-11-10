@@ -81,18 +81,19 @@ export default function CostHeaderPopover({ tasks = [], totalCostUsd = 0, runnin
         top: '100%',
         right: 0,
         marginTop: '6px',
-        background: 'rgba(23, 23, 30, 0.95)',
-        backdropFilter: 'blur(20px)',
-        border: '1px solid rgba(255, 255, 255, 0.12)',
-        borderRadius: '8px',
+        background: 'rgba(16, 16, 18, 0.66)',
+        backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        border: '1px solid var(--glass-edge)',
+        borderRadius: 'var(--radius-lg)',
         padding: '10px 12px',
         minWidth: '320px',
         maxWidth: '380px',
         maxHeight: '60vh',
         overflowY: 'auto',
         zIndex: 1100,
-        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)',
-        color: '#fff',
+        boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
+        color: 'var(--text-primary)',
         fontSize: '12px',
       }}
     >
@@ -104,12 +105,12 @@ export default function CostHeaderPopover({ tasks = [], totalCostUsd = 0, runnin
         <div
           data-testid="budget-exceeded-alert"
           style={{
-            background: 'rgba(245, 158, 11, 0.15)',
-            border: '1px solid rgba(245, 158, 11, 0.35)',
+            background: 'rgba(var(--accent-rgb), 0.15)',
+            border: '1px solid rgba(var(--accent-rgb), 0.35)',
             borderRadius: '6px',
             padding: '6px 8px',
             marginBottom: '8px',
-            color: '#fbbf24',
+            color: 'var(--accent)',
             fontSize: '11px',
             display: 'flex',
             alignItems: 'center',
@@ -123,12 +124,12 @@ export default function CostHeaderPopover({ tasks = [], totalCostUsd = 0, runnin
         </div>
       )}
       {tasks.length === 0 && (
-        <div style={{ color: 'rgba(255,255,255,0.55)', padding: '4px 0' }}>
+        <div style={{ color: 'var(--text-muted)', padding: '4px 0' }}>
           No model calls recorded yet.
         </div>
       )}
       {tasks.map((task) => (
-        <div key={task.task_id} data-testid={`cost-task-${task.task_id}`} style={{ padding: '6px 0', borderTop: '1px solid rgba(255,255,255,0.07)' }}>
+        <div key={task.task_id} data-testid={`cost-task-${task.task_id}`} style={{ padding: '6px 0', borderTop: '1px solid var(--border-default)' }}>
           <div style={rowStyle}>
             <span style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -138,8 +139,8 @@ export default function CostHeaderPopover({ tasks = [], totalCostUsd = 0, runnin
                 <span
                   data-testid={`cost-task-running-${task.task_id}`}
                   style={{
-                    background: 'rgba(16, 185, 129, 0.2)',
-                    color: '#34d399',
+                    background: 'rgba(76, 195, 138, 0.2)',
+                    color: 'var(--success)',
                     borderRadius: '999px',
                     padding: '0 6px',
                     fontSize: '10px',
@@ -158,23 +159,23 @@ export default function CostHeaderPopover({ tasks = [], totalCostUsd = 0, runnin
             <div
               key={modelName}
               data-testid={`cost-model-${task.task_id}-${modelName}`}
-              style={{ ...rowStyle, padding: '2px 0 0 10px', color: 'rgba(255,255,255,0.75)' }}
+              style={{ ...rowStyle, padding: '2px 0 0 10px', color: 'var(--text-secondary)' }}
             >
               <span style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{modelName}</span>
                 {model.is_local && (
-                  <span style={{ background: 'rgba(255,255,255,0.12)', borderRadius: '999px', padding: '0 6px', fontSize: '10px' }}>
+                  <span style={{ background: 'var(--bg-hover)', borderRadius: '999px', padding: '0 6px', fontSize: '10px' }}>
                     local
                   </span>
                 )}
                 {model.unpriced && (
-                  <span style={{ background: 'rgba(245, 158, 11, 0.2)', color: '#fbbf24', borderRadius: '999px', padding: '0 6px', fontSize: '10px' }}>
+                  <span style={{ background: 'rgba(var(--accent-rgb), 0.2)', color: 'var(--accent)', borderRadius: '999px', padding: '0 6px', fontSize: '10px' }}>
                     unpriced
                   </span>
                 )}
               </span>
               <span style={{ display: 'flex', gap: '8px', whiteSpace: 'nowrap' }}>
-                <span style={{ color: 'rgba(255,255,255,0.45)' }}>
+                <span style={{ color: 'var(--text-muted)' }}>
                   {model.input_tokens} in · {model.output_tokens} out
                 </span>
                 <span>{formatUsd(model.cost_usd)}</span>

@@ -102,13 +102,14 @@ export default function VoiceOverlay({
         zIndex: 1200,
         minWidth: '320px',
         maxWidth: '520px',
-        background: 'rgba(18, 18, 26, 0.92)',
-        backdropFilter: 'blur(18px)',
-        border: '1px solid rgba(167, 139, 250, 0.35)',
-        borderRadius: '16px',
+        background: 'rgba(16, 16, 18, 0.66)',
+        backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        border: '1px solid var(--glass-edge)',
+        borderRadius: '999px',
         padding: '16px 18px',
-        color: '#fff',
-        boxShadow: '0 16px 48px rgba(0, 0, 0, 0.5)',
+        color: 'var(--text-primary)',
+        boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
       }}
     >
       {/* S3-M2: the waveform/mic-dot keyframes live in src/index.css,
@@ -117,15 +118,15 @@ export default function VoiceOverlay({
       {status === 'error' || rtcError ? (
         <div data-testid="voice-error" style={{ fontSize: '13px', lineHeight: 1.5 }}>
           <div style={{ fontWeight: 600, marginBottom: '6px' }}>Voice unavailable</div>
-          <div style={{ color: '#fca5a5', marginBottom: '12px' }}>{status === 'error' ? error : rtcError}</div>
+          <div style={{ color: 'var(--danger)', marginBottom: '12px' }}>{status === 'error' ? error : rtcError}</div>
           <button
             type="button"
             data-testid="voice-dismiss-btn"
             onClick={onDismiss}
             style={{
-              background: 'rgba(255, 255, 255, 0.1)',
-              border: '1px solid rgba(255, 255, 255, 0.15)',
-              color: '#fff',
+              background: 'var(--bg-hover)',
+              border: '1px solid var(--border-strong)',
+              color: 'var(--text-primary)',
               cursor: 'pointer',
               padding: '6px 14px',
               borderRadius: '999px',
@@ -157,7 +158,7 @@ export default function VoiceOverlay({
             <div
               data-testid="voice-rtc-state"
               style={{
-                color: rtcState === 'disconnected' ? '#fca5a5' : '#a5b4fc',
+                color: rtcState === 'disconnected' ? 'var(--danger)' : 'var(--text-secondary)',
                 fontSize: '12px',
                 marginBottom: '8px',
               }}
@@ -166,12 +167,12 @@ export default function VoiceOverlay({
             </div>
           )}
           {micError && (
-            <div data-testid="voice-mic-error" style={{ color: '#fca5a5', fontSize: '12px', marginBottom: '8px' }}>
+            <div data-testid="voice-mic-error" style={{ color: 'var(--danger)', fontSize: '12px', marginBottom: '8px' }}>
               {micError}
             </div>
           )}
           {partialText && (
-            <div data-testid="voice-partial" style={{ fontSize: '13px', color: '#c4b5fd', marginBottom: '6px' }}>
+            <div data-testid="voice-partial" style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '6px' }}>
               {partialText}
             </div>
           )}
@@ -186,9 +187,9 @@ export default function VoiceOverlay({
             data-testid="voice-stop-btn"
             onClick={handleStop}
             style={{
-              background: 'rgba(248, 113, 113, 0.18)',
-              border: '1px solid rgba(248, 113, 113, 0.45)',
-              color: '#fff',
+              background: 'rgba(201, 42, 42, 0.15)',
+              border: '1px solid rgba(201, 42, 42, 0.35)',
+              color: 'var(--danger)',
               cursor: 'pointer',
               padding: '6px 14px',
               borderRadius: '999px',

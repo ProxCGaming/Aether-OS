@@ -22,9 +22,9 @@ export default function HeldActionsPrompt() {
   if (!heldMessages || heldMessages.length === 0) return null;
 
   const sendBtn = {
-    background: 'rgba(251, 191, 36, 0.18)',
-    border: '1px solid rgba(251, 191, 36, 0.5)',
-    color: '#fbbf24',
+    background: 'rgba(var(--accent-rgb), 0.18)',
+    border: '1px solid rgba(var(--accent-rgb), 0.5)',
+    color: 'var(--accent)',
     fontSize: '12px',
     padding: '4px 10px',
     borderRadius: '8px',
@@ -33,8 +33,8 @@ export default function HeldActionsPrompt() {
   };
   const discardBtn = {
     background: 'transparent',
-    border: '1px solid rgba(255, 255, 255, 0.18)',
-    color: '#b8b8c4',
+    border: '1px solid var(--border-strong)',
+    color: 'var(--text-secondary)',
     fontSize: '12px',
     padding: '4px 10px',
     borderRadius: '8px',
@@ -53,19 +53,20 @@ export default function HeldActionsPrompt() {
         zIndex: 300,
         width: '340px',
         maxWidth: 'calc(100vw - 40px)',
-        background: 'rgba(28, 22, 8, 0.97)',
-        border: '1px solid rgba(251, 191, 36, 0.45)',
-        borderRadius: '14px',
+        background: 'rgba(16, 16, 18, 0.66)',
+        backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        border: '1px solid rgba(var(--accent-rgb), 0.45)',
+        borderRadius: 'var(--radius-lg)',
         padding: '14px 16px',
-        color: '#f0f0f5',
-        boxShadow: '0 12px 32px rgba(0, 0, 0, 0.45)',
-        backdropFilter: 'blur(8px)',
+        color: 'var(--text-primary)',
+        boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
       }}
     >
-      <div style={{ fontSize: '13px', fontWeight: 600, color: '#fbbf24', marginBottom: '6px' }}>
+      <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--accent)', marginBottom: '6px' }}>
         Queued while offline — confirm before sending
       </div>
-      <p style={{ fontSize: '12px', color: '#c9c9d4', margin: '0 0 10px 0', lineHeight: 1.45 }}>
+      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 10px 0', lineHeight: 1.45 }}>
         These actions were queued while the engine was unreachable and have <strong>not</strong> been
         sent. They stay paused here until you send or discard each one.
       </p>

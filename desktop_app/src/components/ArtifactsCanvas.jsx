@@ -332,11 +332,12 @@ export default function ArtifactsCanvas({
         zIndex: 40,
         display: 'flex',
         flexDirection: 'column',
-        borderRadius: '16px',
+        borderRadius: 'var(--radius-lg)',
         overflow: 'hidden',
-        border: '1px solid rgba(255, 255, 255, 0.12)',
-        background: 'rgba(23, 23, 30, 0.95)',
-        backdropFilter: 'blur(20px)'
+        border: '1px solid var(--glass-edge)',
+        background: 'rgba(16, 16, 18, 0.66)',
+        backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)'
       }}
     >
       {/* Canvas Top Bar */}

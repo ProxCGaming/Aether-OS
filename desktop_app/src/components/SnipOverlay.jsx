@@ -149,16 +149,17 @@ export default function SnipOverlay({ isOpen, onCapture, onCancel, onError }) {
           alignItems: 'center',
           justifyContent: 'space-between',
           padding: '12px 20px',
-          background: 'rgba(15, 15, 25, 0.85)',
-          backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
-          color: '#f0f0f5',
+          background: 'rgba(16, 16, 18, 0.66)',
+          backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+          WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+          borderBottom: '1px solid var(--glass-edge)',
+          color: 'var(--text-primary)',
           pointerEvents: 'auto',
         }}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <Crop size={18} color="#a78bfa" />
+          <Crop size={18} color="#F5B942" />
           <span style={{ fontSize: '13px', fontWeight: 500 }}>
             Drag to select screen region &bull; ESC to cancel
           </span>
@@ -171,9 +172,9 @@ export default function SnipOverlay({ isOpen, onCapture, onCancel, onError }) {
             display: 'flex',
             alignItems: 'center',
             gap: '6px',
-            background: 'rgba(255, 255, 255, 0.08)',
-            border: '1px solid rgba(255, 255, 255, 0.15)',
-            color: '#cbd5e1',
+            background: 'var(--bg-hover)',
+            border: '1px solid var(--border-strong)',
+            color: 'var(--text-primary)',
             borderRadius: '8px',
             padding: '6px 12px',
             cursor: 'pointer',
@@ -194,9 +195,9 @@ export default function SnipOverlay({ isOpen, onCapture, onCancel, onError }) {
           role="alert"
           style={{
             margin: '12px auto 0',
-            background: 'rgba(127, 29, 29, 0.92)',
-            border: '1px solid rgba(248, 113, 113, 0.55)',
-            color: '#fecaca',
+            background: 'rgba(201, 42, 42, 0.18)',
+            border: '1px solid rgba(201, 42, 42, 0.55)',
+            color: 'var(--danger)',
             fontSize: '12.5px',
             fontWeight: 500,
             padding: '8px 14px',
@@ -220,8 +221,8 @@ export default function SnipOverlay({ isOpen, onCapture, onCancel, onError }) {
             top: `${top}px`,
             width: `${width}px`,
             height: `${height}px`,
-            border: '2px solid #8b5cf6',
-            background: 'rgba(139, 92, 246, 0.15)',
+            border: '2px solid var(--accent)',
+            background: 'rgba(var(--accent-rgb), 0.15)',
             boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.35)',
             pointerEvents: 'none',
           }}
@@ -232,10 +233,10 @@ export default function SnipOverlay({ isOpen, onCapture, onCancel, onError }) {
                 position: 'absolute',
                 bottom: '-24px',
                 left: '0px',
-                background: '#8b5cf6',
-                color: '#fff',
+                background: 'var(--accent)',
+                color: 'var(--accent-on)',
                 fontSize: '11px',
-                fontFamily: 'monospace',
+                fontFamily: 'var(--font-mono)',
                 padding: '2px 6px',
                 borderRadius: '4px',
                 whiteSpace: 'nowrap',

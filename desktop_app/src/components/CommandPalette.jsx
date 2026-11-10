@@ -96,7 +96,7 @@ export default function CommandPalette({ open, items = [], onClose, isConnected 
     <div
       data-testid="command-palette"
       style={{
-        position: 'fixed', inset: 0, background: 'rgba(5,5,10,0.6)',
+        position: 'fixed', inset: 0, background: 'rgba(5, 5, 6, 0.55)', backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)',
         display: 'flex', justifyContent: 'center', alignItems: 'flex-start',
         paddingTop: '12vh', zIndex: 210,
       }}
@@ -106,9 +106,11 @@ export default function CommandPalette({ open, items = [], onClose, isConnected 
         role="dialog"
         aria-label="Command palette"
         style={{
-          width: '560px', maxWidth: '92vw', background: 'rgba(20,20,28,0.98)',
-          border: '1px solid rgba(255,255,255,0.12)', borderRadius: '16px',
-          overflow: 'hidden', color: '#f0f0f5',
+          width: '560px', maxWidth: '92vw', background: 'rgba(16, 16, 18, 0.66)',
+          backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)', WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+          border: '1px solid var(--glass-edge)', borderRadius: 'var(--radius-lg)',
+          boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
+          overflow: 'hidden', color: 'var(--text-primary)',
         }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -122,8 +124,8 @@ export default function CommandPalette({ open, items = [], onClose, isConnected 
           placeholder="Type a command, chat, or model…"
           style={{
             width: '100%', boxSizing: 'border-box', padding: '16px',
-            background: 'transparent', border: 'none', borderBottom: '1px solid rgba(255,255,255,0.08)',
-            color: '#fff', fontSize: '15px',
+            background: 'transparent', border: 'none', borderBottom: '1px solid var(--border-default)',
+            color: 'var(--text-primary)', fontSize: '15px',
           }}
         />
         {/* Lane C grouped S4: items are host-supplied, so while the
@@ -136,9 +138,9 @@ export default function CommandPalette({ open, items = [], onClose, isConnected 
             data-testid="palette-offline-note"
             role="status"
             style={{
-              padding: '8px 16px', color: '#fbbf24', fontSize: '12.5px',
-              background: 'rgba(251, 191, 36, 0.08)',
-              borderBottom: '1px solid rgba(255,255,255,0.08)',
+              padding: '8px 16px', color: 'var(--accent)', fontSize: '12.5px',
+              background: 'rgba(var(--accent-rgb), 0.08)',
+              borderBottom: '1px solid var(--border-default)',
             }}
           >
             Engine disconnected — sessions and models may be stale, and actions will queue until it reconnects.
@@ -146,7 +148,7 @@ export default function CommandPalette({ open, items = [], onClose, isConnected 
         )}
         <div style={{ maxHeight: '46vh', overflowY: 'auto' }}>
           {results.length === 0 && (
-            <div style={{ padding: '16px', color: '#9090a0', fontSize: '14px' }}>No matches.</div>
+            <div style={{ padding: '16px', color: 'var(--text-muted)', fontSize: '14px' }}>No matches.</div>
           )}
           {results.map((item, idx) => (
             <button
@@ -157,12 +159,12 @@ export default function CommandPalette({ open, items = [], onClose, isConnected 
               style={{
                 display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                 width: '100%', textAlign: 'left', padding: '11px 16px', cursor: 'pointer',
-                background: idx === selected ? 'rgba(124,58,237,0.22)' : 'transparent',
-                border: 'none', color: '#f0f0f5', fontSize: '14px',
+                background: idx === selected ? 'rgba(var(--accent-rgb), 0.18)' : 'transparent',
+                border: 'none', color: 'var(--text-primary)', fontSize: '14px',
               }}
             >
               <span>{item.label}</span>
-              <span style={{ color: '#9090a0', fontSize: '12px', textTransform: 'capitalize' }}>{item.hint || item.kind}</span>
+              <span style={{ color: 'var(--text-muted)', fontSize: '12px', textTransform: 'capitalize' }}>{item.hint || item.kind}</span>
             </button>
           ))}
         </div>

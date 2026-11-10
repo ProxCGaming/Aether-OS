@@ -130,7 +130,7 @@ export default function ContextMenu({ menu, onClose, onShowToast }) {
             onClick={handleCut}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Scissors size={14} color="#a78bfa" />
+              <Scissors size={14} color="#F5B942" />
               <span>Cut</span>
             </div>
             <span className="ios-context-shortcut">Ctrl+X</span>
@@ -141,7 +141,7 @@ export default function ContextMenu({ menu, onClose, onShowToast }) {
             onClick={handleCopySelection}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Copy size={14} color="#a78bfa" />
+              <Copy size={14} color="#F5B942" />
               <span>Copy</span>
             </div>
             <span className="ios-context-shortcut">Ctrl+C</span>
@@ -149,7 +149,7 @@ export default function ContextMenu({ menu, onClose, onShowToast }) {
 
           <div className="ios-context-item" onClick={handlePaste}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Clipboard size={14} color="#a78bfa" />
+              <Clipboard size={14} color="#F5B942" />
               <span>Paste</span>
             </div>
             <span className="ios-context-shortcut">Ctrl+V</span>
@@ -159,7 +159,7 @@ export default function ContextMenu({ menu, onClose, onShowToast }) {
 
           <div className="ios-context-item" onClick={handleSelectAll}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <CheckCheck size={14} color="#a78bfa" />
+              <CheckCheck size={14} color="#F5B942" />
               <span>Select All</span>
             </div>
             <span className="ios-context-shortcut">Ctrl+A</span>
@@ -170,7 +170,7 @@ export default function ContextMenu({ menu, onClose, onShowToast }) {
           {menu.selectedText ? (
             <div className="ios-context-item" onClick={handleCopySelection}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Copy size={14} color="#a78bfa" />
+                <Copy size={14} color="#F5B942" />
                 <span>Copy Selection</span>
               </div>
               <span className="ios-context-shortcut">Ctrl+C</span>
@@ -180,7 +180,7 @@ export default function ContextMenu({ menu, onClose, onShowToast }) {
           {menu.fullText ? (
             <div className="ios-context-item" onClick={handleCopyFull}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Copy size={14} color="#38bdf8" />
+                <Copy size={14} color="#F5B942" />
                 <span>{menu.isThought ? 'Copy Thought' : 'Copy Message'}</span>
               </div>
             </div>
@@ -190,7 +190,7 @@ export default function ContextMenu({ menu, onClose, onShowToast }) {
 
           <div className="ios-context-item" onClick={handleSelectAll}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <CheckCheck size={14} color="#a78bfa" />
+              <CheckCheck size={14} color="#F5B942" />
               <span>Select All</span>
             </div>
             <span className="ios-context-shortcut">Ctrl+A</span>

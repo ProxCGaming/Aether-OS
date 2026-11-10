@@ -1487,6 +1487,20 @@ function AppContent() {
 
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', overflow: 'hidden', backgroundColor: isFloating ? 'transparent' : 'var(--bg-base)', flexDirection: 'column' }}>
+      {/* Wave 6 Slice 5: the glass refraction filter — one hidden
+          defs block for the whole app. Every glass surface's
+          backdrop-filter references #aether-glass-refraction; the
+          displacement bends the backdrop at the edges (the owner's
+          "proper light bending around the corner"). Visual only:
+          no props, no state. */}
+      <svg aria-hidden="true" width="0" height="0" style={{ position: 'absolute' }}>
+        <defs>
+          <filter id="aether-glass-refraction">
+            <feTurbulence type="fractalNoise" baseFrequency="0.008 0.012" numOctaves="2" seed="7" result="n" />
+            <feDisplacementMap in="SourceGraphic" in2="n" scale="12" />
+          </filter>
+        </defs>
+      </svg>
       
       {!isFloating && (
         <TitleBar
@@ -2064,8 +2078,8 @@ function AppContent() {
         <CommandPalette open={paletteOpen} items={paletteItems} onClose={() => setPaletteOpen(false)} isConnected={isConnected} />
       )}
       {!isFloating && shortcutsOpen && (
-        <div data-testid="shortcuts-dialog" style={{ position: 'fixed', inset: 0, background: 'rgba(5,5,10,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 205 }} onClick={() => setShortcutsOpen(false)}>
-          <div style={{ background: 'rgba(20,20,28,0.98)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '16px', padding: '24px', width: '380px', maxWidth: '92vw', color: '#f0f0f5' }} onClick={(e) => e.stopPropagation()}>
+        <div data-testid="shortcuts-dialog" style={{ position: 'fixed', inset: 0, background: 'rgba(5, 5, 6, 0.55)', backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 205 }} onClick={() => setShortcutsOpen(false)}>
+          <div style={{ background: 'rgba(16, 16, 18, 0.66)', backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)', WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)', border: '1px solid var(--glass-edge)', borderRadius: 'var(--radius-lg)', boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)', padding: '24px', width: '380px', maxWidth: '92vw', color: 'var(--text-primary)' }} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ margin: '0 0 14px 0' }}>Keyboard shortcuts</h3>
             {[
               ['Ctrl+K', 'Command palette'],
@@ -2078,12 +2092,12 @@ function AppContent() {
               [resolveSnipHotkey(engineConfig?.snip_hotkey).accelerator, 'Snip & ask (global)'],
               ['Esc', 'Close palette / dialogs'],
             ].map(([keys, desc]) => (
-              <div key={keys} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.06)', fontSize: '14px' }}>
-                <span style={{ fontFamily: 'monospace', color: '#a78bfa' }}>{keys}</span>
-                <span style={{ color: '#c9c9d4' }}>{desc}</span>
+              <div key={keys} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid var(--border-default)', fontSize: '14px' }}>
+                <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{keys}</span>
+                <span style={{ color: 'var(--text-secondary)' }}>{desc}</span>
               </div>
             ))}
-            <button onClick={() => setShortcutsOpen(false)} style={{ marginTop: '16px', background: '#7c3aed', color: '#fff', border: 'none', padding: '8px 18px', borderRadius: '10px', cursor: 'pointer' }}>Done</button>
+            <button onClick={() => setShortcutsOpen(false)} style={{ marginTop: '16px', background: 'var(--accent)', color: 'var(--accent-on)', border: 'none', padding: '8px 18px', borderRadius: 'var(--radius-md)', cursor: 'pointer', fontWeight: 600 }}>Done</button>
           </div>
         </div>
       )}
@@ -2099,7 +2113,7 @@ function AppContent() {
             nodeColor={node => {
               if (node.group === 1) return '#ec4899'; // AETHER-OS root
               if (node.group === 2) return '#60a5fa'; // Core brain nodes
-              if (node.group === 3) return '#a78bfa'; // Logs
+              if (node.group === 3) return '#F5B942'; // Logs — accent hex inlined (canvas colours cannot read CSS vars)
               return '#312e81'; // Ambient
             }}
             nodeRelSize={6}

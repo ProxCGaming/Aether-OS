@@ -47,10 +47,11 @@ export default function ChatComposer({
             left: '16px',
             right: '16px',
             marginBottom: '8px',
-            background: 'rgba(30, 41, 59, 0.95)',
-            backdropFilter: 'blur(12px)',
-            border: '1px solid rgba(255,255,255,0.1)',
-            borderRadius: '12px',
+            background: 'rgba(16, 16, 18, 0.66)',
+            backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+            WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+            border: '1px solid var(--glass-edge)',
+            borderRadius: 'var(--radius-lg)',
             padding: '8px',
             display: 'flex',
             flexDirection: 'column',
@@ -58,7 +59,7 @@ export default function ChatComposer({
             maxHeight: '200px',
             overflowY: 'auto',
             zIndex: 100,
-            boxShadow: '0 -10px 40px rgba(0,0,0,0.5)'
+            boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)'
           }}
         >
           {filteredCommands.map((cmd, idx) => (

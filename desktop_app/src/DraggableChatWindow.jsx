@@ -93,9 +93,9 @@ export function ScratchpadPanel({ scratchpad }) {
       data-testid="scratchpad-panel"
       style={{
         margin: '12px 16px 0 16px',
-        borderRadius: '14px',
-        background: 'rgba(10, 14, 24, 0.55)',
-        border: '1px solid rgba(96, 165, 250, 0.28)',
+        borderRadius: 'var(--radius-lg)',
+        background: 'var(--bg-raised)',
+        border: '1px solid var(--border-default)',
         overflow: 'hidden',
         flexShrink: 0
       }}
@@ -105,7 +105,7 @@ export function ScratchpadPanel({ scratchpad }) {
         alignItems: 'center',
         gap: '8px',
         padding: '8px 12px',
-        color: '#93c5fd',
+        color: 'var(--text-primary)',
         fontSize: '12px',
         userSelect: 'none'
       }}>
@@ -113,22 +113,22 @@ export function ScratchpadPanel({ scratchpad }) {
         <span style={{ fontWeight: 600, letterSpacing: '0.4px' }}>Scratchpad</span>
         <span style={{
           fontSize: '10px',
-          background: 'rgba(96, 165, 250, 0.16)',
-          border: '1px solid rgba(96, 165, 250, 0.35)',
+          background: 'rgba(var(--accent-rgb), 0.16)',
+          border: '1px solid rgba(var(--accent-rgb), 0.35)',
           padding: '2px 6px',
           borderRadius: '4px',
           fontWeight: 600,
           letterSpacing: '0.5px',
           textTransform: 'uppercase'
         }}>{kind}</span>
-        {agent && <span style={{ fontSize: '11px', color: '#a1a1aa' }}>{agent}</span>}
+        {agent && <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{agent}</span>}
         <span style={{ flex: 1 }} />
         <button
           type="button"
           onClick={() => setIsCollapsed(!isCollapsed)}
           aria-label={isCollapsed ? 'Expand scratchpad' : 'Collapse scratchpad'}
           title={isCollapsed ? 'Expand scratchpad' : 'Collapse scratchpad'}
-          style={{ background: 'transparent', border: 'none', color: '#93c5fd', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px' }}
+          style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px' }}
         >
           <ChevronDown size={14} style={{ transition: 'transform 0.3s ease', transform: isCollapsed ? 'rotate(0deg)' : 'rotate(180deg)' }} />
         </button>
@@ -137,7 +137,7 @@ export function ScratchpadPanel({ scratchpad }) {
           onClick={() => setIsDismissed(true)}
           aria-label="Dismiss scratchpad"
           title="Dismiss scratchpad"
-          style={{ background: 'transparent', border: 'none', color: '#a1a1aa', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px' }}
+          style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px' }}
         >
           <X size={14} />
         </button>
@@ -150,8 +150,8 @@ export function ScratchpadPanel({ scratchpad }) {
             overflowY: 'auto',
             overflowX: 'auto',
             padding: '10px 12px',
-            borderTop: '1px solid rgba(255, 255, 255, 0.06)',
-            background: 'rgba(0, 0, 0, 0.25)'
+            borderTop: '1px solid var(--border-default)',
+            background: 'var(--bg-base)'
           }}
         >
           {/* S3-M1 note is in sanitizeSvg.js: agent SVG is DOMPurify-sanitised before injection below. */}
@@ -162,16 +162,16 @@ export function ScratchpadPanel({ scratchpad }) {
             <div className="scratchpad-mermaid" dangerouslySetInnerHTML={{ __html: mermaidSvg }} />
           ) : mermaidError ? (
             <div>
-              <div style={{ fontSize: '11px', color: '#fca5a5', marginBottom: '6px' }}>
+              <div style={{ fontSize: '11px', color: 'var(--danger)', marginBottom: '6px' }}>
                 Diagram could not be rendered — showing the source instead.
               </div>
-              <pre className="scratchpad-source" style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '11.5px', color: '#d4d4d8' }}>{content}</pre>
+              <pre className="scratchpad-source" style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '11.5px', color: 'var(--text-secondary)' }}>{content}</pre>
             </div>
           ) : (
-            <div style={{ fontSize: '11.5px', color: '#a1a1aa' }}>Rendering diagram…</div>
+            <div style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>Rendering diagram…</div>
           ))}
           {kind !== 'svg' && kind !== 'mermaid' && (
-            <pre className="scratchpad-text" style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '12px', color: '#e2e8f0' }}>{content}</pre>
+            <pre className="scratchpad-text" style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '12px', color: 'var(--text-primary)' }}>{content}</pre>
           )}
         </div>
       )}
@@ -196,15 +196,14 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
       data-testid="browser-task-card"
       style={{
         margin: '12px 16px 0 16px',
-        borderRadius: '14px',
-        border: '1px solid rgba(59, 130, 246, 0.25)',
-        background: 'rgba(15, 23, 42, 0.85)',
-        backdropFilter: 'blur(16px)',
+        borderRadius: 'var(--radius-lg)',
+        border: '1px solid var(--border-default)',
+        background: 'var(--bg-raised)',
         padding: '12px 16px',
         display: 'flex',
         flexDirection: 'column',
         gap: '10px',
-        boxShadow: '0 4px 20px rgba(0, 0, 0, 0.25)',
+        boxShadow: 'none',
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
@@ -213,24 +212,24 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
             width: '28px',
             height: '28px',
             borderRadius: '8px',
-            background: 'rgba(59, 130, 246, 0.15)',
+            background: 'rgba(var(--accent-rgb), 0.15)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            color: '#60a5fa',
+            color: 'var(--accent)',
             flexShrink: 0,
           }}>
             <Globe size={16} />
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-            <span style={{ fontSize: '13px', fontWeight: 600, color: '#f1f5f9' }}>
+            <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
               Agent Browser (Dedicated Profile)
             </span>
             {currentUrl ? (
               <span
                 style={{
                   fontSize: '11px',
-                  color: '#94a3b8',
+                  color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
@@ -249,33 +248,33 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
           padding: '2px 8px',
           borderRadius: '999px',
           background: isWaitingUser
-            ? 'rgba(245, 158, 11, 0.15)'
+            ? 'rgba(var(--accent-rgb), 0.15)'
             : isUserControl
-            ? 'rgba(168, 85, 247, 0.15)'
+            ? 'rgba(76, 195, 138, 0.15)'
             : isPaused
-            ? 'rgba(234, 179, 8, 0.15)'
+            ? 'rgba(var(--accent-rgb), 0.15)'
             : isStopped
-            ? 'rgba(239, 68, 68, 0.15)'
-            : 'rgba(59, 130, 246, 0.15)',
+            ? 'rgba(201, 42, 42, 0.15)'
+            : 'rgba(var(--accent-rgb), 0.15)',
           color: isWaitingUser
-            ? '#fbbf24'
+            ? 'var(--accent)'
             : isUserControl
-            ? '#c084fc'
+            ? 'var(--success)'
             : isPaused
-            ? '#fde047'
+            ? 'var(--accent)'
             : isStopped
-            ? '#f87171'
-            : '#60a5fa',
+            ? 'var(--danger)'
+            : 'var(--accent)',
           border: `1px solid ${
             isWaitingUser
-              ? 'rgba(245, 158, 11, 0.3)'
+              ? 'rgba(var(--accent-rgb), 0.3)'
               : isUserControl
-              ? 'rgba(168, 85, 247, 0.3)'
+              ? 'rgba(76, 195, 138, 0.3)'
               : isPaused
-              ? 'rgba(234, 179, 8, 0.3)'
+              ? 'rgba(var(--accent-rgb), 0.3)'
               : isStopped
-              ? 'rgba(239, 68, 68, 0.3)'
-              : 'rgba(59, 130, 246, 0.3)'
+              ? 'rgba(201, 42, 42, 0.3)'
+              : 'rgba(var(--accent-rgb), 0.3)'
           }`,
         }}>
           {isWaitingUser
@@ -292,17 +291,17 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
 
       {isWaitingUser && (
         <div style={{
-          background: 'rgba(245, 158, 11, 0.1)',
-          border: '1px solid rgba(245, 158, 11, 0.25)',
+          background: 'rgba(var(--accent-rgb), 0.08)',
+          border: '1px solid rgba(var(--accent-rgb), 0.25)',
           borderRadius: '8px',
           padding: '8px 12px',
           fontSize: '12px',
-          color: '#fef3c7',
+          color: 'var(--text-primary)',
           display: 'flex',
           alignItems: 'center',
           gap: '8px',
         }}>
-          <ShieldAlert size={16} color="#fbbf24" style={{ flexShrink: 0 }} />
+          <ShieldAlert size={16} color="#F5B942" style={{ flexShrink: 0 }} />
           <span>
             Waiting for you: {challengeDisplay} challenge detected in browser window. The agent never solves challenges. Please complete it to continue.
           </span>
@@ -311,12 +310,12 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
 
       {isUserControl && (
         <div style={{
-          background: 'rgba(168, 85, 247, 0.1)',
-          border: '1px solid rgba(168, 85, 247, 0.25)',
+          background: 'rgba(76, 195, 138, 0.1)',
+          border: '1px solid rgba(76, 195, 138, 0.25)',
           borderRadius: '8px',
           padding: '8px 12px',
           fontSize: '12px',
-          color: '#f3e8ff',
+          color: 'var(--text-primary)',
         }}>
           You have control of the browser window. The agent is waiting for you to return control.
         </div>
@@ -329,9 +328,9 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
             data-testid="browser-resume-btn"
             onClick={() => onControl('resume')}
             style={{
-              background: 'rgba(59, 130, 246, 0.2)',
-              border: '1px solid rgba(59, 130, 246, 0.4)',
-              color: '#93c5fd',
+              background: 'var(--accent)',
+              border: '1px solid var(--accent)',
+              color: 'var(--accent-on)',
               borderRadius: '8px',
               padding: '5px 12px',
               fontSize: '12px',
@@ -352,9 +351,9 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
             disabled={isStopped}
             onClick={() => onControl('pause')}
             style={{
-              background: isStopped ? 'rgba(255, 255, 255, 0.05)' : 'rgba(234, 179, 8, 0.15)',
-              border: isStopped ? '1px solid rgba(255, 255, 255, 0.1)' : '1px solid rgba(234, 179, 8, 0.35)',
-              color: isStopped ? '#64748b' : '#fde047',
+              background: isStopped ? 'var(--bg-raised)' : 'rgba(var(--accent-rgb), 0.15)',
+              border: isStopped ? '1px solid var(--border-default)' : '1px solid rgba(var(--accent-rgb), 0.35)',
+              color: isStopped ? 'var(--text-muted)' : 'var(--accent)',
               borderRadius: '8px',
               padding: '5px 12px',
               fontSize: '12px',
@@ -376,9 +375,9 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
             data-testid="browser-return-control-btn"
             onClick={() => onControl('return_control')}
             style={{
-              background: 'rgba(168, 85, 247, 0.2)',
-              border: '1px solid rgba(168, 85, 247, 0.4)',
-              color: '#d8b4fe',
+              background: 'rgba(76, 195, 138, 0.15)',
+              border: '1px solid rgba(76, 195, 138, 0.35)',
+              color: 'var(--success)',
               borderRadius: '8px',
               padding: '5px 12px',
               fontSize: '12px',
@@ -399,9 +398,9 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
             disabled={isStopped}
             onClick={() => onControl('take_control')}
             style={{
-              background: isStopped ? 'rgba(255, 255, 255, 0.05)' : 'rgba(168, 85, 247, 0.15)',
-              border: isStopped ? '1px solid rgba(255, 255, 255, 0.1)' : '1px solid rgba(168, 85, 247, 0.35)',
-              color: isStopped ? '#64748b' : '#d8b4fe',
+              background: isStopped ? 'var(--bg-raised)' : 'var(--bg-hover)',
+              border: isStopped ? '1px solid var(--border-default)' : '1px solid var(--border-strong)',
+              color: isStopped ? 'var(--text-muted)' : 'var(--text-primary)',
               borderRadius: '8px',
               padding: '5px 12px',
               fontSize: '12px',
@@ -423,9 +422,9 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
             data-testid="browser-resume-btn"
             onClick={() => onControl('resume')}
             style={{
-              background: 'rgba(59, 130, 246, 0.2)',
-              border: '1px solid rgba(59, 130, 246, 0.4)',
-              color: '#93c5fd',
+              background: 'var(--accent)',
+              border: '1px solid var(--accent)',
+              color: 'var(--accent-on)',
               borderRadius: '8px',
               padding: '5px 12px',
               fontSize: '12px',
@@ -447,9 +446,9 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
           disabled={isStopped}
           onClick={() => onControl('stop')}
           style={{
-            background: isStopped ? 'rgba(255, 255, 255, 0.05)' : 'rgba(239, 68, 68, 0.15)',
-            border: isStopped ? '1px solid rgba(255, 255, 255, 0.1)' : '1px solid rgba(239, 68, 68, 0.35)',
-            color: isStopped ? '#64748b' : '#fca5a5',
+            background: isStopped ? 'var(--bg-raised)' : 'rgba(201, 42, 42, 0.15)',
+            border: isStopped ? '1px solid var(--border-default)' : '1px solid rgba(201, 42, 42, 0.35)',
+            color: isStopped ? 'var(--text-muted)' : 'var(--danger)',
             borderRadius: '8px',
             padding: '5px 12px',
             fontSize: '12px',
@@ -1082,7 +1081,7 @@ export default function DraggableChatWindow({
         display: 'flex',
         flexDirection: 'column',
         zIndex: 1000,
-        boxShadow: 'inset 0 1px 1px rgba(255, 255, 255, 0.15), inset 0 0 40px rgba(124, 58, 237, 0.05), inset 0 -1px 1px rgba(0, 0, 0, 0.4)',
+        boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
         transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
         opacity: isMinimized ? 0.8 : 1
       } : {
@@ -1305,7 +1304,7 @@ export default function DraggableChatWindow({
                     width: '8px',
                     height: '8px',
                     borderRadius: '50%',
-                    background: '#f87171',
+                    background: 'var(--danger)',
                     display: 'inline-block'
                   }}
                 />
@@ -1352,21 +1351,21 @@ export default function DraggableChatWindow({
                     top: '100%',
                     right: 0,
                     marginTop: '6px',
-                    background: 'rgba(23, 23, 30, 0.95)',
-                    backdropFilter: 'blur(20px)',
-                    border: '1px solid rgba(255, 255, 255, 0.12)',
-                    borderRadius: '8px',
+                    background: 'rgba(16, 16, 18, 0.66)',
+                    backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)', WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+                    border: '1px solid var(--glass-edge)',
+                    borderRadius: 'var(--radius-lg)',
                     padding: '6px',
                     minWidth: '340px',
                     maxHeight: '340px',
                     overflowY: 'auto',
                     zIndex: 1100,
-                    boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)'
+                    boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)'
                   }}
                 >
                   {stepPickerEntries.length > 0 ? (
                     <>
-                      <div style={{ padding: '4px 8px', fontSize: '11px', fontWeight: 600, color: '#a78bfa', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                      <div style={{ padding: '4px 8px', fontSize: '11px', fontWeight: 600, color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                         Steps in the current task
                       </div>
                       {stepPickerEntries.map((entry) => (
@@ -1376,8 +1375,8 @@ export default function DraggableChatWindow({
                           style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 8px', borderRadius: '6px' }}
                         >
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: '12px', color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{entry.label}</div>
-                            <div style={{ fontSize: '11px', color: '#9090a0' }}>
+                            <div style={{ fontSize: '12px', color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{entry.label}</div>
+                            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
                               Step {entry.step_index} · Checkpoint {String(entry.checkpoint_id || '').slice(0, 8)}
                             </div>
                           </div>
@@ -1385,7 +1384,7 @@ export default function DraggableChatWindow({
                             type="button"
                             data-testid="step-picker-rewind"
                             onClick={() => { setShowStepPicker(false); if (onRewindRequest) onRewindRequest(entry); }}
-                            style={{ background: 'rgba(167, 139, 250, 0.2)', border: '1px solid rgba(167, 139, 250, 0.4)', color: '#ddd6fe', padding: '4px 8px', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}
+                            style={{ background: 'rgba(var(--accent-rgb), 0.2)', border: '1px solid rgba(var(--accent-rgb), 0.4)', color: 'var(--accent)', padding: '4px 8px', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}
                           >
                             Rewind
                           </button>
@@ -1393,7 +1392,7 @@ export default function DraggableChatWindow({
                             type="button"
                             data-testid="step-picker-fork"
                             onClick={() => { setShowStepPicker(false); if (onForkRequest) onForkRequest({ message_id: null, step_index: entry.step_index }); }}
-                            style={{ background: 'rgba(255, 255, 255, 0.08)', border: '1px solid rgba(255, 255, 255, 0.15)', color: '#fff', padding: '4px 8px', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}
+                            style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-strong)', color: 'var(--text-primary)', padding: '4px 8px', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}
                           >
                             Fork
                           </button>
@@ -1402,10 +1401,10 @@ export default function DraggableChatWindow({
                     </>
                   ) : (
                     <>
-                      <div style={{ padding: '4px 8px', fontSize: '11px', fontWeight: 600, color: '#a78bfa', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                      <div style={{ padding: '4px 8px', fontSize: '11px', fontWeight: 600, color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                         Fork from a message
                       </div>
-                      <div style={{ padding: '0 8px 4px', fontSize: '11px', color: '#9090a0' }}>
+                      <div style={{ padding: '0 8px 4px', fontSize: '11px', color: 'var(--text-muted)' }}>
                         No recorded steps in this session — fork from any message instead.
                       </div>
                       {stepPickerMessages.map((m, j) => (
@@ -1414,14 +1413,14 @@ export default function DraggableChatWindow({
                           data-testid="step-picker-message-item"
                           style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 8px', borderRadius: '6px' }}
                         >
-                          <div style={{ flex: 1, minWidth: 0, fontSize: '12px', color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          <div style={{ flex: 1, minWidth: 0, fontSize: '12px', color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                             {typeof m.content === 'string' ? m.content.slice(0, 60) : ''}
                           </div>
                           <button
                             type="button"
                             data-testid="step-picker-fork-message"
                             onClick={() => { setShowStepPicker(false); if (onForkRequest) onForkRequest({ message_id: m.id || null, step_index: null }); }}
-                            style={{ background: 'rgba(255, 255, 255, 0.08)', border: '1px solid rgba(255, 255, 255, 0.15)', color: '#fff', padding: '4px 8px', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}
+                            style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-strong)', color: 'var(--text-primary)', padding: '4px 8px', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}
                           >
                             Fork
                           </button>
@@ -1459,30 +1458,30 @@ export default function DraggableChatWindow({
                   top: '100%',
                   right: 0,
                   marginTop: '6px',
-                  background: 'rgba(23, 23, 30, 0.95)',
-                  backdropFilter: 'blur(20px)',
-                  border: '1px solid rgba(255, 255, 255, 0.12)',
-                  borderRadius: '8px',
+                  background: 'rgba(16, 16, 18, 0.66)',
+                  backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)', WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+                  border: '1px solid var(--glass-edge)',
+                  borderRadius: 'var(--radius-lg)',
                   padding: '4px',
                   minWidth: '140px',
                   zIndex: 1100,
-                  boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)'
+                  boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)'
                 }}>
                   <button
                     onClick={() => { setShowExportMenu(false); onExportSession('markdown'); }}
-                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: '#fff', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: 'var(--text-primary)', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
                   >
                     Markdown (.md)
                   </button>
                   <button
                     onClick={() => { setShowExportMenu(false); onExportSession('json'); }}
-                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: '#fff', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: 'var(--text-primary)', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
                   >
                     JSON (.json)
                   </button>
                   <button
                     onClick={() => { setShowExportMenu(false); onExportSession('zip'); }}
-                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: '#fff', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: 'var(--text-primary)', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
                   >
                     ZIP (.zip)
                   </button>
@@ -1500,7 +1499,7 @@ export default function DraggableChatWindow({
                 onClick={() => setIsMinimized(false)}
                 title="Restore chat"
                 aria-label="Restore chat"
-                style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
+                style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
               >
                 <Maximize2 size={14} />
               </button>
@@ -1509,7 +1508,7 @@ export default function DraggableChatWindow({
                 onClick={() => setIsMinimized(true)}
                 title="Minimise chat"
                 aria-label="Minimise chat"
-                style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
+                style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
               >
                 <Minimize2 size={14} />
               </button>
@@ -1519,14 +1518,14 @@ export default function DraggableChatWindow({
                 <button 
                   onClick={() => window.electronAPI && window.electronAPI.closeFloatingChat()}
                   title="Re-attach to Main Window"
-                  style={{ WebkitAppRegion: 'no-drag', background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  style={{ WebkitAppRegion: 'no-drag', background: 'var(--bg-hover)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                 >
                   <LogIn size={14} />
                 </button>
                 <button 
                   onClick={() => window.electronAPI && window.electronAPI.closeFloatingChat()}
                   title="Close Window"
-                  style={{ WebkitAppRegion: 'no-drag', background: 'rgba(239, 68, 68, 0.2)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#fca5a5', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  style={{ WebkitAppRegion: 'no-drag', background: 'rgba(201, 42, 42, 0.2)', border: '1px solid rgba(201, 42, 42, 0.4)', color: 'var(--danger)', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                 >
                   <X size={14} />
                 </button>
@@ -1535,7 +1534,7 @@ export default function DraggableChatWindow({
               <button 
                 onClick={() => onDetach({ input })}
                 title="Pop out to floating window"
-                style={{ background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.1)', color: '#fff', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
+                style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', cursor: 'pointer', padding: '6px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
               >
                 <ExternalLink size={14} />
               </button>
@@ -1552,9 +1551,9 @@ export default function DraggableChatWindow({
             data-testid="chat-offline-banner"
             style={{
               padding: '8px 16px',
-              background: 'rgba(239, 68, 68, 0.08)',
-              borderBottom: '1px solid rgba(239, 68, 68, 0.25)',
-              color: '#fca5a5',
+              background: 'rgba(201, 42, 42, 0.08)',
+              borderBottom: '1px solid rgba(201, 42, 42, 0.25)',
+              color: 'var(--danger)',
               fontSize: '12.5px',
               textAlign: 'center'
             }}

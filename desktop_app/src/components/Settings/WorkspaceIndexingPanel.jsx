@@ -1060,8 +1060,9 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
           style={{
             position: 'fixed',
             inset: 0,
-            background: 'rgba(0,0,0,0.7)',
-            backdropFilter: 'blur(4px)',
+            background: 'rgba(5, 5, 6, 0.55)',
+            backdropFilter: 'blur(6px)',
+            WebkitBackdropFilter: 'blur(6px)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -1070,13 +1071,15 @@ export default function WorkspaceIndexingPanel({ wsRef: propWsRef, initialWorksp
         >
           <div
             style={{
-              background: 'var(--bg-raised)',
-              border: '1px solid rgba(201,42,42, 0.3)',
+              background: 'rgba(16, 16, 18, 0.66)',
+              backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+              WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+              border: '1px solid var(--glass-edge)',
               borderRadius: 'var(--radius-lg)',
               padding: '24px',
               maxWidth: '460px',
               width: '90%',
-              boxShadow: '0 20px 40px rgba(0,0,0,0.6)',
+              boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
               display: 'flex',
               flexDirection: 'column',
               gap: '16px',
