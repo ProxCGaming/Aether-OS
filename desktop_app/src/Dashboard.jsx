@@ -65,48 +65,48 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
   }, {});
   
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', color: '#f0f0f5', padding: '16px', overflowY: 'auto' }} className="chat-scroll">
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', color: 'var(--text-primary)', padding: '16px', overflowY: 'auto' }} className="chat-scroll">
       <div style={{ marginBottom: '32px' }}>
         <h1 style={{ fontSize: '28px', margin: '0 0 8px 0', fontWeight: 600 }}>System Dashboard</h1>
-        <p style={{ color: '#9090a0', margin: 0, fontSize: '14px' }}>Overview of Aether-OS active tasks and resources.</p>
+        <p style={{ color: 'var(--text-muted)', margin: 0, fontSize: '14px' }}>Overview of Aether-OS active tasks and resources.</p>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '32px' }}>
         {/* Engine Status — derived from real WS connection state */}
-        <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a78bfa', marginBottom: '12px' }}>
+        <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)', marginBottom: '12px' }}>
             <Activity size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Engine Status</span>
           </div>
-          <div style={{ fontSize: '24px', fontWeight: 500, color: isOnline ? '#10b981' : '#f59e0b' }}>{isOnline ? 'Online' : status}</div>
+          <div style={{ fontSize: '24px', fontWeight: 500, color: isOnline ? 'var(--success)' : 'var(--accent)' }}>{isOnline ? 'Online' : status}</div>
         </div>
 
         {/* Active Tasks — real count from WS task lifecycle events */}
-        <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a78bfa', marginBottom: '12px' }}>
+        <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)', marginBottom: '12px' }}>
             <Cpu size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Active Tasks</span>
           </div>
           <div style={{ fontSize: '24px', fontWeight: 500 }}>{isOnline ? activeTasks : '—'}</div>
         </div>
 
         {/* Plugins — real count from PLUGIN_LIST_RESPONSE */}
-        <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a78bfa', marginBottom: '12px' }}>
+        <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)', marginBottom: '12px' }}>
             <Network size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Plugins</span>
           </div>
           <div style={{ fontSize: '24px', fontWeight: 500 }}>{pluginCount === null || pluginCount === undefined ? '—' : `${pluginCount} Active`}</div>
         </div>
 
         {/* Provider Health — Epic 5 health snapshot via App state */}
-        <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a78bfa', marginBottom: '12px' }}>
+        <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)', marginBottom: '12px' }}>
             <HeartPulse size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Provider Health</span>
           </div>
           {!healthLoaded ? (
-            <div style={{ fontSize: '15px', color: '#9090a0' }}>
+            <div style={{ fontSize: '15px', color: 'var(--text-muted)' }}>
               {isOnline ? 'Waiting for the first health report…' : 'Waiting for the engine — health will appear here once it connects.'}
             </div>
           ) : healthEntries.length === 0 ? (
-            <div style={{ fontSize: '15px', color: '#9090a0' }}>No providers reporting yet</div>
+            <div style={{ fontSize: '15px', color: 'var(--text-muted)' }}>No providers reporting yet</div>
           ) : (
             <div style={{ fontSize: '15px', lineHeight: 1.7 }}>
               {Object.entries(healthCounts).map(([state, n]) => (
@@ -117,17 +117,17 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
         </div>
 
         {/* Memory — engine memory stats (Epic 4 facade reporting) */}
-        <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a78bfa', marginBottom: '12px' }}>
+        <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)', marginBottom: '12px' }}>
             <Database size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Memory</span>
           </div>
           {memoryError ? (
             <div style={{ fontSize: '15px', lineHeight: 1.7 }}>
-              <div style={{ color: '#9090a0' }}>Episodes could not be loaded.</div>
-              <div style={{ color: '#f87171', fontSize: '13px' }}>{memoryError}</div>
+              <div style={{ color: 'var(--text-muted)' }}>Episodes could not be loaded.</div>
+              <div style={{ color: 'var(--danger)', fontSize: '13px' }}>{memoryError}</div>
             </div>
           ) : memoryStats === null ? (
-            <div style={{ fontSize: '15px', color: '#9090a0' }}>
+            <div style={{ fontSize: '15px', color: 'var(--text-muted)' }}>
               Loading…
               {memorySlow && (
                 <div style={{ fontSize: '12px', marginTop: '4px' }}>{DEFAULT_SLOW_TEXT}</div>
@@ -142,8 +142,8 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
         </div>
 
         {/* Memory Usage — real metric from Electron process.memoryUsage() IPC */}
-        <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a78bfa', marginBottom: '12px' }}>
+        <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)', marginBottom: '12px' }}>
             <HardDrive size={18} /> <span style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Memory Usage</span>
           </div>
           <div style={{ fontSize: '24px', fontWeight: 500 }}>{memoryMb !== null ? `${memoryMb} MB` : '—'}</div>
@@ -154,7 +154,7 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
         <h2 style={{ fontSize: '18px', fontWeight: 500, marginBottom: '16px' }}>Quick Actions</h2>
         <div style={{ display: 'flex', gap: '12px' }}>
           {/* Phase 9, B3: previously a dead button with no onClick — now navigates to Chat to start a task. */}
-          <button onClick={onStartWorkflow} style={{ background: 'rgba(var(--accent-rgb), 0.2)', border: '1px solid rgba(var(--accent-rgb), 0.5)', color: '#fff', padding: '12px 20px', borderRadius: '12px', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
+          <button onClick={onStartWorkflow} style={{ background: 'var(--accent)', border: '1px solid var(--accent)', color: 'var(--accent-on)', padding: '12px 20px', borderRadius: 'var(--radius-lg)', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', transition: 'all var(--motion-base)' }}>
             <Zap size={16} /> Start New Workflow
           </button>
         </div>

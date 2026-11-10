@@ -1432,9 +1432,9 @@ function AppContent() {
           disabled={currentWorkspace === w.path}
           onClick={() => onPick(w.path)}
           style={{
-            background: 'rgba(255,255,255,0.05)',
-            border: '1px solid rgba(255,255,255,0.1)',
-            color: currentWorkspace === w.path ? '#9090a0' : '#fff',
+            background: 'var(--bg-overlay)',
+            border: '1px solid var(--border-default)',
+            color: currentWorkspace === w.path ? 'var(--text-muted)' : 'var(--text-primary)',
             borderRadius: '6px',
             padding: '5px 10px',
             cursor: currentWorkspace === w.path ? 'default' : 'pointer',
@@ -1449,9 +1449,9 @@ function AppContent() {
         disabled={currentWorkspace === null}
         onClick={() => onPick(null)}
         style={{
-          background: 'rgba(255,255,255,0.05)',
-          border: '1px solid rgba(255,255,255,0.1)',
-          color: currentWorkspace === null ? '#9090a0' : '#fff',
+          background: 'var(--bg-overlay)',
+          border: '1px solid var(--border-default)',
+          color: currentWorkspace === null ? 'var(--text-muted)' : 'var(--text-primary)',
           borderRadius: '6px',
           padding: '5px 10px',
           cursor: currentWorkspace === null ? 'default' : 'pointer',
@@ -1486,7 +1486,7 @@ function AppContent() {
   }
 
   return (
-    <div style={{ width: '100vw', height: '100vh', display: 'flex', overflow: 'hidden', backgroundColor: isFloating ? 'transparent' : '#05050f', flexDirection: 'column' }}>
+    <div style={{ width: '100vw', height: '100vh', display: 'flex', overflow: 'hidden', backgroundColor: isFloating ? 'transparent' : 'var(--bg-base)', flexDirection: 'column' }}>
       
       {!isFloating && (
         <TitleBar
@@ -1505,15 +1505,6 @@ function AppContent() {
           actions — renders only while the provider holds any. */}
       <HeldActionsPrompt />
       
-      {/* Glowing Orbs for Glassmorphism pop */}
-      {!isFloating && (
-        <>
-          <div style={{ position: 'absolute', top: '10%', left: '20%', width: '500px', height: '500px', background: 'radial-gradient(circle, rgba(124, 58, 237, 0.25) 0%, rgba(0,0,0,0) 70%)', filter: 'blur(80px)', zIndex: 2, pointerEvents: 'none', borderRadius: '50%', animation: 'float1 20s infinite ease-in-out' }}></div>
-          <div style={{ position: 'absolute', bottom: '10%', right: '15%', width: '600px', height: '600px', background: 'radial-gradient(circle, rgba(236, 72, 153, 0.2) 0%, rgba(0,0,0,0) 70%)', filter: 'blur(100px)', zIndex: 2, pointerEvents: 'none', borderRadius: '50%', animation: 'float2 25s infinite ease-in-out reverse' }}></div>
-          <div style={{ position: 'absolute', top: '40%', left: '50%', width: '400px', height: '400px', background: 'radial-gradient(circle, rgba(59, 130, 246, 0.2) 0%, rgba(0,0,0,0) 70%)', filter: 'blur(90px)', zIndex: 2, pointerEvents: 'none', borderRadius: '50%', transform: 'translate(-50%, -50%)', animation: 'float3 15s infinite ease-in-out' }}></div>
-        </>
-      )}
-
       <div style={{ flex: 1, position: 'relative', display: 'flex', zIndex: 10 }}>
         {/* Toggle Button for Sidebar */}
         {!isFloating && (
@@ -1525,25 +1516,24 @@ function AppContent() {
               top: '22px',
               left: '24px',
               zIndex: 100,
-              background: 'rgba(255,255,255,0.05)',
-              border: '1px solid rgba(255,255,255,0.1)',
-              color: '#e2e8f0',
+              background: 'var(--bg-raised)',
+              border: '1px solid var(--border-default)',
+              color: 'var(--text-secondary)',
               cursor: 'pointer',
               padding: '6px',
               borderRadius: '8px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              transition: 'transform 160ms cubic-bezier(0.23, 1, 0.32, 1), background 160ms ease-out',
-              backdropFilter: 'blur(8px)'
+              transition: 'transform 160ms cubic-bezier(0.23, 1, 0.32, 1), background 160ms ease-out'
             }}
             onMouseDown={(e) => e.currentTarget.style.transform = 'scale(0.95)'}
             onMouseUp={(e) => e.currentTarget.style.transform = 'scale(1)'}
             onMouseLeave={(e) => {
               e.currentTarget.style.transform = 'scale(1)';
-              e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+              e.currentTarget.style.background = 'var(--bg-raised)';
             }}
-            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
+            onMouseEnter={(e) => e.currentTarget.style.background = 'var(--bg-hover)'}
           >
             <Menu size={20} />
           </button>
@@ -1566,8 +1556,8 @@ function AppContent() {
           }}>
             <div style={{ padding: '0 24px', paddingLeft: '72px', marginBottom: '32px', display: 'flex', alignItems: 'center', gap: '12px' }}>
               <div>
-                <h2 style={{ fontSize: '18px', margin: 0, color: '#fff' }}>AETHER-OS</h2>
-                <div style={{ fontSize: '12px', color: '#a78bfa', textTransform: 'uppercase', letterSpacing: '1px' }}>{status}</div>
+                <h2 style={{ fontSize: '18px', margin: 0, color: 'var(--text-primary)' }}>AETHER-OS</h2>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px' }}>{status}</div>
               </div>
             </div>
 
@@ -1582,17 +1572,17 @@ function AppContent() {
             {/* Sessions Section */}
             <div style={{ flex: 1, marginTop: '32px', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
               <div style={{ padding: '0 24px', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#9090a0', letterSpacing: '1px', margin: 0 }}>Chats</h3>
+                <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '1px', margin: 0 }}>Chats</h3>
                 <div style={{ display: 'flex', gap: '6px' }}>
                   <button 
                     onClick={handleTriggerImport}
                     title="Import Session"
                     aria-label="Import Session"
-                    style={{ 
-                      background: 'rgba(255,255,255,0.05)', 
-                      border: 'none', 
-                      color: '#fff',
-                      borderRadius: '6px',
+                    style={{
+                      background: 'var(--bg-overlay)',
+                      border: 'none',
+                      color: 'var(--text-secondary)',
+                      borderRadius: 'var(--radius-sm)',
                       padding: '4px 8px',
                       display: 'flex',
                       alignItems: 'center',
@@ -1604,11 +1594,11 @@ function AppContent() {
                   </button>
                 <button 
                   onClick={handleNewChat}
-                  style={{ 
-                  background: 'rgba(255,255,255,0.05)', 
-                  border: 'none', 
-                  color: '#fff',
-                  borderRadius: '6px',
+                  style={{
+                  background: 'var(--bg-overlay)',
+                  border: 'none',
+                  color: 'var(--text-secondary)',
+                  borderRadius: 'var(--radius-sm)',
                   padding: '4px 8px',
                   display: 'flex',
                   alignItems: 'center',
@@ -1628,9 +1618,9 @@ function AppContent() {
                 onChange={handleImportFileChange}
               />
               {importStatus?.type === 'error' && (
-                <div style={{ margin: '0 24px 12px', padding: '8px 10px', background: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '6px', color: '#fca5a5', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ margin: '0 24px 12px', padding: '8px 10px', background: 'rgba(201, 42, 42, 0.15)', border: '1px solid rgba(201, 42, 42, 0.3)', borderRadius: 'var(--radius-sm)', color: 'var(--danger)', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span>{importStatus.message}</span>
-                  <button onClick={() => setImportStatus(null)} style={{ background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', padding: 0 }}><X size={12} /></button>
+                  <button onClick={() => setImportStatus(null)} style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', padding: 0 }}><X size={12} /></button>
                 </div>
               )}
               {/* D1-A3: export outcomes render beside import's — the
@@ -1638,7 +1628,7 @@ function AppContent() {
                   refused export looked exactly like a successful one
                   (no file, no message). */}
               {exportStatus && (
-                <div data-testid="session-export-status" style={{ margin: '0 24px 12px', padding: '8px 10px', background: exportStatus.type === 'error' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.12)', border: `1px solid ${exportStatus.type === 'error' ? 'rgba(239, 68, 68, 0.3)' : 'rgba(16, 185, 129, 0.3)'}`, borderRadius: '6px', color: exportStatus.type === 'error' ? '#fca5a5' : '#a7f3d0', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div data-testid="session-export-status" style={{ margin: '0 24px 12px', padding: '8px 10px', background: exportStatus.type === 'error' ? 'rgba(201, 42, 42, 0.15)' : 'rgba(76, 195, 138, 0.12)', border: `1px solid ${exportStatus.type === 'error' ? 'rgba(201, 42, 42, 0.3)' : 'rgba(76, 195, 138, 0.3)'}`, borderRadius: 'var(--radius-sm)', color: exportStatus.type === 'error' ? 'var(--danger)' : 'var(--success)', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span>{exportStatus.message}</span>
                   <button onClick={() => setExportStatus(null)} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0 }}><X size={12} /></button>
                 </div>
@@ -1657,11 +1647,11 @@ function AppContent() {
                   style={{
                     width: '100%',
                     boxSizing: 'border-box',
-                    background: 'rgba(255,255,255,0.05)',
-                    border: '1px solid rgba(255,255,255,0.1)',
-                    borderRadius: '8px',
+                    background: 'var(--bg-raised)',
+                    border: '1px solid var(--border-default)',
+                    borderRadius: 'var(--radius-md)',
                     padding: '7px 10px',
-                    color: '#fff',
+                    color: 'var(--text-primary)',
                     fontSize: '12px'
                   }}
                 />
@@ -1687,9 +1677,9 @@ function AppContent() {
                       aria-pressed={sessionListView === chip.view}
                       onClick={() => handleSessionListViewChange(chip.view)}
                       style={{
-                        background: sessionListView === chip.view ? 'rgba(167, 139, 250, 0.22)' : 'rgba(255,255,255,0.05)',
-                        border: `1px solid ${sessionListView === chip.view ? 'rgba(167, 139, 250, 0.55)' : 'rgba(255,255,255,0.1)'}`,
-                        color: '#fff',
+                        background: sessionListView === chip.view ? 'var(--bg-overlay)' : 'var(--bg-raised)',
+                        border: `1px solid ${sessionListView === chip.view ? 'var(--accent)' : 'var(--border-default)'}`,
+                        color: sessionListView === chip.view ? 'var(--text-primary)' : 'var(--text-secondary)',
                         borderRadius: '999px',
                         padding: '4px 10px',
                         cursor: 'pointer',
@@ -1709,9 +1699,9 @@ function AppContent() {
                     }}
                     style={{
                       marginLeft: 'auto',
-                      background: sessionSelectMode ? 'rgba(167, 139, 250, 0.22)' : 'rgba(255,255,255,0.05)',
-                      border: `1px solid ${sessionSelectMode ? 'rgba(167, 139, 250, 0.55)' : 'rgba(255,255,255,0.1)'}`,
-                      color: '#fff',
+                      background: sessionSelectMode ? 'var(--bg-overlay)' : 'var(--bg-raised)',
+                      border: `1px solid ${sessionSelectMode ? 'var(--accent)' : 'var(--border-default)'}`,
+                      color: sessionSelectMode ? 'var(--text-primary)' : 'var(--text-secondary)',
                       borderRadius: '999px',
                       padding: '4px 10px',
                       cursor: 'pointer',
@@ -1727,18 +1717,18 @@ function AppContent() {
                   selection is non-empty. One "Move to…" applies the
                   single-move contract per selected session. */}
               {sessionSelectMode && selectedSessionIds.length > 0 && (
-                <div data-testid="session-bulk-bar" style={{ margin: '0 24px 12px', padding: '8px 10px', background: 'rgba(167, 139, 250, 0.1)', border: '1px solid rgba(167, 139, 250, 0.35)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div data-testid="session-bulk-bar" style={{ margin: '0 24px 12px', padding: '8px 10px', background: 'var(--bg-overlay)', border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-md)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span style={{ fontSize: '12px', color: '#fff' }}>{selectedSessionIds.length} selected</span>
+                    <span style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{selectedSessionIds.length} selected</span>
                     <button
                       onClick={() => setMoveMenuFor(moveMenuFor === '__bulk__' ? null : '__bulk__')}
-                      style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#fff', borderRadius: '6px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px' }}
+                      style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-strong)', color: 'var(--text-primary)', borderRadius: 'var(--radius-sm)', padding: '4px 10px', cursor: 'pointer', fontSize: '12px' }}
                     >
                       Move to…
                     </button>
                     <button
                       onClick={() => setSelectedSessionIds([])}
-                      style={{ background: 'none', border: 'none', color: '#9090a0', cursor: 'pointer', fontSize: '12px', padding: '4px' }}
+                      style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '12px', padding: '4px' }}
                     >
                       Clear
                     </button>
@@ -1754,7 +1744,7 @@ function AppContent() {
               {/* Move outcome (Q6): refusals and bulk tallies surface
                   here instead of failing silently. */}
               {moveStatus && (
-                <div data-testid="session-move-status" style={{ margin: '0 24px 12px', padding: '8px 10px', background: moveStatus.type === 'error' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.12)', border: `1px solid ${moveStatus.type === 'error' ? 'rgba(239, 68, 68, 0.3)' : 'rgba(16, 185, 129, 0.3)'}`, borderRadius: '6px', color: moveStatus.type === 'error' ? '#fca5a5' : '#a7f3d0', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div data-testid="session-move-status" style={{ margin: '0 24px 12px', padding: '8px 10px', background: moveStatus.type === 'error' ? 'rgba(201, 42, 42, 0.15)' : 'rgba(76, 195, 138, 0.12)', border: `1px solid ${moveStatus.type === 'error' ? 'rgba(201, 42, 42, 0.3)' : 'rgba(76, 195, 138, 0.3)'}`, borderRadius: 'var(--radius-sm)', color: moveStatus.type === 'error' ? 'var(--danger)' : 'var(--success)', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span>{moveStatus.message}</span>
                   <button onClick={() => setMoveStatus(null)} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0 }}><X size={12} /></button>
                 </div>
@@ -1763,7 +1753,7 @@ function AppContent() {
               <div className="chat-scroll" style={{ padding: '0 12px', flex: 1, overflowY: 'auto' }}>
                 {sessionSearchResults !== null ? (
                   sessionSearchResults.length === 0 ? (
-                    <div style={{ color: '#9090a0', fontSize: '13px', padding: '12px 14px' }}>No chats match your search.</div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '13px', padding: '12px 14px' }}>No chats match your search.</div>
                   ) : sessionSearchResults.map(r => (
                     <div
                       key={r.id}
@@ -1779,11 +1769,11 @@ function AppContent() {
                       <div style={{ overflow: 'hidden' }}>
                         <div style={{ fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.title || `Session ${r.id}`}</div>
                         {r.snippet && (
-                          <div style={{ fontSize: '12px', color: '#9090a0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.snippet}</div>
+                          <div style={{ fontSize: '12px', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.snippet}</div>
                         )}
                         {/* Q10: search is global, so every result
                             names the workspace it is filed under. */}
-                        <div style={{ fontSize: '11px', color: '#a78bfa', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{workspaceLabelFor(r.workspace)}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{workspaceLabelFor(r.workspace)}</div>
                       </div>
                     </div>
                   ))
@@ -1812,7 +1802,7 @@ function AppContent() {
                           checked={selectedSessionIds.includes(s.id)}
                           onChange={() => toggleSessionSelected(s.id)}
                           onClick={(e) => e.stopPropagation()}
-                          style={{ flexShrink: 0, accentColor: '#a78bfa' }}
+                          style={{ flexShrink: 0, accentColor: 'var(--accent)' }}
                         />
                       )}
                       <MessageSquare size={16} style={{ opacity: activeSession === s.id ? 1 : 0.5, flexShrink: 0 }} />
@@ -1838,11 +1828,11 @@ function AppContent() {
                           style={{
                             flex: 1,
                             minWidth: 0,
-                            background: 'rgba(0,0,0,0.3)',
-                            border: '1px solid rgba(167, 139, 250, 0.5)',
-                            borderRadius: '6px',
+                            background: 'var(--bg-base)',
+                            border: '1px solid var(--accent)',
+                            borderRadius: 'var(--radius-sm)',
                             padding: '3px 6px',
-                            color: '#fff',
+                            color: 'var(--text-primary)',
                             fontSize: '13px',
                             outline: 'none'
                           }}
@@ -1882,9 +1872,9 @@ function AppContent() {
                   {moveMenuFor === s.id && (
                     <div
                       data-testid={`session-move-menu-${s.id}`}
-                      style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '8px', margin: '0 2px 6px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.09)', borderRadius: '8px' }}
+                      style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '8px', margin: '0 2px 6px', background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)' }}
                     >
-                      <div style={{ fontSize: '11px', color: '#9090a0' }}>Move to…</div>
+                      <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Move to…</div>
                       {renderMoveTargets(s.workspace ?? null, (target) => startSessionMoves([s.id], target))}
                     </div>
                   )}
@@ -2052,7 +2042,7 @@ function AppContent() {
             )}
             {activeTab === 'Projects' && <Projects wsRef={wsRef} isConnected={isConnected} reconnectCount={reconnectCount} />}
             {activeTab !== 'Settings' && activeTab !== 'Dashboard' && activeTab !== 'Artifacts' && activeTab !== 'Projects' && (
-               <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: '#9090a0' }}>
+               <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
                  <h2>{activeTab} view coming soon.</h2>
                </div>
             )}
@@ -2149,24 +2139,25 @@ function NavItem({ icon, label, activeTab, setActiveTab }) {
         alignItems: 'center',
         gap: '12px',
         padding: '10px 14px',
-        borderRadius: '10px',
-        color: activeTab === label ? '#fff' : '#9090a0',
-        background: activeTab === label ? 'rgba(255, 255, 255, 0.1)' : 'transparent',
+        borderRadius: 'var(--radius-md)',
+        color: activeTab === label ? 'var(--text-primary)' : 'var(--text-secondary)',
+        background: activeTab === label ? 'var(--bg-overlay)' : 'transparent',
+        boxShadow: activeTab === label ? 'inset 3px 0 0 var(--accent)' : 'none',
         cursor: 'pointer',
-        transition: 'all 0.2s',
+        transition: 'all var(--motion-base)',
         fontSize: '14px',
         fontWeight: activeTab === label ? '500' : '400',
       }}
       onMouseEnter={(e) => {
         if (activeTab !== label) {
-          e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
-          e.currentTarget.style.color = '#fff';
+          e.currentTarget.style.background = 'var(--bg-hover)';
+          e.currentTarget.style.color = 'var(--text-primary)';
         }
       }}
       onMouseLeave={(e) => {
         if (activeTab !== label) {
           e.currentTarget.style.background = 'transparent';
-          e.currentTarget.style.color = '#9090a0';
+          e.currentTarget.style.color = 'var(--text-secondary)';
         }
       }}
     >

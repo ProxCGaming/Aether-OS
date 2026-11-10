@@ -156,15 +156,15 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
   };
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', color: '#f0f0f5', padding: '16px', overflowY: 'auto' }} className="chat-scroll">
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', color: 'var(--text-primary)', padding: '16px', overflowY: 'auto' }} className="chat-scroll">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '32px' }}>
         <div>
           <h1 style={{ fontSize: '28px', margin: '0 0 8px 0', fontWeight: 600 }}>Workspaces</h1>
-          <p style={{ color: '#9090a0', margin: 0, fontSize: '14px' }}>Add local folders for Aether to index and provide project-specific context.</p>
+          <p style={{ color: 'var(--text-muted)', margin: 0, fontSize: '14px' }}>Add local folders for Aether to index and provide project-specific context.</p>
         </div>
-        <button 
+        <button
           onClick={handleAddWorkspace}
-          style={{ background: 'var(--accent)', color: '#fff', border: 'none', padding: '10px 20px', borderRadius: '12px', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 500 }}
+          style={{ background: 'var(--accent)', color: 'var(--accent-on)', border: 'none', padding: '10px 20px', borderRadius: 'var(--radius-lg)', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 500 }}
         >
           <FolderPlus size={18} /> Add Folder
         </button>
@@ -173,7 +173,7 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
       {actionError && (
         <div
           data-testid="projects-action-error"
-          style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '12px', padding: '12px 16px', fontSize: '13px', color: '#fca5a5', marginBottom: '16px' }}
+          style={{ background: 'rgba(201, 42, 42, 0.08)', border: '1px solid rgba(201, 42, 42, 0.3)', borderRadius: 'var(--radius-lg)', padding: '12px 16px', fontSize: '13px', color: 'var(--danger)', marginBottom: '16px' }}
         >
           {actionError}
         </div>
@@ -191,23 +191,23 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
           />
         )}
         {workspaces.map(ws => (
-          <div key={ws.path} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '16px', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', opacity: ws.exists === false ? 0.55 : 1 }}>
+          <div key={ws.path} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', opacity: ws.exists === false ? 0.55 : 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-              <div style={{ background: 'rgba(59, 130, 246, 0.2)', padding: '12px', borderRadius: '12px', color: '#60a5fa' }}>
+              <div style={{ background: 'var(--bg-hover)', padding: '12px', borderRadius: 'var(--radius-lg)', color: 'var(--accent)' }}>
                 <Folder size={24} />
               </div>
               <div>
-                <h3 style={{ fontSize: '16px', margin: '0 0 4px 0' }}>{ws.name}</h3>
-                <p style={{ color: '#9090a0', margin: 0, fontSize: '13px', fontFamily: 'monospace' }}>{ws.path}</p>
+                <h3 style={{ fontSize: '16px', margin: '0 0 4px 0', color: 'var(--text-primary)' }}>{ws.name}</h3>
+                <p style={{ color: 'var(--text-muted)', margin: 0, fontSize: '13px', fontFamily: 'var(--font-mono)' }}>{ws.path}</p>
                 {typeof ws.session_count === 'number' && (
-                  <p style={{ color: '#a78bfa', margin: '4px 0 0 0', fontSize: '12px' }}>{ws.session_count} session{ws.session_count === 1 ? '' : 's'}</p>
+                  <p style={{ color: 'var(--text-secondary)', margin: '4px 0 0 0', fontSize: '12px' }}>{ws.session_count} session{ws.session_count === 1 ? '' : 's'}</p>
                 )}
               </div>
             </div>
             <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
               {confirmRemovePath === ws.path ? (
                 <>
-                  <span style={{ color: '#fca5a5', fontSize: '12px', maxWidth: '300px' }}>
+                  <span style={{ color: 'var(--danger)', fontSize: '12px', maxWidth: '300px' }}>
                     {/* D2-22: the count is stated only when the
                         engine actually reported one (the list row
                         below guards the same way) — an unreported
@@ -218,13 +218,13 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
                   </span>
                   <button
                     onClick={() => handleRemoveWorkspace(ws.path)}
-                    style={{ background: 'rgba(239, 68, 68, 0.85)', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}
+                    style={{ background: 'var(--danger)', color: 'var(--text-primary)', border: 'none', padding: '6px 12px', borderRadius: 'var(--radius-md)', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}
                   >
                     Remove
                   </button>
                   <button
                     onClick={() => setConfirmRemovePath(null)}
-                    style={{ background: 'rgba(255,255,255,0.06)', color: '#e2e8f0', border: '1px solid rgba(255,255,255,0.15)', padding: '6px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px' }}
+                    style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '6px 12px', borderRadius: 'var(--radius-md)', cursor: 'pointer', fontSize: '12px' }}
                   >
                     Cancel
                   </button>
@@ -232,22 +232,22 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
               ) : (
               <>
               {ws.is_active && (
-                <div style={{ color: '#a78bfa', fontSize: '12px', border: '1px solid rgba(167,139,250,0.5)', borderRadius: '8px', padding: '3px 10px' }}>Active</div>
+                <div style={{ color: 'var(--accent)', fontSize: '12px', border: '1px solid rgba(245, 185, 66, 0.5)', borderRadius: 'var(--radius-md)', padding: '3px 10px' }}>Active</div>
               )}
               {ws.exists === false && (
-                <div style={{ color: '#f59e0b', fontSize: '12px' }}>Folder missing</div>
+                <div style={{ color: 'var(--accent)', fontSize: '12px' }}>Folder missing</div>
               )}
               {!ws.is_active && ws.exists !== false && (
                 <button
                   onClick={() => handleSetActive(ws.path)}
-                  style={{ background: 'rgba(255,255,255,0.06)', color: '#e2e8f0', border: '1px solid rgba(255,255,255,0.15)', padding: '6px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px' }}
+                  style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '6px 12px', borderRadius: 'var(--radius-md)', cursor: 'pointer', fontSize: '12px' }}
                 >
                   Set active
                 </button>
               )}
               {/* Only show Indexed badge if the engine reports is_indexed === true */}
               {ws.is_indexed && (
-                <div style={{ color: '#10b981', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <div style={{ color: 'var(--success)', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}>
                   <Search size={14} /> Indexed
                 </div>
               )}
@@ -255,7 +255,7 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
                 onClick={() => setConfirmRemovePath(ws.path)}
                 title="Remove workspace"
                 aria-label={`Remove workspace ${ws.path}`}
-                style={{ background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: 'none', padding: '8px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                style={{ background: 'rgba(201, 42, 42, 0.12)', color: 'var(--danger)', border: 'none', padding: '8px', borderRadius: 'var(--radius-md)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               >
                 <Trash2 size={16} />
               </button>
@@ -265,16 +265,16 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
           </div>
         ))}
         {unboundSessionCount !== null && (
-          <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px dashed rgba(255,255,255,0.12)', borderRadius: '16px', padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ background: 'var(--bg-raised)', border: '1px dashed var(--border-strong)', borderRadius: 'var(--radius-lg)', padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
-              <h3 style={{ fontSize: '14px', margin: '0 0 4px 0', color: '#e2e8f0' }}>No workspace</h3>
-              <p style={{ color: '#9090a0', margin: 0, fontSize: '13px' }}>Sessions not filed under any workspace.</p>
+              <h3 style={{ fontSize: '14px', margin: '0 0 4px 0', color: 'var(--text-primary)' }}>No workspace</h3>
+              <p style={{ color: 'var(--text-muted)', margin: 0, fontSize: '13px' }}>Sessions not filed under any workspace.</p>
             </div>
-            <div style={{ color: '#a78bfa', fontSize: '13px' }}>{unboundSessionCount} unbound session{unboundSessionCount === 1 ? '' : 's'}</div>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>{unboundSessionCount} unbound session{unboundSessionCount === 1 ? '' : 's'}</div>
           </div>
         )}
         {listLoad === 'ready' && workspaces.length === 0 && (
-          <div style={{ textAlign: 'center', color: '#9090a0', padding: '40px', background: 'rgba(255,255,255,0.02)', borderRadius: '16px' }}>
+          <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '40px', background: 'var(--bg-raised)', borderRadius: 'var(--radius-lg)' }}>
             No workspaces added. Add a local folder to get started.
           </div>
         )}
