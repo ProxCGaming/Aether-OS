@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
-import { AlertCircle, ShieldAlert, X, TerminalSquare, User, Bot, Edit2, MoreHorizontal, RotateCcw, Volume2, VolumeX } from 'lucide-react';
+import { AlertCircle, ShieldAlert, X, TerminalSquare, User, Bot, Edit2, MoreHorizontal, RotateCcw, Volume2, VolumeX, KeyRound } from 'lucide-react';
 import {
   ThinkingAccordion,
   ApprovalPreview,
@@ -201,6 +201,71 @@ function PluginApprovalMessage({ msg, onApprovePlugin }) {
           >
             <TerminalSquare size={16} style={{ marginRight: '6px' }} />
             Approve Install
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// F2 (post-Wave-6 linkage audit): the vault ask-every-time prompt.
+// Same amber approval pattern as the tool/plugin cards above. The
+// engine's push carries site + username only — a password is never
+// in the payload and never rendered here; it goes straight into the
+// page if (and only if) the owner approves. An expired card (the
+// engine's timeout resolved the fill closed before an answer) shows
+// the refusal and disables its buttons instead of offering a stale
+// answer as if it were live.
+function VaultFillApprovalMessage({ msg, onVaultFillApproval }) {
+  const decided = !!msg.decisionQueued;
+  const expired = !!msg.expired;
+  return (
+    <div data-testid="vault-fill-approval-card" data-message-id={msg.id || undefined} style={{
+      margin: '8px 0',
+      background: 'var(--bg-raised)',
+      border: '1px solid rgba(var(--accent-rgb), 0.35)',
+      borderRadius: 'var(--radius-lg)',
+      overflow: 'hidden',
+      boxShadow: 'none'
+    }}>
+      <div style={{ padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '12px', borderBottom: '1px solid var(--border-default)', background: 'rgba(var(--accent-rgb), 0.1)' }}>
+        <ShieldAlert size={20} color="#F5B942" />
+        <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600, color: 'var(--accent)' }}>Credential Fill Approval Required</h3>
+      </div>
+      <div style={{ padding: '20px' }}>
+        <p style={{ margin: '0 0 16px 0', fontSize: '14px', color: 'var(--text-primary)', lineHeight: 1.5 }}>
+          The agent wants to fill a saved vault credential: <strong>{msg.username}</strong> on <strong>{msg.site}</strong>. Because this entry is set to ask every time, the fill waits for your answer. The password itself is never shown here — it goes directly into the page only if you approve.
+        </p>
+        {msg.decisionQueued && (
+          <div data-testid="approval-decision-queued" style={{ marginBottom: '16px', padding: '8px 12px', borderRadius: '8px', background: 'rgba(var(--accent-rgb), 0.15)', border: '1px solid rgba(var(--accent-rgb), 0.35)', color: 'var(--accent)', fontSize: '12px' }}>
+            {msg.decisionApproved ? 'Approval' : 'Denial'} queued — will send when the engine reconnects.
+          </div>
+        )}
+        {expired && !decided && (
+          <div data-testid="vault-fill-approval-expired" style={{ marginBottom: '16px', padding: '8px 12px', borderRadius: '8px', background: 'rgba(201, 42, 42, 0.12)', border: '1px solid rgba(201, 42, 42, 0.35)', color: 'var(--danger)', fontSize: '12px' }}>
+            This request expired — the fill was refused. If you still want it filled, ask the agent to try again.
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+          <button
+            data-testid="vault-fill-deny-btn"
+            onClick={() => onVaultFillApproval && onVaultFillApproval(msg.id, false)}
+            disabled={decided || expired}
+            className="ios-close-btn"
+            style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-strong)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: 'var(--text-primary)', display: 'flex', alignItems: 'center' }}
+          >
+            <X size={16} style={{ marginRight: '6px' }} />
+            Deny Fill
+          </button>
+          <button
+            data-testid="vault-fill-approve-btn"
+            onClick={() => onVaultFillApproval && onVaultFillApproval(msg.id, true)}
+            disabled={decided || expired}
+            className="ios-close-btn"
+            style={{ background: 'var(--accent)', border: '1px solid var(--accent)', color: 'var(--accent-on)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+          >
+            <KeyRound size={16} style={{ marginRight: '6px' }} />
+            Approve Fill
           </button>
         </div>
       </div>
@@ -505,6 +570,7 @@ export default function ChatTranscript({
   onEnvelopeGrantChange,
   onApproveTool,
   onApprovePlugin,
+  onVaultFillApproval,
   approveToolWithEdits,
   onStopTask,
   onOpenArtifact,
@@ -577,6 +643,15 @@ export default function ChatTranscript({
               key={msg.id || i}
               msg={msg}
               onApprovePlugin={onApprovePlugin}
+            />
+          );
+        }
+        if (msg.role === 'vault_fill_approval') {
+          return (
+            <VaultFillApprovalMessage
+              key={msg.id || i}
+              msg={msg}
+              onVaultFillApproval={onVaultFillApproval}
             />
           );
         }

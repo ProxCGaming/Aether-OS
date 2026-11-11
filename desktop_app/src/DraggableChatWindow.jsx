@@ -482,6 +482,7 @@ export default function DraggableChatWindow({
   isThinking,
   onApproveTool,
   onApprovePlugin,
+  onVaultFillApproval,
   providers = [],
   onChangeModel = () => {},
   onEditMessage,
@@ -1585,6 +1586,7 @@ export default function DraggableChatWindow({
               onEnvelopeGrantChange={handleEnvelopeGrantChange}
               onApproveTool={onApproveTool}
               onApprovePlugin={onApprovePlugin}
+              onVaultFillApproval={onVaultFillApproval}
               approveToolWithEdits={approveToolWithEdits}
               onStopTask={onStopTask}
               onOpenArtifact={onOpenArtifact}

@@ -191,4 +191,73 @@ describe('useEngineMessages', () => {
     expect(deps.setCanvasArtifacts).not.toHaveBeenCalled();
     expect(deps.onArtifactLoadStart).not.toHaveBeenCalled();
   });
+
+  it('VAULT_FILL_APPROVAL_REQUEST becomes a vault card + a shortcut-tracked pending (F2)', () => {
+    const { deps, emit } = mount();
+    emit({
+      type: 'VAULT_FILL_APPROVAL_REQUEST',
+      request_id: 'vault-req-1',
+      payload: {
+        request_id: 'vault-req-1',
+        entry_id: 'entry-9',
+        site: 'https://bank.example.com',
+        username: 'arindam',
+        task_id: 'task-7',
+      },
+    });
+    expect(deps.setIsThinking).toHaveBeenCalledWith(false);
+    expect(deps.pendingApprovalsRef.current).toEqual([
+      { kind: 'vault', id: 'vault-req-1' },
+    ]);
+    const updaters = deps.setChatMessages.mock.calls
+      .map(([arg]) => arg).filter((a) => typeof a === 'function');
+    const next = updaters.reduce((acc, fn) => fn(acc), []);
+    expect(next).toEqual([expect.objectContaining({
+      id: 'vault-req-1',
+      role: 'vault_fill_approval',
+      entry_id: 'entry-9',
+      site: 'https://bank.example.com',
+      username: 'arindam',
+      task_id: 'task-7',
+      isFinal: true,
+    })]);
+  });
+
+  it('VAULT_FILL_APPROVAL_REQUEST for an off-view task session is cached there (F2)', () => {
+    const { deps, emit } = mount();
+    deps.activeTaskSessionRef.current = 's-other';
+    emit({
+      type: 'VAULT_FILL_APPROVAL_REQUEST',
+      request_id: 'vault-req-2',
+      payload: {
+        request_id: 'vault-req-2',
+        entry_id: 'entry-9',
+        site: 'https://mail.example.com',
+        username: 'arindam',
+        task_id: 'task-8',
+      },
+    });
+    expect(deps.setChatMessages).not.toHaveBeenCalled();
+    expect(deps.sessionCacheRef.current['s-other']).toEqual([
+      expect.objectContaining({ id: 'vault-req-2', role: 'vault_fill_approval' }),
+    ]);
+  });
+
+  it('TASK_COMPLETED marks an undecided vault card expired (F2)', () => {
+    const { deps, emit } = mount();
+    const seed = [{
+      id: 'vault-req-1', role: 'vault_fill_approval',
+      site: 'https://bank.example.com', username: 'arindam', isFinal: true,
+    }];
+    emit({
+      type: 'TASK_COMPLETED',
+      payload: { task_id: 'task-7', session_id: 's1', response: 'done' },
+    });
+    const updaters = deps.setChatMessages.mock.calls
+      .map(([arg]) => arg).filter((a) => typeof a === 'function');
+    const next = updaters.reduce((acc, fn) => fn(acc), seed);
+    expect(next.find((m) => m.id === 'vault-req-1')).toEqual(
+      expect.objectContaining({ expired: true }));
+    expect(deps.pendingApprovalsRef.current).toEqual([]);
+  });
 });

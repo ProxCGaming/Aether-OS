@@ -1138,6 +1138,8 @@ function AppContent() {
           const approved = !e.shiftKey;
           if (pending.kind === 'tool') {
             handleToolApproval(pending.id, approved, pending.approval_key);
+          } else if (pending.kind === 'vault') {
+            handleVaultFillApproval(pending.id, approved);
           } else {
             handlePluginApproval(pending.id, approved);
           }
@@ -1276,6 +1278,33 @@ function AppContent() {
     // E6-F13: decided now — no longer shortcut-actionable.
     pendingApprovalsRef.current = pendingApprovalsRef.current.filter(
       (entry) => !(entry.kind === 'plugin' && entry.id === requestId));
+    if (disposition === 'queued') {
+      markApprovalDecisionQueued(requestId, null, approved);
+    } else {
+      setChatMessages(prev => prev.filter(m => m.id !== requestId));
+      if (approved) setIsThinking(true);
+    }
+  };
+
+  // F2 (post-Wave-6 linkage audit): the owner's answer to a vault
+  // ask-every-time fill prompt. Per contracts.py the desktop answers
+  // with VAULT_FILL_APPROVAL_RESPONSE {"request_id", "approved"} —
+  // the engine's handler reads BOTH from the payload, so the payload
+  // carries them; the envelope id repeats the correlation id, as
+  // with plugin approvals. Via safeSend like the other approval
+  // decisions: queued (never dropped) while offline, with the card
+  // marked queued; the engine tolerates a stale id silently (the
+  // fill already failed closed on its timeout), so a late or queued
+  // answer can never fill anything on its own.
+  const handleVaultFillApproval = (requestId, approved) => {
+    const disposition = safeSend(
+      'VAULT_FILL_APPROVAL_RESPONSE',
+      { request_id: requestId, approved },
+      requestId,
+    );
+    // E6-F13: decided now — no longer shortcut-actionable.
+    pendingApprovalsRef.current = pendingApprovalsRef.current.filter(
+      (entry) => !(entry.kind === 'vault' && entry.id === requestId));
     if (disposition === 'queued') {
       markApprovalDecisionQueued(requestId, null, approved);
     } else {
@@ -1910,6 +1939,7 @@ function AppContent() {
           onStopTask={handleStopTask}
           onApproveTool={handleToolApproval}
           onApprovePlugin={handlePluginApproval}
+          onVaultFillApproval={handleVaultFillApproval}
           status={status}
           isThinking={isThinking}
           providers={providers}

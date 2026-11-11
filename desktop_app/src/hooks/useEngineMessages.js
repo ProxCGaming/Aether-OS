@@ -79,6 +79,28 @@ export function useEngineMessages(deps) {
   // SocketContext facade (wsRef). No mock wsRef, no direct onEngineMessage
   // subscription, no local dedup — all of that lives in the facade now.
   useEffect(() => {
+    // Vault fill approvals (F2 fix): the engine fails an
+    // ask-every-time fill closed on its own 120s timeout, so a vault
+    // prompt still undecided when its task ends can never be
+    // answered live. The tool-approval flow only disarms the
+    // shortcut ref at task end (D1-A5); the vault card additionally
+    // gets a visual expired state, because its timeout can lapse
+    // mid-task (the fill tool returns the refusal and the task
+    // moves on). A stale answer stays harmless regardless — the
+    // engine's resolve_fill_approval returns False for unknown ids
+    // and the WS handler tolerates it silently.
+    const expireVaultFillCards = (list) => list.map(m =>
+      (m.role === 'vault_fill_approval' && !m.decisionQueued && !m.expired)
+        ? { ...m, expired: true }
+        : m);
+    const expirePendingVaultFillApprovals = () => {
+      if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
+        const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
+        sessionCacheRef.current[activeTaskSessionRef.current] = expireVaultFillCards(cached);
+      } else {
+        setChatMessages(prev => expireVaultFillCards(prev));
+      }
+    };
     const handleMessage = (event) => {
       let data;
       try {
@@ -377,6 +399,9 @@ export function useEngineMessages(deps) {
           // once it ends they must stop being shortcut-actionable
           // (the Ctrl+Enter/Ctrl+Shift+Enter listener reads this ref).
           pendingApprovalsRef.current = [];
+          // F2: an undecided vault fill prompt is engine-dead now —
+          // mark the card expired, not just disarmed.
+          expirePendingVaultFillApprovals();
           // E8-1.1a: the finished task's manifest is complete now.
           requestRewindManifest(data.payload?.session_id || activeTaskSessionRef.current || activeSessionRef.current);
           // E8-A8.1a: reconcile the cost surfaces with the ledger
@@ -438,6 +463,8 @@ export function useEngineMessages(deps) {
           // D1-A5: see TASK_COMPLETED — a dead task's approvals must
           // not stay armed for the keyboard shortcuts.
           pendingApprovalsRef.current = [];
+          // F2: see TASK_COMPLETED — expire undecided vault cards.
+          expirePendingVaultFillApprovals();
           // E8-1.1a: failed/cancelled tasks still recorded points.
           requestRewindManifest(data.payload?.session_id || activeTaskSessionRef.current || activeSessionRef.current);
           if (data.payload?.task_id || data.request_id) {
@@ -832,6 +859,40 @@ export function useEngineMessages(deps) {
             plugin_details: data.payload.plugin_details,
             isFinal: true
           }]);
+        } else if (data.type === 'VAULT_FILL_APPROVAL_REQUEST') {
+          // F2 (post-Wave-6 linkage audit): the desktop half of the
+          // vault ask-every-time round trip. The engine's vault
+          // service publishes this on the task's event bus with
+          // payload {request_id, entry_id, site, username, task_id}
+          // and waits for VAULT_FILL_APPROVAL_RESPONSE (contracts.py)
+          // — before this branch nothing in the desktop answered, so
+          // every ask-every-time fill timed out and was refused.
+          // Mirrors TOOL_APPROVAL_REQUEST: a transcript card routed
+          // to the owning task's session, tracked for the E6-F13
+          // shortcuts, answered from App (handleVaultFillApproval).
+          // The payload never carries a password — site + username.
+          setIsThinking(false);
+          const vaultPayload = data.payload || {};
+          const vaultRequestId = data.request_id || vaultPayload.request_id || Date.now().toString();
+          pendingApprovalsRef.current = [
+            ...pendingApprovalsRef.current,
+            { kind: 'vault', id: vaultRequestId },
+          ];
+          const vaultMsg = {
+            id: vaultRequestId,
+            role: 'vault_fill_approval',
+            entry_id: vaultPayload.entry_id || null,
+            site: vaultPayload.site || '',
+            username: vaultPayload.username || '',
+            task_id: vaultPayload.task_id || null,
+            isFinal: true
+          };
+          if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {
+            const cached = sessionCacheRef.current[activeTaskSessionRef.current] || [];
+            sessionCacheRef.current[activeTaskSessionRef.current] = [...cached, vaultMsg];
+          } else {
+            setChatMessages(prev => [...prev, vaultMsg]);
+          }
         } else if (data.type === 'SESSION_CREATE_RESPONSE') {
           const newId = data.payload.session_id;
           // D1-A5: a fresh session orphans the previous task's
