@@ -488,7 +488,7 @@ function AppContent() {
     handleVoiceStart, handleVoiceStop, handleVoiceDismissError,
     handleVoiceRtcOffer, handleVoiceRtcIceCandidate,
     handleVoicePlaybackProgress,
-    handleDictationStart, handleDictationStop,
+    handleDictationStart, handleDictationChunk, handleDictationStop,
     handleReadAloudStart, handleReadAloudStop,
   } = useVoiceBridge({ wsRef, activeSessionRef, activeSession, setChatMessages });
 
@@ -1997,6 +1997,7 @@ function AppContent() {
           dictationState={dictationState}
           readAloudState={readAloudState}
           onDictationStart={handleDictationStart}
+          onDictationChunk={handleDictationChunk}
           onDictationStop={handleDictationStop}
           onReadAloudStart={handleReadAloudStart}
           onReadAloudStop={handleReadAloudStop}

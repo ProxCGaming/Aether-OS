@@ -56,11 +56,22 @@ describe('Voice surfaces on a mid-session disconnect (grouped S4)', () => {
     });
     window.RTCPeerConnection = jest.fn(() => ({ addTrack: jest.fn(), close: jest.fn() }));
 
-    const mockSource = { connect: jest.fn(), start: jest.fn(), stop: jest.fn(), onended: null };
+    const mockSource = { connect: jest.fn(), start: jest.fn(), stop: jest.fn(), disconnect: jest.fn(), onended: null };
+    // F1: dictation capture builds a real audio graph
+    // (createMediaStreamSource -> ScriptProcessor); the mock
+    // grows those APIs so an engine-approved dictation actually
+    // reaches the recording state this suite then disconnects.
+    const mockProcessor = { connect: jest.fn(), disconnect: jest.fn(), onaudioprocess: null };
+    const mockGain = { gain: { value: 1 }, connect: jest.fn(), disconnect: jest.fn() };
     const mockAudioContext = {
       currentTime: 0,
       destination: {},
+      sampleRate: 48000,
+      state: 'running',
       createBufferSource: jest.fn(() => mockSource),
+      createMediaStreamSource: jest.fn(() => mockSource),
+      createScriptProcessor: jest.fn(() => mockProcessor),
+      createGain: jest.fn(() => mockGain),
       decodeAudioData: jest.fn(() => Promise.resolve({ duration: 2 })),
       close: jest.fn(),
     };

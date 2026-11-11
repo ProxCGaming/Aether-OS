@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 import { Globe, Play, Pause, Maximize2, Minimize2, X, GripHorizontal, Bot, User, ShieldAlert, Check, ChevronDown, ExternalLink, LogIn, Square, Layers, Edit2, RotateCcw, Download, CircleDollarSign, Mic } from 'lucide-react';
 import Dropdown from './Dropdown';
@@ -10,6 +10,7 @@ import VoiceOverlay from './components/VoiceOverlay';
 import { sanitizeSvg } from './sanitizeSvg';
 import { useSlowLoad } from './components/Settings/LoadStateRow';
 import ChatComposer from './components/ChatComposer';
+import { startDictationCapture } from './dictationCapture';
 import ContextMenu from './components/ContextMenu';
 import { buildContextMenuState } from './components/contextMenuState';
 import ChatTranscript from './components/ChatTranscript';
@@ -531,6 +532,7 @@ export default function DraggableChatWindow({
   dictationState = null,
   readAloudState = null,
   onDictationStart = null,
+  onDictationChunk = null,
   onDictationStop = null,
   onReadAloudStart = null,
   onReadAloudStop = null
@@ -579,8 +581,50 @@ export default function DraggableChatWindow({
   const [playingMessageId, setPlayingMessageId] = useState(null);
   const [readAloudError, setReadAloudError] = useState(null);
 
-  const dictationStreamRef = useRef(null);
+  // F1 (linkage audit): the live capture behind the mic —
+  // { stream, session } while dictating, null otherwise. The
+  // session (src/dictationCapture.js) reads the stream and
+  // streams cumulative PCM16 chunks up through onDictationChunk;
+  // ending it returns the complete utterance for the STOP
+  // request's final transcription. Before F1 the stream was
+  // held unread and no chunk was ever sent.
+  const dictationCaptureRef = useRef(null);
   const baseInputRef = useRef('');
+
+  const beginDictationCapture = useCallback((stream) => {
+    dictationCaptureRef.current = { stream, session: null };
+    try {
+      const session = startDictationCapture({
+        stream,
+        onChunk: (payload) => { if (onDictationChunk) onDictationChunk(payload); },
+      });
+      dictationCaptureRef.current.session = session;
+      setIsDictating(true);
+    } catch (err) {
+      // Same honesty contract as a refused getUserMedia: the
+      // error shows, the mic is released, nothing dangles.
+      dictationCaptureRef.current = null;
+      try { stream.getTracks().forEach((t) => t.stop()); } catch {}
+      setDictationError(`Microphone unavailable: ${err && err.message ? err.message : err}`);
+    }
+  }, [onDictationChunk, setIsDictating, setDictationError]);
+
+  // Tears capture down (graph closed, tracks stopped) and
+  // returns the final { audio, sample_rate } for the STOP
+  // request — null when no capture was running.
+  const endDictationCapture = useCallback(() => {
+    const capture = dictationCaptureRef.current;
+    dictationCaptureRef.current = null;
+    if (!capture) return null;
+    let finalAudio = null;
+    if (capture.session) {
+      try { finalAudio = capture.session.stop(); } catch {}
+    }
+    if (capture.stream) {
+      try { capture.stream.getTracks().forEach((t) => t.stop()); } catch {}
+    }
+    return finalAudio;
+  }, []);
   // D1-C11: whether a mic press is currently active (see
   // handleMicStart / handleMicEnd).
   const micPressActiveRef = useRef(false);
@@ -592,12 +636,9 @@ export default function DraggableChatWindow({
     if (dictationState?.error) {
       setDictationError(dictationState.error);
       setIsDictating(false);
-      if (dictationStreamRef.current) {
-        try { dictationStreamRef.current.getTracks().forEach((t) => t.stop()); } catch {} 
-        dictationStreamRef.current = null;
-      }
+      endDictationCapture();
     }
-  }, [dictationState?.error]);
+  }, [dictationState?.error, endDictationCapture]);
 
   useEffect(() => {
     if (dictationState?.status === 'active') {
@@ -608,15 +649,35 @@ export default function DraggableChatWindow({
         }
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          dictationStreamRef.current = stream;
-          setIsDictating(true);
+          // The press may have ended while permission was in
+          // flight — then the STOP already went out without
+          // audio and this stream must not start (or leak).
+          if (!micPressActiveRef.current) {
+            try { stream.getTracks().forEach((t) => t.stop()); } catch {}
+            return;
+          }
+          beginDictationCapture(stream);
         } catch (err) {
           setDictationError(`Microphone unavailable: ${err && err.message ? err.message : err}`);
         }
       };
       startCapture();
     }
-  }, [dictationState?.status]);
+  }, [dictationState?.status, beginDictationCapture]);
+
+  // Unmounting mid-dictation must not leak the mic or the
+  // audio graph. No STOP is sent: the engine keeps no
+  // dictation session state to clean up.
+  useEffect(() => () => {
+    const capture = dictationCaptureRef.current;
+    dictationCaptureRef.current = null;
+    if (capture && capture.session) {
+      try { capture.session.stop(); } catch {}
+    }
+    if (capture && capture.stream) {
+      try { capture.stream.getTracks().forEach((t) => t.stop()); } catch {}
+    }
+  }, []);
 
   useEffect(() => {
     if (dictationState?.text !== undefined && dictationState?.text !== null) {
@@ -658,8 +719,13 @@ export default function DraggableChatWindow({
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      dictationStreamRef.current = stream;
-      setIsDictating(true);
+      // As in the engine-answered path: a press that already
+      // ended must not start (or leak) a capture.
+      if (!micPressActiveRef.current) {
+        try { stream.getTracks().forEach((t) => t.stop()); } catch {}
+        return;
+      }
+      beginDictationCapture(stream);
     } catch (err) {
       setDictationError(`Microphone unavailable: ${err && err.message ? err.message : err}`);
     }
@@ -678,15 +744,10 @@ export default function DraggableChatWindow({
     // included).
     if (!micPressActiveRef.current) return;
     micPressActiveRef.current = false;
-    if (dictationStreamRef.current) {
-      try {
-        dictationStreamRef.current.getTracks().forEach((t) => t.stop());
-      } catch {} 
-      dictationStreamRef.current = null;
-    }
+    const finalAudio = endDictationCapture();
     setIsDictating(false);
     if (onDictationStop) {
-      onDictationStop();
+      onDictationStop(finalAudio);
     }
   };
 

@@ -70,12 +70,32 @@ describe('Push-to-talk dictation + TTS read-aloud (E8-5.3)', () => {
       connect: jest.fn(),
       start: jest.fn(),
       stop: jest.fn(),
+      disconnect: jest.fn(),
       onended: null,
+    };
+    // F1: dictation capture builds a real graph now
+    // (createMediaStreamSource -> ScriptProcessor). The mock
+    // grows those APIs so the standalone mic tests exercise the
+    // capture path instead of a stream held unread.
+    const mockProcessor = {
+      connect: jest.fn(),
+      disconnect: jest.fn(),
+      onaudioprocess: null,
+    };
+    const mockGain = {
+      gain: { value: 1 },
+      connect: jest.fn(),
+      disconnect: jest.fn(),
     };
     mockAudioContext = {
       currentTime: 0,
       destination: {},
+      sampleRate: 48000,
+      state: 'running',
       createBufferSource: jest.fn(() => mockSource),
+      createMediaStreamSource: jest.fn(() => mockSource),
+      createScriptProcessor: jest.fn(() => mockProcessor),
+      createGain: jest.fn(() => mockGain),
       decodeAudioData: jest.fn(() => Promise.resolve({ duration: 2 })),
       close: jest.fn(),
     };

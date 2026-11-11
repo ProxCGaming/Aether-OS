@@ -160,9 +160,32 @@ export function useVoiceBridge(deps) {
     setDictationState({ status: 'starting', error: null, text: '' });
   }, [sendVoiceRequest, activeSessionRef]);
 
-  const handleDictationStop = useCallback(() => {
+  // F1 (linkage audit): the chunk sender the capture session
+  // streams through. Payload shape is the engine contract
+  // (websocket.py _handle_dictation_chunk_request): base64 raw
+  // PCM16 mono in `audio`, `sample_rate`, `is_final`. Chunks are
+  // cumulative (see src/dictationCapture.js); the engine chains
+  // them in arrival order (RUX-B-09), so no response is awaited.
+  const handleDictationChunk = useCallback((chunk) => {
+    if (!chunk || !chunk.audio) return;
+    sendVoiceRequest('DICTATION_CHUNK_REQUEST', {
+      session_id: activeSessionRef.current,
+      audio: chunk.audio,
+      sample_rate: chunk.sample_rate || 16000,
+      is_final: false,
+    });
+  }, [sendVoiceRequest, activeSessionRef]);
+
+  const handleDictationStop = useCallback((finalAudio) => {
     const sessionId = activeSessionRef.current;
-    sendVoiceRequest('DICTATION_STOP_REQUEST', { session_id: sessionId });
+    // The final transcription rides the STOP request: the
+    // complete utterance buffer, base64 PCM16 (an empty string
+    // is honest silence to the engine — answered ok, no text).
+    sendVoiceRequest('DICTATION_STOP_REQUEST', {
+      session_id: sessionId,
+      audio: (finalAudio && finalAudio.audio) || '',
+      sample_rate: (finalAudio && finalAudio.sample_rate) || 16000,
+    });
     setDictationState(prev => (prev ? { ...prev, status: 'idle' } : null));
   }, [sendVoiceRequest, activeSessionRef]);
 
@@ -221,7 +244,7 @@ export function useVoiceBridge(deps) {
     handleVoiceStart, handleVoiceStop, handleVoiceDismissError,
     handleVoiceRtcOffer, handleVoiceRtcIceCandidate,
     handleVoicePlaybackProgress,
-    handleDictationStart, handleDictationStop,
+    handleDictationStart, handleDictationChunk, handleDictationStop,
     handleReadAloudStart, handleReadAloudStop,
   };
 }
