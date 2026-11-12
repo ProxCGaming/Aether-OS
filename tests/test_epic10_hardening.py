@@ -57,6 +57,34 @@ def test_audit_log_drops_oldest_archive(tmp_path):
     assert not (tmp_path / "audit.log.3.gz").exists()
 
 
+def test_audit_log_rotation_record_never_recurses(tmp_path, monkeypatch):
+    # A cap smaller than one entry plus the AUDIT_LOG_ROTATED record:
+    # every append rotates, so a rotation record that recorded its own
+    # rotation cascades — hundreds of rotations per event, the oldest
+    # archive dropped at every level, until a RecursionError happens
+    # to land outside the guarded append and kills the write. The
+    # record is written, but it never re-records.
+    log = tmp_path / "audit.log"
+    logger = AuditLogger(log, max_bytes=120, backup_count=2)
+    rotations = 0
+    real_rotate = AuditLogger._rotate
+
+    def counting_rotate(self):
+        nonlocal rotations
+        rotations += 1
+        return real_rotate(self)
+
+    monkeypatch.setattr(AuditLogger, "_rotate", counting_rotate)
+    for i in range(30):
+        logger.log_event("ENTRY", {"i": i, "pad": "z" * 40})
+    assert flush_pending_rotations(timeout=10)
+    # At most one extra rotation per event (the record's own append) —
+    # an unguarded record cascades into hundreds per event.
+    assert rotations <= 2 * 30
+    assert (tmp_path / "audit.log.1.gz").exists()
+    assert not (tmp_path / "audit.log.3.gz").exists()
+
+
 def test_audit_log_under_cap_never_rotates(tmp_path):
     log = tmp_path / "audit.log"
     logger = AuditLogger(log, max_bytes=10 * 1024 * 1024, backup_count=2)

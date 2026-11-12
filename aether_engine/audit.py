@@ -253,16 +253,22 @@ class AuditLogger:
             f.write(line)
         return rotated
 
-    def _append(self, record: dict[str, Any]) -> None:
+    def _append(self, record: dict[str, Any], *, _record_rotation: bool = True) -> None:
         line = json.dumps(_redact(record)) + "\n"
         with _APPEND_LOCK:
             rotated = self._append_locked(line)
-        if rotated:
+        if rotated and _record_rotation:
+            # The rotation record goes through _append like any other
+            # record (see _append_locked), but it must never record its
+            # OWN rotation: at a cap smaller than one entry plus the
+            # rotation record, that recursion is unbounded — every
+            # attempt to note a rotation rotates again (dropping the
+            # oldest archive at every level) until RecursionError.
             self.log_event("AUDIT_LOG_ROTATED", {
                 "max_bytes": self.max_bytes,
                 "backup_count": self.backup_count,
                 "archive": self._archive_path(1).name,
-            })
+            }, _record_rotation=False)
 
     def log_connection(self, success: bool, ip: str = "unknown",
                        port: int | None = None, reason: str = "") -> None:
@@ -277,9 +283,11 @@ class AuditLogger:
                        "from_state": from_st.value, "to_state": to_st.value,
                        "payload": payload or {}})
 
-    def log_event(self, action: str, details: dict | None = None) -> None:
+    def log_event(self, action: str, details: dict | None = None, *,
+                  _record_rotation: bool = True) -> None:
         self._append({"type": "ENGINE_EVENT", "ts": time.time(),
-                       "action": action, "details": details or {}})
+                       "action": action, "details": details or {}},
+                     _record_rotation=_record_rotation)
 
     def log_validation(self, tool_name: str, valid: bool, message: str, payload: dict | None = None) -> None:
         self._append({"type": "VALIDATION", "ts": time.time(),
