@@ -73,9 +73,56 @@ def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 5000")
+    _ensure_wal_mode(conn)
     return conn
+
+
+def _ensure_wal_mode(conn: sqlite3.Connection) -> None:
+    """Switch the DB file to WAL, tolerating the first-open race.
+
+    The journal mode is persistent per database file, so this is a
+    one-time transition — but it needs exclusive access, and SQLite
+    does not apply busy_timeout to journal-mode changes: a
+    connection that asks for WAL while another connection holds a
+    transaction on a not-yet-WAL file gets "database is locked"
+    immediately (measured: 0.00s, busy_timeout set or not). Once the
+    file is in WAL the same request is a no-op that cannot fail
+    that way.
+
+    Concurrent first connections raced exactly this — four
+    extraction threads initialising a fresh DB together, one of
+    them mid-transaction — and the OperationalError escaped
+    _get_conn before the store's per-fact guards, killing the whole
+    extraction batch (the N-07 flake: CI run 43324851127 lost one
+    fact with only "Fact extraction failed: database is locked"
+    logged). So: skip the request when the file is already WAL,
+    retry the transition briefly while a competing writer finishes,
+    and if it still cannot land, carry on without it — this
+    connection works correctly in the rollback journal and a later
+    connection completes the transition. Housekeeping must never
+    kill a caller.
+    """
+    try:
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+    except sqlite3.Error:
+        return
+    if row is not None and str(row[0]).lower() == "wal":
+        return
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or time.monotonic() >= deadline:
+                logger.warning(
+                    "Could not switch %s to WAL journal mode (%s); "
+                    "continuing in the rollback journal — a later "
+                    "connection retries the transition",
+                    DB_PATH, e)
+                return
+            time.sleep(0.05)
 
 def init_kg_db() -> None:
     with _get_conn() as conn:

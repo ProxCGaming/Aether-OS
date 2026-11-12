@@ -175,6 +175,46 @@ def test_concurrent_extraction_same_new_entity_keeps_all_batches(
     assert stored == set(facts), stored
 
 
+def test_get_conn_survives_concurrent_first_open(kg_db):
+    # Regression pin for the N-07 flake's proven root cause (found
+    # 13 Nov 2026, CI run 43324851127): the batch above was still
+    # lost intermittently — not in the store (the module lock and
+    # savepoints held) but in _get_conn itself. Switching a fresh
+    # DB to WAL needs exclusive access and busy_timeout does not
+    # apply to journal-mode changes, so a connection that asked
+    # while another held a transaction got "database is locked"
+    # immediately; the error escaped init_kg_db, outside the
+    # per-fact guards, and the outer handler dropped the whole
+    # batch ("Fact extraction failed: database is locked").
+    # Hold a write transaction open on the fresh file and open a
+    # connection through _get_conn: it must come back working, and
+    # once the holder releases, the file must be in WAL.
+    # check_same_thread=False: the holder is created here but
+    # committed/closed by the releaser thread below (used strictly
+    # sequentially — the main thread never touches it after start).
+    holder = sqlite3.connect(kg_db, check_same_thread=False)
+    holder.execute("CREATE TABLE hold (x INTEGER)")
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("INSERT INTO hold VALUES (1)")
+
+    def release_holder():
+        time.sleep(0.4)
+        holder.commit()
+        holder.close()
+
+    releaser = threading.Thread(target=release_holder)
+    releaser.start()
+    try:
+        conn = kg._get_conn()  # raised OperationalError before the fix
+        try:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+    finally:
+        releaser.join(timeout=10)
+    assert str(mode).lower() == "wal"
+
+
 # ---------------------------------------------------------------------------
 # N-12 — synchronous SQLite inside async memory functions
 # ---------------------------------------------------------------------------
