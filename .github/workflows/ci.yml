@@ -166,6 +166,17 @@ jobs:
           cache-dependency-path: desktop_app/package-lock.json
       - name: Install dependencies
         run: npm ci
+      - name: Build frontend (vite build — resolves every import)
+        # Jest cannot catch a missing or uninstalled package: it maps
+        # ESM-only dependencies such as remark-gfm to stubs (see
+        # desktop_app/jest.config.cjs), so the suite passed while the
+        # app could not start on the owner's PC (13 Nov 2026,
+        # remark-gfm imported by MarkdownRenderer but absent from his
+        # node_modules). `vite build` is the check that actually
+        # resolves every import against node_modules — a missing,
+        # undeclared or uninstallable dependency fails here, before
+        # the test run. Pinned by tests/test_frontend_build_gate_ci.py.
+        run: npm run build
       - name: Run Jest with coverage
         run: npm run test:coverage
       - name: Upload Jest coverage report
