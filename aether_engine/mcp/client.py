@@ -637,7 +637,10 @@ class MCPClientManager:
         """Open a session in *this* task and register it.
 
         Shared by :meth:`connect` and the owner task in
-        :meth:`connect_owned`. Returns {"ok": bool, "error": str|None}.
+        :meth:`connect_owned`. Returns {"ok": bool, "error": str|None};
+        on success the dict also carries "tools" — the tool objects
+        listed during the connect — so the registry can fill its cache
+        from them instead of listing a second time.
         Only a genuine cancellation escapes (re-raised by _open_session).
         """
         try:
@@ -653,6 +656,7 @@ class MCPClientManager:
         self._stacks[name] = stack
         self._sessions[name] = session
         self._configs[name] = dict(config)
+        tools: list = []
         try:
             # Issue 011 (S1): list_tools is bounded by the session read
             # timeout (server config timeout). A server that stalls here
@@ -684,10 +688,11 @@ class MCPClientManager:
             self._set_status(name, "failed", error=message)
             return {"ok": False, "error": message}
         self._set_status(name, "connected", error=None, tool_count=tool_count)
-        return {"ok": True, "error": None}
+        return {"ok": True, "error": None, "tools": tools}
 
     async def connect(self, name: str, config: dict) -> dict[str, Any]:
-        """Connect to *name*; returns {"ok": bool, "error": str|None}.
+        """Connect to *name*; returns {"ok": bool, "error": str|None}
+        (plus "tools" on success — see :meth:`_open_and_register`).
 
         The session is opened by a dedicated owner task, never in
         the caller's task (E3-F03): see :meth:`connect_owned`. This
@@ -713,7 +718,9 @@ class MCPClientManager:
         hook). The owner task opens the session, signals readiness,
         then parks until :meth:`disconnect` sets its close event —
         and closes the stack itself, in the task that opened it.
-        Returns {"ok": bool, "error": str|None} once the session is up
+        Returns {"ok": bool, "error": str|None} (plus "tools" when the
+        owner performed a fresh connect — see :meth:`_open_and_register`)
+        once the session is up
         (or the connect has failed); the owner task keeps running.
         """
         if name in self._sessions:
@@ -837,7 +844,15 @@ class MCPClientManager:
             self._owner_tasks.pop(name, None)
             self._close_events.pop(name, None)
             return {"ok": False, "error": result.get("error") or "MCP connection was cancelled"}
-        return {"ok": True, "error": None}
+        # Carry the owner's listed tools through when it produced them
+        # (see _open_and_register): rebuilding a bare {"ok", "error"}
+        # here would drop them and the registry would fall back to
+        # listing a second time. An opener that returned no tools keeps
+        # the bare result, exactly as before.
+        out: dict[str, Any] = {"ok": True, "error": None}
+        if result.get("tools") is not None:
+            out["tools"] = result["tools"]
+        return out
 
     async def _drop_dead_session(self, name: str) -> None:
         """Drop a failed (dead) session registration so a fresh connect can open a new one.

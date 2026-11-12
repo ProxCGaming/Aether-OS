@@ -492,7 +492,16 @@ class MCPRegistry:
 
     # -- live connections (delegated to the client) ----------------------
     async def _finish_connect(self, name: str, result: dict[str, Any]) -> dict[str, Any]:
-        """After a successful connect, refresh the cached tools.
+        """After a successful connect, fill the cached tools.
+
+        When the client hands over the tools it listed while connecting
+        (the "tools" key — see MCPClientManager._open_and_register), the
+        cache is filled from them synchronously: the server is never
+        observable as connected with its tools still missing, and no
+        second list_tools round-trip is made. A client result without
+        them (an already-connected or in-flight connect) falls back to
+        a fresh listing. Either way the "tools" key is consumed here —
+        callers keep receiving exactly {"ok", "error"}.
 
         A session that cannot list its tools is not a connected server
         (S4): disconnect it, mark it failed with the error, and report
@@ -500,7 +509,11 @@ class MCPRegistry:
         """
         if result["ok"]:
             try:
-                await self._refresh_tools(name)
+                listed = result.pop("tools", None)
+                if listed is not None:
+                    self._store_tools(name, listed)
+                else:
+                    await self._refresh_tools(name)
             except Exception as e:  # noqa: BLE001 — any listing failure marks the server failed (S4), whatever the SDK raises
                 message = str(e) or e.__class__.__name__
                 logger.warning(
@@ -625,6 +638,9 @@ class MCPRegistry:
 
     async def _refresh_tools(self, name: str) -> None:
         mcp_tools = await self._client.list_tools(name)
+        self._store_tools(name, mcp_tools)
+
+    def _store_tools(self, name: str, mcp_tools) -> None:
         self._tools_cache[name] = [
             self._convert_tool(name, t) for t in mcp_tools
         ]

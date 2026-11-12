@@ -112,3 +112,59 @@ async def test_test_connection_lists_tools_without_connecting(registry, fake_url
     result = await registry.test_connection("fake")
     assert result == {"ok": True, "error": None, "tools": ["add"]}
     assert registry.get_mcp_tools() == []
+
+
+async def test_connect_fills_tool_cache_from_connect_listing(registry):
+    """The client hands the tools it listed while connecting to the
+    registry (the "tools" key), and the registry fills its cache from
+    them — no second list_tools round-trip, and no window where the
+    server already reads connected while get_mcp_tools() still offers
+    nothing. The hand-over is consumed: callers keep receiving exactly
+    {"ok", "error"}."""
+    from types import SimpleNamespace
+
+    class _HandoverClient:
+        def __init__(self):
+            self.list_tools_calls = 0
+            self.connected = set()
+
+        async def connect(self, name, config):
+            self.connected.add(name)
+            return {"ok": True, "error": None, "tools": [
+                SimpleNamespace(
+                    name="add", description="Add two numbers",
+                    inputSchema={"type": "object", "properties": {}},
+                ),
+            ]}
+
+        async def connect_owned(self, name, config):
+            return await self.connect(name, config)
+
+        async def list_tools(self, name):
+            self.list_tools_calls += 1
+            raise AssertionError("registry listed the tools a second time")
+
+        def get_status(self, name):
+            if name in self.connected:
+                return {"status": "connected", "error": None, "tool_count": 1}
+            return {"status": "disconnected", "error": None, "tool_count": 0}
+
+        def is_connected(self, name):
+            return name in self.connected
+
+        async def disconnect(self, name):
+            self.connected.discard(name)
+            return {"ok": True, "error": None}
+
+        def set_failed(self, name, error):
+            raise AssertionError("a handed-over connect must not be marked failed")
+
+    registry.add_server(
+        "fake", {"transport": "streamable_http", "url": "http://127.0.0.1:9/mcp"}
+    )
+    client = _HandoverClient()
+    registry._client = client
+    result = await registry.connect_server("fake")
+    assert result == {"ok": True, "error": None}
+    assert client.list_tools_calls == 0
+    assert [t.name for t in registry.get_mcp_tools()] == ["fake__add"]
