@@ -4,6 +4,9 @@
   "version": "0.3.5",
   "type": "module",
   "main": "main.cjs",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

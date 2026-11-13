@@ -29,19 +29,30 @@ warn on first run (choose *More info → Run anyway*).
 
 ### From source (works today)
 
-Prerequisites: Python 3.12 with [uv](https://docs.astral.sh/uv/),
-Node 24, Git.
+Prerequisites: Git, [uv](https://docs.astral.sh/uv/) and Node 24
+(`.nvmrc` pins the Node line; uv provisions Python 3.12 itself).
 
 ```bash
 git clone https://github.com/ProxCGaming/Aether-OS.git
 cd Aether-OS
-uv venv .venv --python 3.12   # create the venv (Python 3.12 only)
-uv sync --locked              # engine deps, exactly as pinned in uv.lock
-cd desktop_app && npm ci   # desktop dependencies
-cd ..
+scripts/setup.sh          # Windows: scripts\setup.ps1
 ```
 
-Run it — engine first, then the app:
+Setup installs everything exactly as pinned in `uv.lock` and
+`package-lock.json`, then proves the machine with three smoke checks
+(locked-venv imports, a `vite build`, pytest collection). It never
+edits a lockfile, and it is safe to re-run: after a `git pull`,
+running setup again **is** the update flow — both installers reconcile
+the environment to the locks, so stale installs cannot survive it.
+
+Run it — one command starts the engine, waits for its health check,
+then launches the app; closing the app stops the engine:
+
+```bash
+scripts/run.sh            # Windows: scripts\run.ps1
+```
+
+Or run the two halves by hand, engine first, then the app:
 
 ```bash
 # terminal 1: engine on 127.0.0.1:8000
