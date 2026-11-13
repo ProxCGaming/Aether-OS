@@ -245,6 +245,12 @@ class EventType(str, Enum):
     # desktop turns it into an OS notification when unfocused
     # (electron/notify.cjs) and an in-app surface when focused.
     REMINDER_DUE = "REMINDER_DUE"
+    # Calendar layer C5: the Settings surface's read of the diary.
+    # REQUEST payload: {"limit": int (optional, default 20)};
+    # RESPONSE payload: {"success": bool, "events": [event dicts as
+    # in calendar/store.to_dict], "error": str (only on failure)}.
+    CALENDAR_LIST_REQUEST = "CALENDAR_LIST_REQUEST"
+    CALENDAR_LIST_RESPONSE = "CALENDAR_LIST_RESPONSE"
     # Epic 8, E8-5.1: streaming voice conversation. START_REQUEST
     # payload: {"session_id": str | None} — the engine creates a
     # session when omitted and answers {"ok": bool, "session_id": str,

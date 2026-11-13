@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info } from 'lucide-react';
+import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info, CalendarDays } from 'lucide-react';
 import './chat.css';
 import { resolveSnipHotkey, defaultSnipHotkey } from './snipHotkey';
 import ProviderSettings from './components/Settings/ProviderSettings';
@@ -18,6 +18,7 @@ import SkillsPanel from './components/Settings/SkillsPanel';
 import AdvancedPanel from './components/Settings/AdvancedPanel';
 import AboutPanel from './components/Settings/AboutPanel';
 import VoicePanel from './components/Settings/VoicePanel';
+import CalendarPanel from './components/Settings/CalendarPanel';
 
 // Wave 5 (Annex C row 7): this file is the Settings shell —
 // sidebar navigation, the one socket message handler, the
@@ -65,6 +66,12 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   
   // Advanced Config State
   const [disableFallbacks, setDisableFallbacks] = useState(false);
+  // Calendar layer C5 (14 Nov 2026): the calendar switches, held
+  // here like every other config value so they ride the one
+  // applyConfigValues point and the one CONFIG_UPDATE flow.
+  const [calendarEnabled, setCalendarEnabled] = useState(true);
+  const [calendarDayBefore, setCalendarDayBefore] = useState(true);
+  const [calendarLeadMinutes, setCalendarLeadMinutes] = useState(30);
   const [fallbackChain, setFallbackChain] = useState('');
   // E6-F05: the last applied engine config — the controlled panels
   // for the Epic 1/2 handed-off surfaces (OrchestrationPanel,
@@ -513,6 +520,22 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     sendConfigUpdate({ disable_fallbacks: val });
   };
 
+  // Calendar layer C5: same one-flow rule as every settings edit.
+  const handleCalendarEnabledChange = (val) => {
+    setCalendarEnabled(val);
+    sendConfigUpdate({ calendar_enabled: val });
+  };
+
+  const handleCalendarDayBeforeChange = (val) => {
+    setCalendarDayBefore(val);
+    sendConfigUpdate({ calendar_reminder_day_before: val });
+  };
+
+  const handleCalendarLeadMinutesCommit = (val) => {
+    setCalendarLeadMinutes(val);
+    sendConfigUpdate({ calendar_reminder_lead_minutes: val });
+  };
+
   const handleFallbackChainCommit = () => {
     // E6-F15: through the one CONFIG_UPDATE flow,
     // unconditionally (facade queues offline).
@@ -607,6 +630,13 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
       // D2-05: an applied config also clears a previous load error.
       setConfigLoadError('');
       setDisableFallbacks(config.disable_fallbacks || false);
+      setCalendarEnabled(config.calendar_enabled !== false);
+      setCalendarDayBefore(config.calendar_reminder_day_before !== false);
+      setCalendarLeadMinutes(
+        Number.isInteger(config.calendar_reminder_lead_minutes)
+          ? config.calendar_reminder_lead_minutes
+          : 30
+      );
       setFallbackChain((config.fallback_chain || []).join(', '));
       // D2-06: the applied payload is the confirmed state the
       // optimistic Advanced controls roll back to on a refusal.
@@ -997,7 +1027,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
       // D2-04: the Memory branch that used to sit here sent
       // MEMORY_EPISODES_REQUEST + MEMORY_GRAPH_REQUEST for fossil
       // state — MemoryManagement fetches both itself on mount.
-    } else if ((activeMenu === 'Advanced' || activeMenu === 'Models' || activeMenu === 'Voice') && wsRef.current?.readyState === WebSocket.OPEN) {
+    } else if ((activeMenu === 'Advanced' || activeMenu === 'Models' || activeMenu === 'Voice' || activeMenu === 'Calendar') && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'CONFIG_GET_REQUEST',
         schema_version: 1,
@@ -1042,6 +1072,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     { keywords: 'usage cost budget tokens spend ledger models agents daily alert', id: 'Usage', icon: <CircleDollarSign size={18} />, label: 'Usage' },
     { keywords: 'password vault credentials logins totp ask every time autofill', id: 'PasswordVault', icon: <Lock size={18} />, label: 'Password Vault' },
     { keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
+    { keywords: 'calendar events reminders schedule itinerary upcoming', id: 'Calendar', icon: <CalendarDays size={18} />, label: 'Calendar & Reminders' },
     { keywords: 'capabilities diagnostics environment scheduler', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
     { keywords: 'voice tuning audio vad endpointing silence threshold mic speech', id: 'Voice', icon: <Mic size={18} />, label: 'Voice Tuning' },
     { keywords: 'advanced routing fallbacks reset defaults developer project config layer overlay', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' },
@@ -1275,6 +1306,20 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
 
         {activeMenu === 'Memory' && (
           <MemoryManagement />
+        )}
+
+        {activeMenu === 'Calendar' && (
+          <CalendarPanel
+            configAnswered={!!answered.config}
+            isConnected={isConnected}
+            configError={configUpdateError}
+            calendarEnabled={calendarEnabled}
+            onCalendarEnabledChange={handleCalendarEnabledChange}
+            calendarDayBefore={calendarDayBefore}
+            onCalendarDayBeforeChange={handleCalendarDayBeforeChange}
+            calendarLeadMinutes={calendarLeadMinutes}
+            onCalendarLeadMinutesCommit={handleCalendarLeadMinutesCommit}
+          />
         )}
 
         {activeMenu === 'WorkspaceIndexing' && (

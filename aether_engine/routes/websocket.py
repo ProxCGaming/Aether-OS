@@ -47,6 +47,7 @@ from aether_engine.providers.discovery import fetch_available_models  # noqa: F4
 from aether_engine.rewind import fork as fork_service
 from aether_engine.rewind import manifest as rewind_manifest
 from aether_engine.rewind import service as rewind_service
+from aether_engine.routes.ws_calendar import handle_calendar_list_request
 from aether_engine.routes.ws_connection import WsConnection
 from aether_engine.routes.ws_mcp_plugins import (
     PLUGIN_INSTALL_TTL_SECONDS,  # noqa: F401 — re-exported: tests patch the TTL on this module
@@ -4133,6 +4134,7 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.PLUGIN_APPROVAL_REJECTED: _handle_plugin_approval_rejected,
     EventType.PLUGIN_UNINSTALL_REQUEST: _handle_plugin_uninstall_request,
     EventType.PLUGIN_TOGGLE_REQUEST: _handle_plugin_toggle_request,
+    EventType.CALENDAR_LIST_REQUEST: handle_calendar_list_request,
     EventType.MEMORY_EPISODES_REQUEST: _handle_memory_episodes_request,
     EventType.MEMORY_EPISODE_DELETE_REQUEST: _handle_memory_episode_delete_request,
     EventType.MEMORY_EPISODES_CLEAR_REQUEST: _handle_memory_episodes_clear_request,

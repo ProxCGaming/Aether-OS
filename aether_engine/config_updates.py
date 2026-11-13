@@ -63,6 +63,9 @@ HANDED_OFF_FIELDS = (
     "speech_stt_model",
     "transcription_stt_model",
     "speech_tts_voice",
+    "calendar_enabled",
+    "calendar_reminder_day_before",
+    "calendar_reminder_lead_minutes",
 )
 
 # The verdict vocabulary of tools/policy.py's _VERDICT_MAP and the
@@ -284,5 +287,22 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
     if "speech_tts_voice" in config_data:
         cleaned["speech_tts_voice"] = _validate_tts_voice(
             config_data["speech_tts_voice"])
+
+    # Calendar layer C5 (14 Nov 2026): the switches are real
+    # booleans — a truthy string from a hand-rolled client must be
+    # refused, not coerced, or the UI would show a state the engine
+    # never agreed to. Lead minutes are bounded like every other
+    # count here; 0 is meaningful (it disables the lead reminder).
+    for bool_field in ("calendar_enabled", "calendar_reminder_day_before"):
+        if bool_field in config_data:
+            value = config_data[bool_field]
+            if not isinstance(value, bool):
+                raise _fail(bool_field, "must be true or false")
+            cleaned[bool_field] = value
+
+    if "calendar_reminder_lead_minutes" in config_data:
+        cleaned["calendar_reminder_lead_minutes"] = _bounded_int(
+            "calendar_reminder_lead_minutes",
+            config_data["calendar_reminder_lead_minutes"], 0, 1440)
 
     return cleaned
