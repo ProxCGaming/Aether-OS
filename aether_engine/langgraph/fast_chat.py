@@ -365,6 +365,20 @@ async def run_fast_chat(
 
     messages.append({"role": "user", "content": user_content})
 
+    # Calendar layer C2 (14 Nov 2026): if the prompt stated a future
+    # event, it has already been stored by the extraction hook; this
+    # system note makes the reply announce it (with the undo path)
+    # instead of the add happening silently. Best-effort — the hook
+    # never raises, and a failure here must not break the turn.
+    try:
+        from aether_engine.calendar.extraction import note_for_message_if_enabled
+
+        _calendar_note = note_for_message_if_enabled(prompt)
+    except Exception:  # noqa: BLE001
+        _calendar_note = None
+    if _calendar_note:
+        messages.append({"role": "system", "content": _calendar_note})
+
     parts: list[str] = []
     try:
         async for chunk in provider.call_stream(messages, tools=None, node_name="fast_chat"):

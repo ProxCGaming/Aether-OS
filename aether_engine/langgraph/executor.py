@@ -454,6 +454,29 @@ async def run_langgraph_task(
                     # (same doctrine as the registry's TOOL_EXECUTED).
                     logger.debug("CONTEXT_COMPACTED audit write failed", exc_info=True)
 
+        # Calendar layer C2 (14 Nov 2026): chat event extraction —
+        # the same hook fast chat uses. If the prompt stated a future
+        # event it is already stored; the note rides this run's
+        # messages so the reply announces it (with the undo path)
+        # rather than the add happening silently. It stays in the
+        # thread as a system record of what the calendar did.
+        # Best-effort, like skill auto-match above: the hook never
+        # raises, and extraction must never break a task start.
+        try:
+            from aether_engine.calendar.extraction import (
+                note_for_message_if_enabled,
+            )
+
+            _calendar_note = await asyncio.to_thread(
+                note_for_message_if_enabled, prompt)
+        except Exception:  # noqa: BLE001
+            _calendar_note = None
+        if _calendar_note:
+            initial_state["messages"] = [
+                *initial_state["messages"],
+                {"role": "system", "content": _calendar_note},
+            ]
+
         # Epic 8, E8-1.1a: open this task's rewind manifest. Step 0 is
         # the "before this task began" point, anchored at the thread's
         # pre-run checkpoint ("" on a fresh thread — the first landed
