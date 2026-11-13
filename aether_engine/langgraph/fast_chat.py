@@ -328,6 +328,18 @@ async def run_fast_chat(
     messages: list[dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}]
     messages.extend(history or [])
 
+    # Calendar layer C3 (14 Nov 2026): fast chat's one-line itinerary
+    # — the supervisor gets the full briefing in its prompt; a direct
+    # chat reply only needs what's next. Best-effort, empty = absent.
+    try:
+        from aether_engine.calendar.itinerary import fast_chat_itinerary_line
+
+        _itinerary_line = fast_chat_itinerary_line()
+    except Exception:  # noqa: BLE001
+        _itinerary_line = ""
+    if _itinerary_line:
+        messages.append({"role": "system", "content": _itinerary_line})
+
     start_time = time.time()
 
     user_content: Any = prompt

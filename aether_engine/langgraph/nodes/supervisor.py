@@ -322,9 +322,20 @@ def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: 
         lessons_section = learned_briefing()
     except Exception:  # noqa: BLE001 — lessons must never break routing
         lessons_section = ""
+    # Calendar layer C3 (14 Nov 2026): the itinerary rides beside the
+    # lessons under the same contract — best-effort, capped, empty
+    # when there is nothing scheduled — so routing always knows
+    # today's commitments and clashes without a memory-tool call.
+    try:
+        from aether_engine.calendar.itinerary import calendar_briefing
+
+        calendar_section = calendar_briefing()
+    except Exception:  # noqa: BLE001 — calendar must never break routing
+        calendar_section = ""
     return (
         f"{skill_catalog}\n"
         f"{lessons_section + chr(10) if lessons_section else ''}"
+        f"{calendar_section + chr(10) if calendar_section else ''}"
         f"You are the Supervisor agent. Your task is to delegate the user's request to one of the specialists: "
         f"{options_str}, or 'END' if the task is complete.\n"
         f"User Request: {original_prompt}\n"
