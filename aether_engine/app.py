@@ -83,6 +83,30 @@ async def _discover_startup_models():
         logger.warning(f"Startup model discovery failed: {e}")
 
 
+async def _init_knowledge_graph_at_startup():
+    """Initialise the knowledge-graph store once, during startup.
+
+    Belt-and-braces alongside knowledge_graph._ensure_wal_mode (the
+    fix that made a concurrent first open safe): creating the schema
+    and landing the file's one-time WAL journal transition here —
+    before task execution begins, while startup is still effectively
+    single-threaded — means the extraction hot path never pays
+    first-open costs and a concurrent first use becomes the
+    exception, not the norm. Runs off the event loop (sync SQLite,
+    N-11) and is best-effort: a failure is logged and startup
+    continues, because the store still initialises lazily on first
+    use, exactly as it did before this existed.
+    """
+    import asyncio
+
+    from aether_engine.memory import knowledge_graph
+
+    try:
+        await asyncio.to_thread(knowledge_graph.init_kg_db)
+    except Exception as e:  # noqa: BLE001 — startup boundary: KG init is best-effort; lazy init on first use remains as the fallback
+        logger.warning(f"Startup knowledge-graph initialisation failed: {e}")
+
+
 async def _ensure_embedder_then_backfill():
     """Embedder lifecycle gate for the startup episodic backfill.
 
@@ -153,6 +177,19 @@ async def lifespan(_app: FastAPI):
         f"AETHER Engine initialized. Active: {engine_state.active_provider}/{engine_state.active_model}. "
         f"Auth token written to {engine_state.token_path}"
     )
+
+    # WAL first-open belt-and-braces: initialise the knowledge-graph
+    # store now, before any extraction threads exist, so its one-time
+    # WAL journal transition lands in startup's quiet window (see
+    # _init_knowledge_graph_at_startup). Awaited — it is one quick
+    # idempotent init, not per-provider network work — but run off
+    # the event loop. Native backend only: external backends own
+    # their stores, the same gate the episodic backfill below uses.
+    try:
+        if (engine_state.user_config.memory_backend or "native") == "native":
+            await _init_knowledge_graph_at_startup()
+    except Exception as e:  # noqa: BLE001 — startup boundary: KG init is best-effort and must never block engine startup
+        logger.warning(f"Startup knowledge-graph initialisation failed to start: {e}")
 
     # Issue 004: auto-connect enabled MCP servers in the background.
     # start_auto_connect() returns immediately — it never blocks startup —
