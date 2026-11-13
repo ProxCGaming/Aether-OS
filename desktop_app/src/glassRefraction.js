@@ -23,7 +23,12 @@
 
 export const GLASS_MAP_SIZE = 256;
 const GLASS_MAP_RADIUS = 30; // corner radius, map px
-const GLASS_MAP_BAND = 38; // rim band width, map px
+// Rim band width, map px (64/256 = the outer 25% of the panel).
+// Tuned up from 38 at the owner's word ("more dramatic", 13 Nov
+// 2026), together with the filter scale in App.jsx (32 → 52, i.e.
+// max rim shift ~16px → ~26px). The interior beyond the band is
+// still exactly zero — dramatic at the rim, flat in the middle.
+const GLASS_MAP_BAND = 64;
 
 // 1x1 neutral PNG (every channel 0.5-ish grey): a valid feImage
 // target that displaces nothing, used if canvas is unavailable

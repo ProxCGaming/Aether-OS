@@ -1532,7 +1532,7 @@ function AppContent() {
         <defs>
           <filter id="aether-glass-refraction" x="0%" y="0%" width="100%" height="100%" colorInterpolationFilters="sRGB">
             <feImage href={GLASS_DISPLACEMENT_MAP_URL} x="0" y="0" width="100%" height="100%" preserveAspectRatio="none" result="map" />
-            <feDisplacementMap in="SourceGraphic" in2="map" scale="32" xChannelSelector="R" yChannelSelector="G" />
+            <feDisplacementMap in="SourceGraphic" in2="map" scale="52" xChannelSelector="R" yChannelSelector="G" />
           </filter>
         </defs>
       </svg>
