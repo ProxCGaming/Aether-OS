@@ -239,6 +239,12 @@ class EventType(str, Enum):
     # are lexical-only (honest recall, never fabricated matches).
     MEDIA_SEARCH_REQUEST = "MEDIA_SEARCH_REQUEST"
     MEDIA_SEARCH_RESPONSE = "MEDIA_SEARCH_RESPONSE"
+    # Calendar layer C4 (14 Nov 2026): a due reminder pushed by the
+    # scheduler, outside any task — payload: {"event_id", "title",
+    # "start_ts", "start_text", "kind": "lead" | "day_before"}. The
+    # desktop turns it into an OS notification when unfocused
+    # (electron/notify.cjs) and an in-app surface when focused.
+    REMINDER_DUE = "REMINDER_DUE"
     # Epic 8, E8-5.1: streaming voice conversation. START_REQUEST
     # payload: {"session_id": str | None} — the engine creates a
     # session when omitted and answers {"ok": bool, "session_id": str,

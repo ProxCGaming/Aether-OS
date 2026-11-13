@@ -134,4 +134,25 @@ describe('notify gate', () => {
     expect(notificationContent(approval).body).toContain('run_shell');
     expect(notificationContent('junk')).toBeNull();
   });
+
+  it('notifies for a due calendar reminder only when the user is not looking', () => {
+    const reminder = JSON.stringify({
+      type: 'REMINDER_DUE',
+      payload: { title: 'PTM', start_text: 'Sat 14 Nov, 04:30 PM', kind: 'lead' },
+    });
+    expect(shouldNotify(reminder, { windowVisible: true, windowFocused: false })).toBe(true);
+    expect(shouldNotify(reminder, { windowVisible: true, windowFocused: true })).toBe(false);
+    const content = notificationContent(reminder);
+    expect(content.title).toContain('reminder');
+    expect(content.body).toContain('PTM');
+    expect(content.body).toContain('Sat 14 Nov');
+  });
+
+  it('words a day-before reminder as tomorrow', () => {
+    const reminder = JSON.stringify({
+      type: 'REMINDER_DUE',
+      payload: { title: 'Dentist', start_text: 'Sun 15 Nov, 09:00 AM', kind: 'day_before' },
+    });
+    expect(notificationContent(reminder).body).toMatch(/^Tomorrow: Dentist/);
+  });
 });

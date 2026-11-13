@@ -136,6 +136,7 @@ class CapabilitySchedulerManager:
                 self._update_job_schedule(self.current_schedule)
                 self._register_memory_prune_job()
                 self._register_memory_consolidation_job()
+                self._register_reminder_job()
                 logger.info("CapabilitySchedulerManager started.")
             except Exception as e:  # noqa: BLE001 — scheduler start is deferred to the loop's first tick if no loop is running yet
                 logger.warning(f"AsyncIOScheduler start deferred (no running event loop yet): {e}")
@@ -374,6 +375,66 @@ class CapabilitySchedulerManager:
         """Manual trigger for memory consolidation (mirrors
         run_memory_prune_now for capability housekeeping)."""
         return self._run_memory_consolidation_job()
+
+    def _register_reminder_job(self):
+        """Calendar layer C4 (14 Nov 2026): minute-tick reminder
+        dispatch for the calendar store.
+
+        Registered next to the prune/consolidation jobs — this
+        manager is the engine's only background scheduler. Unlike
+        those jobs it is a coroutine job: reminder delivery fans out
+        to websocket subscribers, which are async. The tick only
+        reads the calendar DB and claims reminders that are actually
+        due, so a tick against an empty or disabled calendar is a
+        no-op; claimed flags in the store make double-firing
+        impossible even if ticks overlap.
+        """
+        if not HAS_APSCHEDULER or not self.scheduler or not self.scheduler.running:
+            return
+        self.scheduler.add_job(
+            self._run_reminder_job,
+            trigger=IntervalTrigger(minutes=1),
+            id="calendar_reminders",
+            replace_existing=True,
+        )
+        logger.info("Registered calendar reminder job (1-minute tick).")
+
+    async def _run_reminder_job(self) -> list[dict[str, Any]]:
+        """One reminder tick: claim due reminders and dispatch them.
+        Returns the dispatched payloads (empty when nothing is due
+        or the calendar is disabled)."""
+        from aether_engine.calendar.reminders import dispatch_due_reminders
+        from aether_engine.calendar.store import get_calendar_store
+        from aether_engine.config import load_config
+
+        try:
+            config = load_config()
+            if not getattr(config, "calendar_enabled", True):
+                return []
+            events = await dispatch_due_reminders(
+                get_calendar_store(),
+                day_before_enabled=getattr(
+                    config, "calendar_reminder_day_before", True
+                ),
+                lead_minutes=int(
+                    getattr(config, "calendar_reminder_lead_minutes", 30)
+                ),
+                now_ts=time.time(),
+            )
+            return [e.payload for e in events]
+        except Exception:  # a reminder tick must never kill the scheduler
+            logger.exception("Calendar reminder tick failed")
+            return []
+
+    def run_reminders_now(self):
+        """Manual trigger for one reminder tick. With no running
+        loop it runs the tick to completion and returns the payloads;
+        inside a running loop it returns the scheduled Task."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._run_reminder_job())
+        return loop.create_task(self._run_reminder_job())
 
     async def _execute_check_job(self, method: str | None = None) -> dict[str, Any]:
         """Execute a capability check run using Option A (benchmarks), C (self-tests), or Both."""

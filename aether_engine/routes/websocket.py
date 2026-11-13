@@ -455,6 +455,20 @@ async def ws_tasks(ws: WebSocket):
 
     _unsubscribe_media_events = subscribe_media_events(_push_media_event)
 
+    # Calendar layer C4 (14 Nov 2026): the same fan-out pattern for
+    # REMINDER_DUE — the scheduler fires reminders outside any task,
+    # so they reach this connection by subscription, not by the
+    # per-task EventBus. Removed on disconnect, like media above.
+    from aether_engine.calendar.reminders import subscribe_reminder_events
+
+    async def _push_reminder_event(event):
+        try:
+            await ws.send_text(event.to_json())
+        except Exception:  # the socket may be mid-close; delivery is best-effort
+            logger.debug("Reminder event push failed", exc_info=True)
+
+    _unsubscribe_reminder_events = subscribe_reminder_events(_push_reminder_event)
+
 
     # ── Voice session (Epic 8, E8-5.1a) ─────────────────────────────
     # The cascade itself lives in aether_engine.voice.pipeline; this
@@ -581,6 +595,7 @@ async def ws_tasks(ws: WebSocket):
     except WebSocketDisconnect:
         logger.info(f"Client disconnected from {ip}:{port}")
         _unsubscribe_media_events()
+        _unsubscribe_reminder_events()
         if conn.task_start_tail and not conn.task_start_tail.done():
             conn.task_start_tail.cancel()
         if conn.task_runner and not conn.task_runner.done():
@@ -594,6 +609,7 @@ async def ws_tasks(ws: WebSocket):
     except Exception as e:  # noqa: BLE001 — top-level socket boundary: any session failure is logged and the task is cancelled, never propagated
         logger.error(f"WebSocket session error: {e}")
         _unsubscribe_media_events()
+        _unsubscribe_reminder_events()
         if conn.task_start_tail and not conn.task_start_tail.done():
             conn.task_start_tail.cancel()
         if conn.task_runner and not conn.task_runner.done():
