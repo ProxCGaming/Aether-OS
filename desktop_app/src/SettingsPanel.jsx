@@ -1060,14 +1060,25 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   return (
     <div style={{ display: 'flex', height: '100%', gap: '32px' }}>
       
-      {/* Settings Sidebar */}
-      <div style={{
+      {/* Settings Sidebar. 13 Nov fix: the nav column itself must
+          scroll — it previously had no overflow at all, so at
+          shorter window heights the sections below Password Vault
+          (Memory & Storage, Capabilities, Voice Tuning, Advanced,
+          About) were clipped by the panel and unreachable: no
+          scrollbar, no wheel response (owner report). The content
+          area on the right already scrolled; the nav now matches
+          it, with items pinned to their natural height. */}
+      <div className="chat-scroll" style={{
         width: '240px',
         display: 'flex',
         flexDirection: 'column',
         gap: '8px',
         borderRight: '1px solid var(--border-default)',
-        paddingRight: '24px'
+        paddingRight: '24px',
+        paddingBottom: '16px',
+        overflowY: 'auto',
+        minHeight: 0,
+        flexShrink: 0
       }}>
         <input
           type="text"
@@ -1082,7 +1093,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               setActiveMenu(visibleMenuItems[0].id);
             }
           }}
-          style={{ padding: '10px 14px', borderRadius: 'var(--radius-md)', background: 'var(--bg-base)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', fontSize: '13px', marginBottom: '4px' }}
+          style={{ padding: '10px 14px', borderRadius: 'var(--radius-md)', background: 'var(--bg-base)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', fontSize: '13px', marginBottom: '4px', flexShrink: 0 }}
         />
         {visibleMenuItems.map(item => (
           <div
@@ -1105,6 +1116,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
               gap: '12px',
               padding: '12px 16px',
               borderRadius: '12px',
+              flexShrink: 0,
               cursor: 'pointer',
               color: activeMenu === item.id ? 'var(--text-primary)' : 'var(--text-secondary)',
               background: activeMenu === item.id ? 'var(--bg-hover)' : 'transparent',

@@ -22,6 +22,7 @@ import GlobalArtifactsView from './components/GlobalArtifactsView';
 import RewindConfirmModal from './components/RewindConfirmModal';
 import PendingQueueIndicator from './components/PendingQueueIndicator';
 import HeldActionsPrompt from './components/HeldActionsPrompt';
+import { GLASS_DISPLACEMENT_MAP_URL } from './glassRefraction';
 import './chat.css';
 
 // Decorative background graph (branding, not live data — see Phase 9 B3)
@@ -1521,12 +1522,17 @@ function AppContent() {
           backdrop-filter references #aether-glass-refraction; the
           displacement bends the backdrop at the edges (the owner's
           "proper light bending around the corner"). Visual only:
-          no props, no state. */}
+          no props, no state.
+          13 Nov fix: the displacement map is the generated SDF map
+          from glassRefraction.js — flat interior, smooth rim bend.
+          The original feTurbulence noise displaced the backdrop
+          EVERYWHERE, so wherever text sat behind a panel edge the
+          bright fringe broke up into a glitchy glow (owner report). */}
       <svg aria-hidden="true" width="0" height="0" style={{ position: 'absolute' }}>
         <defs>
-          <filter id="aether-glass-refraction">
-            <feTurbulence type="fractalNoise" baseFrequency="0.008 0.012" numOctaves="2" seed="7" result="n" />
-            <feDisplacementMap in="SourceGraphic" in2="n" scale="12" />
+          <filter id="aether-glass-refraction" x="0%" y="0%" width="100%" height="100%" colorInterpolationFilters="sRGB">
+            <feImage href={GLASS_DISPLACEMENT_MAP_URL} x="0" y="0" width="100%" height="100%" preserveAspectRatio="none" result="map" />
+            <feDisplacementMap in="SourceGraphic" in2="map" scale="32" xChannelSelector="R" yChannelSelector="G" />
           </filter>
         </defs>
       </svg>
