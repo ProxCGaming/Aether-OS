@@ -131,6 +131,13 @@ def build_tool_registry(
     from aether_engine.tools.media_recall import create_media_recall_tool
 
     registry.register(create_media_recall_tool())
+    # Calendar layer (14 Nov 2026): the schedule tools — add / list /
+    # cancel over ~/.aether/calendar.db. WRITE tools ride the same
+    # policy + approval pipeline as every other built-in.
+    from aether_engine.tools.calendar_tools import create_calendar_tools
+
+    for tool in create_calendar_tools():
+        registry.register(tool)
     if include_file_tools:
         for tool in create_file_tools():
             registry.register(tool)

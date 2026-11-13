@@ -223,6 +223,15 @@ class UserConfig:
     kg_max_facts: int = 5000
     session_retention_days: int = 180
     session_max_sessions: int = 200
+    # Calendar layer (14 Nov 2026): the schedule in
+    # aether_engine/calendar/. Defaults documented here and nowhere
+    # else, same rule as the retention block above — the calendar
+    # modules read them from UserConfig. calendar_enabled gates
+    # extraction, itinerary injection and reminders as one switch;
+    # lead minutes <= 0 disables the lead reminder only.
+    calendar_enabled: bool = True
+    calendar_reminder_day_before: bool = True
+    calendar_reminder_lead_minutes: int = 30
     # Epic 1, E1-06: conversation compaction thresholds. When a thread's
     # model-facing history exceeds either bound, the older turns are
     # folded into a summary (see langgraph/compaction.py); the most
@@ -324,6 +333,9 @@ class UserConfig:
             "kg_max_facts": self.kg_max_facts,
             "session_retention_days": self.session_retention_days,
             "session_max_sessions": self.session_max_sessions,
+            "calendar_enabled": self.calendar_enabled,
+            "calendar_reminder_day_before": self.calendar_reminder_day_before,
+            "calendar_reminder_lead_minutes": self.calendar_reminder_lead_minutes,
             "snip_hotkey": self.snip_hotkey,
             "compaction_trigger_messages": self.compaction_trigger_messages,
             "compaction_trigger_chars": self.compaction_trigger_chars,
@@ -445,6 +457,13 @@ class UserConfig:
             kg_max_facts=_as_int(d.get("kg_max_facts"), 5000),
             session_retention_days=_as_int(d.get("session_retention_days"), 180),
             session_max_sessions=_as_int(d.get("session_max_sessions"), 200),
+            calendar_enabled=bool(d.get("calendar_enabled", True)),
+            calendar_reminder_day_before=bool(
+                d.get("calendar_reminder_day_before", True)
+            ),
+            calendar_reminder_lead_minutes=_as_int(
+                d.get("calendar_reminder_lead_minutes"), 30
+            ),
             snip_hotkey=d.get("snip_hotkey") or "CommandOrControl+Shift+S",
             compaction_trigger_messages=_as_int(d.get("compaction_trigger_messages"), 40),
             compaction_trigger_chars=_as_int(d.get("compaction_trigger_chars"), 24000),
