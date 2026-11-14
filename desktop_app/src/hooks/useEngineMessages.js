@@ -256,12 +256,14 @@ export function useEngineMessages(deps) {
           }
           const node = data.payload?.node;
           const isThought = node && node !== 'assistant' && node !== 'agent';
-          
-          // Filter out supervisor delegation strings that duplicate NODE_ACTIVITY
-          if (isThought && delta && typeof delta === 'string' && delta.trim().startsWith('[Supervisor] -> Delegating')) {
-            return;
-          }
-          
+
+          // S12: no text sniffing here any more. Delegation used to be
+          // filtered out of the thought stream by matching the
+          // '[Supervisor] -> Delegating' prefix; since S12 the engine
+          // never emits delegation as text — it arrives only as the
+          // structured NODE_ACTIVITY event, so every TASK_PROGRESS
+          // delta is genuine content and renders as it arrives.
+
           if (delta) {
             const updateMessages = (prev) => {
               const lastAgentIdx = prev.findLastIndex(m => m.role === 'agent' && !m.isFinal);

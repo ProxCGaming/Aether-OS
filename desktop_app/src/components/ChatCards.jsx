@@ -560,7 +560,7 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
 export function NodeActivityCard({ activity, nestedTools = [], rawDelta, onOpenArtifact = null }) {
   if (!activity) return null;
 
-  const { from_node, to_node, action, reason, briefing, input_payload, output_payload, status } = activity;
+  const { from_node, to_node, action, reason, briefing, input_payload, output_payload, status, delegation_count } = activity;
 
   const fromStyle = getNodeStyle(from_node);
   const toStyle = getNodeStyle(to_node);
@@ -580,6 +580,15 @@ export function NodeActivityCard({ activity, nestedTools = [], rawDelta, onOpenA
         {action && (
           <span className="node-action-pill">
             {action.replace('_', ' ').toUpperCase()}
+          </span>
+        )}
+        {/* S12: the delegation ordinal comes from the engine's S4
+            counter on the event payload — the card displays it, it
+            never counts cards itself. */}
+        {(action === 'delegation' || action === 'delegation_denied') &&
+          typeof delegation_count === 'number' && delegation_count > 0 && (
+          <span style={{ fontSize: '10.5px', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+            Delegation {delegation_count}
           </span>
         )}
       </div>
@@ -705,14 +714,14 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
       }
     } else {
       const text = item.text?.trim() || '';
-      // Filter out redundant supervisor delegation texts or echoed assistant conversational outputs
-      // D1-C10: the '[Supervisor] -> Delegating' drop is structural
-      // (it duplicates the NODE_ACTIVITY handoff rendering). A
-      // hard-coded greeting prefix used to sit beside it — content
-      // sniffing that hid any legitimate thought beginning with
-      // those words and would silently stop working the day the
-      // echoed phrasing changed; it is gone.
-      if (!text || text.startsWith('[Supervisor] -> Delegating')) {
+      // D1-C10: thought visibility is not decided by content
+      // sniffing. A hard-coded greeting prefix used to hide thoughts
+      // here, and a '[Supervisor] -> Delegating' prefix drop sat
+      // beside it; both are gone — the greeting one by D1-C10, the
+      // delegation one by S12, which made delegation structural at
+      // the engine (NODE_ACTIVITY only, never a text thought), so
+      // there is nothing left to drop. Thoughts render as written.
+      if (!text) {
         return;
       }
       if (currentGroup && !currentGroup.rawDelta && currentGroup.activity?.from_node === item.node) {

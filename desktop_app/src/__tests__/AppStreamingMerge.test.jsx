@@ -149,13 +149,39 @@ describe('App streaming merge (Phase 10.3 D2)', () => {
     expect(agentBubbles(container)[0].textContent).toContain('"key": "value"');
   });
 
-  it('supervisor delegation strings are filtered out of thoughts', () => {
+  // S12 replaced this test: it used to assert that a
+  // '[Supervisor] -> Delegating' TASK_PROGRESS string was filtered
+  // out of the thoughts. Since S12 the engine never sends delegation
+  // as text at all — the transition arrives as a structured
+  // NODE_ACTIVITY event (with the S4 delegation counter on the
+  // payload) and renders as an activity card outside the answer
+  // bubble. The contract is now pinned at the source: structured in,
+  // card shown, answer bubble clean.
+  it('S12: delegation arrives as NODE_ACTIVITY structure, never as answer text', () => {
     const { container } = render(<App />);
 
     emitEngineMessage({ type: 'START_TASK', payload: { task_id: 't1' } });
-    emitEngineMessage(progress('[Supervisor] -> Delegating to researcher', 'planner'));
+    emitEngineMessage({
+      type: 'NODE_ACTIVITY',
+      payload: {
+        task_id: 't1',
+        from_node: 'supervisor',
+        to_node: 'researcher',
+        action: 'delegation',
+        reason: 'look it up',
+        delegation_count: 1,
+        status: 'completed',
+      },
+    });
+    emitEngineMessage(progress('The answer is 42.'));
 
-    expect(container.querySelectorAll('.thought-step-content')).toHaveLength(0);
-    expect(container.textContent).not.toContain('Delegating');
+    // The answer bubble carries only the genuine answer text.
+    expect(agentBubbles(container)).toHaveLength(1);
+    expect(agentBubbles(container)[0].textContent).toContain('The answer is 42.');
+    expect(container.textContent).not.toContain('[Supervisor]');
+    // The handoff is visible as activity: the specialist badge and
+    // the delegation ordinal from the engine's counter.
+    expect(container.textContent).toContain('RESEARCHER');
+    expect(container.textContent).toContain('Delegation 1');
   });
 });

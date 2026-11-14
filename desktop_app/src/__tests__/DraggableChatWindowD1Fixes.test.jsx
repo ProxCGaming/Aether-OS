@@ -372,15 +372,51 @@ describe('D1-C10 thought visibility is not decided by a hard-coded greeting stri
     expect(screen.getByText(/Hello! The current time budget/)).toBeInTheDocument();
   });
 
-  it('the structural supervisor-delegation filter still applies', () => {
-    const { container } = render(
+  // S12 replaced the old "structural supervisor-delegation filter"
+  // test: it pinned a render-time drop of '[Supervisor] ->
+  // Delegating' text thoughts. Since S12 the engine emits
+  // delegation ONLY as a structured NODE_ACTIVITY event — the text
+  // form no longer exists anywhere in the stream, so the drop was
+  // removed and visibility is fully structural. What is pinned now:
+  // the NODE_ACTIVITY handoff renders its card (with the S4
+  // delegation ordinal), and plain text thoughts — even a
+  // supervisor's — render exactly as written.
+  it('S12: a NODE_ACTIVITY delegation renders its handoff card and count', () => {
+    render(
       <ThinkingAccordion
-        thoughts={[{ node: 'supervisor', text: '[Supervisor] -> Delegating to coder' }]}
+        thoughts={[
+          {
+            type: 'NODE_ACTIVITY',
+            payload: {
+              from_node: 'supervisor',
+              to_node: 'coder',
+              action: 'delegation',
+              reason: 'build it',
+              delegation_count: 2,
+            },
+          },
+        ]}
         isThinking={false}
         hasError={false}
       />
     );
-    expect(container.firstChild).toBeNull();
+    const header = screen.getByText(/Execution Pipeline/);
+    fireEvent.click(header);
+    expect(screen.getByText('CODER')).toBeInTheDocument();
+    expect(screen.getByText('Delegation 2')).toBeInTheDocument();
+  });
+
+  it('S12: a plain supervisor text thought renders as written (no prefix drops remain)', () => {
+    render(
+      <ThinkingAccordion
+        thoughts={[{ node: 'supervisor', text: 'Working through the plan step by step.' }]}
+        isThinking={false}
+        hasError={false}
+      />
+    );
+    const header = screen.getByText(/Execution Pipeline/);
+    fireEvent.click(header);
+    expect(screen.getByText(/Working through the plan step by step/)).toBeInTheDocument();
   });
 });
 
