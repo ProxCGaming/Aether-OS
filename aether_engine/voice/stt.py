@@ -128,6 +128,13 @@ class FasterWhisperStt:
         self._language = language
         self._model = None
 
+    @property
+    def model_name(self) -> str:
+        """The whisper model this engine transcribes with —
+        read by the S15 degradation tracker to key its latency
+        measurements to the model that produced them."""
+        return self._model_name
+
     def unavailable_reason(self) -> str | None:
         if importlib.util.find_spec("faster_whisper") is None:
             return "faster-whisper is not installed (local STT)"

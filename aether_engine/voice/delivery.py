@@ -45,6 +45,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from aether_common.contracts import Event, EventType
+from aether_engine.voice.degradation import PROFILE_UNAVAILABLE, SessionDegradation
 from aether_engine.voice.stt import SttEngine
 from aether_engine.voice.tts import TtsEngine
 
@@ -54,6 +55,8 @@ Talker = Callable[[str], AsyncIterator[str]]
 EmitFn = Callable[[Event], Awaitable[None]]
 TurnCallback = Callable[[str], Awaitable[None]]
 EscalationClassifier = Callable[[str], Awaitable[bool]]
+SttSwapFn = Callable[[str], Awaitable[bool]]
+FatalFn = Callable[[str], Awaitable[None]]
 
 _SENTENCE_BOUNDARY = re.compile(r"[.!?…]+[\"'”’)\]]*\s+")
 _WORD = re.compile(r"\S+")
@@ -148,10 +151,23 @@ class VoiceDelivery:
         user_speaking: Callable[[], bool],
         is_started: Callable[[], bool],
         is_stopping: Callable[[], bool],
+        degradation: SessionDegradation | None = None,
+        swap_stt: SttSwapFn | None = None,
+        on_fatal: FatalFn | None = None,
     ):
         self.session_id = session_id
         self._stt = stt
         self._tts = tts
+        # S15: the session's degradation tracker + the
+        # pipeline's execution seams for its decisions (swap
+        # the STT engine, end the session). All three are None
+        # for a pipeline built without a ladder plan — the
+        # historical behaviour then applies unchanged (a failed
+        # transcription drops its turn, a failed synthesis
+        # degrades its sentence to text, nothing is measured).
+        self._degradation = degradation
+        self._swap_stt = swap_stt
+        self._on_fatal = on_fatal
         self._talker = talker
         self._emit = emit
         self._on_user_final = on_user_final
@@ -243,6 +259,135 @@ class VoiceDelivery:
         if self._partial_task is not None and not self._partial_task.done():
             self._partial_task.cancel()
         self._turn_active = False
+
+    # -- degradation seams (S15) -----------------------------------------
+
+    def replace_stt(self, engine: SttEngine) -> None:
+        """Swap the STT engine mid-session (the pipeline's
+        step-down execution: the new engine is already open
+        when this lands, so no transcription waits on a load).
+        A partial transcription in flight on the old engine is
+        provisional by contract — its failure or staleness is
+        already tolerated by ``_run_partial``."""
+        self._stt = engine
+
+    async def _emit_session_status(
+        self, *, profile: str, notice: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Push the session's degradation state (VOICE_SESSION_STATUS):
+        the current profile plus, on a transition, the notice or
+        the ending reason. Fire-and-forget like every voice push."""
+        payload: dict = {"session_id": self.session_id, "profile": profile}
+        if notice is not None:
+            payload["notice"] = notice
+        if reason is not None:
+            payload["reason"] = reason
+        await self._emit(Event(
+            type=EventType.VOICE_SESSION_STATUS, payload=payload))
+
+    async def _try_swap_stt(self, model: str) -> bool:
+        """Execute a tracker-decided STT swap via the pipeline's
+        seam. False when no seam is wired (an injected STT the
+        factory cannot rebuild) or the new engine failed to
+        load — the caller decides what False means (a latency
+        step-down just doesn't happen; a failure swap falls
+        through to ending the session)."""
+        if self._swap_stt is None:
+            return False
+        try:
+            return bool(await self._swap_stt(model))
+        except Exception:  # a swap failure is a decision input, not a crash
+            logger.warning("voice STT swap failed", exc_info=True)
+            return False
+
+    async def _handle_stt_success(self, duration_ms: float) -> None:
+        """A final transcription landed: feed the tracker; on
+        its one-shot step-down decision, swap engines and
+        announce. A swap that cannot execute leaves the session
+        on the current model — still working, just slow — and
+        the latch means it is not retried every turn."""
+        if self._degradation is None:
+            return
+        step = self._degradation.note_stt_success(duration_ms)
+        if step is None:
+            return
+        notice, new_model = step
+        if await self._try_swap_stt(new_model):
+            await self._emit_session_status(
+                profile=self._degradation.profile, notice=notice)
+
+    async def _handle_stt_failure(self, error: Exception) -> None:
+        """A final transcription failed. Below the tracker's
+        consecutive-failure limit the turn is simply dropped
+        (the historical behaviour). At the limit the ladder
+        acts: one swap to a smaller model (announced), or —
+        no smaller model, swap already used, or the swap
+        itself cannot load — the session ends with the
+        specific stage + error as its reason, never a generic
+        failure."""
+        if self._degradation is None:
+            return
+        failing_model = self._degradation.stt_model
+        action, payload = self._degradation.note_stt_failure(str(error))
+        if action == "drop":
+            return
+        if action == "swap":
+            new_model = payload or ""
+            if await self._try_swap_stt(new_model):
+                await self._emit_session_status(
+                    profile=self._degradation.profile,
+                    notice=(
+                        "Transcription kept failing with "
+                        f"'{failing_model}', so I've switched to "
+                        f"'{new_model}' — it may be a little less "
+                        "accurate."))
+                return
+            reason = (
+                "voice unavailable: speech-to-text failed "
+                f"repeatedly with '{failing_model}' (last error: "
+                f"{error}) and the fallback model '{new_model}' "
+                "could not be loaded — the session has ended.")
+        else:  # "end"
+            reason = payload or f"voice unavailable: speech-to-text failed ({error})"
+        self._degradation.profile = PROFILE_UNAVAILABLE
+        await self._emit_session_status(
+            profile=PROFILE_UNAVAILABLE, reason=reason)
+        if self._on_fatal is not None:
+            await self._on_fatal(reason)
+
+    async def _handle_tts_failure(self) -> None:
+        """A synthesis failed mid-session: the tracker flips
+        the session to text-only (later sentences skip the TTS
+        stage entirely instead of failing one by one) and the
+        transition is announced exactly once."""
+        if self._degradation is None:
+            return
+        notice = self._degradation.note_tts_failure()
+        if notice is not None:
+            await self._emit_session_status(
+                profile=self._degradation.profile, notice=notice)
+
+    def _timed_talker(self, text: str) -> AsyncIterator[str]:
+        """The talker stream with its time-to-first-delta
+        recorded as a stage measurement (S15). A pass-through
+        when no tracker is wired."""
+        talker = self._talker
+        degradation = self._degradation
+
+        async def _gen() -> AsyncIterator[str]:
+            started = time.perf_counter()
+            first = True
+            async for delta in talker(text):
+                if first:
+                    first = False
+                    if degradation is not None:
+                        degradation.record_stage_sample(
+                            "talker", "",
+                            (time.perf_counter() - started) * 1000.0)
+                yield delta
+
+        return _gen()
 
     # -- playback accounting (N09) --------------------------------------
 
@@ -446,13 +591,24 @@ class VoiceDelivery:
 
     async def finish_utterance(self, audio: bytes) -> None:
         """Transcribe a finished utterance (its audio, handed over
-        by the intake half at the endpoint) and route the turn."""
+        by the intake half at the endpoint) and route the turn.
+
+        S15: the final transcription is the measured one — its
+        duration feeds the degradation tracker's latency window
+        and per-model store (partials are provisional and scale
+        with buffer growth, so they are never measured), and a
+        failure feeds the consecutive-failure ladder instead of
+        always just dropping the turn."""
         self._last_partial_text = ""
+        transcribe_started = time.perf_counter()
         try:
             text = await self._stt.transcribe(audio, sample_rate=self._sample_rate)
-        except Exception as e:  # noqa: BLE001 — a dead STT stage drops the turn, not the session
+        except Exception as e:  # noqa: BLE001 — the ladder decides: drop, swap, or end
             logger.warning(f"voice transcription failed: {e}")
+            await self._handle_stt_failure(e)
             return
+        await self._handle_stt_success(
+            (time.perf_counter() - transcribe_started) * 1000.0)
         text = (text or "").strip()
         if not text:
             return
@@ -500,7 +656,7 @@ class VoiceDelivery:
         """One talker turn. Turn state was initialised by
         ``finish_utterance`` before this task was scheduled."""
         try:
-            await self._deliver_reply(self._talker(text))
+            await self._deliver_reply(self._timed_talker(text))
         except Exception as e:  # noqa: BLE001 — the talker failing must not kill the session
             logger.warning(f"voice turn failed: {e}")
             if self._on_turn_error is not None:
@@ -527,7 +683,7 @@ class VoiceDelivery:
             if launched:
                 await self._deliver_reply(_static_deltas(self._escalation_ack))
             else:
-                await self._deliver_reply(self._talker(text))
+                await self._deliver_reply(self._timed_talker(text))
         except Exception as e:  # noqa: BLE001 — a failed turn must not kill the session
             logger.warning(f"voice escalation turn failed: {e}")
             if self._on_turn_error is not None:
@@ -662,16 +818,37 @@ class VoiceDelivery:
         be credited on the interrupted path (it still stands in
         the full commit of an uninterrupted reply, which
         ``_deliver_reply`` builds from the reply text itself).
+
+        S15: when the session's ladder has speech output off —
+        the plan's text-only rung, or a mid-session TTS failure
+        that flipped the session text-only — the stage is not
+        called at all; the sentence's text has already streamed.
+        While speech is on, the time to the first audio chunk
+        is recorded as the TTS stage measurement (the bench's
+        "TTS first-audio" figure, live), and a synthesis failure
+        is reported to the tracker, which announces the
+        text-only transition once and stops further attempts.
         """
+        if self._degradation is not None and not self._degradation.tts_enabled:
+            return
         chunks: list[bytes] = []
+        synth_started = time.perf_counter()
+        first_chunk_ms: float | None = None
         try:
             async for audio in self._tts.synthesize(sentence, voice=self._tts_voice):
                 if self._interrupt_requested or self._is_stopping():
                     return  # nothing of this sentence was emitted
+                if first_chunk_ms is None:
+                    first_chunk_ms = (
+                        time.perf_counter() - synth_started) * 1000.0
                 chunks.append(audio)
         except Exception:  # the mouth failing must not kill the conversation
             logger.warning("voice TTS failed; continuing text-only", exc_info=True)
+            await self._handle_tts_failure()
             return
+        if first_chunk_ms is not None and self._degradation is not None:
+            self._degradation.record_stage_sample(
+                "tts", self._tts_voice, first_chunk_ms)
         if not chunks:
             return
         entry = {

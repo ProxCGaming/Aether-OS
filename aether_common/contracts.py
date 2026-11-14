@@ -275,6 +275,18 @@ class EventType(str, Enum):
     # start is always ok=False with an honest "voice unavailable: ..."
     # error and never opens an audio device. STOP_REQUEST payload:
     # {"session_id": str}; STOP_RESPONSE: {"ok": bool}.
+    # S15 (degradation ladder): the START_RESPONSE additionally
+    # carries "voice_profile" ("full" | "degraded" | "text_only";
+    # null when refused) and "notices": [str] — one sentence per
+    # deviation from the full cascade the ladder planned (speech
+    # output off, energy endpointing, a load-fallback STT model,
+    # a measured-slow STT warning). VOICE_SESSION_STATUS is the
+    # engine -> renderer push for MID-session transitions:
+    # {"session_id", "profile": str, "notice": str (on a live
+    # transition), "reason": str (only when profile is
+    # "unavailable" — the session has ended, with the specific
+    # stage + error as the reason)}. A session only ever steps
+    # DOWN the ladder mid-flight, never back up.
     # VOICE_PARTIAL_TRANSCRIPT is an outbound push for the user's
     # speech: {"session_id", "speaker": "user", "text": str,
     # "is_final": bool} — partials are provisional display only; the
@@ -307,6 +319,7 @@ class EventType(str, Enum):
     VOICE_PARTIAL_TRANSCRIPT = "VOICE_PARTIAL_TRANSCRIPT"
     VOICE_OUTPUT_CHUNK = "VOICE_OUTPUT_CHUNK"
     VOICE_BARGE_IN = "VOICE_BARGE_IN"
+    VOICE_SESSION_STATUS = "VOICE_SESSION_STATUS"
     # N09: VOICE_PLAYBACK_PROGRESS is the renderer -> engine report
     # of playback position: {"session_id", "played_seq": int} —
     # the highest chunk_seq the renderer has FINISHED playing

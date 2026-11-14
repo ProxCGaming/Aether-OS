@@ -417,9 +417,14 @@ class TestVoiceOffLoop:
             start_ev = next(
                 ev for ev in events
                 if ev.type == EventType.VOICE_SESSION_START_RESPONSE)
+            # S15: the start response also carries the
+            # degradation ladder's voice_profile + notices; a
+            # pipeline without the ladder surface (this fake)
+            # reads as a full-profile session with no notices.
             assert start_ev.payload == {
                 "ok": True, "session_id": sid,
                 "webrtc_config": {"sdp": "fake-config"}, "error": None,
+                "voice_profile": "full", "notices": [],
             }
             # Clean shutdown of the live session.
             _send(ws, EventType.VOICE_SESSION_STOP_REQUEST,

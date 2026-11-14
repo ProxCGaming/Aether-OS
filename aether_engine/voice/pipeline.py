@@ -20,6 +20,19 @@
   ``VoiceUnavailableError`` naming every unavailable stage —
   before touching the transport; ``stop()`` closes the transport
   and every stage, idempotently.
+* Degradation (S15): a pipeline built by
+  ``create_voice_pipeline`` carries a ladder plan
+  (``voice/degradation.py``) decided before anything opens —
+  from the stages' own availability, the S10 capability
+  matrix's local-voice verdict, and this machine's measured
+  STT latency. Stages with a rung no longer refuse the
+  session: a missing TTS starts the session text-only, a
+  missing Silero runtime falls back to energy endpointing,
+  and mid-session the delivery half executes the tracker's
+  decisions through this class's seams (STT engine swap,
+  text-only flip, fatal end). A pipeline constructed directly
+  (tests, embeddings) has no ladder and keeps the binary
+  contract above, exactly.
 
 The loop is full-duplex (E8-5.1b): frames keep flowing while a
 reply plays, into a dedicated barge-in endpointer. Sustained user
@@ -74,11 +87,21 @@ only at the narrow callables wired in ``__init__`` below, so the
 intake path has no code path that waits on a transcription
 (E7-07's structural fix) and each half is testable on its own.
 """
+import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 from aether_common.contracts import EventType
 from aether_engine.voice import VoiceTalkerError, VoiceUnavailableError
+from aether_engine.voice.degradation import (
+    PROFILE_DEGRADED,
+    PROFILE_FULL,
+    SessionDegradation,
+    plan_voice_session,
+    record_voice_stage_sample,
+    stt_fallback_chain,
+    stt_p95_by_model,
+)
 from aether_engine.voice.delivery import (
     EmitFn,
     EscalationClassifier,
@@ -90,7 +113,13 @@ from aether_engine.voice.intake import VoiceIntake, VoiceTransport
 from aether_engine.voice.rtc import WebRtcVoiceTransport
 from aether_engine.voice.stt import FasterWhisperStt, SttEngine
 from aether_engine.voice.tts import DEFAULT_VOICE, KokoroTts, TtsEngine
-from aether_engine.voice.vad import Endpointer, EndpointerConfig, SileroVad, VadEngine
+from aether_engine.voice.vad import (
+    Endpointer,
+    EndpointerConfig,
+    EnergyVad,
+    SileroVad,
+    VadEngine,
+)
 
 logger = logging.getLogger("aether_engine.voice.pipeline")
 
@@ -140,8 +169,19 @@ class VoicePipeline:
         escalation_classifier: EscalationClassifier | None = None,
         on_escalation: TurnCallback | None = None,
         escalation_ack: str = DEFAULT_ESCALATION_ACK,
+        degradation: SessionDegradation | None = None,
+        stt_factory: Callable[[str], SttEngine] | None = None,
     ):
         self.session_id = session_id
+        # S15: the session's degradation tracker (None = no
+        # ladder; the binary availability contract applies) and
+        # the factory the STT swap/load-fallback seams build
+        # replacement engines with (None when the STT stage was
+        # injected — an injected engine cannot be rebuilt, so
+        # swaps honestly report False).
+        self._degradation = degradation
+        self._stt_factory = stt_factory
+        self._fatal_reason: str | None = None
         # S11: the latest EQ affect read for this session,
         # recorded via note_affect_read (the talker's fast-chat
         # run computes one per turn). Session state only — it is
@@ -212,6 +252,9 @@ class VoicePipeline:
             user_speaking=lambda: self._intake.user_speaking,
             is_started=lambda: self._started,
             is_stopping=lambda: self._stopping,
+            degradation=degradation,
+            swap_stt=self.swap_stt_engine,
+            on_fatal=self._end_session_fatal,
         )
         self._intake.bind_delivery(self._delivery)
 
@@ -246,6 +289,14 @@ class VoicePipeline:
 
     # -- availability --------------------------------------------------
 
+    def _speech_output_enabled(self) -> bool:
+        """Whether this session speaks its replies. False only
+        under a ladder plan whose TTS rung is off (the stage
+        could not run at plan time): the TTS stage is then
+        neither checked nor opened, and the delivery half never
+        calls it."""
+        return self._degradation is None or self._degradation.tts_enabled
+
     def unavailable_reasons(self) -> dict[str, str]:
         """Stage name -> reason, for every stage that cannot run."""
         reasons: dict[str, str] = {}
@@ -255,10 +306,39 @@ class VoicePipeline:
             ("tts", self._tts),
             ("transport", self._transport),
         ):
+            if name == "tts" and not self._speech_output_enabled():
+                continue
             reason = stage.unavailable_reason()
             if reason is not None:
                 reasons[name] = reason
         return reasons
+
+    @property
+    def voice_profile(self) -> str:
+        """The session's current degradation profile (S15): the
+        plan's profile at start, updated live as transitions
+        land (text_only after a TTS failure, unavailable at a
+        fatal end). "full" for a pipeline built without a
+        ladder."""
+        if self._degradation is None:
+            return PROFILE_FULL
+        return self._degradation.profile
+
+    @property
+    def start_notices(self) -> tuple[str, ...]:
+        """The user-facing notices the start response carries
+        (S15): every deviation from the full cascade the ladder
+        planned, plus a load-failure substitution added by
+        start() itself. Empty for a full-cascade session."""
+        if self._degradation is None:
+            return ()
+        return self._degradation.notices
+
+    @property
+    def fatal_reason(self) -> str | None:
+        """Why the ladder ended this session mid-flight (S15),
+        or None while it lives."""
+        return self._fatal_reason
 
     # -- lifecycle -----------------------------------------------------
 
@@ -266,7 +346,9 @@ class VoicePipeline:
         """Open the transport and stages; returns webrtc_config.
 
         Raises VoiceUnavailableError — before opening anything —
-        when any stage reports itself unavailable.
+        when any stage reports itself unavailable (under a
+        ladder plan, the TTS stage is exempt when the plan's
+        text-only rung is active: it is never opened at all).
         """
         reasons = self.unavailable_reasons()
         if reasons:
@@ -277,9 +359,13 @@ class VoicePipeline:
         try:
             self._webrtc_config = await self._transport.open()
             opened.append(self._transport)
-            for stage in (self._vad, self._stt, self._tts):
-                await stage.open()
-                opened.append(stage)
+            await self._vad.open()
+            opened.append(self._vad)
+            await self._open_stt()
+            opened.append(self._stt)
+            if self._speech_output_enabled():
+                await self._tts.open()
+                opened.append(self._tts)
         except Exception:
             for stage in reversed(opened):
                 try:
@@ -289,6 +375,96 @@ class VoicePipeline:
             raise
         self._started = True
         return self._webrtc_config
+
+    async def _open_stt(self) -> None:
+        """Open the STT stage, with the ladder's load-failure
+        retry (S15): a configured model that cannot even LOAD
+        (not downloaded, corrupt cache) retries down the
+        smaller-model chain before the start is allowed to
+        fail — each candidate is built fresh by the factory and
+        opened, the first that loads is adopted (the delivery
+        half is repointed at it) and the substitution joins the
+        start notices. With no ladder or no factory wired, or
+        when every candidate fails, the original error
+        propagates and start()'s rollback runs as before."""
+        try:
+            await self._stt.open()
+            return
+        except Exception:
+            if self._degradation is None or self._stt_factory is None:
+                raise
+            configured = self._degradation.stt_model
+            adopted: SttEngine | None = None
+            adopted_model: str | None = None
+            for candidate in stt_fallback_chain(configured):
+                try:
+                    engine = self._stt_factory(candidate)
+                    await engine.open()
+                except Exception:  # this candidate cannot load either; try smaller
+                    logger.debug(
+                        "voice STT load fallback: %r failed to load",
+                        candidate, exc_info=True)
+                    continue
+                adopted, adopted_model = engine, candidate
+                break
+            if adopted is None or adopted_model is None:
+                raise
+            old = self._stt
+            self._stt = adopted
+            self._delivery.replace_stt(adopted)
+            self._degradation.stt_model = adopted_model
+            if self._degradation.profile == PROFILE_FULL:
+                self._degradation.profile = PROFILE_DEGRADED
+            self._degradation.add_start_notice(
+                f"The '{configured}' speech model could not be "
+                f"loaded, so this session is using "
+                f"'{adopted_model}' instead — it may be a little "
+                "less accurate.")
+            try:
+                await old.close()
+            except Exception:  # the old engine never opened; close is best-effort
+                logger.debug("voice STT load fallback: old engine close failed",
+                             exc_info=True)
+
+    # -- degradation execution seams (S15) ------------------------------
+
+    async def swap_stt_engine(self, model: str) -> bool:
+        """Replace the STT engine with a fresh one for *model*
+        (the delivery half's step-down/failure-swap execution).
+        The new engine is opened BEFORE the swap lands, so a
+        load failure changes nothing and returns False; on
+        success the delivery half is repointed at the new
+        engine and the old one is closed. False whenever no
+        factory is wired (an injected STT cannot be rebuilt)."""
+        if self._stt_factory is None:
+            return False
+        try:
+            engine = self._stt_factory(model)
+            await engine.open()
+        except Exception:  # a swap candidate that cannot load is a decision input
+            logger.warning(
+                "voice STT swap: model %r failed to load", model,
+                exc_info=True)
+            return False
+        old = self._stt
+        self._stt = engine
+        self._delivery.replace_stt(engine)
+        try:
+            await old.close()
+        except Exception:  # teardown of the replaced engine is best-effort
+            logger.debug("voice STT swap: old engine close failed", exc_info=True)
+        return True
+
+    async def _end_session_fatal(self, reason: str) -> None:
+        """The delivery half's fatal hook (S15): the STT ladder
+        decided the session cannot honestly continue. The
+        status push carrying the reason has already been
+        emitted by the delivery half; the stop itself is
+        scheduled rather than run inline, because stop() tears
+        down the transport the frame loop — the delivery
+        half's caller — is running under."""
+        self._fatal_reason = reason
+        asyncio.ensure_future(self.stop())
 
     async def stop(self) -> None:
         """Close the transport and every stage. Idempotent."""
@@ -442,6 +618,31 @@ def fast_chat_talker(provider, *, session_id: str | None,
     return talk
 
 
+def _matrix_voice_verdict(report: dict | None) -> dict | None:
+    """The S10 matrix's ``local_voice`` verdict for the planner:
+    the injected report when given, else the capability
+    module's current report (cached/persisted per its own
+    TTL). Reading the matrix must never break a session start
+    — any failure reads as "no verdict", and planning proceeds
+    on stage reasons alone."""
+    try:
+        if report is None:
+            from aether_engine.machine_capability import (
+                machine_capability_report,
+            )
+
+            report = machine_capability_report()
+    except Exception:  # the matrix is advisory input, never a start dependency
+        logger.debug("voice planning: capability report unreadable",
+                     exc_info=True)
+        return None
+    features = report.get("features") if isinstance(report, dict) else None
+    for feature in features or []:
+        if isinstance(feature, dict) and feature.get("id") == "local_voice":
+            return feature
+    return None
+
+
 def create_voice_pipeline(
     *,
     session_id: str,
@@ -461,28 +662,76 @@ def create_voice_pipeline(
     endpointer_config: EndpointerConfig | None = None,
     stt_model: str | None = None,
     tts_voice: str = DEFAULT_VOICE,
+    capability_report: dict | None = None,
+    latency_store=None,
 ) -> tuple[VoicePipeline | None, str | None]:
     """Build a pipeline from the production stages (or injected
-    ones). Returns ``(pipeline, None)`` when every stage can run,
-    or ``(None, "voice unavailable: ...")`` — nothing is opened
-    either way; opening happens in ``pipeline.start()``.
+    ones), planned through the S15 degradation ladder. Returns
+    ``(pipeline, None)`` when the ladder finds a runnable
+    profile — full, degraded, or text-only — or
+    ``(None, "voice unavailable: ...")`` when no rung exists —
+    nothing is opened either way; opening happens in
+    ``pipeline.start()``.
 
     ``stt_model`` / ``tts_voice`` are the speech config (model hub,
     H3), read by the caller at session start: the STT engine is
-    built with the model here and holds it for the pipeline's
-    whole life — there is no swap seam, so a config change applies
-    to the NEXT session (grill P3(a)). An injected ``stt`` wins
-    over ``stt_model``. The voice, by contrast, reaches the TTS
-    stage as a per-sentence parameter from ``tts_voice``.
+    built with the configured model here, and a config change
+    applies to the NEXT session (grill P3(a)). The only
+    mid-session model changes are the ladder's own step-downs,
+    executed through the pipeline's swap seam with a factory
+    that rebuilds this same stage — never from config. An
+    injected ``stt`` wins over ``stt_model`` (and, being
+    un-rebuildable, disables the swap seams). The voice, by
+    contrast, reaches the TTS stage as a per-sentence parameter
+    from ``tts_voice``.
+
+    ``capability_report`` / ``latency_store`` are the planner's
+    S10-matrix and measured-latency inputs, injectable for
+    tests; by default the live report and the global store
+    are read.
     """
+    vad_stage = vad if vad is not None else SileroVad()
+    stt_stage = stt if stt is not None else (
+        FasterWhisperStt(model=stt_model) if stt_model
+        else FasterWhisperStt())
+    tts_stage = tts if tts is not None else KokoroTts()
+    transport_stage = (
+        transport if transport is not None else WebRtcVoiceTransport())
+    configured_model = (
+        stt_model or getattr(stt_stage, "model_name", None) or "small")
+    plan = plan_voice_session(
+        stage_reasons={
+            "vad": vad_stage.unavailable_reason(),
+            "stt": stt_stage.unavailable_reason(),
+            "tts": tts_stage.unavailable_reason(),
+            "transport": transport_stage.unavailable_reason(),
+        },
+        configured_stt_model=configured_model,
+        matrix_voice=_matrix_voice_verdict(capability_report),
+        stt_p95_by_model=stt_p95_by_model(
+            [configured_model], store=latency_store),
+        vad_replaceable=vad is None,
+    )
+    if plan.unavailable_reason is not None:
+        return None, plan.unavailable_reason
+    if plan.vad_fallback and vad is None:
+        # The factory's own Silero stage cannot run: the
+        # ladder's energy endpointing takes its place. (An
+        # injected VAD is never swapped — see the planner's
+        # vad_replaceable rule, which refuses instead.)
+        vad_stage = EnergyVad()
+    degradation = SessionDegradation(
+        plan,
+        recorder=lambda stage, model, duration_ms: (
+            record_voice_stage_sample(
+                stage, model, duration_ms, store=latency_store)),
+    )
     pipeline = VoicePipeline(
         session_id=session_id,
-        vad=vad if vad is not None else SileroVad(),
-        stt=stt if stt is not None else (
-            FasterWhisperStt(model=stt_model) if stt_model
-            else FasterWhisperStt()),
-        tts=tts if tts is not None else KokoroTts(),
-        transport=transport if transport is not None else WebRtcVoiceTransport(),
+        vad=vad_stage,
+        stt=stt_stage,
+        tts=tts_stage,
+        transport=transport_stage,
         talker=talker,
         emit=emit,
         on_user_final=on_user_final,
@@ -494,8 +743,9 @@ def create_voice_pipeline(
         escalation_classifier=escalation_classifier,
         on_escalation=on_escalation,
         escalation_ack=escalation_ack,
+        degradation=degradation,
+        stt_factory=(
+            (lambda model: FasterWhisperStt(model=model))
+            if stt is None else None),
     )
-    reasons = pipeline.unavailable_reasons()
-    if reasons:
-        return None, _unavailable_message(reasons)
     return pipeline, None

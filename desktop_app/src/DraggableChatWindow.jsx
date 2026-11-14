@@ -1730,6 +1730,7 @@ export default function DraggableChatWindow({
             status={voiceState.status === 'active' ? ((voiceState.assistantText || voiceState.announcementText) ? 'speaking' : 'listening') : voiceState.status}
             partialText={voiceState.partialText || ''}
             assistantText={voiceState.assistantText || voiceState.announcementText || ''}
+            notice={voiceState.notice || null}
             error={voiceState.error || null}
             webrtcConfig={voiceState.webrtcConfig || null}
             audioChunk={voiceAudioChunk}

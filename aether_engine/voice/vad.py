@@ -47,7 +47,9 @@ Two separate concerns live here:
 import asyncio
 import importlib.util
 import logging
+import math
 import re
+import struct
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
@@ -510,3 +512,65 @@ class SileroVad:
         )
         self._context = audio[0, -context_size:]
         return float(out[0][0])
+
+
+# ---------------------------------------------------------------------------
+# Energy fallback (master build S15)
+# ---------------------------------------------------------------------------
+
+#: RMS level (in int16 sample units) at which the energy
+#: fallback reports the Endpointer's default speech threshold
+#: (0.5). HEURISTIC: near-microphone speech typically measures
+#: an RMS in the low thousands, a quiet room's noise floor in
+#: the low hundreds; 500 sits between them. It is a fallback's
+#: guess, labelled as one — the plan's session notice tells the
+#: user endpointing is in reduced mode.
+ENERGY_VAD_SPEECH_RMS = 500.0
+
+
+class EnergyVad:
+    """Energy-based speech-probability fallback (S15).
+
+    The degradation ladder's VAD rung: when the Silero runtime
+    cannot run here (onnxruntime / numpy / the model package
+    missing), the session used to refuse outright even though
+    every other stage was fine. This source needs nothing but
+    the PCM bytes themselves — it reports a probability derived
+    from the frame's RMS level, scaled so ordinary speech
+    clears the Endpointer's speech threshold and quiet frames
+    do not.
+
+    Honest limits, stated plainly: energy is not speech. A loud
+    television endpoints exactly like a voice, and a whisper
+    may not endpoint at all; the Endpointer's minimum-speech
+    and maximum-utterance guards still bound the damage. That
+    trade is the rung's whole point — degraded endpointing
+    beats no session — and the session-start notice says the
+    mode is reduced.
+    """
+
+    def __init__(self, speech_rms: float = ENERGY_VAD_SPEECH_RMS):
+        self._speech_rms = max(1.0, float(speech_rms))
+
+    def unavailable_reason(self) -> str | None:
+        # Pure standard library over the frame bytes: there is
+        # no dependency whose absence could make this true.
+        return None
+
+    async def open(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def probability(self, frame: bytes, sample_rate: int) -> float:
+        count = len(frame) // 2
+        if count == 0:
+            return 0.0
+        samples = struct.unpack(f"<{count}h", frame[:count * 2])
+        mean_square = sum(s * s for s in samples) / count
+        rms = math.sqrt(mean_square)
+        # Speech at twice the reference level saturates at 1.0;
+        # the reference level itself lands exactly on the
+        # default 0.5 speech threshold.
+        return min(1.0, rms / (2.0 * self._speech_rms))

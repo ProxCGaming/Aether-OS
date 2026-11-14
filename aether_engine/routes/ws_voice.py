@@ -222,6 +222,23 @@ async def send_voice_session_start_result(conn, req_id_, payload_):
                 "session_id": voice_session_id,
                 "webrtc_config": webrtc_config,
                 "error": voice_error,
+                # S15: the degradation ladder's outcome — the
+                # profile the session actually started in and
+                # the notices for every deviation from the full
+                # cascade (text-only, energy endpointing, a
+                # load-fallback model, a measured-slow warning).
+                # Read defensively (the RTC seams' getattr
+                # pattern): a pipeline without the ladder
+                # surface is a full-profile session with no
+                # notices, and this background task must never
+                # die on an attribute — a dead start task is a
+                # response the client waits on forever.
+                "voice_profile": (
+                    getattr(voice_pipeline, "voice_profile", "full")
+                    if voice_pipeline is not None else None),
+                "notices": (
+                    list(getattr(voice_pipeline, "start_notices", ()))
+                    if voice_pipeline is not None else []),
             },
             "Could not send voice session start response")
 

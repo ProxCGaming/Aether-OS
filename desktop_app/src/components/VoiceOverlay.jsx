@@ -59,6 +59,7 @@ export default function VoiceOverlay({
   status = 'starting',
   partialText = '',
   assistantText = '',
+  notice = null,
   error = null,
   webrtcConfig = null,
   audioChunk = null,
@@ -169,6 +170,11 @@ export default function VoiceOverlay({
           {micError && (
             <div data-testid="voice-mic-error" style={{ color: 'var(--danger)', fontSize: '12px', marginBottom: '8px' }}>
               {micError}
+            </div>
+          )}
+          {notice && (
+            <div data-testid="voice-notice" style={{ color: 'var(--text-secondary)', fontSize: '12px', marginBottom: '8px' }}>
+              {notice}
             </div>
           )}
           {partialText && (

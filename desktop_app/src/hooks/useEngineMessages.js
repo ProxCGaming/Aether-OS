@@ -1150,6 +1150,15 @@ export function useEngineMessages(deps) {
                 sessionId: p.session_id || current.sessionId,
                 webrtcConfig: p.webrtc_config || null,
                 error: null,
+                // S15: the degradation ladder's starting
+                // profile + the latest start notice (text-only
+                // session, energy endpointing, slow-STT
+                // warning...), shown in the overlay so a
+                // reduced session never looks like a full one.
+                profile: p.voice_profile || 'full',
+                notice: (Array.isArray(p.notices) && p.notices.length)
+                  ? p.notices[p.notices.length - 1]
+                  : null,
               });
               if (p.session_id && p.session_id !== activeSessionRef.current) {
                 setActiveSession(p.session_id);
@@ -1240,6 +1249,33 @@ export function useEngineMessages(deps) {
               }]);
             }
             applyVoiceState({ ...current, assistantText: '', announcementText: '' });
+          }
+        } else if (data.type === 'VOICE_SESSION_STATUS') {
+          // S15: a mid-session degradation transition. The
+          // session only ever steps DOWN the ladder (a slower
+          // STT stepped to a faster model, speech output lost
+          // -> text-only), announced once with its notice; a
+          // profile of "unavailable" means the ladder ended
+          // the session — the overlay's error state shows the
+          // specific reason, like a refused start.
+          const p = data.payload || {};
+          const current = voiceStateRef.current;
+          if (current && p.session_id === current.sessionId) {
+            if (p.profile === 'unavailable') {
+              applyVoiceState({
+                ...current,
+                status: 'error',
+                profile: 'unavailable',
+                error: p.reason || 'Voice became unavailable on this machine.',
+                webrtcConfig: null,
+              });
+            } else {
+              applyVoiceState({
+                ...current,
+                profile: p.profile || current.profile || 'full',
+                notice: p.notice || current.notice || null,
+              });
+            }
           }
         } else if (data.type === 'VOICE_SESSION_STOP_RESPONSE') {
           // A local stop already tore the UI down; this only lands
