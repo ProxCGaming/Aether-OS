@@ -77,6 +77,22 @@ SUPERVISOR_MEMORY_TOOLS = [
                 "required": ["query"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_user_profile",
+            "description": (
+                "Fetch the stored profile of the user from long-term memory: who they are, "
+                "their people and relationships, and their preferences — derived from the "
+                "stored facts, each traceable to its fact. Call this when the task is about "
+                "the user themselves, their people, or what they prefer."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
     }
 ]
 
@@ -160,6 +176,26 @@ async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id
                     backend, query, config=user_config,
                     include_facts=False, include_curated=False)
                 result_str = assembled["text"] or "No past episodes found matching query."
+
+        elif tool_name == "get_user_profile":
+            # S6: the profile VIEW over the KG (memory/profile.py),
+            # read through the facade like every memory read. This
+            # is a pull, never an injection: the routing prompt's
+            # discipline — NEVER call memory tools for
+            # self-contained requests — covers this tool too, so
+            # the profile enters context only when a task is
+            # actually about the user, their people, or their
+            # preferences. The result cap below applies as the
+            # outer safety limit on top of the profile's own cap.
+            backend = backend_or_none(user_config, context="supervisor memory tool")
+            if backend is None:
+                result_str = "Memory is unavailable: the configured memory backend cannot run here (see engine log)."
+            else:
+                briefing = backend.profile_briefing()
+                result_str = briefing or (
+                    "No user profile is stored yet — nothing has been "
+                    "learned about the user, their people, or their "
+                    "preferences so far.")
 
         if len(result_str) > MEMORY_TOOL_RESULT_MAX_CHARS:
             result_str = result_str[:MEMORY_TOOL_RESULT_MAX_CHARS] + "\n...[memory result truncated to budget]"
@@ -348,7 +384,8 @@ def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: 
         "You have autonomous access to memory tools:\n"
         "- get_current_chat_history: fetch previous messages in this current open chat session\n"
         "- search_knowledge_graph: fetch long-term user facts, preferences, or project entities\n"
-        "- search_past_episodes: fetch past completed tasks across previous sessions\n\n"
+        "- search_past_episodes: fetch past completed tasks across previous sessions\n"
+        "- get_user_profile: fetch the stored profile of the user — who they are, their people and relationships, and their preferences\n\n"
         "THINK CAREFULLY:\n"
         "1. NEVER call memory tools for self-contained requests. Examples that must be handled WITHOUT any tool call: "
         "current time/date, greetings, basic math, code generation, generic explanations, definitions. "
@@ -425,6 +462,20 @@ async def search_past_episodes(query: str, *, runtime: ToolRuntime) -> str:
     )
 
 
+@tool
+async def get_user_profile(*, runtime: ToolRuntime) -> str:
+    """Fetch the stored profile of the user from long-term memory: who they are, their people and relationships, and their preferences. Call this when the task is about the user themselves, their people, or what they prefer."""
+    gate = _memory_tool_gate("get_user_profile", runtime.config)
+    if gate:
+        return gate
+    state = runtime.state
+    return await _execute_supervisor_memory_tool(
+        "get_user_profile", {},
+        state.get("session_id"), state.get("original_prompt", ""), state.get("task_id") or "",
+        user_config=runtime.config.get("configurable", {}).get("user_config"),
+    )
+
+
 def build_supervisor_memory_tools() -> list:
     """The supervisor's memory tools as LangChain tools (Epic 1).
 
@@ -432,7 +483,7 @@ def build_supervisor_memory_tools() -> list:
     execution path (audit events, TOOL_ACTIVITY events) — for the
     create_supervisor agent's ToolNode.
     """
-    return [get_current_chat_history, search_knowledge_graph, search_past_episodes]
+    return [get_current_chat_history, search_knowledge_graph, search_past_episodes, get_user_profile]
 
 
 def repo_map_context(

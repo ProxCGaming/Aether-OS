@@ -68,6 +68,37 @@ class MemoryBackend:
     def search_facts(self, query: str, limit: int = 10, include_history: bool = False) -> list[dict]:
         raise NotImplementedError
 
+    async def search_facts_hybrid(self, query: str, limit: int = 10, include_history: bool = False) -> list[dict]:
+        """S6: fact search with a semantic leg, where the backend
+        has one. The base implementation is the backend's own
+        search_facts — external backends rank their own way and
+        this adds nothing for them. NativeMemoryBackend overrides
+        with the KG's hybrid (substring priority + embedding
+        recall, degrading to exactly search_facts when embeddings
+        are unavailable). Result shape is the search_facts shape;
+        rows the semantic leg attested may carry one extra key,
+        "semantic_similarity"."""
+        if include_history:
+            return self.search_facts(query, limit=limit, include_history=True)
+        return self.search_facts(query, limit=limit)
+
+    def user_profile(self) -> dict[str, Any]:
+        """S6: the user/relationship profile VIEW over this
+        backend's facts (memory/profile.py) — a derivation from
+        the stored records on every call, not a store: there is
+        nothing separate to correct, and edits through
+        update_fact / delete_fact show up on the next read."""
+        from aether_engine.memory import profile
+
+        return profile.build_user_profile(self)
+
+    def profile_briefing(self) -> str:
+        """S6: the profile view as a bounded briefing string
+        ("" when nothing about the user is stored)."""
+        from aether_engine.memory import profile
+
+        return profile.profile_briefing(self)
+
     def list_facts(self, limit: int = 100, include_history: bool = False) -> list[dict]:
         raise NotImplementedError
 
@@ -138,6 +169,12 @@ class NativeMemoryBackend(MemoryBackend):
         if include_history:
             return knowledge_graph.search_facts(query, limit=limit, include_history=True)
         return knowledge_graph.search_facts(query, limit=limit)
+
+    async def search_facts_hybrid(self, query, limit=10, include_history=False):
+        from aether_engine.memory import knowledge_graph
+
+        return await knowledge_graph.search_facts_semantic(
+            query, limit=limit, include_history=include_history)
 
     def list_facts(self, limit=100, include_history=False):
         from aether_engine.memory import knowledge_graph

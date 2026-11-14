@@ -36,14 +36,24 @@ each factor in 0..1, so the score is in 0..1:
   the candidate text, with an exact-phrase bonus — if the whole
   normalised query string appears in the candidate text, relevance
   is 1.0. (The stores' native rankings still decide WHICH records
-  become candidates — KG substring search, the episodic hybrid
-  BM25+cosine RRF — but the facade does not expose those native
-  scores, so the assembler re-derives a uniform lexical relevance
-  for scoring; that is stated here, not hidden.) When the query
+  become candidates — the KG hybrid substring+semantic search,
+  the episodic hybrid BM25+cosine RRF — but the facade does not
+  expose those native scores, so the assembler re-derives a
+  uniform lexical relevance for scoring; that is stated here, not
+  hidden.) When the query
   has no usable tokens (a list-style briefing), relevance is the
   neutral 0.5 for every candidate and the other factors decide.
   With a real query, a candidate with relevance 0 is dropped: it
   shares nothing with what was asked.
+  S6 amendment — a fact the KG's semantic leg attested (its
+  hybrid search stamps ``semantic_similarity``, already gated at
+  the store's cosine threshold) carries a second, independent
+  relevance signal, and the relevance factor takes the STRONGER
+  of the two: relevance = max(lexical, semantic_similarity). The
+  four-factor formula is unchanged; only the relevance input
+  gains the store's evidence, so a paraphrase with zero token
+  overlap is not discarded when the embedding leg vouches for
+  it — while a candidate no leg vouches for still drops.
 * recency — exponential half-life on the record's age:
   ``0.5 ** (age_days / 90)`` (90-day half-life: memory here is
   long-term, so a month-old fact still scores ~0.79; a record with
@@ -167,6 +177,15 @@ def _fact_candidate(fact: dict, query: str, tokens: list[str], now: int) -> dict
         return None
     entity = str(fact.get("entity_name") or "Entity")
     relevance = _relevance(query, tokens, f"{entity} {text}")
+    # S6: the store's semantic attestation, when present, floors
+    # the relevance factor (see the module docstring's S6
+    # amendment) — max(lexical, semantic), never a replacement
+    # ranking: the product formula still decides the order.
+    semantic = fact.get("semantic_similarity")
+    semantic_value: float | None = None
+    if isinstance(semantic, (int, float)) and not isinstance(semantic, bool):
+        semantic_value = min(1.0, max(0.0, float(semantic)))
+        relevance = max(relevance, semantic_value)
     if tokens and relevance <= 0.0:
         return None
     confidence = _unit(fact.get("confidence"), 0.5)
@@ -179,6 +198,7 @@ def _fact_candidate(fact: dict, query: str, tokens: list[str], now: int) -> dict
         "text": text,
         "score": _score(relevance, recency, confidence, importance),
         "relevance": relevance,
+        "semantic_similarity": semantic_value,
         "recency": recency,
         "confidence": confidence,
         "importance": importance,
@@ -313,14 +333,27 @@ async def assemble_memory_context(
 
     if include_facts and backend is not None:
         try:
-            facts = await _maybe_await(
-                backend.search_facts(query, limit=FACT_CANDIDATE_LIMIT))
+            # S6: prefer the backend's hybrid search (substring
+            # priority + semantic recall) when it offers one, so
+            # paraphrased queries reach candidates the substring
+            # leg alone would never surface; backends and test
+            # doubles without it keep the plain search. Either
+            # way the candidates are scored by the one formula
+            # above — retrieval decides candidacy, scoring ranks.
+            hybrid = getattr(backend, "search_facts_hybrid", None)
+            if hybrid is not None:
+                facts = await _maybe_await(
+                    hybrid(query, limit=FACT_CANDIDATE_LIMIT))
+            else:
+                facts = await _maybe_await(
+                    backend.search_facts(query, limit=FACT_CANDIDATE_LIMIT))
         except Exception:  # one failing section must not sink assembly
             logger.warning("Context assembly: fact search failed", exc_info=True)
             facts = []
         if not facts:
-            # The KG's native search is substring-only: an empty
-            # result can mean "phrased differently", not "nothing
+            # Even the hybrid can come back empty (embeddings
+            # unavailable AND no substring hit): an empty result
+            # can mean "phrased differently", not "nothing
             # known". Fall back to the backend's top facts and let
             # the uniform relevance score judge them.
             try:

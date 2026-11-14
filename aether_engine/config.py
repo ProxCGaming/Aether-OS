@@ -221,6 +221,13 @@ class UserConfig:
     episodic_similarity_threshold: float = 0.3
     kg_fact_retention_days: int = 365
     kg_max_facts: int = 5000
+    # S6: KG semantic-retrieval threshold (cosine) — the embedding
+    # leg of knowledge_graph.search_facts_semantic. Facts scoring
+    # below it never join the hybrid results. Same 0.3 default and
+    # reasoning as episodic_similarity_threshold above (same
+    # embedder, same short-text regime); 0.0 restores
+    # unthresholded semantic recall.
+    kg_similarity_threshold: float = 0.3
     # S5: unified memory scoring + the single context assembler
     # (memory/context_assembler.py). memory_context_token_budget is
     # the ONE total token budget (estimated at the house 4 chars /
@@ -346,6 +353,7 @@ class UserConfig:
             "episodic_similarity_threshold": self.episodic_similarity_threshold,
             "kg_fact_retention_days": self.kg_fact_retention_days,
             "kg_max_facts": self.kg_max_facts,
+            "kg_similarity_threshold": self.kg_similarity_threshold,
             "memory_context_token_budget": self.memory_context_token_budget,
             "memory_decay_half_life_days": self.memory_decay_half_life_days,
             "memory_decay_floor": self.memory_decay_floor,
@@ -473,6 +481,7 @@ class UserConfig:
             episodic_similarity_threshold=_as_float(d.get("episodic_similarity_threshold"), 0.3),
             kg_fact_retention_days=_as_int(d.get("kg_fact_retention_days"), 365),
             kg_max_facts=_as_int(d.get("kg_max_facts"), 5000),
+            kg_similarity_threshold=_as_float(d.get("kg_similarity_threshold"), 0.3),
             memory_context_token_budget=_as_int(d.get("memory_context_token_budget"), 1500),
             memory_decay_half_life_days=_as_float(d.get("memory_decay_half_life_days"), 45.0),
             memory_decay_floor=_as_float(d.get("memory_decay_floor"), 0.1),

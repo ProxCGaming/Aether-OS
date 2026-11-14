@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -10,6 +11,7 @@ from typing import Any
 
 from aether_engine.audit import AuditLogger
 from aether_engine.config import UserConfig, load_config
+from aether_engine.embedding_codec import decode_embedding, encode_embedding
 from aether_engine.providers.base import BaseProvider
 
 _audit_logger = AuditLogger()
@@ -48,6 +50,27 @@ VALID_PROVENANCE = (PROVENANCE_STATED, PROVENANCE_INFERRED)
 # heuristic below cannot tier). 0.5 on the 0..1 scale the
 # context assembler multiplies by — neither boosted nor buried.
 DEFAULT_IMPORTANCE = 0.5
+
+# S6: schema version of the fact_embeddings store (its own row in
+# aether_schema_meta, the episodic / episodic_embeddings pattern —
+# see init_kg_db). 1 = the original fact_embeddings table.
+FACT_EMBEDDINGS_SCHEMA_VERSION = 1
+
+# S6: semantic-similarity threshold (cosine) for the embedding leg
+# of search_facts_semantic. Same 0.3 default and reasoning as the
+# episodic threshold (same embedder, same short-text regime —
+# unrelated short texts score well below it, genuinely related
+# ones materially higher). The authoritative value lives in
+# UserConfig (kg_similarity_threshold); this constant is only the
+# fallback when no config is available.
+KG_SIMILARITY_THRESHOLD = 0.3
+
+# S6: how many unembedded facts one search_facts_semantic() call
+# backfills (oldest first) — the episodic DEFAULT_QUERY_BACKFILL_
+# LIMIT discipline: bounded so a query cannot stall on a long
+# embed queue when Ollama is slow; leftovers retry on the next
+# query (or via backfill_fact_embeddings).
+DEFAULT_FACT_QUERY_BACKFILL_LIMIT = 5
 
 _SCHEMA_META_DDL = """
     CREATE TABLE IF NOT EXISTS aether_schema_meta (
@@ -199,6 +222,32 @@ def init_kg_db() -> None:
         if "last_decayed_at" not in columns:
             conn.execute("ALTER TABLE facts ADD COLUMN last_decayed_at INTEGER")
         _record_schema_version(conn, "knowledge_graph", SCHEMA_VERSION)
+        # S6 migration: the fact-embedding store for semantic
+        # retrieval (see the S6 section at the end of this module).
+        # A separate table, not columns on facts: the episodic
+        # store keeps its vectors in their own table for the same
+        # reason — the wide embedding blob must not ride along on
+        # every fact read (get_entity_facts selects f.*). It lives
+        # in THIS file (memory.db), not embeddings.db, so the
+        # foreign key can cascade: deleting a fact (delete_fact,
+        # pruning, decay, dedupe, entity delete) takes its vector
+        # with it, and no orphan can outlive its fact. The table is
+        # its own store in aether_schema_meta (the episodic /
+        # episodic_embeddings split is the pattern), so the KG
+        # store's version above is untouched. IF NOT EXISTS makes
+        # the migration idempotent; a pre-S6 database gains an
+        # EMPTY table — vectors are derived data, rebuilt from
+        # fact text by the backfill, never migrated.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS fact_embeddings (
+                fact_id TEXT PRIMARY KEY,
+                embedding BLOB,
+                model TEXT,
+                dimension INTEGER,
+                FOREIGN KEY(fact_id) REFERENCES facts(id) ON DELETE CASCADE
+            )
+        """)
+        _record_schema_version(conn, "fact_embeddings", FACT_EMBEDDINGS_SCHEMA_VERSION)
         conn.commit()
     # Phase 10.3 A3: collapse any duplicate facts left by the old
     # unconditional INSERT in extract_and_store_facts (once per
@@ -570,6 +619,14 @@ Respond ONLY with raw JSON array, no markdown code blocks, no explanations.
         # _store_extracted_facts for the N-07 race fix inside it).
         inserted_facts = await asyncio.to_thread(
             _store_extracted_facts, facts_list, task_id)
+        # S6: embed the new facts for semantic retrieval
+        # (search_facts_semantic). Best-effort, exactly like
+        # episodic's store-time embedding: a failure leaves the
+        # fact unembedded and the search-time backfill is the
+        # retry — extraction itself already succeeded and must
+        # not be undone by an embedding problem.
+        if inserted_facts:
+            await _embed_inserted_facts(inserted_facts)
         # Epic 4, E4-02: reconcile the new facts against what the
         # graph already believed about the same entities — a new fact
         # that contradicts an older active one supersedes it (the old
@@ -733,6 +790,12 @@ def update_fact(fact_id: str, new_text: str) -> bool:
             "UPDATE facts SET fact_text = ?, timestamp = ?, provenance = 'stated' WHERE id = ?",
             (new_text, int(time.time()), fact_id),
         )
+        # S6: any stored embedding describes the OLD text. Drop it
+        # in the same transaction — the fact becomes a backfill
+        # candidate and is re-embedded from the new text, so it is
+        # never scored semantically by a stale vector in between.
+        conn.execute(
+            "DELETE FROM fact_embeddings WHERE fact_id = ?", (fact_id,))
         conn.commit()
         changed = cur.rowcount > 0
     if changed:
@@ -1056,3 +1119,377 @@ def decay_inferred_facts(half_life_days: float | None = None,
     _audit_logger.log_event("KNOWLEDGE_GRAPH_DECAYED", result)
     logger.info("KNOWLEDGE_GRAPH_DECAYED %s", result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# S6: semantic retrieval — an embedding leg beside the substring
+# search. Before S6, search_facts() was SQL LIKE over the WHOLE
+# query string: a paraphrase ("hot beverage" for a fact about
+# filter coffee) could never hit. This section copies the episodic
+# pattern (Phase 10.3 A2) rather than inventing a second one:
+#
+# * SAME embedder — episodic.resolve_embedder / episodic.embed_text
+#   (the unified qwen3-embedding:0.6b), so there is one model, one
+#   endpoint, one circuit breaker, one failure domain for every
+#   embedding in the engine.
+# * Vectors live in fact_embeddings (memory.db — see init_kg_db),
+#   stamped with the producing model + dimension (the N02
+#   identity discipline): recall scores ONLY rows stamped with
+#   the active embedder at the query vector's dimension, decided
+#   at recall time. Blobs use the shared tagged codec
+#   (embedding_codec); an undecodable row reads as unembedded.
+# * A vector is a pure function of (entity name, fact text,
+#   embedder) — derived data, rebuildable from the fact row at
+#   any time, never a second source of truth. Writes are fenced
+#   on the fact text (the E4-F03 pattern): a fact edited or
+#   deleted while its embed was in flight never gains a stale
+#   vector. update_fact deletes the row outright (the text it
+#   described no longer exists); fact deletion cascades.
+# * Facts are embedded at extraction time (best-effort) and by a
+#   bounded lazy backfill — at most DEFAULT_FACT_QUERY_BACKFILL_
+#   LIMIT per semantic search, oldest first, plus the unbounded
+#   maintenance entry point backfill_fact_embeddings(). Only
+#   ACTIVE facts are embedded: superseded facts are history and
+#   keep their substring recall; if one is reactivated it joins
+#   the backfill queue like any unembedded active fact.
+# * search_facts_semantic() merges: substring results first, in
+#   their native order (they are precise — the query text
+#   literally appears), then semantic-only hits by cosine. A
+#   result whose cosine clears the threshold carries
+#   "semantic_similarity" so downstream scoring (the S5 context
+#   assembler) can see the store's evidence; substring-only
+#   results are byte-identical to search_facts() output.
+# * Degradation: when the embedder cannot produce a query vector
+#   (endpoint down, breaker open, no provider), the semantic leg
+#   simply does not run and the function returns the substring
+#   leg EXACTLY — same rows, same order, no extra keys, no error.
+#   Semantic recall is an addition, never a dependency.
+# ---------------------------------------------------------------------------
+
+def _fact_embed_text(entity_name: str | None, fact_text: str | None) -> str:
+    """The text a fact's embedding is computed over: the entity
+    name, then the fact text — a query about the entity ("what
+    does Maa like?") should be able to find the fact semantically
+    even when the fact text itself never repeats the name. The
+    fence for stored vectors keys on fact_text alone (the mutable
+    part; entity names are never rewritten, only deleted)."""
+    name = (entity_name or "").strip()
+    text = (fact_text or "").strip()
+    return f"{name}: {text}" if name else text
+
+
+def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+    """Cosine similarity — the episodic implementation's contract:
+    a dimension mismatch is a data error (vectors from different
+    models, or a corrupt row) and scores 0.0, never a zip()-
+    truncated plausible score."""
+    if len(vec1) != len(vec2):
+        return 0.0
+    dot = sum(a * b for a, b in zip(vec1, vec2))
+    norm_a = math.sqrt(sum(a * a for a in vec1))
+    norm_b = math.sqrt(sum(b * b for b in vec2))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _resolve_kg_similarity_threshold(
+    similarity_threshold: float | None,
+    config: UserConfig | None,
+) -> float:
+    """Explicit arg wins, then UserConfig, then the module
+    default — the episodic _resolve_similarity_threshold order."""
+    if similarity_threshold is not None:
+        return float(similarity_threshold)
+    cfg = config if config is not None else load_config()
+    return float(getattr(cfg, "kg_similarity_threshold", KG_SIMILARITY_THRESHOLD))
+
+
+def _store_fact_embedding_if_current(
+    fact_id: str, expected_fact_text: str, embedding: list[float]
+) -> bool:
+    """Fenced embedding write (the E4-F03 pattern): store
+    ``embedding`` for ``fact_id`` only if the fact still exists
+    AND its stored text is still exactly ``expected_fact_text``
+    — the text that was embedded.
+
+    Embedding is awaited, so between reading a fact and writing
+    its vector the fact can be edited (update_fact also deletes
+    the row, but a racing write could resurrect a stale one) or
+    deleted outright. The existence + currency check and the
+    write are a SINGLE SQL statement, so there is no
+    check-then-write window. Returns True when the row landed.
+    """
+    from aether_engine.memory import episodic
+
+    init_kg_db()
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "INSERT OR REPLACE INTO fact_embeddings"
+            " (fact_id, embedding, model, dimension)"
+            " SELECT ?, ?, ?, ? WHERE EXISTS ("
+            " SELECT 1 FROM facts WHERE id = ? AND fact_text IS ?)",
+            (fact_id, encode_embedding(embedding),
+             episodic.resolve_embedder(), len(embedding),
+             fact_id, expected_fact_text),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+async def _embed_inserted_facts(inserted_facts: list[dict]) -> None:
+    """S6: write-time embedding for freshly extracted facts.
+
+    Best-effort by design (the episodic store_episode contract):
+    episodic.embed_text returns None on any failure — already
+    logged distinctly there — and the fact simply stays
+    unembedded for the backfill. Never raises into extraction.
+    """
+    from aether_engine.memory import episodic
+
+    for item in inserted_facts:
+        try:
+            vector = await episodic.embed_text(
+                _fact_embed_text(item["entity_name"], item["fact_text"]),
+                context="kg_store",
+            )
+        except Exception:  # embedding must never break extraction
+            logger.debug(
+                "KG fact embedding failed for %s", item["fact_id"],
+                exc_info=True)
+            continue
+        if vector:
+            await asyncio.to_thread(
+                _store_fact_embedding_if_current,
+                item["fact_id"], item["fact_text"], vector)
+
+
+def _fact_backfill_snapshot(limit: int | None):
+    """Candidate snapshot for backfill_fact_embeddings —
+    synchronous, run via to_thread by the caller (N-12).
+
+    Returns ``(checked, candidates)``: ``checked`` is every active
+    fact in the store; a candidate is ``(fact_id, entity_name,
+    fact_text)`` for one of the oldest active facts lacking a
+    vector stamped with the ACTIVE embedder (no row, a stale-
+    model row, and an undecodable row are all rebuild candidates
+    — absence of a current-model row is the marker, as in
+    episodic's snapshot).
+    """
+    from aether_engine.memory import episodic
+
+    init_kg_db()
+    embedder = episodic.resolve_embedder()
+    with _get_conn() as conn:
+        embedded_ids = {
+            r[0] for r in conn.execute(
+                "SELECT fact_id FROM fact_embeddings WHERE model = ?",
+                (embedder,),
+            )
+        }
+        checked = 0
+        candidates: list[tuple[str, str, str]] = []
+        for row in conn.execute(
+            "SELECT f.id, e.name, f.fact_text FROM facts f "
+            "JOIN entities e ON f.entity_id = e.id "
+            "WHERE COALESCE(f.status, 'active') = 'active' "
+            "ORDER BY f.timestamp ASC"
+        ):
+            checked += 1
+            if row["id"] in embedded_ids:
+                continue
+            if limit is not None and len(candidates) >= limit:
+                continue
+            candidates.append((row["id"], row["name"], row["fact_text"]))
+    return checked, candidates
+
+
+async def backfill_fact_embeddings(limit: int | None = None,
+                                   *, config: UserConfig | None = None
+                                   ) -> dict[str, Any]:
+    """Embed active KG facts that lack a current-model vector.
+
+    The maintenance counterpart of the bounded per-search
+    backfill (search_facts_semantic passes a small limit; this
+    entry point defaults to all). Candidates are the oldest
+    unembedded facts first. A failed embed is already logged
+    distinctly by the embedder; the fact stays unembedded and is
+    retried on the next backfill. Writes are fenced: a fact
+    edited or deleted while its embed was in flight is counted
+    under ``fenced`` and its stale vector is never written.
+    Returns counts and logs them (KNOWLEDGE_FACT_EMBEDDINGS_
+    BACKFILLED).
+    """
+    checked, candidates = await asyncio.to_thread(
+        _fact_backfill_snapshot, limit)
+
+    from aether_engine.memory import episodic
+
+    backfilled = 0
+    fenced = 0
+    failed_ids: list[str] = []
+    for fact_id, entity_name, fact_text in candidates:
+        embedding = await episodic.embed_text(
+            _fact_embed_text(entity_name, fact_text),
+            context="kg_backfill", config=config)
+        if embedding:
+            if await asyncio.to_thread(
+                    _store_fact_embedding_if_current,
+                    fact_id, fact_text, embedding):
+                backfilled += 1
+            else:
+                fenced += 1
+        else:
+            failed_ids.append(fact_id)
+
+    result: dict[str, Any] = {
+        "backfilled": backfilled,
+        "fenced": fenced,
+        "failed": len(failed_ids),
+        "failed_fact_ids": failed_ids,
+        "checked": checked,
+    }
+    _audit_logger.log_event("KNOWLEDGE_FACT_EMBEDDINGS_BACKFILLED", result)
+    logger.info("KNOWLEDGE_FACT_EMBEDDINGS_BACKFILLED %s", result)
+    return result
+
+
+def _fact_semantic_scores(query_embedding: list[float],
+                          threshold: float,
+                          include_history: bool = False) -> dict[str, float]:
+    """Semantic leg of search_facts_semantic — synchronous, run
+    via to_thread by the caller (N-12). Streams the stored
+    vectors and scores them one at a time (N-20: never fetchall
+    every embedding into memory first).
+
+    Eligibility is decided HERE, at recall time (N02): only rows
+    stamped with the active embedder at exactly the query
+    vector's dimension are scored; stale-model, unknown-model
+    and undecodable rows never reach the scorer.
+    """
+    from aether_engine.memory import episodic
+
+    init_kg_db()
+    scores: dict[str, float] = {}
+    status_filter = "" if include_history else (
+        " AND COALESCE(f.status, 'active') = 'active'")
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "SELECT f.id AS fact_id, fe.embedding FROM fact_embeddings fe "
+            "JOIN facts f ON f.id = fe.fact_id "
+            f"WHERE fe.model = ? AND fe.dimension = ?{status_filter}",
+            (episodic.resolve_embedder(), len(query_embedding)),
+        )
+        for row in cur:
+            emb = decode_embedding(row["embedding"])
+            if emb is None:
+                continue
+            sim = _cosine_similarity(query_embedding, emb)
+            if sim >= threshold:
+                scores[row["fact_id"]] = sim
+    return scores
+
+
+def _fetch_fact_rows(fact_ids: list[str],
+                     include_history: bool = False) -> dict[str, dict[str, Any]]:
+    """Full fact rows by id, in search_facts()' exact result
+    shape — the hybrid merge's fetch for semantic-only hits.
+    Synchronous, run via to_thread by the caller (N-12)."""
+    if not fact_ids:
+        return {}
+    init_kg_db()
+    marks = ", ".join("?" for _ in fact_ids)
+    status_filter = "" if include_history else (
+        " AND COALESCE(f.status, 'active') = 'active'")
+    with _get_conn() as conn:
+        rows = conn.execute(f"""
+            SELECT f.id as fact_id, e.name as entity_name, e.entity_type, f.fact_text, f.timestamp, f.confidence, f.status, f.superseded_by, f.provenance, f.importance
+            FROM facts f
+            JOIN entities e ON f.entity_id = e.id
+            WHERE f.id IN ({marks}){status_filter}
+        """, list(fact_ids)).fetchall()
+    return {r["fact_id"]: dict(r) for r in rows}
+
+
+async def search_facts_semantic(query: str, limit: int = 10,
+                                include_history: bool = False,
+                                *, similarity_threshold: float | None = None,
+                                backfill_limit: int = DEFAULT_FACT_QUERY_BACKFILL_LIMIT,
+                                config: UserConfig | None = None) -> list[dict[str, Any]]:
+    """Hybrid substring + semantic fact search (S6).
+
+    The substring leg is search_facts() itself, unchanged, and
+    its results keep priority: they come first, in native order —
+    a literal match is precise in a way a cosine score is not.
+    The semantic leg then EXTENDS recall into the remaining
+    slots: active facts whose stored embedding scores at or
+    above ``similarity_threshold`` (explicit arg, then
+    ``config.kg_similarity_threshold``, then 0.3) against the
+    query's embedding, best cosine first (ties: confidence, then
+    newest). A returned fact the semantic leg attested carries
+    ``semantic_similarity``; every other row is exactly a
+    search_facts() row.
+
+    Before the semantic scan, up to ``backfill_limit`` unembedded
+    active facts are embedded oldest-first, so a fact stored
+    while Ollama was down becomes findable on the next search;
+    pass ``backfill_limit=0`` to skip that. When the embedder
+    cannot produce a query vector at all, the result is the
+    substring leg EXACTLY — semantic recall degrades to today's
+    behaviour silently and completely.
+    """
+    substring_results = search_facts(
+        query, limit=limit, include_history=include_history)
+    if not (query or "").strip() or limit <= 0:
+        return substring_results
+    threshold = _resolve_kg_similarity_threshold(similarity_threshold, config)
+
+    if backfill_limit and backfill_limit > 0:
+        await backfill_fact_embeddings(limit=backfill_limit, config=config)
+
+    from aether_engine.memory import episodic
+
+    query_embedding = await episodic.embed_text(
+        query, context="kg_query", config=config)
+    if not query_embedding:
+        return substring_results
+    semantic_scores = await asyncio.to_thread(
+        _fact_semantic_scores, query_embedding, threshold, include_history)
+    if not semantic_scores:
+        return substring_results
+
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in substring_results:
+        fact_id = row.get("fact_id")
+        if fact_id in semantic_scores:
+            row = {**row, "semantic_similarity": semantic_scores[fact_id]}
+        results.append(row)
+        seen.add(fact_id)
+
+    extras = [
+        (fact_id, sim) for fact_id, sim in semantic_scores.items()
+        if fact_id not in seen
+    ]
+    if extras and len(results) < limit:
+        fetched = await asyncio.to_thread(
+            _fetch_fact_rows, [fact_id for fact_id, _ in extras],
+            include_history)
+
+        def _extra_key(item: tuple[str, float]):
+            fact_id, sim = item
+            row = fetched.get(fact_id) or {}
+            try:
+                confidence = float(row.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            return (-sim, -confidence, -(row.get("timestamp") or 0))
+
+        for fact_id, sim in sorted(extras, key=_extra_key):
+            if len(results) >= limit:
+                break
+            row = fetched.get(fact_id)
+            if row is None:
+                continue
+            results.append({**row, "semantic_similarity": sim})
+    return results
