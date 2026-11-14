@@ -17,6 +17,10 @@ def store(tmp_path):
 
 @pytest.mark.asyncio
 async def test_dispatch_lead_reminder_to_subscribers(store):
+    # Day-before disabled: near midnight the +15 min event lands
+    # tomorrow and would also earn a day-before dispatch in the same
+    # pass — correct engine behaviour (see the note in
+    # test_calendar_store.py), not what this lead-only test asserts.
     now = time.time()
     store.add_event("PTM", now + 15 * 60)
     received = []
@@ -27,7 +31,7 @@ async def test_dispatch_lead_reminder_to_subscribers(store):
     unsubscribe = reminders.subscribe_reminder_events(collector)
     try:
         events = await reminders.dispatch_due_reminders(
-            store, day_before_enabled=True, lead_minutes=30, now_ts=now
+            store, day_before_enabled=False, lead_minutes=30, now_ts=now
         )
     finally:
         unsubscribe()
@@ -39,7 +43,7 @@ async def test_dispatch_lead_reminder_to_subscribers(store):
     # Claimed: a second dispatch at the same instant sends nothing.
     assert (
         await reminders.dispatch_due_reminders(
-            store, day_before_enabled=True, lead_minutes=30, now_ts=now
+            store, day_before_enabled=False, lead_minutes=30, now_ts=now
         )
         == []
     )
@@ -76,8 +80,10 @@ async def test_failing_subscriber_does_not_starve_others(store):
     unsub_bad = reminders.subscribe_reminder_events(bad)
     unsub_good = reminders.subscribe_reminder_events(received.append)
     try:
+        # Day-before disabled — same midnight sensitivity as above:
+        # this test counts dispatches for one lead reminder only.
         events = await reminders.dispatch_due_reminders(
-            store, day_before_enabled=True, lead_minutes=30, now_ts=now
+            store, day_before_enabled=False, lead_minutes=30, now_ts=now
         )
     finally:
         unsub_bad()

@@ -112,20 +112,31 @@ def test_search_upcoming_by_title(store):
 
 
 def test_lead_reminder_claimed_once(store):
+    # Day-before disabled for the same reason as the test below: near
+    # midnight the +20 min event lands tomorrow and would also earn a
+    # day-before claim in the same pass — correct engine behaviour,
+    # not what this lead-only assertion is about.
     now = time.time()
     store.add_event("Soon", now + 20 * 60)  # starts in 20 min, lead = 30
-    due = store.due_reminders(now, day_before_enabled=True, lead_minutes=30)
+    due = store.due_reminders(now, day_before_enabled=False, lead_minutes=30)
     assert [(d["event"].title, d["kind"]) for d in due] == [("Soon", "lead")]
     # Second pass at the same instant: already claimed, nothing due.
-    assert store.due_reminders(now, day_before_enabled=True, lead_minutes=30) == []
+    assert store.due_reminders(now, day_before_enabled=False, lead_minutes=30) == []
 
 
 def test_lead_reminder_not_due_yet_and_disabled(store):
+    # This test is about the LEAD kind only, so the day-before kind is
+    # disabled: with it enabled, "Later" (+90 min) is legitimately due
+    # as a day-before reminder whenever the run happens late enough in
+    # the evening that the event lands tomorrow (the engine is right;
+    # the assertion was wall-clock-sensitive — it failed at 23:38 IST
+    # on 14 Nov after passing all day). The day-before kind has its
+    # own test below (test_day_before_reminder).
     now = time.time()
     store.add_event("Later", now + 90 * 60)
-    assert store.due_reminders(now, day_before_enabled=True, lead_minutes=30) == []
+    assert store.due_reminders(now, day_before_enabled=False, lead_minutes=30) == []
     store.add_event("Soon", now + 10 * 60)
-    assert store.due_reminders(now, day_before_enabled=True, lead_minutes=0) == []
+    assert store.due_reminders(now, day_before_enabled=False, lead_minutes=0) == []
 
 
 def test_day_before_reminder(store):
