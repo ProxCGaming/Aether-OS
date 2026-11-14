@@ -51,12 +51,14 @@ jobs:
     name: Test gates (pytest + Jest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.16"
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.13.6"
       - name: Check uv.lock is up to date with pyproject.toml
         run: uv lock --check
       - name: Create venv (Python 3.12)
@@ -75,9 +77,9 @@ jobs:
       - name: Judge pytest against the known-failures baseline
         run: uv run python scripts/ci_pytest_subset.py pytest-results.xml
       # Electron 44 bundles Node 24 — same major line as CI's Jest job.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "24"
+          node-version: "24.22.1"
           cache: npm
           cache-dependency-path: desktop_app/package-lock.json
       - name: Install desktop dependencies
@@ -101,16 +103,16 @@ jobs:
       run:
         working-directory: desktop_app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Same Node line as CI (Electron 44 bundles Node 24).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "24"
+          node-version: "24.22.1"
           cache: npm
           cache-dependency-path: desktop_app/package-lock.json
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.16"
       # D4-17: the version rule lives once, in
       # scripts/check_version_consistency.py — both build jobs call
       # it instead of carrying verbatim bash copies that can drift.
@@ -131,7 +133,9 @@ jobs:
       # Without this step the installer ships the shell alone and
       # the app has no engine to connect to.
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.13.6"
       - name: Assemble bundled engine payload
         shell: bash
         run: python ../scripts/assemble_engine_payload.py --platform win32
@@ -147,7 +151,7 @@ jobs:
           sha256sum *.exe > SHA256SUMS-windows.txt
           cat SHA256SUMS-windows.txt
       - name: Upload Windows installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Aether-OS-Windows-NSIS
           path: |
@@ -162,15 +166,15 @@ jobs:
       run:
         working-directory: desktop_app
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "24"
+          node-version: "24.22.1"
           cache: npm
           cache-dependency-path: desktop_app/package-lock.json
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.16"
       # D4-17: shared version check — see the Windows job.
       - name: Check version consistency
         shell: bash
@@ -189,7 +193,9 @@ jobs:
       # Without this step the installer ships the shell alone and
       # the app has no engine to connect to.
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.13.6"
       - name: Assemble bundled engine payload
         shell: bash
         run: python ../scripts/assemble_engine_payload.py --platform linux
@@ -205,7 +211,7 @@ jobs:
           sha256sum *.AppImage > SHA256SUMS-linux.txt
           cat SHA256SUMS-linux.txt
       - name: Upload Linux installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Aether-OS-Linux-AppImage
           path: |
@@ -222,9 +228,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Download built installers
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: release-files
           merge-multiple: true
@@ -260,7 +266,7 @@ jobs:
           print(notes)
           PYEOF
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.ref_name }}
           name: Aether-OS ${{ github.ref_name }}
