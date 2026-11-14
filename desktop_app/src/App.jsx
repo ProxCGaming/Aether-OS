@@ -536,6 +536,22 @@ function AppContent() {
   // dead path in both directions.)
   const [browserSessions, setBrowserSessions] = useState({});
   const browserSessionIdsRef = useRef({});
+  // Master build S20: desktop control lane state (machine-wide —
+  // one desktop — so a single value, not per-session). Updated by
+  // DESKTOP_CONTROL_RESPONSE in useEngineMessages; the chat
+  // window's desktop control card renders it.
+  const [desktopControl, setDesktopControl] = useState(null);
+  const handleDesktopControl = useCallback((action) => {
+    // Via safeSend like the browser control: pausing or stopping
+    // desktop actuation is an emergency control and must not
+    // silently do nothing when the connection is in trouble.
+    // No task_id is sent for stop: the engine stops the task
+    // currently driving the desktop (desktop/control.py).
+    safeSend('DESKTOP_CONTROL_REQUEST', {
+      chat_session_id: activeSessionRef.current,
+      action: action,
+    });
+  }, [safeSend, activeSessionRef]);
   const handleBrowserControl = useCallback((action) => {
     // Wave 2 slice 2 (RUX-A-06): via safeSend — pause/resume/stop for
     // the agent's browser session is the user's emergency control;
@@ -662,7 +678,8 @@ function AppContent() {
     voiceChunkSeqRef, voiceRtcSeqRef, voiceStateRef,
     setActiveArtifactContent, setActiveSession, setActiveTaskIds,
     setBrowserSessions, setBudgetAlert, setCanvasArtifacts, setChatMessages,
-    setContextBreakdown, setCostTasks, setDailyBudget, setDevServerInfo,
+    setContextBreakdown, setCostTasks, setDailyBudget, setDesktopControl,
+    setDevServerInfo,
     setDictationState, setEngineConfig, setExportStatus, setImportStatus,
     setIsThinking, setLastCostTaskId, setLocalModels, setMoveStatus,
     setPlanModeBySession, setPluginCount, setProviderHealth,
@@ -1214,7 +1231,7 @@ function AppContent() {
         : m));
   };
 
-  const handleToolApproval = (requestId, approved, approvalKey, scope, editedArgs, browserEnvelope) => {
+  const handleToolApproval = (requestId, approved, approvalKey, scope, editedArgs, browserEnvelope, desktopGrant) => {
     const key = approvalKey || requestId;
     // Wave 2 slice 2 (RUX-A-05): the decision goes out via safeSend —
     // never discarded. The envelope request_id stays the approval's
@@ -1239,7 +1256,14 @@ function AppContent() {
         // Epic 8, E8-6.2: a per-task envelope grant made at a
         // browser confirmation rides the GRANTED event; the engine
         // scopes it to the confirmed action's category + site.
-        ...(approved && browserEnvelope ? { browser_envelope: browserEnvelope } : {})
+        ...(approved && browserEnvelope ? { browser_envelope: browserEnvelope } : {}),
+        // Master build S20: the desktop confirmation's grants ride
+        // the same event — the per-task envelope (scoped by the
+        // engine to the confirmed action's app + category) and the
+        // remembered-grant flag (the engine refuses both for the
+        // hard-confirm categories).
+        ...(approved && desktopGrant && desktopGrant.envelope ? { desktop_envelope: desktopGrant.envelope } : {}),
+        ...(approved && desktopGrant && desktopGrant.remember ? { desktop_remember: true } : {})
       },
       requestId,
     );
@@ -1989,6 +2013,8 @@ function AppContent() {
           budgetAlert={budgetAlert}
           browserSession={browserSessions[activeSession] || null}
           onBrowserControl={handleBrowserControl}
+          desktopControl={desktopControl}
+          onDesktopControl={handleDesktopControl}
           voiceState={voiceState}
           voiceAudioChunk={voiceAudioChunk}
           voicePlaybackCut={voicePlaybackCut}

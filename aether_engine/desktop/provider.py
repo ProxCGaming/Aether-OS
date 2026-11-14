@@ -20,9 +20,13 @@ PRIVACY SHAPE — the contract this whole package keeps:
   never proactively, never on a timer, never in the background.
   Nothing is captured continuously and nothing is stored: the
   summary lives only in that turn's prompt.
-- This slice is READ-ONLY. There is no invoke, click, type or
-  any other actuation anywhere in the package; actuation is
-  S20, gated on the owner's O1 decision.
+- S19 was READ-ONLY. S20 (owner decision O1) adds actuation to
+  this package — the :class:`DesktopActuator` below and the raw
+  actuation adapter protocol — but observe's own contract is
+  unchanged: this module still never screenshots and never
+  stores anything. Actuation is policy-gated end to end
+  (``desktop/policy.py``); the actuator is the last mile only,
+  and it performs exactly the action it is handed.
 
 The split mirrors ``memory/backend_status.py`` (S9) and
 ``machine_capability.py`` (S10): availability is probed WITHOUT
@@ -37,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import platform
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -75,13 +80,26 @@ class ElementNode:
     element's bounding rectangle (left, top, right, bottom in
     screen pixels) when the backend reports one — the avatar
     spec's UIA route is rectangle-based, so the data is kept;
-    the text summary does not print it."""
+    the text summary does not print it.
+
+    The S20 fields are the actuation evidence: ``can_invoke`` /
+    ``can_set_value`` say which UIA patterns the element supports
+    (the classifier and the tool read them to prefer the element
+    route over pixels), ``is_password`` marks a password field
+    (typing into one always confirms — ``policy.force_confirm``),
+    and ``app`` is filled in by target resolution with the owning
+    window's process name (raw tree dicts do not carry it: a tree
+    belongs to one window)."""
     name: str = ""
     role: str = ""
     value: str | None = None
     automation_id: str | None = None
     focused: bool = False
     bounds: tuple[int, int, int, int] | None = None
+    can_invoke: bool = False
+    can_set_value: bool = False
+    is_password: bool = False
+    app: str = ""
     children: list[ElementNode] = field(default_factory=list)
 
 
@@ -114,6 +132,8 @@ class ScreenState:
 #   element dict: {"name": str, "role": str, "value": str|None,
 #                  "automation_id": str|None, "focused": bool,
 #                  "bounds": (l, t, r, b)|None,
+#                  "can_invoke": bool, "can_set_value": bool,
+#                  "is_password": bool,
 #                  "children": [element dict, ...]}
 # ---------------------------------------------------------------------------
 @runtime_checkable
@@ -195,6 +215,9 @@ def _element_from_raw(raw: Any, depth: int, budget: list[int]) -> ElementNode | 
                        if raw.get("automation_id") is not None else None),
         focused=bool(raw.get("focused")),
         bounds=bounds,
+        can_invoke=bool(raw.get("can_invoke")),
+        can_set_value=bool(raw.get("can_set_value")),
+        is_password=bool(raw.get("is_password")),
     )
     if depth < MAX_TREE_DEPTH:
         for child_raw in raw.get("children") or []:
@@ -305,6 +328,11 @@ class UnavailableDesktopProvider:
     async def screen_state(self) -> ScreenState:
         return ScreenState.unavailable(self._reason)
 
+    def read_raw_sync(self) -> dict[str, Any] | None:
+        """The sync raw read the actuator resolves targets from.
+        Unavailable here: there is nothing to resolve against."""
+        return None
+
 
 class WindowsUiaProvider:
     """Desktop observe on Windows, over a RawDesktopAdapter
@@ -347,6 +375,13 @@ class WindowsUiaProvider:
                 "could not be determined, so desktop observe is "
                 "unjudged here.")
         return True, ""
+
+    def read_raw_sync(self) -> dict[str, Any]:
+        """The blocking raw read, called directly (S20 target
+        resolution runs on the graph's sync approval path, which
+        bounds it with its own thread + join — see
+        DesktopActuator). Builds the real adapter on first use."""
+        return self._read_sync()
 
     def _read_sync(self) -> dict[str, Any]:
         """The blocking read, run on a worker thread. Builds the
@@ -424,3 +459,402 @@ class WindowsUiaProvider:
             root=root,
             tree_truncated=truncated,
         )
+
+
+# ---------------------------------------------------------------------------
+# Actuation (S20). The actuator is the last mile: it resolves a
+# target against a FRESH read (the screen the action was gated on
+# may have changed; resolution is evidence, and evidence is
+# re-read, never cached) and performs exactly the action it is
+# handed. All policy lives in desktop/policy.py — nothing here
+# decides whether an action SHOULD happen.
+#
+# The raw actuation adapter speaks plain dicts like the read
+# adapter. An element ACTION addresses its element by a MATCHER
+# ({"automation_id", "name", "role"} from the resolved element):
+# the backend re-finds the live control under the window handle
+# at action time, because UIA element references do not survive
+# across reads. Every adapter method returns a result dict:
+# {"ok": bool, "detail": str} (clipboard_get adds "text").
+# ---------------------------------------------------------------------------
+ACTION_TIMEOUT_SECONDS = 10.0   # one actuation call, bounded like reads
+RESOLVE_TIMEOUT_SECONDS = 5.0   # target resolution on the sync gate path
+
+
+@runtime_checkable
+class RawActuationAdapter(Protocol):
+    """Synchronous, blocking OS actions. Implementations run on
+    a worker thread bounded by the actuator's timeout."""
+
+    def invoke_element(self, handle: int | None,
+                       matcher: dict[str, Any]) -> dict[str, Any]:
+        """Invoke (click/activate) the matched element."""
+        ...
+
+    def set_element_value(self, handle: int | None,
+                          matcher: dict[str, Any],
+                          value: str) -> dict[str, Any]:
+        """Set the matched element's value (ValuePattern)."""
+        ...
+
+    def focus_window(self, handle: int | None) -> dict[str, Any]:
+        """Bring the window to the foreground."""
+        ...
+
+    def close_window(self, handle: int | None) -> dict[str, Any]:
+        """Close the window (WindowPattern.Close)."""
+        ...
+
+    def clipboard_get(self) -> dict[str, Any]:
+        """{"ok": True, "text": ...} or a failure dict."""
+        ...
+
+    def clipboard_set(self, text: str) -> dict[str, Any]:
+        """Replace the clipboard's text contents."""
+        ...
+
+    def mouse_click(self, x: int, y: int) -> dict[str, Any]:
+        """Move the pointer to (x, y) and click the left button."""
+        ...
+
+    def type_text(self, text: str) -> dict[str, Any]:
+        """Type text as keyboard input into the focused element."""
+        ...
+
+    def key_press(self, keys: str) -> dict[str, Any]:
+        """Press a key or chord ("Enter", "ctrl+s", "alt+f4")."""
+        ...
+
+
+@dataclass
+class ResolvedTarget:
+    """The engine's own resolution of an action's target — the
+    evidence the policy classifier reads (never the model's
+    wording). ``element`` is the matched accessibility element,
+    ``window`` its owning window; ``ambiguous`` marks a locator
+    that matched more than one element (resolution refuses to
+    guess: the classifier sees element=None and the action
+    confirms as unknown)."""
+
+    window: WindowInfo | None = None
+    element: ElementNode | None = None
+    point: tuple[int, int] | None = None
+    ambiguous: bool = False
+
+    @property
+    def found(self) -> bool:
+        return self.element is not None or self.window is not None
+
+
+def _walk_elements(node: ElementNode | None):
+    if node is None:
+        return
+    yield node
+    for child in node.children:
+        yield from _walk_elements(child)
+
+
+def _match_elements(root: ElementNode | None,
+                    locator: dict[str, Any]) -> list[ElementNode]:
+    """Elements matching a locator {"name", "role",
+    "automation_id"}. An automation_id match is exact and wins
+    alone (ids are unique by contract); otherwise name matches
+    (case-insensitive, exact) filtered by role when given."""
+    elements = list(_walk_elements(root))
+    automation_id = str(locator.get("automation_id") or "")
+    if automation_id:
+        by_id = [e for e in elements if e.automation_id == automation_id]
+        if by_id:
+            return by_id
+    name = str(locator.get("name") or "").strip().lower()
+    role = str(locator.get("role") or "").strip().lower()
+    matches = []
+    for element in elements:
+        if name and (element.name or "").strip().lower() != name:
+            continue
+        if role and (element.role or "").strip().lower() != role:
+            continue
+        if not name and not role:
+            continue
+        matches.append(element)
+    return matches
+
+
+class DesktopActuator:
+    """Resolution + last-mile actuation over a read provider and
+    a raw actuation adapter.
+
+    Resolution is synchronous and bounded (the graph's approval
+    pause is a sync node): the raw read runs on a daemon thread
+    joined with a timeout — the same discipline as the async
+    read's asyncio.wait, transposed. Actions are async and use
+    the read's own wait pattern. No method raises: failures come
+    back as (False, reason) so the tool can report them plainly.
+    """
+
+    def __init__(self, provider: Any,
+                 actuation_adapter: RawActuationAdapter | None = None, *,
+                 timeout_s: float = ACTION_TIMEOUT_SECONDS,
+                 resolve_timeout_s: float = RESOLVE_TIMEOUT_SECONDS):
+        self._provider = provider
+        self._actuation_adapter = actuation_adapter
+        self._timeout_s = timeout_s
+        self._resolve_timeout_s = resolve_timeout_s
+
+    # --------------------------------------------------------------
+    # Availability
+    # --------------------------------------------------------------
+
+    def availability(self) -> tuple[bool, str]:
+        """Actuation needs the read side (resolution evidence) AND
+        an action backend. With an injected adapter (tests), the
+        adapter's existence is the action side; otherwise the
+        same platform/package probe as observe gates the real
+        backend, which is built lazily on first action."""
+        available, reason = self._provider.availability()
+        if not available:
+            return False, reason
+        if self._actuation_adapter is not None:
+            return True, ""
+        system = platform.system()
+        if system != "Windows":
+            return False, (
+                "Desktop actuation is built on Windows UI "
+                f"Automation; {system or 'this platform'} is not a "
+                "supported platform for it.")
+        from aether_engine.desktop.windows_uia import uia_package_state
+
+        if uia_package_state() is not True:
+            return False, (
+                "The 'uiautomation' package is not installed in "
+                "the engine's environment, so desktop elements "
+                "cannot be actuated until it is.")
+        return True, ""
+
+    def _adapter(self) -> RawActuationAdapter:
+        if self._actuation_adapter is None:
+            from aether_engine.desktop.windows_actuation import (
+                UiautomationActuationAdapter,
+            )
+
+            self._actuation_adapter = UiautomationActuationAdapter()
+        return self._actuation_adapter
+
+    # --------------------------------------------------------------
+    # Resolution (sync, bounded)
+    # --------------------------------------------------------------
+
+    def _raw_read_bounded(self) -> dict[str, Any] | None:
+        read_sync = getattr(self._provider, "read_raw_sync", None)
+        if read_sync is None:
+            return None
+        box: dict[str, Any] = {}
+
+        def _run() -> None:
+            try:
+                box["raw"] = read_sync()
+            except Exception as exc:  # noqa: BLE001 - resolution degrades to unresolved, never an exception
+                box["error"] = exc
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        thread.join(self._resolve_timeout_s)
+        if thread.is_alive() or "error" in box:
+            return None
+        raw = box.get("raw")
+        return raw if isinstance(raw, dict) else None
+
+    def _state_now(self) -> tuple[WindowInfo | None, ElementNode | None]:
+        raw = self._raw_read_bounded()
+        if raw is None:
+            return None, None
+        foreground = _window_from_raw(raw.get("foreground"))
+        root, _truncated = _convert_tree(raw.get("tree"))
+        return foreground, root
+
+    def resolve_now(self, locator: dict[str, Any]) -> ResolvedTarget:
+        """Resolve an element locator against a fresh foreground
+        read. Zero or several matches both leave element=None
+        (several sets ``ambiguous``) — the gate classifies an
+        unresolved target as unknown and the owner confirms or
+        refuses with eyes open."""
+        window, root = self._state_now()
+        if window is None or root is None:
+            return ResolvedTarget(window=window)
+        matches = _match_elements(root, locator or {})
+        if len(matches) == 1:
+            element = matches[0]
+            element.app = window.app
+            return ResolvedTarget(window=window, element=element)
+        if len(matches) > 1:
+            focused = [e for e in matches if e.focused]
+            if len(focused) == 1:
+                element = focused[0]
+                element.app = window.app
+                return ResolvedTarget(window=window, element=element)
+            return ResolvedTarget(window=window, ambiguous=True)
+        return ResolvedTarget(window=window)
+
+    def resolve_window_now(self, *, app: str | None = None,
+                           title: str | None = None) -> ResolvedTarget:
+        """Resolve a window target (focus/close) by app and/or
+        title across the visible windows, foreground included."""
+        raw = self._raw_read_bounded()
+        if raw is None:
+            return ResolvedTarget()
+        # The foreground window also appears in the window list;
+        # dedupe by handle or every foreground match reads as
+        # ambiguous (two candidates, one window).
+        candidates = []
+        seen_handles = set()
+        for raw_window in [raw.get("foreground"),
+                           *(raw.get("windows") or [])]:
+            window = _window_from_raw(raw_window)
+            if window is None or window.handle in seen_handles:
+                continue
+            seen_handles.add(window.handle)
+            candidates.append(window)
+        wanted_app = (app or "").strip().lower()
+        wanted_title = (title or "").strip().lower()
+        matches = []
+        for window in candidates:
+            if window is None:
+                continue
+            if wanted_app and window.app.strip().lower() != wanted_app:
+                continue
+            if wanted_title and wanted_title not in window.title.strip().lower():
+                continue
+            if not wanted_app and not wanted_title:
+                continue
+            matches.append(window)
+        if len(matches) == 1:
+            return ResolvedTarget(window=matches[0])
+        if len(matches) > 1:
+            return ResolvedTarget(ambiguous=True)
+        return ResolvedTarget()
+
+    def focused_now(self) -> ResolvedTarget:
+        """The currently focused element (the type_text target
+        evidence: a password field here forces confirmation)."""
+        window, root = self._state_now()
+        if window is None or root is None:
+            return ResolvedTarget(window=window)
+        for element in _walk_elements(root):
+            if element.focused:
+                element.app = window.app
+                return ResolvedTarget(window=window, element=element)
+        return ResolvedTarget(window=window)
+
+    def element_at_point_now(self, x: int, y: int) -> ResolvedTarget:
+        """The smallest element whose bounds contain (x, y) in
+        the foreground tree — the UIA verification of a pixel or
+        vision-grounded point. The window root itself is skipped:
+        landing on bare window background resolves to the window,
+        not an element."""
+        window, root = self._state_now()
+        if window is None or root is None:
+            return ResolvedTarget(window=window, point=(x, y))
+        best: ElementNode | None = None
+        best_area: int | None = None
+        for element in _walk_elements(root):
+            if element is root or element.bounds is None:
+                continue
+            left, top, right, bottom = element.bounds
+            if left <= x <= right and top <= y <= bottom:
+                area = max(0, right - left) * max(0, bottom - top)
+                if best_area is None or area < best_area:
+                    best, best_area = element, area
+        if best is not None:
+            best.app = window.app
+        return ResolvedTarget(window=window, element=best, point=(x, y))
+
+    # --------------------------------------------------------------
+    # Actions (async, bounded, never raise)
+    # --------------------------------------------------------------
+
+    async def _run_action(self, fn) -> tuple[bool, str]:
+        available, reason = self.availability()
+        if not available:
+            return False, reason
+        call = asyncio.ensure_future(asyncio.to_thread(fn, self._adapter()))
+        done, _pending = await asyncio.wait({call}, timeout=self._timeout_s)
+        if not done:
+            return False, (
+                f"The desktop action did not complete within "
+                f"{self._timeout_s:g} seconds; whether it took "
+                "effect is unknown — check the screen before "
+                "retrying.")
+        try:
+            result = call.result()
+        except Exception as exc:  # noqa: BLE001 - an action failure is reported, never raised into the graph
+            return False, f"The desktop action failed: {exc}"
+        if isinstance(result, dict):
+            return bool(result.get("ok")), str(result.get("detail") or "")
+        return False, "The desktop action backend returned no result."
+
+    @staticmethod
+    def _matcher(target: ResolvedTarget) -> dict[str, Any]:
+        element = target.element
+        return {
+            "automation_id": element.automation_id if element else None,
+            "name": element.name if element else "",
+            "role": element.role if element else "",
+        }
+
+    async def invoke(self, target: ResolvedTarget) -> tuple[bool, str]:
+        handle = target.window.handle if target.window else None
+        matcher = self._matcher(target)
+        return await self._run_action(
+            lambda adapter: adapter.invoke_element(handle, matcher))
+
+    async def set_value(self, target: ResolvedTarget,
+                        value: str) -> tuple[bool, str]:
+        handle = target.window.handle if target.window else None
+        matcher = self._matcher(target)
+        return await self._run_action(
+            lambda adapter: adapter.set_element_value(handle, matcher, value))
+
+    async def focus_window(self, target: ResolvedTarget) -> tuple[bool, str]:
+        handle = target.window.handle if target.window else None
+        return await self._run_action(
+            lambda adapter: adapter.focus_window(handle))
+
+    async def close_window(self, target: ResolvedTarget) -> tuple[bool, str]:
+        handle = target.window.handle if target.window else None
+        return await self._run_action(
+            lambda adapter: adapter.close_window(handle))
+
+    async def clipboard_get(self) -> tuple[bool, str]:
+        """(ok, text-or-reason)."""
+        available, reason = self.availability()
+        if not available:
+            return False, reason
+        call = asyncio.ensure_future(
+            asyncio.to_thread(lambda: self._adapter().clipboard_get()))
+        done, _pending = await asyncio.wait({call}, timeout=self._timeout_s)
+        if not done:
+            return False, "Reading the clipboard timed out."
+        try:
+            result = call.result()
+        except Exception as exc:  # noqa: BLE001
+            return False, f"Reading the clipboard failed: {exc}"
+        if isinstance(result, dict) and result.get("ok"):
+            return True, str(result.get("text") or "")
+        detail = result.get("detail") if isinstance(result, dict) else ""
+        return False, str(detail or "The clipboard could not be read.")
+
+    async def clipboard_set(self, text: str) -> tuple[bool, str]:
+        return await self._run_action(
+            lambda adapter: adapter.clipboard_set(text))
+
+    async def mouse_click(self, x: int, y: int) -> tuple[bool, str]:
+        return await self._run_action(
+            lambda adapter: adapter.mouse_click(int(x), int(y)))
+
+    async def type_text(self, text: str) -> tuple[bool, str]:
+        return await self._run_action(
+            lambda adapter: adapter.type_text(text))
+
+    async def key_press(self, keys: str) -> tuple[bool, str]:
+        return await self._run_action(
+            lambda adapter: adapter.key_press(keys))

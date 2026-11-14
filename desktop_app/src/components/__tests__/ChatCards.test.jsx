@@ -9,8 +9,9 @@ import {
   getRewindPointForMessage,
   ToolActivityCard,
   ThinkingAccordion,
+  DesktopConfirmationControl,
 } from '../ChatCards';
-import { parseApprovalEditedArgs, browserEnvelopeGrant } from '../approvalLogic';
+import { parseApprovalEditedArgs, browserEnvelopeGrant, desktopGrantSpec } from '../approvalLogic';
 
 // Wave 5 (Annex C row 6): the transcript-rendering cards moved
 // out of DraggableChatWindow into ChatCards. The window re-exports
@@ -155,5 +156,178 @@ describe('ThinkingAccordion D1-C1 binding', () => {
       <ThinkingAccordion thoughts={[]} isThinking={false} hasError={false} onStopTask={jest.fn()} />
     );
     expect(container.firstChild).toBeNull();
+  });
+});
+
+// ── S20: desktop confirmation surface ─────────────────────────────
+
+describe('DesktopConfirmationControl (S20)', () => {
+  const interact = {
+    category: 'interact',
+    app: 'WINWORD.EXE',
+    description: "Press 'Save' (Button) in Document1 - Word (WINWORD.EXE)",
+    hard_confirm: false,
+    force_confirm: false,
+    via: 'uia',
+  };
+
+  test('an ordinary action offers the envelope and remember choices', () => {
+    const onChoiceChange = jest.fn();
+    render(
+      <DesktopConfirmationControl
+        confirmation={interact}
+        choice={{}}
+        onChoiceChange={onChoiceChange}
+      />
+    );
+    expect(screen.getByTestId('desktop-confirmation-description')).toHaveTextContent(
+      "Press 'Save' (Button) in Document1 - Word"
+    );
+    fireEvent.click(screen.getByTestId('desktop-envelope-checkbox'));
+    expect(onChoiceChange).toHaveBeenCalledWith('envelope', true);
+    fireEvent.click(screen.getByTestId('desktop-remember-checkbox'));
+    expect(onChoiceChange).toHaveBeenCalledWith('remember', true);
+    expect(screen.getByText(/for the rest of this task/)).toBeInTheDocument();
+    expect(screen.getByText(/revocable in Settings → Computer Use/)).toBeInTheDocument();
+  });
+
+  test('a hard-confirm action renders NO grant choices, with the lock note', () => {
+    render(
+      <DesktopConfirmationControl
+        confirmation={{ ...interact, category: 'close_or_quit', hard_confirm: true }}
+        choice={{}}
+        onChoiceChange={jest.fn()}
+      />
+    );
+    expect(screen.queryByTestId('desktop-envelope-checkbox')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('desktop-remember-checkbox')).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/always asks individually — no envelope or remembered grant/)
+    ).toBeInTheDocument();
+  });
+
+  test('a password-field action is force-confirmed, also without choices', () => {
+    render(
+      <DesktopConfirmationControl
+        confirmation={{ ...interact, category: 'type_into', force_confirm: true }}
+        choice={{}}
+        onChoiceChange={jest.fn()}
+      />
+    );
+    expect(screen.queryByTestId('desktop-envelope-checkbox')).not.toBeInTheDocument();
+    expect(screen.getByText(/password field — it always asks individually/)).toBeInTheDocument();
+  });
+
+  test('pixel and vision vias carry their notes', () => {
+    const { rerender } = render(
+      <DesktopConfirmationControl confirmation={{ ...interact, via: 'pixel' }} choice={{}} />
+    );
+    expect(screen.getByTestId('desktop-pixel-note')).toHaveTextContent(
+      /allows pixel \(mouse\/keyboard\) input for the rest of this session/
+    );
+    rerender(
+      <DesktopConfirmationControl confirmation={{ ...interact, via: 'vision' }} choice={{}} />
+    );
+    expect(screen.getByTestId('desktop-vision-note')).toHaveTextContent(
+      /screenshot is discarded/
+    );
+  });
+
+  test('renders nothing without a confirmation', () => {
+    const { container } = render(<DesktopConfirmationControl confirmation={null} />);
+    expect(container.firstChild).toBeNull();
+  });
+});
+
+describe('desktopGrantSpec (S20)', () => {
+  const base = { category: 'interact', hard_confirm: false };
+
+  test('no confirmation, no choices → undefined (legacy approve shape)', () => {
+    expect(desktopGrantSpec(null, { envelope: true })).toBeUndefined();
+    expect(desktopGrantSpec(base, {})).toBeUndefined();
+    expect(desktopGrantSpec(base, null)).toBeUndefined();
+  });
+
+  test('hard-confirm and observe/unknown never produce a spec', () => {
+    expect(desktopGrantSpec({ ...base, hard_confirm: true }, { envelope: true, remember: true })).toBeUndefined();
+    expect(desktopGrantSpec({ category: 'observe' }, { remember: true })).toBeUndefined();
+    expect(desktopGrantSpec({ category: 'unknown' }, { envelope: true })).toBeUndefined();
+  });
+
+  test('choices map to the wire spec', () => {
+    expect(desktopGrantSpec(base, { envelope: true })).toEqual({ envelope: { grant: true } });
+    expect(desktopGrantSpec(base, { remember: true })).toEqual({ remember: true });
+    expect(desktopGrantSpec(base, { envelope: true, remember: true })).toEqual({
+      envelope: { grant: true },
+      remember: true,
+    });
+  });
+});
+
+describe('ToolActivityCard desktop approval (S20)', () => {
+  const payload = {
+    tool_name: 'desktop_act',
+    tool_args: { action: 'invoke', element: { name: 'Save' } },
+    status: 'pending',
+  };
+  const confirmation = {
+    category: 'interact',
+    app: 'WINWORD.EXE',
+    description: "Press 'Save' (Button) in Document1 - Word (WINWORD.EXE)",
+    hard_confirm: false,
+    force_confirm: false,
+    via: 'uia',
+  };
+
+  test('ticking remember rides the approval as the desktop spec', () => {
+    const onApproveTool = jest.fn();
+    const pendingApproval = {
+      id: 'appr-d1', approval_key: 'key-d1',
+      tool_args: payload.tool_args, desktop_confirmation: confirmation,
+    };
+    let grantChoice = {};
+    const onDesktopGrantChoiceChange = (field, checked) => {
+      grantChoice = { ...grantChoice, [field]: checked };
+    };
+    const { rerender } = render(
+      <ToolActivityCard
+        payload={payload}
+        pendingApproval={pendingApproval}
+        onApproveTool={onApproveTool}
+        desktopGrantChoice={grantChoice}
+        onDesktopGrantChoiceChange={onDesktopGrantChoiceChange}
+      />
+    );
+    fireEvent.click(screen.getByTestId('desktop-remember-checkbox'));
+    expect(grantChoice).toEqual({ remember: true });
+    rerender(
+      <ToolActivityCard
+        payload={payload}
+        pendingApproval={pendingApproval}
+        onApproveTool={onApproveTool}
+        desktopGrantChoice={grantChoice}
+        onDesktopGrantChoiceChange={onDesktopGrantChoiceChange}
+      />
+    );
+    fireEvent.click(screen.getByText('Approve & Execute'));
+    const call = onApproveTool.mock.calls[0];
+    expect(call[0]).toBe('appr-d1');
+    expect(call[1]).toBe(true);
+    expect(call[2]).toBe('key-d1');
+    expect(call[call.length - 1]).toEqual({ remember: true });
+  });
+
+  test('without a desktop confirmation the legacy approve shape is untouched', () => {
+    const onApproveTool = jest.fn();
+    const pendingApproval = { id: 'appr-1', approval_key: 'key-1', tool_args: { command: 'ls' } };
+    render(
+      <ToolActivityCard
+        payload={{ tool_name: 'run_shell', tool_args: { command: 'ls' }, status: 'pending' }}
+        pendingApproval={pendingApproval}
+        onApproveTool={onApproveTool}
+      />
+    );
+    fireEvent.click(screen.getByText('Approve & Execute'));
+    expect(onApproveTool).toHaveBeenCalledWith('appr-1', true, 'key-1');
   });
 });

@@ -439,6 +439,29 @@ async def ws_tasks(ws: WebSocket):
     _prev_browser_policy_loader = set_browser_policy_loader(
         lambda: policy_from_user_config(engine_state.user_config))
 
+    # Master build S20: the desktop seams get the same treatment —
+    # the live desktop policy (read fresh from the user config on
+    # every gate/tool check) and the vision-grounding provider
+    # resolver (the configured auxiliary "vision" model through
+    # THIS connection's secret store, the advisor pattern). Both
+    # restored on disconnect with the rest (N-43).
+    from aether_engine.desktop.policy import (
+        policy_from_user_config as desktop_policy_from_user_config,
+    )
+    from aether_engine.desktop.policy import (
+        set_desktop_policy_loader,
+    )
+    from aether_engine.desktop.vision import (
+        default_vision_provider,
+        set_vision_provider_resolver,
+    )
+
+    _prev_desktop_policy_loader = set_desktop_policy_loader(
+        lambda: desktop_policy_from_user_config(engine_state.user_config))
+    _prev_vision_resolver = set_vision_provider_resolver(
+        lambda: default_vision_provider(
+            engine_state.user_config, secret_store))
+
     # N07: forward production-analyzer events (MEDIA_ANALYSIS_PROGRESS
     # / MEDIA_ANALYZED) to this connection so the Media Library
     # reflects analysis state live. Analysis is triggered from many
@@ -511,6 +534,8 @@ async def ws_tasks(ws: WebSocket):
         set_search_key_loader(_prev_search_key_loader)
         set_search_config_loader(_prev_search_config_loader)
         set_browser_policy_loader(_prev_browser_policy_loader)
+        set_desktop_policy_loader(_prev_desktop_policy_loader)
+        set_vision_provider_resolver(_prev_vision_resolver)
 
     try:
         while True:
@@ -749,6 +774,15 @@ async def _handle_tool_approval_decision(conn: WsConnection, msg: Event) -> None
     browser_envelope = msg.payload.get("browser_envelope") if is_approved else None
     if not isinstance(browser_envelope, dict):
         browser_envelope = None
+    # Master build S20: the desktop confirmation's extras ride
+    # the same event — the per-task envelope grant (scoped by
+    # the pause node to the confirmed action, exactly like the
+    # browser's) and the remembered-grant flag (the pause node
+    # and the grant store both refuse the hard-confirm class).
+    desktop_envelope = msg.payload.get("desktop_envelope") if is_approved else None
+    if not isinstance(desktop_envelope, dict):
+        desktop_envelope = None
+    desktop_remember = bool(msg.payload.get("desktop_remember")) if is_approved else False
     if edited_args is not None:
         try:
             pending = await get_pending_approvals()
@@ -888,6 +922,8 @@ async def _handle_tool_approval_decision(conn: WsConnection, msg: Event) -> None
         forced_agent=run_cfg.get("forced_agent"),
         edited_args=edited_args,
         browser_envelope=browser_envelope,
+        desktop_envelope=desktop_envelope,
+        desktop_remember=desktop_remember,
         # M17 residual: the resumed run's graph config
         # carries the same constraints (the executor also
         # re-derives them from the checkpoint as a net).
@@ -1879,6 +1915,62 @@ async def _handle_browser_task_pause_request(conn: WsConnection, msg: Event) -> 
         payload=browser_result,
     ).to_json())
 
+async def _handle_desktop_control_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Master build S20: the desktop control channel — pause /
+    # resume / take-control / return-control / stop for Computer
+    # Use actuation (the chat window's desktop control card).
+    # "stop" refuses the named task's further desktop actions
+    # WITHOUT killing the task (desktop/control.py). Only this
+    # user-driven channel can move the lane; there is no agent
+    # path back to AGENT state.
+    from aether_engine.desktop.control import get_desktop_control
+
+    result = get_desktop_control().control(
+        str(msg.payload.get("action", "")),
+        task_id=msg.payload.get("task_id"),
+    )
+    await conn.ws.send_text(Event(
+        type=EventType.DESKTOP_CONTROL_RESPONSE,
+        request_id=req_id,
+        payload=result,
+    ).to_json())
+
+async def _handle_desktop_grants_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Master build S20: Settings → Computer Use reviews the
+    # remembered grants — list, and revoke by id. Revocation is
+    # effective for the very next gate decision (the gate reads
+    # the store at decision time).
+    from aether_engine.desktop.grants import get_default_grant_store
+
+    store = get_default_grant_store()
+    action = str(msg.payload.get("action", "list"))
+    payload: dict = {"success": True}
+    if action == "revoke":
+        grant_id = msg.payload.get("grant_id")
+        if not isinstance(grant_id, int) or isinstance(grant_id, bool):
+            payload = {"success": False,
+                       "error": "A grant id is required to revoke a grant."}
+        else:
+            revoked = store.revoke(grant_id)
+            payload = {"success": revoked,
+                       **({"error": "No such remembered grant."}
+                          if not revoked else {})}
+            if revoked:
+                engine_state.audit_logger.log_event(
+                    "DESKTOP_GRANT_REVOKED", {"grant_id": grant_id})
+    elif action != "list":
+        payload = {"success": False,
+                   "error": f"Unknown desktop grants action: {action!r}."}
+    if payload.get("success"):
+        payload["grants"] = store.list_grants()
+    await conn.ws.send_text(Event(
+        type=EventType.DESKTOP_GRANTS_RESPONSE,
+        request_id=req_id,
+        payload=payload,
+    ).to_json())
+
 async def _handle_browser_policy_get_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
     # Epic 8, E8-6.2: Settings → Browser Agent Policy reads
@@ -2726,6 +2818,37 @@ async def _handle_config_update_request(conn: WsConnection, msg: Event) -> None:
                 type=EventType.CONFIG_UPDATE_RESPONSE,
                 request_id=req_id,
                 payload={"success": False, "error": backend_error},
+            ).to_json())
+            return
+    # Master build S20: the first-enable acknowledgement rule
+    # for desktop Control — the S9 pattern (a cross-field check
+    # the stateless F05 validator cannot make). If the RESULTING
+    # config would have Control on without the one-time
+    # acknowledgement, the update is refused whole, with the
+    # reason, and nothing is applied or saved. The engine gate
+    # (desktop.control_permitted) independently requires the ack,
+    # so even a hand-edited config cannot actuate unacknowledged;
+    # this refusal keeps the Settings surface honest about it
+    # instead of storing a Control switch that does nothing.
+    if "computer_use_control" in config_data or "computer_use_control_ack" in config_data:
+        prospective_control = handed_off_values.get(
+            "computer_use_control",
+            engine_state.user_config.computer_use_control)
+        prospective_ack = handed_off_values.get(
+            "computer_use_control_ack",
+            engine_state.user_config.computer_use_control_ack)
+        if prospective_control and not prospective_ack:
+            await conn.ws.send_text(Event(
+                type=EventType.CONFIG_UPDATE_RESPONSE,
+                request_id=req_id,
+                payload={
+                    "success": False,
+                    "error": (
+                        "computer_use_control: desktop control "
+                        "requires the one-time acknowledgement "
+                        "first (Settings → Computer Use) — control "
+                        "was not enabled."),
+                },
             ).to_json())
             return
     # E6-F07: snapshot before mutating — if the save
@@ -4232,6 +4355,8 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.BROWSER_TASK_PAUSE_REQUEST: _handle_browser_task_pause_request,
     EventType.BROWSER_POLICY_GET_REQUEST: _handle_browser_policy_get_request,
     EventType.BROWSER_POLICY_SET_REQUEST: _handle_browser_policy_set_request,
+    EventType.DESKTOP_CONTROL_REQUEST: _handle_desktop_control_request,
+    EventType.DESKTOP_GRANTS_REQUEST: _handle_desktop_grants_request,
     EventType.VAULT_ENTRY_LIST_REQUEST: _handle_vault_entry_list_request,
     EventType.VAULT_ENTRY_SAVE_REQUEST: _handle_vault_entry_save_request,
     EventType.VAULT_ENTRY_DELETE_REQUEST: _handle_vault_entry_delete_request,

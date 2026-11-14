@@ -25,6 +25,32 @@ AUXILIARY_TASK_CLASSES = frozenset({"vision", "compression", "advisor", "title"}
 CONFIG_PATH = Path.home() / ".aether" / "config.json"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 
+
+def _clean_desktop_category_modes(raw: Any) -> dict:
+    """S20: delegate to the desktop policy's cleaner (the policy
+    module owns the taxonomy; importing it lazily keeps config's
+    import graph unchanged — the policy module is stdlib-only
+    but config loads before the desktop package's consumers)."""
+    from aether_engine.desktop.policy import clean_category_modes
+
+    return clean_category_modes(raw)
+
+
+def _default_desktop_category_modes() -> dict:
+    """S20: the UserConfig default for the category-mode map —
+    the policy's full default map, via the same lazy import as
+    the cleaner, so a fresh config and its round-trip agree."""
+    from aether_engine.desktop.policy import default_category_modes
+
+    return default_category_modes()
+
+
+def _clean_desktop_app_rules(raw: Any) -> list:
+    """S20: the per-app rule cleaner (desktop/policy.py owns it)."""
+    from aether_engine.desktop.policy import clean_app_rules
+
+    return clean_app_rules(raw)
+
 # ---------------------------------------------------------------------------
 # Base provider registry metadata (URLs, icons, display names)
 # ---------------------------------------------------------------------------
@@ -342,6 +368,37 @@ class UserConfig:
     computer_use_enabled: bool = False
     computer_use_observe: bool = False
     computer_use_vision_capture: str = "off"
+    # Master build S20 (owner decision O1): Computer Use —
+    # desktop actuation (aether_engine/desktop/policy.py owns
+    # the taxonomy; these fields are its storage).
+    # computer_use_control is the Control switch S19
+    # deliberately left unstored: actuation exists only when
+    # master AND control AND computer_use_control_ack are all
+    # on (desktop.control_permitted) — the ack is the one-time
+    # first-enable acknowledgement, part of the gate itself so
+    # no write path (panel, hand-edited file) can enable
+    # control without it. computer_use_category_modes maps each
+    # policy category to its mode; the hard-confirm categories
+    # (close_or_quit, system) are normalised to always_confirm
+    # by the policy cleaner whatever is stored here.
+    # computer_use_app_rules is the per-app allow/deny list
+    # (deny refuses outright). computer_use_envelopes_enabled
+    # gates per-task envelopes; computer_use_pixel_fallback
+    # gates raw mouse/keyboard input (its own class, off by
+    # default, first use per session always confirms).
+    computer_use_control: bool = False
+    computer_use_control_ack: bool = False
+    # The default is the policy's full default map (every category
+    # always_confirm), NOT an empty dict: from_dict cleans stored
+    # values through the same cleaner, which fills defaults, so an
+    # empty-dict default would make a fresh config unequal to its
+    # own save/load round-trip (the E6-F07 atomicity pin caught
+    # exactly that at the S20 gate).
+    computer_use_category_modes: dict = field(
+        default_factory=_default_desktop_category_modes)
+    computer_use_app_rules: list = field(default_factory=list)
+    computer_use_envelopes_enabled: bool = True
+    computer_use_pixel_fallback: bool = False
     session_retention_days: int = 180
     session_max_sessions: int = 200
     # Calendar layer (14 Nov 2026): the schedule in
@@ -469,6 +526,12 @@ class UserConfig:
             "computer_use_enabled": self.computer_use_enabled,
             "computer_use_observe": self.computer_use_observe,
             "computer_use_vision_capture": self.computer_use_vision_capture,
+            "computer_use_control": self.computer_use_control,
+            "computer_use_control_ack": self.computer_use_control_ack,
+            "computer_use_category_modes": self.computer_use_category_modes,
+            "computer_use_app_rules": self.computer_use_app_rules,
+            "computer_use_envelopes_enabled": self.computer_use_envelopes_enabled,
+            "computer_use_pixel_fallback": self.computer_use_pixel_fallback,
             "session_retention_days": self.session_retention_days,
             "session_max_sessions": self.session_max_sessions,
             "calendar_enabled": self.calendar_enabled,
@@ -615,6 +678,20 @@ class UserConfig:
                 if d.get("computer_use_vision_capture")
                 in ("off", "ask", "on_demand")
                 else "off"),
+            computer_use_control=bool(d.get("computer_use_control", False)),
+            computer_use_control_ack=bool(
+                d.get("computer_use_control_ack", False)),
+            # S20: the policy cleaners own the shapes (a corrupt
+            # stored policy tightens to all-confirm / no rules —
+            # see desktop/policy.py's cleaning rules).
+            computer_use_category_modes=_clean_desktop_category_modes(
+                d.get("computer_use_category_modes")),
+            computer_use_app_rules=_clean_desktop_app_rules(
+                d.get("computer_use_app_rules")),
+            computer_use_envelopes_enabled=bool(
+                d.get("computer_use_envelopes_enabled", True)),
+            computer_use_pixel_fallback=bool(
+                d.get("computer_use_pixel_fallback", False)),
             session_retention_days=_as_int(d.get("session_retention_days"), 180),
             session_max_sessions=_as_int(d.get("session_max_sessions"), 200),
             calendar_enabled=bool(d.get("calendar_enabled", True)),

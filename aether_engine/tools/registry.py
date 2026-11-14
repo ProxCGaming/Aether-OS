@@ -154,6 +154,16 @@ def build_tool_registry(
 
     for tool in create_browser_tools():
         registry.register(tool)
+    # Master build S20: the desktop actuation tool. Registered
+    # unconditionally like the browser tools — OFFERING is the
+    # runner's job (it filters desktop_act out unless Computer
+    # Use control is fully permitted, so default-config prompts
+    # stay byte-identical), and the tool itself fails closed
+    # when control is off or the backend is unavailable.
+    from aether_engine.desktop.tools import create_desktop_tools
+
+    for tool in create_desktop_tools():
+        registry.register(tool)
     for tool in mcp_tools or []:
         registry.register(tool)
     return registry
@@ -408,7 +418,8 @@ class ToolRegistry:
 
         # ── Step 3: sandbox routing (ADR 0010) ─────────────────────────
         try:
-            if tool.source.startswith("mcp:") or tool.source == "browser":
+            if tool.source.startswith("mcp:") or tool.source == "browser" \
+                    or tool.source == "desktop":
                 # MCP tools run in-process in the engine (PRD Q4): the
                 # worker hardcodes 3 builtin tools and cannot hold MCP
                 # sessions, so routing an MCP tool there would silently
@@ -416,8 +427,11 @@ class ToolRegistry:
                 # Browser tools (Epic 8, E8-6.1) share the rationale:
                 # they drive a live Playwright session the engine
                 # holds in its dedicated profile — a worker subprocess
-                # cannot adopt it. Policy, pre-flight and hooks above
-                # apply to both, unchanged.
+                # cannot adopt it. Desktop tools (S20) share it too:
+                # they drive the owner's live desktop through the
+                # engine's UIA session, which no worker can adopt.
+                # Policy, pre-flight and hooks above apply to all,
+                # unchanged.
                 if inspect.iscoroutinefunction(tool.execute_fn):
                     result = await _run_coro_tool(tool, call_args)
                 else:

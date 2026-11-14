@@ -33,6 +33,7 @@ from langgraph.errors import GraphInterrupt
 
 from aether_common.contracts import Event, EventType
 from aether_engine.browser.policy import BROWSER_TOOL_NAMES
+from aether_engine.desktop.policy import DESKTOP_TOOL_NAMES
 from aether_engine.event_bus import event_bus
 from aether_engine.langgraph.state import TOOL_LOOP_GUARD_THRESHOLD, AetherState
 from aether_engine.langgraph.steering import (
@@ -368,6 +369,16 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
 
                 final_args_gate = make_browser_final_args_gate(
                     state, config, pending.get("browser_authorization"))
+            elif tool_name in DESKTOP_TOOL_NAMES:
+                # S20: the M03 analogue for desktop actuation —
+                # the executed action must be the authorised one
+                # (same category, same resolved target identity).
+                from aether_engine.langgraph.nodes.pause import (
+                    make_desktop_final_args_gate,
+                )
+
+                final_args_gate = make_desktop_final_args_gate(
+                    state, config, pending.get("desktop_authorization"))
 
             # N05: snapshot the workspace before a write-capable tool
             # other than the two file tools runs, so its filesystem

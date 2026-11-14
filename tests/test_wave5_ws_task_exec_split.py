@@ -59,6 +59,8 @@ DISPATCHED_TYPES = (
     "CONFIG_UPDATE_REQUEST",
     "CONTEXT_BREAKDOWN_REQUEST",
     "DAILY_BUDGET_SET_REQUEST",
+    "DESKTOP_CONTROL_REQUEST",
+    "DESKTOP_GRANTS_REQUEST",
     "DEV_SERVER_DETECT_REQUEST",
     "DIAGNOSTICS_EXPORT_REQUEST",
     "DICTATION_CHUNK_REQUEST",
@@ -269,7 +271,7 @@ class TestDispatchTable:
         assert d[EventType.PROJECT_CONFIG_GET_REQUEST] is \
             d[EventType.PROJECT_CONFIG_UPDATE_REQUEST]
 
-    def test_handlers_are_coroutine_functions_129_distinct(self):
+    def test_handlers_are_coroutine_functions_131_distinct(self):
         handlers = list(websocket._DISPATCH.values())
         assert all(inspect.iscoroutinefunction(h) for h in handlers)
         # 123 at the Wave 5 split; +1 for the calendar layer's
@@ -280,8 +282,10 @@ class TestDispatchTable:
         # 14 Nov 2026); +1 for the machine capability report
         # handler (master build S10, 14 Nov 2026); +1 for the
         # agent routing report handler (master build S14,
+        # 14 Nov 2026); +2 for the desktop control lane and
+        # remembered-grants handlers (master build S20,
         # 14 Nov 2026).
-        assert len(set(handlers)) == 129
+        assert len(set(handlers)) == 131
 
 
 class _FakeSocket:

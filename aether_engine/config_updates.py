@@ -77,6 +77,12 @@ HANDED_OFF_FIELDS = (
     "computer_use_enabled",
     "computer_use_observe",
     "computer_use_vision_capture",
+    "computer_use_control",
+    "computer_use_control_ack",
+    "computer_use_category_modes",
+    "computer_use_app_rules",
+    "computer_use_envelopes_enabled",
+    "computer_use_pixel_fallback",
 )
 
 # The verdict vocabulary of tools/policy.py's _VERDICT_MAP and the
@@ -219,6 +225,74 @@ def _validate_tts_voice(value: Any) -> str:
                     f"like 'af_heart': a language/gender prefix and "
                     f"a lowercase name)")
     return voice
+
+
+def _validate_desktop_category_modes(value: Any) -> dict:
+    """A Computer Use category-modes write (S20): a mapping over
+    the desktop policy's categories to its modes. Unknown
+    categories/modes are refused naming the valid sets, and the
+    hard-confirm categories refuse any mode but always_confirm
+    WITH THE REASON (owner decision O1: close/quit and system
+    actions confirm individually, always — no envelope, no
+    Allow-freely; storing a looser mode for them is refused here
+    so the data can never exist, on top of the policy's own
+    mode_for forcing). A partial mapping is fine: the policy
+    cleaner fills the rest with always_confirm."""
+    from aether_engine.desktop.policy import (
+        CATEGORIES,
+        HARD_CONFIRM_CATEGORIES,
+        MODES,
+    )
+
+    if not isinstance(value, dict):
+        raise _fail("computer_use_category_modes",
+                    "must be an object mapping category to mode")
+    cleaned: dict[str, str] = {}
+    for category, mode in value.items():
+        if category not in CATEGORIES:
+            raise _fail(
+                "computer_use_category_modes",
+                f"unknown category {category!r} (valid: "
+                f"{', '.join(CATEGORIES)})")
+        if mode not in MODES:
+            raise _fail(
+                "computer_use_category_modes",
+                f"unknown mode {mode!r} for {category} (valid: "
+                f"{', '.join(MODES)})")
+        if category in HARD_CONFIRM_CATEGORIES and mode != "always_confirm":
+            raise _fail(
+                "computer_use_category_modes",
+                f"{category} actions always confirm individually "
+                "and cannot use envelopes or Allow freely — the "
+                "mode must stay always_confirm")
+        cleaned[category] = mode
+    return cleaned
+
+
+def _validate_desktop_app_rules(value: Any) -> list:
+    """A Computer Use per-app rules write (S20): a list of
+    {"app", "verdict"} entries over the closed verdict set
+    (allow/deny), capped so the Settings list stays a list a
+    human reviews. Malformed entries refuse the write (the
+    strict contract) rather than being dropped silently."""
+    from aether_engine.desktop.policy import APP_VERDICTS, clean_app_rules
+
+    if not isinstance(value, list):
+        raise _fail("computer_use_app_rules",
+                    "must be a list of {app, verdict} entries")
+    if len(value) > 50:
+        raise _fail("computer_use_app_rules",
+                    "at most 50 app rules — the list is meant to "
+                    "stay reviewable")
+    for entry in value:
+        if not isinstance(entry, dict) \
+                or not str(entry.get("app") or "").strip() \
+                or entry.get("verdict") not in APP_VERDICTS:
+            raise _fail(
+                "computer_use_app_rules",
+                "each entry needs a non-empty app and a verdict "
+                f"of {', '.join(APP_VERDICTS)}")
+    return clean_app_rules(value)
 
 
 def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
@@ -366,15 +440,41 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
     # real booleans; a truthy string would show a state the
     # engine never agreed to, and for a screen-reading feature
     # that distinction is the whole point of the switch.
+    # S20: the actuation switches join them on the same rule —
+    # control, its acknowledgement, envelopes and the pixel
+    # fallback are all real booleans; for a feature that clicks
+    # and types in the user's apps, a coerced truthy string is
+    # exactly the failure this contract exists to prevent.
     for bool_field in ("calendar_enabled", "calendar_reminder_day_before",
                        "eq_enabled", "subagents_enabled",
                        "voice_speculation_enabled",
-                       "computer_use_enabled", "computer_use_observe"):
+                       "computer_use_enabled", "computer_use_observe",
+                       "computer_use_control", "computer_use_control_ack",
+                       "computer_use_envelopes_enabled",
+                       "computer_use_pixel_fallback"):
         if bool_field in config_data:
             value = config_data[bool_field]
             if not isinstance(value, bool):
                 raise _fail(bool_field, "must be true or false")
             cleaned[bool_field] = value
+
+    # S20: the desktop policy's stored half. Category modes are
+    # a closed vocabulary (the policy taxonomy); an unknown
+    # category or mode is refused naming the valid set. The
+    # hard-confirm categories (close_or_quit, system) REFUSE any
+    # mode but always_confirm, with the reason — the panel
+    # disables those selects, and this is the write-path lock
+    # behind it: an envelope or Allow-freely for close/quit must
+    # not even exist as stored data. The per-app list is
+    # shape-validated and capped; entries collapse by app (the
+    # policy cleaner's rule).
+    if "computer_use_category_modes" in config_data:
+        cleaned["computer_use_category_modes"] = \
+            _validate_desktop_category_modes(
+                config_data["computer_use_category_modes"])
+    if "computer_use_app_rules" in config_data:
+        cleaned["computer_use_app_rules"] = _validate_desktop_app_rules(
+            config_data["computer_use_app_rules"])
 
     # S19: the vision capture mode is a closed three-value set,
     # validated like model_routing — an unknown value is refused

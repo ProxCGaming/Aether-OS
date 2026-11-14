@@ -181,6 +181,22 @@ async def run_specialist(
         keep = registry.read_only_names()
         tools = [t for t in tools if t.get("function", {}).get("name") in keep]
 
+    # Master build S20: desktop actuation is offered ONLY when
+    # Computer Use control is fully permitted (master + Control +
+    # the one-time acknowledgement — desktop.control_permitted).
+    # The filter runs on the final list (after the allow-list and
+    # plan-mode passes; plan mode already drops it as a WRITE
+    # tool) and removes the tool outright rather than disabling
+    # its description, so with control off — the default — the
+    # offered tools, and therefore the prompt, are byte-identical
+    # to pre-S20.
+    from aether_engine.desktop import control_permitted
+    from aether_engine.desktop.policy import DESKTOP_TOOL_NAMES
+
+    if not control_permitted(_uc):
+        tools = [t for t in tools
+                 if t.get("function", {}).get("name") not in DESKTOP_TOOL_NAMES]
+
     # S13: bounded sub-agent spawning — a specialist may spawn a
     # bounded sub-agent for a focused sub-task (langgraph/subagents).
     # Offered only; every bound is enforced at execution time in

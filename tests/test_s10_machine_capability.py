@@ -219,6 +219,11 @@ class TestMatrix:
         # present, degraded naming the missing package when
         # absent, unknown when unprobed); the non-Windows and
         # unidentified-platform verdicts are unchanged from S10.
+        # S20: actuation is built, so the available reason now
+        # says Aether CAN click and type (behind the Computer
+        # Use switches and the confirmation policy) where S19's
+        # wording said it could not — the assertion below pins
+        # the new sentence, not the old one.
         windows = _machine(platform={"system": "Windows", "release": "11",
                                      "architecture": "AMD64",
                                      "python": "3.12.3"})
@@ -231,7 +236,8 @@ class TestMatrix:
                      desktop={"uia_package": True}),
             "desktop_control")
         assert ready["status"] == "available"
-        assert "cannot click or type" in ready["reason"]
+        assert "click and type" in ready["reason"]
+        assert "always confirm" in ready["reason"]
         missing = _verdict(
             _machine(platform={"system": "Windows", "release": "11",
                                "architecture": "AMD64",

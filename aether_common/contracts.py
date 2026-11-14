@@ -574,6 +574,36 @@ class EventType(str, Enum):
     BROWSER_POLICY_SET_REQUEST = "BROWSER_POLICY_SET_REQUEST"
     BROWSER_POLICY_SET_RESPONSE = "BROWSER_POLICY_SET_RESPONSE"
 
+    # Desktop control (master build S20): the live control lane
+    # for Computer Use actuation — the BrowserControlState design
+    # generalised to the desktop (desktop/control.py). DESKTOP_
+    # CONTROL_REQUEST payload: {"action": "pause" | "resume" |
+    # "take_control" | "return_control" | "stop",
+    # "task_id": str | None, "chat_session_id": str | None} —
+    # "stop" names a task (or stops the task currently driving)
+    # and refuses that task's further desktop actions WITHOUT
+    # killing the task. DESKTOP_CONTROL_RESPONSE payload:
+    # {"success": bool, "control_state": "agent" | "paused" |
+    # "user", "stopped_tasks": [str], "driving_task": str | None,
+    # "stopped_task": str | None, "error": str (only when success
+    # is False)}. Only the user drives this channel; no agent
+    # path can pause, resume, or return control.
+    DESKTOP_CONTROL_REQUEST = "DESKTOP_CONTROL_REQUEST"
+    DESKTOP_CONTROL_RESPONSE = "DESKTOP_CONTROL_RESPONSE"
+
+    # Desktop remembered grants (master build S20): the durable
+    # (app, category) "don't ask again" grants the confirmation
+    # card can create, reviewed in Settings → Computer Use.
+    # DESKTOP_GRANTS_REQUEST payload: {"action": "list"} or
+    # {"action": "revoke", "grant_id": int}. DESKTOP_GRANTS_
+    # RESPONSE payload: {"success": bool, "grants": [{"id": int,
+    # "app": str, "category": str, "granted_at": float}],
+    # "error": str (only when success is False)}. Grants never
+    # exist for the hard-confirm categories (close_or_quit,
+    # system) — the store refuses them at write time.
+    DESKTOP_GRANTS_REQUEST = "DESKTOP_GRANTS_REQUEST"
+    DESKTOP_GRANTS_RESPONSE = "DESKTOP_GRANTS_RESPONSE"
+
     # Credential vault (Epic 8 — E8-6.3). Entries live encrypted in
     # ~/.aether/vault.db (the DPAPI / keychain BaseProtector, same as
     # provider keys) and are bound to their site. Listing is METADATA

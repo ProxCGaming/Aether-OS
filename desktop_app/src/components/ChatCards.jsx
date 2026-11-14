@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, AlertCircle, ShieldAlert, TerminalSquare, ChevronDown, CheckCircle2, Copy, CheckCheck, ArrowRight, ArrowDownRight, ArrowUpRight } from 'lucide-react';
-import { parseApprovalEditedArgs, browserEnvelopeGrant } from './approvalLogic';
+import { parseApprovalEditedArgs, browserEnvelopeGrant, desktopGrantSpec } from './approvalLogic';
 
 // Wave 5 (Annex C row 6): the transcript-rendering cards —
 // payload drawers, the tool / node activity cards, the thinking
@@ -310,7 +310,74 @@ export function BrowserConfirmationControl({ confirmation, grantChecked = false,
 }
 
 
-export function ToolActivityCard({ payload, isNested = false, pendingApproval = null, onApproveTool = null, onOpenArtifact = null, envelopeGrantChecked = false, onEnvelopeGrantCheckedChange = null }) {
+// Master build S20: the desktop confirmation control — the
+// browser control's analogue for Computer Use actuation. The
+// description names the exact action (the resolved element as
+// the OS states it). The grant opt-ins follow the engine's
+// rules, stated on the card: the hard-confirm categories
+// (close_or_quit, system) and password-field targets NEVER
+// offer envelope/remember boxes — they always ask individually.
+// A pixel action's approval IS the session's pixel consent, and
+// a vision action's approval covers the one screenshot — both
+// notes say so where the decision is made.
+export function DesktopConfirmationControl({ confirmation, choice = {}, onChoiceChange = null }) {
+  if (!confirmation) return null;
+  const categoryLabel = (confirmation.category || '').replace(/_/g, ' ');
+  const appSuffix = confirmation.app ? ` in ${confirmation.app}` : '';
+  return (
+    <>
+      <div
+        data-testid="desktop-confirmation-description"
+        style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-strong)', padding: '12px', borderRadius: '8px', fontSize: '14px', color: 'var(--text-primary)' }}
+      >
+        {confirmation.description}
+      </div>
+      {confirmation.hard_confirm ? (
+        <div style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px' }}>
+          This kind of action always asks individually — no envelope or remembered grant can cover it.
+        </div>
+      ) : confirmation.force_confirm ? (
+        <div style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px' }}>
+          This target is a password field — it always asks individually.
+        </div>
+      ) : (
+        <>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'var(--text-primary)', marginTop: '10px', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              data-testid="desktop-envelope-checkbox"
+              checked={!!choice.envelope}
+              onChange={(e) => { if (onChoiceChange) onChoiceChange('envelope', e.target.checked); }}
+            />
+            Allow {categoryLabel} actions{appSuffix} for the rest of this task
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'var(--text-primary)', marginTop: '6px', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              data-testid="desktop-remember-checkbox"
+              checked={!!choice.remember}
+              onChange={(e) => { if (onChoiceChange) onChoiceChange('remember', e.target.checked); }}
+            />
+            Remember: allow {categoryLabel} actions{appSuffix} without asking (revocable in Settings → Computer Use)
+          </label>
+        </>
+      )}
+      {confirmation.via === 'pixel' && (
+        <div data-testid="desktop-pixel-note" style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px' }}>
+          Approving also allows pixel (mouse/keyboard) input for the rest of this session.
+        </div>
+      )}
+      {confirmation.via === 'vision' && (
+        <div data-testid="desktop-vision-note" style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px' }}>
+          Approving takes one screenshot to locate the control; the screenshot is discarded as soon as the call returns.
+        </div>
+      )}
+    </>
+  );
+}
+
+
+export function ToolActivityCard({ payload, isNested = false, pendingApproval = null, onApproveTool = null, onOpenArtifact = null, envelopeGrantChecked = false, onEnvelopeGrantCheckedChange = null, desktopGrantChoice = {}, onDesktopGrantChoiceChange = null }) {
   // Epic 8, E8-1.3: approval argument editor state (hooks first —
   // the early return below must stay after them).
   const [argsEditorOpen, setArgsEditorOpen] = useState(false);
@@ -338,16 +405,27 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
   // and will flush on reconnect; App marks the approval message for us.
   const decisionQueued = !!(pendingApproval && pendingApproval.decisionQueued);
   const browserConfirmation = (pendingApproval && pendingApproval.browser_confirmation) || payload.browser_confirmation || null;
+  const desktopConfirmation = (pendingApproval && pendingApproval.desktop_confirmation) || payload.desktop_confirmation || null;
   const approveWithEdits = (scope) => {
     if (!onApproveTool || !pendingApproval) return;
     // N11: the envelope grant rides the same sixth-argument
     // contract as the standalone approval card, via the shared
     // browserEnvelopeGrant helper — one payload, both surfaces.
+    // S20: the desktop grant spec rides as the SEVENTH argument
+    // under the same discipline (approvalLogic.desktopGrantSpec);
+    // when neither grant exists the legacy call shapes are
+    // preserved exactly.
     const envelope = browserEnvelopeGrant(browserConfirmation, envelopeGrantChecked);
-    if (!argsEditorOpen) {
-      if (envelope) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope, undefined, envelope);
-      else if (scope) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope);
+    const desktopSpec = desktopGrantSpec(desktopConfirmation, desktopGrantChoice);
+    const approve = (s, edited) => {
+      if (desktopSpec) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, s, edited, envelope, desktopSpec);
+      else if (envelope) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, s, edited, envelope);
+      else if (edited) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, s, edited);
+      else if (s) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, s);
       else onApproveTool(pendingApproval.id, true, pendingApproval.approval_key);
+    };
+    if (!argsEditorOpen) {
+      approve(scope, undefined);
       return;
     }
     const { editedArgs, error } = parseApprovalEditedArgs(argsText, approvalArgs);
@@ -355,10 +433,7 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
       setArgsError(error);
       return;
     }
-    if (envelope) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope, editedArgs || undefined, envelope);
-    else if (editedArgs) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope, editedArgs);
-    else if (scope) onApproveTool(pendingApproval.id, true, pendingApproval.approval_key, scope);
-    else onApproveTool(pendingApproval.id, true, pendingApproval.approval_key);
+    approve(scope, editedArgs || undefined);
   };
   const openArgsEditor = () => {
     setArgsText(JSON.stringify(approvalArgs, null, 2));
@@ -434,6 +509,13 @@ export function ToolActivityCard({ payload, isNested = false, pendingApproval = 
                 confirmation={browserConfirmation}
                 grantChecked={envelopeGrantChecked}
                 onGrantCheckedChange={onEnvelopeGrantCheckedChange}
+              />
+            )}
+            {desktopConfirmation && (
+              <DesktopConfirmationControl
+                confirmation={desktopConfirmation}
+                choice={desktopGrantChoice}
+                onChoiceChange={onDesktopGrantChoiceChange}
               />
             )}
             {!argsEditorOpen ? (
@@ -643,7 +725,7 @@ export function NodeActivityCard({ activity, nestedTools = [], rawDelta, onOpenA
   );
 }
 
-export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopTask, onApproveTool = null, pendingApprovals = [], onOpenArtifact = null, envelopeGrants = {}, onEnvelopeGrantChange = null }) {
+export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopTask, onApproveTool = null, pendingApprovals = [], onOpenArtifact = null, envelopeGrants = {}, onEnvelopeGrantChange = null, desktopGrantChoices = {}, onDesktopGrantChoiceChange = null }) {
   let parsedThoughts = thoughts;
   if (typeof thoughts === 'string') {
     try {
@@ -865,13 +947,15 @@ export function ThinkingAccordion({ thoughts = [], isThinking, hasError, onStopT
               if (item.type === 'tool') {
                 const approval = approvalByCardKey.get(item.key) || null;
                 return (
-                  <ToolActivityCard 
-                    key={item.key} 
-                    payload={item.payload} 
+                  <ToolActivityCard
+                    key={item.key}
+                    payload={item.payload}
                     pendingApproval={approval}
                     onApproveTool={onApproveTool}
                     envelopeGrantChecked={!!(approval && envelopeGrants[approval.id])}
                     onEnvelopeGrantCheckedChange={approval && onEnvelopeGrantChange ? (checked) => onEnvelopeGrantChange(approval.id, checked) : null}
+                    desktopGrantChoice={(approval && desktopGrantChoices[approval.id]) || {}}
+                    onDesktopGrantChoiceChange={approval && onDesktopGrantChoiceChange ? (field, checked) => onDesktopGrantChoiceChange(approval.id, field, checked) : null}
                     onOpenArtifact={onOpenArtifact}
                   />
                 );

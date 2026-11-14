@@ -788,6 +788,7 @@ async def run_langgraph_task(
                                     "task_class": intr_val.get("task_class"),
 "preview": intr_val.get("preview"),
 "browser_confirmation": intr_val.get("browser_confirmation"),
+"desktop_confirmation": intr_val.get("desktop_confirmation"),
                                     "workspace_roots": workspace_roots or [],
                                 },
                             )
@@ -1182,6 +1183,8 @@ async def resume_langgraph_task(
     agent_tools: dict[str, list[str]] | None = None,
     edited_args: dict[str, Any] | None = None,
     browser_envelope: dict[str, Any] | None = None,
+    desktop_envelope: dict[str, Any] | None = None,
+    desktop_remember: bool = False,
     **kwargs,
 ) -> AsyncGenerator[Event, None]:
     """Resume an interrupted LangGraph task and yield remaining events.
@@ -1364,6 +1367,7 @@ async def resume_langgraph_task(
                                         "task_class": intr_val.get("task_class"),
 "preview": intr_val.get("preview"),
 "browser_confirmation": intr_val.get("browser_confirmation"),
+"desktop_confirmation": intr_val.get("desktop_confirmation"),
                                         "workspace_roots": workspace_roots or [],
                                     },
                                 )
@@ -1499,14 +1503,22 @@ async def resume_langgraph_task(
             # Epic 8, E8-6.2: a browser-envelope grant granted at a
             # confirmation rides the same dict (the pause node scopes
             # it to the confirmed action's category + site itself).
+            # S20: the desktop extras (per-task envelope grant +
+            # remembered-grant flag) ride it the same way.
             resume_value: Any = approved
             if approved and (isinstance(edited_args, dict)
-                             or isinstance(browser_envelope, dict)):
+                             or isinstance(browser_envelope, dict)
+                             or isinstance(desktop_envelope, dict)
+                             or desktop_remember):
                 resume_value = {"approved": True}
                 if isinstance(edited_args, dict):
                     resume_value["edited_args"] = edited_args
                 if isinstance(browser_envelope, dict):
                     resume_value["browser_envelope"] = browser_envelope
+                if isinstance(desktop_envelope, dict):
+                    resume_value["desktop_envelope"] = desktop_envelope
+                if desktop_remember:
+                    resume_value["desktop_remember"] = True
             # S3: the resume path's translated events tap into the
             # Task Ledger here, at the segment funnel — the mirror of
             # the run path's emit_event tap.
@@ -1736,7 +1748,8 @@ async def get_pending_approvals() -> list[dict[str, Any]]:
                                 "args": intr_val.get("args"),
                                 "task_class": intr_val.get("task_class", "standard"),
                                 "preview": intr_val.get("preview"),
-                                "browser_confirmation": intr_val.get("browser_confirmation")
+                                "browser_confirmation": intr_val.get("browser_confirmation"),
+                                "desktop_confirmation": intr_val.get("desktop_confirmation")
                             })
                             break
             except Exception as e:  # noqa: BLE001 — per-thread scan isolation: one unreadable thread is logged and must not abort the approvals listing

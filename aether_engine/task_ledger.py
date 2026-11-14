@@ -111,6 +111,7 @@ def _tap_entry(task_id: str) -> dict[str, Any]:
             "delegations": [],
             "subagents": [],
             "model_routing": [],
+            "desktop_actions": [],
             "tool_calls": [],
             "node_activity": [],
             "approvals": [],
@@ -187,6 +188,25 @@ def record_executor_event(task_id: str | None, event: Any) -> None:
                         "escalation" if action == "model_escalation" else "auto"),
                     "reason": out.get("reason") or payload.get("reason", ""),
                     "escalated_from": out.get("escalated_from"),
+                    "timestamp": ts,
+                    "source": "executor_event",
+                })
+            elif action == "desktop_action":
+                # S20: desktop actuations (desktop_act tool) are
+                # their own record — what was done on the user's
+                # desktop, in which app, by which route, and how
+                # it ended. The tool publishes the S12 NODE_ACTIVITY
+                # shape with the classification on input_payload
+                # and the outcome on output_payload.
+                inp = payload.get("input_payload") or {}
+                out = payload.get("output_payload") or {}
+                _tap_append(entry, "desktop_actions", {
+                    "action": inp.get("action"),
+                    "category": inp.get("category"),
+                    "app": inp.get("app"),
+                    "via": inp.get("via"),
+                    "status": out.get("status") or payload.get("status"),
+                    "detail": (out.get("detail") or "")[:OUTCOME_EXCERPT_CHARS] or None,
                     "timestamp": ts,
                     "source": "executor_event",
                 })
@@ -812,6 +832,9 @@ async def task_summary(
         # delegations above are annotated from these; the raw list
         # stays available for surfaces that want the full trail.
         "model_routing": routing_records,
+        # S20 (additive): the tap's desktop-actuation records for
+        # this task (category / app / via / status per action).
+        "desktop_actions": (tap or {}).get("desktop_actions") or [],
         # S4 (additive): the checkpointed delegation counter for the
         # task's turn, or None when no checkpoint carries one.
         "delegation_count": (checkpoint or {}).get("delegation_count"),
@@ -943,6 +966,13 @@ def task_briefing(summary: dict[str, Any], *, max_chars: int = BRIEFING_MAX_CHAR
             f" by {s.get('parent_agent') or '?'}"
             for s in subagents[:6])
         parts.append(f"Sub-agents: {rendered}")
+    desktop_actions = summary.get("desktop_actions") or []
+    if desktop_actions:
+        rendered = ", ".join(
+            f"{a.get('action') or '?'} in {a.get('app') or 'the desktop'}"
+            f" ({a.get('status') or '?'})"
+            for a in desktop_actions[:6])
+        parts.append(f"Desktop actions: {rendered}")
     calls = summary.get("tool_calls") or []
     if calls:
         failed = sum(1 for c in calls if c.get("status") == "failed")

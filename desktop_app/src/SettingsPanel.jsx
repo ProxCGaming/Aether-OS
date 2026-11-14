@@ -80,6 +80,12 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   const [computerUseEnabled, setComputerUseEnabled] = useState(false);
   const [computerUseObserve, setComputerUseObserve] = useState(false);
   const [computerUseVisionCapture, setComputerUseVisionCapture] = useState('off');
+  const [computerUseControl, setComputerUseControl] = useState(false);
+  const [computerUseControlAck, setComputerUseControlAck] = useState(false);
+  const [computerUseCategoryModes, setComputerUseCategoryModes] = useState({});
+  const [computerUseAppRules, setComputerUseAppRules] = useState([]);
+  const [computerUseEnvelopesEnabled, setComputerUseEnvelopesEnabled] = useState(true);
+  const [computerUsePixelFallback, setComputerUsePixelFallback] = useState(false);
   const [fallbackChain, setFallbackChain] = useState('');
   // E6-F05: the last applied engine config — the controlled panels
   // for the Epic 1/2 handed-off surfaces (OrchestrationPanel,
@@ -563,6 +569,42 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     sendConfigUpdate({ computer_use_vision_capture: val });
   };
 
+  // S20: the actuation fields ride the same path; the engine
+  // strictly validates all of them (bools are bools, category
+  // modes are a closed vocabulary with the hard-confirm
+  // categories refused looser than always_confirm, and Control
+  // without the acknowledgement is refused whole).
+  const handleComputerUseControlChange = (val) => {
+    setComputerUseControl(val);
+    sendConfigUpdate({ computer_use_control: val });
+  };
+
+  const handleComputerUseControlAckChange = (val) => {
+    setComputerUseControlAck(val);
+    sendConfigUpdate({ computer_use_control_ack: val });
+  };
+
+  const handleComputerUseCategoryModeChange = (category, mode) => {
+    const next = { ...computerUseCategoryModes, [category]: mode };
+    setComputerUseCategoryModes(next);
+    sendConfigUpdate({ computer_use_category_modes: next });
+  };
+
+  const handleComputerUseAppRulesChange = (rules) => {
+    setComputerUseAppRules(rules);
+    sendConfigUpdate({ computer_use_app_rules: rules });
+  };
+
+  const handleComputerUseEnvelopesEnabledChange = (val) => {
+    setComputerUseEnvelopesEnabled(val);
+    sendConfigUpdate({ computer_use_envelopes_enabled: val });
+  };
+
+  const handleComputerUsePixelFallbackChange = (val) => {
+    setComputerUsePixelFallback(val);
+    sendConfigUpdate({ computer_use_pixel_fallback: val });
+  };
+
   const handleCalendarLeadMinutesCommit = (val) => {
     setCalendarLeadMinutes(val);
     sendConfigUpdate({ calendar_reminder_lead_minutes: val });
@@ -670,6 +712,16 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
       ['off', 'ask', 'on_demand'].includes(config.computer_use_vision_capture)
         ? config.computer_use_vision_capture
         : 'off');
+    setComputerUseControl(config.computer_use_control === true);
+    setComputerUseControlAck(config.computer_use_control_ack === true);
+    setComputerUseCategoryModes(
+      config.computer_use_category_modes && typeof config.computer_use_category_modes === 'object'
+        ? config.computer_use_category_modes
+        : {});
+    setComputerUseAppRules(
+      Array.isArray(config.computer_use_app_rules) ? config.computer_use_app_rules : []);
+    setComputerUseEnvelopesEnabled(config.computer_use_envelopes_enabled !== false);
+    setComputerUsePixelFallback(config.computer_use_pixel_fallback === true);
       setCalendarDayBefore(config.calendar_reminder_day_before !== false);
       setCalendarLeadMinutes(
         Number.isInteger(config.calendar_reminder_lead_minutes)
@@ -1384,6 +1436,18 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             onComputerUseObserveChange={handleComputerUseObserveChange}
             visionCapture={computerUseVisionCapture}
             onVisionCaptureChange={handleComputerUseVisionCaptureChange}
+            computerUseControl={computerUseControl}
+            onComputerUseControlChange={handleComputerUseControlChange}
+            computerUseControlAck={computerUseControlAck}
+            onComputerUseControlAckChange={handleComputerUseControlAckChange}
+            computerUseCategoryModes={computerUseCategoryModes}
+            onComputerUseCategoryModeChange={handleComputerUseCategoryModeChange}
+            computerUseAppRules={computerUseAppRules}
+            onComputerUseAppRulesChange={handleComputerUseAppRulesChange}
+            computerUseEnvelopesEnabled={computerUseEnvelopesEnabled}
+            onComputerUseEnvelopesEnabledChange={handleComputerUseEnvelopesEnabledChange}
+            computerUsePixelFallback={computerUsePixelFallback}
+            onComputerUsePixelFallbackChange={handleComputerUsePixelFallbackChange}
             approvalMode={approvalMode}
           />
         )}

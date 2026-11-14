@@ -663,24 +663,33 @@ def _desktop_control(machine: dict[str, Any]) -> dict[str, Any]:
         # it still cannot do is ACT (click/type), which is S20.
         # The remaining gate is the UIA package the backend
         # reads through, probed like every other dependency.
+        # S20: actuation is now built too — UIA invoke/set-value
+        # by element, window and clipboard primitives, vision
+        # grounding and the pixel fallback, all behind the
+        # Computer Use switches (master + Control + the one-time
+        # acknowledgement) and the desktop confirmation policy.
+        # The verdict speaks for the MACHINE's readiness, so the
+        # reason names the switches as the remaining gate.
         uia = (machine.get("desktop") or {}).get("uia_package")
         if uia is True:
             return _verdict(
                 "desktop_control", name, "available",
-                "Desktop observe is built on this platform "
-                "(Windows UI Automation): with Computer Use and "
-                "Observe enabled in Settings, Aether can read "
-                "the foreground window's accessibility tree as "
-                "text when a task asks. It cannot click or type "
-                "— actuation is not built yet.")
+                "Desktop observe and actuation are built on this "
+                "platform (Windows UI Automation): with Computer "
+                "Use enabled in Settings, Aether can read the "
+                "foreground window's accessibility tree as text "
+                "when a task asks, and — with Control on and "
+                "acknowledged — click and type through the "
+                "desktop confirmation policy (closing/quitting "
+                "and system actions always confirm).")
         if uia is False:
             return _verdict(
                 "desktop_control", name, "degraded",
-                "Desktop observe is built on this platform "
-                "(Windows UI Automation), but the 'uiautomation' "
-                "package is not installed in the engine's "
-                "environment, so the accessibility tree cannot "
-                "be read until it is.")
+                "Desktop observe and actuation are built on this "
+                "platform (Windows UI Automation), but the "
+                "'uiautomation' package is not installed in the "
+                "engine's environment, so the accessibility tree "
+                "cannot be read or actuated until it is.")
         return _verdict(
             "desktop_control", name, "unknown",
             "Desktop observe is built on this platform (Windows "

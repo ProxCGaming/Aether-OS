@@ -23,6 +23,7 @@ from langgraph_supervisor import create_supervisor
 logger = logging.getLogger("aether_engine.langgraph.graph")
 
 from aether_engine.browser.policy import BROWSER_TOOL_NAMES
+from aether_engine.desktop.policy import DESKTOP_TOOL_NAMES
 from aether_engine.langgraph.nodes.coder import coder_node
 from aether_engine.langgraph.nodes.execute_tool import execute_tool_node
 from aether_engine.langgraph.nodes.pause import dummy_pause_node
@@ -72,6 +73,23 @@ def _is_browser_write(tool_name, registry) -> bool:
     return tool_name in BROWSER_TOOL_NAMES and tool_name != "browser_extract"
 
 
+def _is_desktop_write(tool_name, registry) -> bool:
+    """A non-read-only desktop actuation tool (master build S20).
+
+    Same resolution rule as _is_browser_write: the registry's
+    source + risk are the authority; the fixed name set is the
+    fallback."""
+    if not tool_name:
+        return False
+    if registry is not None:
+        try:
+            tool = registry.get_tool(tool_name)
+            return tool.source == "desktop" and tool.risk.value != "read_only"
+        except Exception:
+            logger.debug("Desktop-tool lookup failed in _is_desktop_write", exc_info=True)
+    return tool_name in DESKTOP_TOOL_NAMES
+
+
 def tool_router(state: AetherState, config=None) -> str:
     """Route a specialist's pending tool call (ADR 0021, Layer 2).
 
@@ -107,6 +125,12 @@ def tool_router(state: AetherState, config=None) -> str:
     # or approval mode, decides whether they actually pause. An
     # explicit per-tool Deny still wins: execution denies it there.
     if policy != "deny" and _is_browser_write(pending.get("name"), registry):
+        return "pause_for_approval"
+    # Master build S20: desktop actuation always meets the desktop
+    # confirmation gate in the pause node — the desktop policy
+    # (Settings → Computer Use), not the generic tool policy,
+    # decides whether it actually pauses. Same Deny carve-out.
+    if policy != "deny" and _is_desktop_write(pending.get("name"), registry):
         return "pause_for_approval"
     if policy == "ask":
         # E2-09: a stored approval grant skips the pause (registry.execute

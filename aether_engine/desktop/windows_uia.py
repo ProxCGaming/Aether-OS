@@ -24,9 +24,13 @@ desktop transition) must degrade that element, never the read.
 
 READ-ONLY by construction: the adapter calls getters only —
 name, control type, value pattern *read*, focus, bounds,
-children. There is no Invoke/SetValue/SetFocus anywhere in
-this file; actuation is S20 and will land behind its own
-module and gates.
+children, and (S20) pattern AVAILABILITY reads plus the
+IsPassword property: whether an element supports Invoke or
+SetValue is evidence the actuation classifier reads, and
+*checking* for a pattern is a read, not an actuation. There
+is still no Invoke/SetValue/SetFocus CALL anywhere in this
+file; actuation lives in ``windows_actuation.py``, behind
+its own module and gates.
 """
 from __future__ import annotations
 
@@ -157,6 +161,15 @@ class UiautomationAdapter:
             pass
         return None
 
+    def _pattern_present(self, control: Any, getter: str) -> bool:
+        """Whether a UIA pattern is available on the element — a
+        read of capability (S20's classifier evidence), guarded
+        like every other property fetch here."""
+        try:
+            return getattr(control, getter)() is not None
+        except Exception:  # noqa: BLE001 - capability unknown reads as absent
+            return False
+
     def _element_dict(self, control: Any, depth: int, max_depth: int,
                       budget: list[int]) -> dict[str, Any] | None:
         if budget[0] <= 0:
@@ -171,6 +184,10 @@ class UiautomationAdapter:
                           int(rect.right), int(rect.bottom))
             except Exception:  # noqa: BLE001 - bounds are best-effort
                 bounds = None
+            try:
+                is_password = bool(control.IsPassword)
+            except Exception:  # noqa: BLE001 - unknown reads as not-a-password; the classifier still confirms type-ins by default posture
+                is_password = False
             node: dict[str, Any] = {
                 "name": str(control.Name or ""),
                 "role": role,
@@ -178,6 +195,11 @@ class UiautomationAdapter:
                 "automation_id": str(control.AutomationId or "") or None,
                 "focused": bool(control.HasKeyboardFocus),
                 "bounds": bounds,
+                "can_invoke": self._pattern_present(
+                    control, "GetInvokePattern"),
+                "can_set_value": self._pattern_present(
+                    control, "GetValuePattern"),
+                "is_password": is_password,
                 "children": [],
             }
         except Exception:  # noqa: BLE001 - an unreadable element degrades to absent

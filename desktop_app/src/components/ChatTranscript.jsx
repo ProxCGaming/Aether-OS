@@ -5,6 +5,7 @@ import {
   ThinkingAccordion,
   ApprovalPreview,
   BrowserConfirmationControl,
+  DesktopConfirmationControl,
   approvalScopePath,
   getRewindPointForMessage,
 } from './ChatCards';
@@ -44,6 +45,8 @@ function ToolApprovalMessage({
   setApprovalArgEdits,
   browserEnvelopeGrants,
   setBrowserEnvelopeGrants,
+  desktopGrantChoices,
+  setDesktopGrantChoices,
   onApproveTool,
   approveToolWithEdits,
 }) {
@@ -78,6 +81,18 @@ function ToolApprovalMessage({
               confirmation={msg.browser_confirmation}
               grantChecked={!!browserEnvelopeGrants[msg.id]}
               onGrantCheckedChange={(checked) => setBrowserEnvelopeGrants(prev => ({ ...prev, [msg.id]: checked }))}
+            />
+          </div>
+        )}
+        {msg.desktop_confirmation && (
+          <div style={{ marginBottom: '20px' }}>
+            <DesktopConfirmationControl
+              confirmation={msg.desktop_confirmation}
+              choice={(desktopGrantChoices && desktopGrantChoices[msg.id]) || {}}
+              onChoiceChange={(field, checked) => setDesktopGrantChoices && setDesktopGrantChoices(prev => ({
+                ...prev,
+                [msg.id]: { ...((prev && prev[msg.id]) || {}), [field]: checked },
+              }))}
             />
           </div>
         )}
@@ -290,6 +305,8 @@ function ChatMessageRow({
   pendingApprovals,
   browserEnvelopeGrants,
   onEnvelopeGrantChange,
+  desktopGrantChoices,
+  onDesktopGrantChoiceChange,
   onOpenArtifact,
   playingMessageId,
   readAloudError,
@@ -439,6 +456,8 @@ function ChatMessageRow({
           pendingApprovals={pendingApprovals}
           envelopeGrants={browserEnvelopeGrants}
           onEnvelopeGrantChange={onEnvelopeGrantChange}
+          desktopGrantChoices={desktopGrantChoices}
+          onDesktopGrantChoiceChange={onDesktopGrantChoiceChange}
           onOpenArtifact={onOpenArtifact}
         />
       )}
@@ -568,6 +587,9 @@ export default function ChatTranscript({
   browserEnvelopeGrants,
   setBrowserEnvelopeGrants,
   onEnvelopeGrantChange,
+  desktopGrantChoices,
+  setDesktopGrantChoices,
+  onDesktopGrantChoiceChange,
   onApproveTool,
   onApprovePlugin,
   onVaultFillApproval,
@@ -632,6 +654,8 @@ export default function ChatTranscript({
               setApprovalArgEdits={setApprovalArgEdits}
               browserEnvelopeGrants={browserEnvelopeGrants}
               setBrowserEnvelopeGrants={setBrowserEnvelopeGrants}
+              desktopGrantChoices={desktopGrantChoices}
+              setDesktopGrantChoices={setDesktopGrantChoices}
               onApproveTool={onApproveTool}
               approveToolWithEdits={approveToolWithEdits}
             />
@@ -674,6 +698,8 @@ export default function ChatTranscript({
             pendingApprovals={pendingApprovals}
             browserEnvelopeGrants={browserEnvelopeGrants}
             onEnvelopeGrantChange={onEnvelopeGrantChange}
+            desktopGrantChoices={desktopGrantChoices}
+            onDesktopGrantChoiceChange={onDesktopGrantChoiceChange}
             onOpenArtifact={onOpenArtifact}
             playingMessageId={playingMessageId}
             readAloudError={readAloudError}

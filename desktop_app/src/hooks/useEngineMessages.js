@@ -57,7 +57,8 @@ export function useEngineMessages(deps) {
     voiceChunkSeqRef, voiceRtcSeqRef, voiceStateRef,
     setActiveArtifactContent, setActiveSession, setActiveTaskIds,
     setBrowserSessions, setBudgetAlert, setCanvasArtifacts, setChatMessages,
-    setContextBreakdown, setCostTasks, setDailyBudget, setDevServerInfo,
+    setContextBreakdown, setCostTasks, setDailyBudget, setDesktopControl,
+    setDevServerInfo,
     setDictationState, setEngineConfig, setExportStatus, setImportStatus,
     setIsThinking, setLastCostTaskId, setLocalModels, setMoveStatus,
     setPlanModeBySession, setPluginCount, setProviderHealth,
@@ -805,6 +806,19 @@ export function useEngineMessages(deps) {
               }
             }));
           }
+        } else if (data.type === 'DESKTOP_CONTROL_RESPONSE') {
+          // Master build S20: desktop control lane state. Unlike
+          // the browser's per-session sessions, the desktop lane
+          // is machine-wide (one desktop), so the state is a
+          // single value, not keyed by chat session.
+          const payload = data.payload || {};
+          if (payload.success !== false) {
+            setDesktopControl({
+              controlState: payload.control_state || 'agent',
+              stoppedTasks: payload.stopped_tasks || [],
+              drivingTask: payload.driving_task || null,
+            });
+          }
         } else if (data.type === 'BROWSER_CHALLENGE_DETECTED') {
           // Epic 8, E8-6.1: CAPTCHA / 2FA park notification — agent never solves challenges.
           // Same keying as the control response above (M04).
@@ -889,6 +903,11 @@ export function useEngineMessages(deps) {
             // + the exact action named from the page) when this
             // approval is a browser confirmation; null otherwise.
             browser_confirmation: data.payload.browser_confirmation || null,
+            // Master build S20: desktop confirmation details
+            // (category + the exact action named from the resolved
+            // element) when this approval is a desktop actuation
+            // confirmation; null otherwise.
+            desktop_confirmation: data.payload.desktop_confirmation || null,
             isFinal: true
           };
           if (activeTaskSessionRef.current && activeTaskSessionRef.current !== activeSessionRef.current) {

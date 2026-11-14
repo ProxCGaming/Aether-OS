@@ -42,3 +42,23 @@ export function browserEnvelopeGrant(confirmation, grantChecked) {
   if (!confirmation || confirmation.category === 'payments') return undefined;
   return grantChecked ? { grant: true } : undefined;
 }
+
+// Master build S20: the desktop-confirmation grant contract, the
+// browser helper's analogue — shared by both approval surfaces
+// for the same N11 reason. A desktop approval can carry TWO
+// opt-ins: a per-task envelope ({ envelope: { grant: true } })
+// and a remembered grant ({ remember: true }). The hard-confirm
+// categories (close_or_quit, system) are eligible for NEITHER —
+// the control never renders the boxes for them, and this helper
+// is the second lock: a hard-confirm confirmation yields
+// undefined no matter what the choice state says. Pixel-consent
+// is not part of the choice: approving a pixel action IS the
+// consent, recorded by the engine.
+export function desktopGrantSpec(confirmation, choice) {
+  if (!confirmation || confirmation.hard_confirm) return undefined;
+  if (confirmation.category === 'observe' || confirmation.category === 'unknown') return undefined;
+  const spec = {};
+  if (choice && choice.envelope) spec.envelope = { grant: true };
+  if (choice && choice.remember) spec.remember = true;
+  return Object.keys(spec).length > 0 ? spec : undefined;
+}

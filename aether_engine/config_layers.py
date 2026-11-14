@@ -35,7 +35,9 @@ skill and delegation surface (``agent_tools``, ``agent_skills``,
 trigger pruning of, or change what is recalled from, the user's
 stores); browser-agent policy (``browser_agent_enabled``,
 ``browser_vault_autofill``, ``browser_envelopes_enabled``,
-``browser_category_modes``); output validation
+``browser_category_modes``); Computer Use (every
+``computer_use_*`` field — screen reading and desktop control
+are the user's switches, never a project's); output validation
 (``agent_output_schemas``); spend (``daily_budget_usd``); and
 first-run state (``onboarding_completed``). Stripping is top-level
 only, and that is sufficient: ``merge_layers`` merges key-wise at
@@ -97,6 +99,20 @@ PROJECT_FORBIDDEN_KEYS = frozenset({
     # per-category modes are the loosening surface).
     "browser_agent_enabled", "browser_vault_autofill",
     "browser_envelopes_enabled", "browser_category_modes",
+    # Computer Use (S19/S20): EVERY computer_use_* field. The
+    # browser policy fields above were forbidden from the start;
+    # the S19 switches were missed when observe landed — a
+    # cloned repo's .aether/config.json could have enabled
+    # screen reading, and with S20 the same hole would enable
+    # CONTROL (master + control + ack + looser category modes +
+    # a deny-list rewrite). A project layer must never be able
+    # to turn on, or loosen, a feature that reads the screen or
+    # drives the mouse and keyboard.
+    "computer_use_enabled", "computer_use_observe",
+    "computer_use_vision_capture", "computer_use_control",
+    "computer_use_control_ack", "computer_use_category_modes",
+    "computer_use_app_rules", "computer_use_envelopes_enabled",
+    "computer_use_pixel_fallback",
     # Spend limit.
     "daily_budget_usd",
     # Beyond the programme list, judged on the same test:

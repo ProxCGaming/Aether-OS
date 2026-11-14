@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 
-import { Globe, Play, Pause, Maximize2, Minimize2, X, GripHorizontal, Bot, User, ShieldAlert, Check, ChevronDown, ExternalLink, LogIn, Square, Layers, Edit2, RotateCcw, Download, CircleDollarSign, Mic } from 'lucide-react';
+import { Globe, Play, Pause, Maximize2, Minimize2, X, GripHorizontal, Bot, User, ShieldAlert, Check, ChevronDown, ExternalLink, LogIn, Square, Layers, Edit2, RotateCcw, Download, CircleDollarSign, Mic, Monitor, Hand } from 'lucide-react';
 import Dropdown from './Dropdown';
 import UndoToast from './components/UndoToast';
 import SnipOverlay from './components/SnipOverlay';
@@ -16,7 +16,7 @@ import { buildContextMenuState } from './components/contextMenuState';
 import ChatTranscript from './components/ChatTranscript';
 import './chat.css';
 
-import { parseApprovalEditedArgs, browserEnvelopeGrant } from './components/approvalLogic';
+import { parseApprovalEditedArgs, browserEnvelopeGrant, desktopGrantSpec } from './components/approvalLogic';
 export {
   getNodeStyle,
   useSmoothScroll,
@@ -469,10 +469,244 @@ export function BrowserTaskCard({ session = {}, onControl = () => {} }) {
 }
 
 
+// Master build S20: the desktop control card — the browser task
+// card's analogue for Computer Use actuation. Pause / Take
+// control / Return control move the machine-wide lane; Stop
+// refuses the CURRENT task's further desktop actions without
+// killing the task (the engine resolves the driving task).
+// States mirror the browser card's vocabulary.
+export function DesktopControlCard({ control = {}, onControl = () => {} }) {
+  const { controlState = 'agent', taskStopped = false } = control || {};
+
+  const isPaused = controlState === 'paused';
+  const isUserControl = controlState === 'user';
+
+  return (
+    <div
+      data-testid="desktop-control-card"
+      style={{
+        margin: '12px 16px 0 16px',
+        borderRadius: 'var(--radius-lg)',
+        border: '1px solid var(--border-default)',
+        background: 'var(--bg-raised)',
+        padding: '12px 16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '10px',
+        boxShadow: 'none',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+          <div style={{
+            width: '28px',
+            height: '28px',
+            borderRadius: '8px',
+            background: 'rgba(var(--accent-rgb), 0.15)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'var(--accent)',
+            flexShrink: 0,
+          }}>
+            <Monitor size={16} />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
+              Desktop Control (Computer Use)
+            </span>
+            <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+              Aether is acting on your desktop in this task.
+            </span>
+          </div>
+        </div>
+
+        <div style={{
+          fontSize: '11px',
+          fontWeight: 500,
+          padding: '2px 8px',
+          borderRadius: '999px',
+          background: taskStopped
+            ? 'rgba(201, 42, 42, 0.15)'
+            : isUserControl
+            ? 'rgba(76, 195, 138, 0.15)'
+            : 'rgba(var(--accent-rgb), 0.15)',
+          color: taskStopped
+            ? 'var(--danger)'
+            : isUserControl
+            ? 'var(--success)'
+            : 'var(--accent)',
+          border: `1px solid ${taskStopped
+            ? 'rgba(201, 42, 42, 0.3)'
+            : isUserControl
+            ? 'rgba(76, 195, 138, 0.3)'
+            : 'rgba(var(--accent-rgb), 0.3)'}`,
+        }}>
+          {taskStopped
+            ? 'Stopped for this task'
+            : isUserControl
+            ? 'User in control'
+            : isPaused
+            ? 'Paused'
+            : 'Active'}
+        </div>
+      </div>
+
+      {isUserControl && (
+        <div style={{
+          background: 'rgba(76, 195, 138, 0.1)',
+          border: '1px solid rgba(76, 195, 138, 0.25)',
+          borderRadius: '8px',
+          padding: '8px 12px',
+          fontSize: '12px',
+          color: 'var(--text-primary)',
+        }}>
+          You have control of the desktop. Aether is waiting for you to return control.
+        </div>
+      )}
+
+      {taskStopped && (
+        <div style={{
+          background: 'rgba(201, 42, 42, 0.08)',
+          border: '1px solid rgba(201, 42, 42, 0.25)',
+          borderRadius: '8px',
+          padding: '8px 12px',
+          fontSize: '12px',
+          color: 'var(--text-primary)',
+        }}>
+          Desktop actions are stopped for this task. The task itself continues in chat — start a new task to use desktop control again.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+        {isPaused ? (
+          <button
+            type="button"
+            data-testid="desktop-resume-btn"
+            onClick={() => onControl('resume')}
+            style={{
+              background: 'var(--accent)',
+              border: '1px solid var(--accent)',
+              color: 'var(--accent-on)',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <Play size={13} />
+            <span>Resume</span>
+          </button>
+        ) : !isUserControl ? (
+          <button
+            type="button"
+            data-testid="desktop-pause-btn"
+            disabled={taskStopped}
+            onClick={() => onControl('pause')}
+            style={{
+              background: taskStopped ? 'var(--bg-raised)' : 'rgba(var(--accent-rgb), 0.15)',
+              border: taskStopped ? '1px solid var(--border-default)' : '1px solid rgba(var(--accent-rgb), 0.35)',
+              color: taskStopped ? 'var(--text-muted)' : 'var(--accent)',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: taskStopped ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <Pause size={13} />
+            <span>Pause</span>
+          </button>
+        ) : null}
+
+        {isUserControl ? (
+          <button
+            type="button"
+            data-testid="desktop-return-control-btn"
+            onClick={() => onControl('return_control')}
+            style={{
+              background: 'rgba(76, 195, 138, 0.15)',
+              border: '1px solid rgba(76, 195, 138, 0.35)',
+              color: 'var(--success)',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <Bot size={13} />
+            <span>Return Control</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            data-testid="desktop-take-control-btn"
+            disabled={taskStopped}
+            onClick={() => onControl('take_control')}
+            style={{
+              background: taskStopped ? 'var(--bg-raised)' : 'var(--bg-hover)',
+              border: taskStopped ? '1px solid var(--border-default)' : '1px solid var(--border-strong)',
+              color: taskStopped ? 'var(--text-muted)' : 'var(--text-primary)',
+              borderRadius: '8px',
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: taskStopped ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <Hand size={13} />
+            <span>Take Control</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          data-testid="desktop-stop-btn"
+          disabled={taskStopped}
+          onClick={() => onControl('stop')}
+          style={{
+            background: taskStopped ? 'var(--bg-raised)' : 'rgba(201, 42, 42, 0.12)',
+            border: taskStopped ? '1px solid var(--border-default)' : '1px solid rgba(201, 42, 42, 0.35)',
+            color: taskStopped ? 'var(--text-muted)' : 'var(--danger)',
+            borderRadius: '8px',
+            padding: '5px 12px',
+            fontSize: '12px',
+            fontWeight: 500,
+            cursor: taskStopped ? 'not-allowed' : 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+          }}
+        >
+          <Square size={13} />
+          <span>Stop desktop</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // D1-C6: how long the browser card may show an optimistic
 // control state the engine has not confirmed before falling
 // back to the last engine-confirmed state.
-const BROWSER_CONTROL_CONFIRM_MS = 5000;
+const BROWSER_CONTROL_CONFIRM_MS = 5000;
+
+// S20: the same optimistic-state bound for the desktop card.
+const DESKTOP_CONTROL_CONFIRM_MS = 5000;
 
 export default function DraggableChatWindow({ 
   messages, 
@@ -516,8 +750,10 @@ export default function DraggableChatWindow({
   contextBreakdown = null,
   onRequestContextBreakdown = () => {},
   budgetAlert = null,
-  browserSession = null,
+  browserSession = null,
   onBrowserControl = null,
+  desktopControl = null,
+  onDesktopControl = null,
   voiceState = null,
   voiceAudioChunk = null,
   voicePlaybackCut = 0,
@@ -571,6 +807,10 @@ export default function DraggableChatWindow({
   // Epic 8, E8-6.2: per-approval "allow for this task" envelope
   // opt-ins on browser confirmation cards, keyed by message id.
   const [browserEnvelopeGrants, setBrowserEnvelopeGrants] = useState({});
+  // Master build S20: per-approval desktop grant choices
+  // ({ envelope, remember }), keyed by message id — the
+  // browser map's analogue, one map for both surfaces (N11).
+  const [desktopGrantChoices, setDesktopGrantChoices] = useState({});
   // Epic 8, E8-1.1a: which message's step menu is open (index into
   // messages), or null. One menu at a time.
   const [openStepMenu, setOpenStepMenu] = useState(null);
@@ -788,6 +1028,19 @@ export default function DraggableChatWindow({
 
   // Epic 8, E8-6.1: agent-browser control and activity tracking
   const [localControlState, setLocalControlState] = useState(null);
+  // Master build S20: the desktop lane's optimistic state,
+  // the browser pair's analogue (confirmed state arrives via
+  // the desktopControl prop from DESKTOP_CONTROL_RESPONSE).
+  const [localDesktopControlState, setLocalDesktopControlState] = useState(null);
+  const [localDesktopStopped, setLocalDesktopStopped] = useState(false);
+  const lastDesktopStateRef = useRef(desktopControl?.controlState);
+
+  if (lastDesktopStateRef.current !== desktopControl?.controlState) {
+    lastDesktopStateRef.current = desktopControl?.controlState;
+    if (localDesktopControlState !== null) {
+      setLocalDesktopControlState(null);
+    }
+  }
   const lastBrowserStateRef = useRef(browserSession?.controlState);
   const lastBrowserChallengeRef = useRef(browserSession?.challenge);
 
@@ -858,6 +1111,69 @@ export default function DraggableChatWindow({
     return () => clearTimeout(timer);
   }, [localControlState]);
 
+  // Master build S20: desktop activity detection — the card
+  // shows when this session's messages carry desktop work:
+  // a desktop_action NODE_ACTIVITY (the tool publishes it in
+  // the S12 shape) or a desktop_act TOOL_ACTIVITY.
+  const desktopActivity = React.useMemo(() => {
+    for (const m of messages || []) {
+      for (const t of m.thoughts || []) {
+        const payload = t.payload || {};
+        if (payload.action === 'desktop_action') return true;
+        const toolName = payload.tool_name || t.tool_name || '';
+        if (toolName === 'desktop_act') return true;
+      }
+      if (m.desktop_confirmation) return true;
+    }
+    return false;
+  }, [messages]);
+
+  const activeDesktopControl = React.useMemo(() => {
+    const engineStopped = !!(
+      desktopControl && desktopControl.drivingTask
+      && (desktopControl.stoppedTasks || []).includes(desktopControl.drivingTask));
+    const taskStopped = localDesktopStopped || engineStopped;
+    if (!desktopActivity && !taskStopped
+        && (!desktopControl || desktopControl.controlState === 'agent')) {
+      return null;
+    }
+    if (!desktopActivity && !desktopControl && !localDesktopControlState && !taskStopped) {
+      return null;
+    }
+    return {
+      controlState: localDesktopControlState || desktopControl?.controlState || 'agent',
+      taskStopped,
+    };
+  }, [desktopActivity, desktopControl, localDesktopControlState, localDesktopStopped]);
+
+  const handleDesktopControlClick = React.useCallback((action) => {
+    const optimisticState = {
+      pause: 'paused',
+      resume: 'agent',
+      take_control: 'user',
+      return_control: 'agent',
+    }[action];
+    // D1-C6 discipline, same as the browser card: while
+    // offline the request queues and the card keeps showing
+    // the engine-confirmed state.
+    if (!chatOffline) {
+      if (optimisticState) setLocalDesktopControlState(optimisticState);
+      if (action === 'stop') setLocalDesktopStopped(true);
+    }
+    if (onDesktopControl) {
+      onDesktopControl(action);
+    }
+  }, [onDesktopControl, chatOffline]);
+
+  // The optimistic desktop state is bounded exactly like the
+  // browser's (D1-C6): unconfirmed within the window, the
+  // card falls back to the engine-confirmed state.
+  useEffect(() => {
+    if (localDesktopControlState === null) return undefined;
+    const timer = setTimeout(() => setLocalDesktopControlState(null), DESKTOP_CONTROL_CONFIRM_MS);
+    return () => clearTimeout(timer);
+  }, [localDesktopControlState]);
+
 
   useEffect(() => {
     if (initialAttachments && initialAttachments.length > 0) {
@@ -913,11 +1229,31 @@ export default function DraggableChatWindow({
     setBrowserEnvelopeGrants(prev => ({ ...prev, [approvalId]: checked }));
   };
 
+  // S20: the desktop map's writer — one choice object per
+  // approval ({ envelope, remember }), shared by both
+  // approval surfaces like the browser map above.
+  const handleDesktopGrantChoiceChange = (approvalId, field, checked) => {
+    setDesktopGrantChoices(prev => ({
+      ...prev,
+      [approvalId]: { ...(prev[approvalId] || {}), [field]: checked },
+    }));
+  };
+
+  // S20: the desktop grant spec a confirmation carries when
+  // its boxes are ticked (approvalLogic.desktopGrantSpec —
+  // hard-confirm categories yield none, whatever the state).
+  const desktopGrantSpecFor = (msg) => desktopGrantSpec(
+    msg && msg.desktop_confirmation,
+    (msg && desktopGrantChoices[msg.id]) || {}
+  );
+
   const approveToolWithEdits = (msg, scope) => {
     if (!onApproveTool) return;
     const envelope = browserEnvelopeGrantFor(msg);
+    const desktopSpec = desktopGrantSpecFor(msg);
     const approve = (s, edited) => {
-      if (envelope) onApproveTool(msg.id, true, msg.approval_key, s, edited, envelope);
+      if (desktopSpec) onApproveTool(msg.id, true, msg.approval_key, s, edited, envelope, desktopSpec);
+      else if (envelope) onApproveTool(msg.id, true, msg.approval_key, s, edited, envelope);
       else if (edited) onApproveTool(msg.id, true, msg.approval_key, s, edited);
       else if (s) onApproveTool(msg.id, true, msg.approval_key, s);
       else onApproveTool(msg.id, true, msg.approval_key);
@@ -1645,6 +1981,9 @@ export default function DraggableChatWindow({
               browserEnvelopeGrants={browserEnvelopeGrants}
               setBrowserEnvelopeGrants={setBrowserEnvelopeGrants}
               onEnvelopeGrantChange={handleEnvelopeGrantChange}
+              desktopGrantChoices={desktopGrantChoices}
+              setDesktopGrantChoices={setDesktopGrantChoices}
+              onDesktopGrantChoiceChange={handleDesktopGrantChoiceChange}
               onApproveTool={onApproveTool}
               onApprovePlugin={onApprovePlugin}
               onVaultFillApproval={onVaultFillApproval}
@@ -1662,12 +2001,20 @@ export default function DraggableChatWindow({
               onRegenerate={onRegenerate}
             />
 
-            {/* Agent browser task card (Epic 8, E8-6.1) */}
-            {activeBrowserSession && (
-              <BrowserTaskCard
-                session={activeBrowserSession}
-                onControl={handleBrowserControlClick}
-              />
+            {/* Agent browser task card (Epic 8, E8-6.1) */}
+            {activeBrowserSession && (
+              <BrowserTaskCard
+                session={activeBrowserSession}
+                onControl={handleBrowserControlClick}
+              />
+            )}
+
+            {/* Desktop control card (master build S20) */}
+            {activeDesktopControl && (
+              <DesktopControlCard
+                control={activeDesktopControl}
+                onControl={handleDesktopControlClick}
+              />
             )}
 
             {/* Scratchpad panel (Epic 1, E1-17): above the composer, below the message stream */}
