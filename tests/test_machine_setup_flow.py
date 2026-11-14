@@ -51,7 +51,11 @@ def test_setup_and_run_scripts_exist_for_both_platforms():
 def test_setup_installs_only_from_the_locks():
     for path in SETUP_SCRIPTS:
         text = _read(path)
-        assert "uv venv" in text and "--python 3.12" in text, path.name
+        # The venv is created at the exact CPython pinned in
+        # .python-version (15 Nov 2026: scripts pass the pin file's
+        # value to uv venv, never a floating "3.12").
+        assert "uv venv" in text and ".python-version" in text, path.name
+        assert '--python "$EXPECTED_PYTHON"' in text or "--python $expectedPython" in text, path.name
         assert "uv sync --locked --all-extras" in text, path.name
         assert "npm ci" in text, path.name
         # Nothing may rewrite a lockfile as a side effect of setup.
@@ -88,8 +92,10 @@ def test_setup_checks_node_24_before_installing():
     for path in SETUP_SCRIPTS:
         text = _read(path)
         code = _code_only(text)
+        # The expected Node is read from .nvmrc (the pin file) and
+        # compared exactly, before any install step runs.
         assert ".nvmrc" in text, path.name
-        assert code.index("24") < code.index("uv sync"), path.name
+        assert code.index(".nvmrc") < code.index("uv sync"), path.name
 
 
 def test_run_scripts_start_engine_wait_for_health_then_launch():
@@ -105,9 +111,39 @@ def test_run_scripts_start_engine_wait_for_health_then_launch():
 
 
 def test_node_version_is_pinned_where_machines_read_it():
-    assert (REPO_ROOT / ".nvmrc").read_text(encoding="utf-8").strip() == "24"
+    # Exact pin since 15 Nov 2026: .nvmrc and the desktop manifest's
+    # engines must carry the SAME exact Node version — no line pins.
+    nvmrc = (REPO_ROOT / ".nvmrc").read_text(encoding="utf-8").strip()
+    assert nvmrc == "24.22.1"
     package = json.loads(_read(REPO_ROOT / "desktop_app" / "package.json"))
-    assert "24" in package["engines"]["node"]
+    assert package["engines"]["node"] == nvmrc
+
+
+def test_setup_clean_installs_on_lock_fingerprint_mismatch():
+    # Owner directive, 15 Nov 2026: a machine whose locks/pins moved
+    # since its last setup is wiped and rebuilt, never patched in
+    # place. Both setup scripts must carry the fingerprint + stamp
+    # + wipe of every environment the locks feed.
+    for path in SETUP_SCRIPTS:
+        text = _read(path)
+        assert ".aether-setup-stamp" in text, path.name
+        assert "uv.lock" in text and "package-lock.json" in text, path.name
+        assert "engine-payload" in text, path.name
+        assert "rm -rf" in text or "Remove-Item" in text, path.name
+
+
+def test_update_scripts_pull_then_run_setup():
+    # The one-command update path for source machines: pull
+    # (fast-forward only, so local divergence is never merged over)
+    # then the setup flow, whose fingerprint rule clean-installs
+    # when the pull moved the locks.
+    for name, setup_name in (("update.sh", "setup.sh"), ("update.ps1", "setup.ps1")):
+        path = REPO_ROOT / "scripts" / name
+        assert path.is_file(), f"missing update script: {name}"
+        text = _read(path)
+        assert "git pull --ff-only" in text, name
+        assert setup_name in text, name
+        assert text.index("git pull") < text.index(setup_name), name
 
 
 def test_script_line_endings_are_pinned():

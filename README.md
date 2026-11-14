@@ -29,8 +29,11 @@ warn on first run (choose *More info → Run anyway*).
 
 ### From source (works today)
 
-Prerequisites: Git, [uv](https://docs.astral.sh/uv/) and Node 24
-(`.nvmrc` pins the Node line; uv provisions Python 3.12 itself).
+Prerequisites: Git, [uv](https://docs.astral.sh/uv/) and the exact
+Node in `.nvmrc` (uv provisions the exact Python in `.python-version`
+itself). Every version the app needs is pinned exactly — see
+[docs/dependencies.md](docs/dependencies.md) for the full map of
+what is pinned where.
 
 ```bash
 git clone https://github.com/ProxCGaming/Aether-OS.git
@@ -38,12 +41,16 @@ cd Aether-OS
 scripts/setup.sh          # Windows: scripts\setup.ps1
 ```
 
-Setup installs everything exactly as pinned in `uv.lock` and
-`package-lock.json`, then proves the machine with three smoke checks
-(locked-venv imports, a `vite build`, pytest collection). It never
-edits a lockfile, and it is safe to re-run: after a `git pull`,
-running setup again **is** the update flow — both installers reconcile
-the environment to the locks, so stale installs cannot survive it.
+Setup installs everything exactly as pinned in `uv.lock` and the
+`package-lock.json` files, then proves the machine with three smoke
+checks (locked-venv imports, a `vite build`, pytest collection). It
+never edits a lockfile. To update later, run
+`scripts/update.sh` (Windows: `scripts\update.ps1`): it pulls the
+latest source and re-runs setup. Setup keeps a fingerprint of the
+locks — if they moved since the last setup, it **clean-installs**:
+the old `.venv`, `node_modules` and engine payload are wiped and
+rebuilt from the locks, never patched in place, so a stale or
+mixed install cannot survive an update.
 
 Run it — one command starts the engine, waits for its health check,
 then launches the app; closing the app stops the engine:
