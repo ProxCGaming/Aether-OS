@@ -305,6 +305,33 @@ class UsageLedger:
             },
         }
 
+    def model_usage_totals(self) -> dict[tuple[str, str], dict[str, Any]]:
+        """Per-(provider, model) aggregates over ALL recorded calls.
+
+        Master build S14: the model router's cost history — how
+        much each model has actually been used and what its calls
+        cost on average, read from real rows (never a price list).
+        Aggregated in SQL like :meth:`query`'s totals, keyed by
+        ``(provider_name, model_name)`` — the same bare model ID
+        offered by two providers is two different routes with two
+        different records (E5-F03).
+        """
+        self.init_db()
+        totals: dict[tuple[str, str], dict[str, Any]] = {}
+        with self._get_conn() as conn:
+            for r in conn.execute(
+                "SELECT provider_name, model_name, COUNT(*) AS calls, "
+                "COALESCE(SUM(cost_usd), 0.0) AS cost, "
+                "COALESCE(SUM(total_tokens), 0) AS tokens "
+                "FROM usage_ledger GROUP BY provider_name, model_name",
+            ):
+                totals[(r["provider_name"], r["model_name"])] = {
+                    "calls": int(r["calls"]),
+                    "cost_usd": float(r["cost"]),
+                    "total_tokens": int(r["tokens"]),
+                }
+        return totals
+
     def task_total(self, task_id: str) -> float:
         self.init_db()
         with self._get_conn() as conn:

@@ -18,6 +18,7 @@ exactly as it did when the body lived in each node module.
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
@@ -39,6 +40,7 @@ from aether_engine.langgraph.state import (
 )
 from aether_engine.langgraph.structured import apply_output_schema
 from aether_engine.langgraph.thinking import forward_thinking
+from aether_engine.providers.base import ProviderError
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,11 @@ async def run_specialist(
     secret_store = config.get("configurable", {}).get("secret_store")
 
     agent_model_override = agent_models.get(spec.name)
+    # S14: a pin is any non-"inherit" value, captured BEFORE the
+    # prewalk split below can null the override for this round —
+    # a pinned agent is never auto-routed and never escalated, in
+    # either routing mode (langgraph/model_routing.py).
+    _pin_present = bool(agent_model_override) and agent_model_override != "inherit"
     # E1-13 prewalk: for prewalk-enabled agents the per-agent model is
     # the EXECUTION model — until the first write/execute tool lands,
     # the agent plans on the run's (strong) provider instead.
@@ -123,6 +130,27 @@ async def run_specialist(
             len(drained["queued_tool_calls"]),
         )
         return drained
+
+    # S14: automatic model routing — what "inherit" resolves to
+    # for THIS invocation, decided per delegation from the task's
+    # signals and the recorded history (langgraph/model_routing).
+    # Consulted only for unpinned agents in "auto" mode; "off"
+    # (the default) and pins take the exact pre-S14 path above, so
+    # with routing off this block is inert and the provider — and
+    # every prompt built below — is unchanged. An S13 child's
+    # retry carries the seam's step-up flag in its config; the
+    # resolver honours it there.
+    routing_ctx = None
+    escalated = False
+    if not _pin_present:
+        from aether_engine.langgraph import model_routing
+
+        if model_routing.routing_mode(_uc) == "auto":
+            provider, routing_ctx = model_routing.resolve_for_specialist(
+                agent=spec.name, state=state, config=config,
+                run_provider=provider)
+            if routing_ctx is not None and routing_ctx.choice.source == "escalation":
+                escalated = True
 
     registry = config.get("configurable", {}).get("tool_registry")
     all_tools = registry.get_definitions() if registry else []
@@ -216,23 +244,103 @@ async def run_specialist(
             "content": spec.proceed_prompt
         })
 
-    content_parts = []
-    accumulated_tool_calls = {}
+    def _record_outcome(provider_obj: Any, outcome: str) -> None:
+        # S14's recorded history (langgraph/model_routing): one
+        # row per specialist model round — success when the round
+        # completed, failure when its provider call raised a typed
+        # provider error or its structured output failed
+        # validation. Recorded for pinned and inherited runs too:
+        # the history is routing input for every agent, and the
+        # recording is observational, like the usage ledger's.
+        from aether_engine.langgraph import model_routing
 
-    async for chunk in provider.call_stream(messages, tools=tools, node_name=spec.name):
-        forward_thinking(state, spec.name, chunk)
-        if chunk.text:
-            content_parts.append(chunk.text)
-        if chunk.tool_calls:
-            for tc in chunk.tool_calls:
-                if tc.call_id not in accumulated_tool_calls:
-                    accumulated_tool_calls[tc.call_id] = tc
-        if chunk.finish_reason:
-            break
+        model_routing.record_model_outcome(
+            getattr(provider_obj, "provider_name", None),
+            getattr(provider_obj, "model", None),
+            spec.name, outcome)
 
-    content = "".join(content_parts)
+    async def _stream_round(provider_obj):
+        """One model round on ``provider_obj``.
+
+        The pre-S14 streaming loop, except a failure is RETURNED
+        as ``(content, tool_calls, error, received_any)`` instead
+        of raised, so the S14 escalation seam below can judge it;
+        the caller re-raises whenever escalation does not apply,
+        which keeps every other behaviour identical. Only
+        Exception subclasses are captured — cancellation and
+        other BaseExceptions propagate as before.
+        """
+        parts: list[str] = []
+        calls: dict = {}
+        received = False
+        try:
+            async for chunk in provider_obj.call_stream(
+                    messages, tools=tools, node_name=spec.name):
+                forward_thinking(state, spec.name, chunk)
+                if chunk.text:
+                    received = True
+                    parts.append(chunk.text)
+                if chunk.tool_calls:
+                    received = True
+                    for tc in chunk.tool_calls:
+                        if tc.call_id not in calls:
+                            calls[tc.call_id] = tc
+                if chunk.finish_reason:
+                    break
+        except Exception as exc:  # noqa: BLE001 — returned for the escalation seam to judge; re-raised when it does not apply.
+            return "".join(parts), calls, exc, received
+        return "".join(parts), calls, None, received
+
+    content, accumulated_tool_calls, stream_error, _received = \
+        await _stream_round(provider)
+    if stream_error is not None:
+        if isinstance(stream_error, ProviderError):
+            _record_outcome(provider, "failure")
+        # S14 escalation: ONE step up to the next tier, only for
+        # an auto-routed (unpinned) invocation, only for a typed
+        # provider failure that arrived before ANY output streamed
+        # — a mid-stream failure has already shown partial work,
+        # and restarting it on another model would corrupt the
+        # answer; policy/approval denials never reach this seam
+        # (they are judged in the tool pipeline, not the model
+        # call), and non-provider errors are bugs, not model
+        # outcomes. Everything else re-raises untouched.
+        escalated_provider = None
+        if (routing_ctx is not None and not _received
+                and isinstance(stream_error, ProviderError)):
+            from aether_engine.langgraph import model_routing
+
+            esc_choice = model_routing.escalate(
+                routing_ctx.signals, routing_ctx.candidates,
+                routing_ctx.history,
+                current_provider=str(getattr(provider, "provider_name", "")),
+                current_model=str(getattr(provider, "model", "")),
+                current_tier=routing_ctx.choice.tier)
+            if esc_choice is not None:
+                escalated_provider = model_routing.construct_choice_provider(
+                    esc_choice, config)
+                if escalated_provider is not None:
+                    routing_ctx.choice = esc_choice
+                    escalated = True
+                    model_routing.publish_routing_activity(
+                        state, spec.name, esc_choice)
+                    logger.warning(
+                        "%s model %s failed (%s); escalating once to %s",
+                        spec.display_name,
+                        getattr(provider, "model", "?"), stream_error,
+                        esc_choice.model)
+        if escalated_provider is None:
+            raise stream_error
+        provider = escalated_provider
+        content, accumulated_tool_calls, stream_error, _received = \
+            await _stream_round(provider)
+        if stream_error is not None:
+            if isinstance(stream_error, ProviderError):
+                _record_outcome(provider, "failure")
+            raise stream_error
 
     if accumulated_tool_calls:
+        _record_outcome(provider, "success")
         # S1-M5: the first call is pending for this tool-loop round;
         # any parallel calls are queued in state (checkpointed, so
         # they survive the approval pause) and drained one per round
@@ -259,9 +367,74 @@ async def run_specialist(
         }
 
     # E1-10: validate against the specialist's output schema, if configured.
+    # S14: a validation failure past the same-model correction is
+    # the second escalation seam (audit G5 named this retry point):
+    # in auto mode the correction ladder gets ONE attempt on the
+    # next tier up, inside apply_output_schema. Never when the
+    # invocation already escalated, and never for a pinned agent
+    # (routing_ctx is None then, as it is whenever routing is off).
+    _esc_choice = None
+    if routing_ctx is not None and not escalated:
+        from aether_engine.langgraph import model_routing
+
+        _esc_choice = model_routing.escalate(
+            routing_ctx.signals, routing_ctx.candidates,
+            routing_ctx.history,
+            current_provider=str(getattr(provider, "provider_name", "")),
+            current_model=str(getattr(provider, "model", "")),
+            current_tier=routing_ctx.choice.tier)
+    # The stronger model is constructed LAZILY, only if the
+    # same-model correction actually fails (apply_output_schema
+    # accepts a zero-arg factory): a run whose output validates
+    # first time never builds a provider it will not call.
+    _esc_holder: dict[str, Any] = {}
+
+    def _esc_factory():
+        if _esc_choice is None:
+            return None
+        from aether_engine.langgraph import model_routing
+
+        obj = model_routing.construct_choice_provider(_esc_choice, config)
+        if obj is not None:
+            _esc_holder["provider"] = obj
+        return obj
+
+    _esc_fired: list[bool] = []
+
+    def _on_escalation() -> None:
+        _esc_fired.append(True)
+        if routing_ctx is not None and _esc_choice is not None:
+            routing_ctx.choice = _esc_choice
+            from aether_engine.langgraph import model_routing
+
+            model_routing.publish_routing_activity(
+                state, spec.name, _esc_choice)
+            logger.warning(
+                "%s structured output failed validation on %s; "
+                "escalating the correction once to %s",
+                spec.display_name, getattr(provider, "model", "?"),
+                _esc_choice.model)
+
     content, structured_entry = await apply_output_schema(
         agent=spec.name, config=config, provider=provider,
-        messages=messages, content=content, node_name=spec.name)
+        messages=messages, content=content, node_name=spec.name,
+        escalation_provider=_esc_factory if _esc_choice is not None else None,
+        on_escalation=_on_escalation if _esc_choice is not None else None)
+    # Round outcome for the S14 history: a validation failure past
+    # correction is a failure of the model that produced the
+    # output; an escalated correction's outcome belongs to the
+    # escalated model, and the original keeps its failure.
+    _entry_failed = isinstance(structured_entry, dict) and "error" in structured_entry
+    if _esc_fired:
+        escalated = True
+        _record_outcome(provider, "failure")
+        _record_outcome(
+            _esc_holder.get("provider"),
+            "failure" if _entry_failed else "success")
+    elif _entry_failed:
+        _record_outcome(provider, "failure")
+    else:
+        _record_outcome(provider, "success")
 
     result = {"current_phase": spec.phase}
     if spec.tail_extras is not None:

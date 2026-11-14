@@ -200,6 +200,17 @@ class UserConfig:
     subagent_timeout_s: int = 120
     subagent_token_budget: int = 20000
     subagent_cost_budget_usd: float = 0.0
+    # Master build S14: automatic per-agent model routing
+    # (langgraph/model_routing.py). "off" (the default) is today's
+    # behaviour exactly: an agent_models pin wins, "inherit" falls
+    # through to the run's provider. "auto" lets the router choose
+    # what "inherit" resolves to, per delegation — from the task's
+    # signals, the configured providers' models and the recorded
+    # outcome history — and step one tier up when a specialist run
+    # fails. A pin (any agent_models value other than "inherit")
+    # is NEVER overridden in either mode, and the auxiliary_models
+    # task classes keep their own resolution untouched.
+    model_routing: str = "off"
     # Epic 1, E1-10: per-agent output schemas (agent name -> JSON-Schema
     # dict). When set, the agent's final answer must validate against
     # the schema; see aether_engine/langgraph/structured.py.
@@ -392,6 +403,7 @@ class UserConfig:
             "subagent_timeout_s": self.subagent_timeout_s,
             "subagent_token_budget": self.subagent_token_budget,
             "subagent_cost_budget_usd": self.subagent_cost_budget_usd,
+            "model_routing": self.model_routing,
             "agent_output_schemas": self.agent_output_schemas,
             "prewalk_agents": self.prewalk_agents,
             "custom_slash_commands": self.custom_slash_commands,
@@ -525,6 +537,7 @@ class UserConfig:
             subagent_timeout_s=_as_int(d.get("subagent_timeout_s"), 120),
             subagent_token_budget=_as_int(d.get("subagent_token_budget"), 20000),
             subagent_cost_budget_usd=_as_float(d.get("subagent_cost_budget_usd"), 0.0),
+            model_routing=d.get("model_routing") if d.get("model_routing") in ("off", "auto") else "off",
             agent_output_schemas=_as_dict(d.get("agent_output_schemas")),
             prewalk_agents=d.get("prewalk_agents") if isinstance(d.get("prewalk_agents"), list) else [],
             custom_slash_commands=_as_dict(d.get("custom_slash_commands")),

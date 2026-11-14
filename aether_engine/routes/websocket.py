@@ -3387,6 +3387,24 @@ async def _handle_machine_capability_request(conn: WsConnection, msg: Event) -> 
         payload=report,
     ).to_json())
 
+async def _handle_agent_routing_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Master build S14: the Settings → Agent Orchestration
+    # "Model routing" card — per-agent effective models
+    # (langgraph/model_routing.effective_models_report). The
+    # report reads the usage/outcome stores (SQLite), so it runs
+    # on a worker thread like the S10 probe, never on the
+    # message loop; it is computed on demand, per request.
+    from aether_engine.langgraph.model_routing import effective_models_report
+
+    report = await asyncio.to_thread(
+        effective_models_report, engine_state.user_config)
+    await conn.ws.send_text(Event(
+        type=EventType.AGENT_ROUTING_RESPONSE,
+        request_id=req_id,
+        payload=report,
+    ).to_json())
+
 async def _handle_backup_create_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
     # Epic 10, E10-03: snapshot ~/.aether into a zip under
@@ -4274,6 +4292,7 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.MEMORY_EXPORT_REQUEST: _handle_memory_export_request,
     EventType.MEMORY_BACKENDS_REQUEST: _handle_memory_backends_request,
     EventType.MACHINE_CAPABILITY_REQUEST: _handle_machine_capability_request,
+    EventType.AGENT_ROUTING_REQUEST: _handle_agent_routing_request,
     EventType.BACKUP_CREATE_REQUEST: _handle_backup_create_request,
     EventType.BACKUP_RESTORE_REQUEST: _handle_backup_restore_request,
     EventType.DIAGNOSTICS_EXPORT_REQUEST: _handle_diagnostics_export_request,

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useAetherSocket } from '../../contexts/SocketContext';
 
 // E6-F05 (Epic 1 handoff): Settings surfaces for the orchestration
 // config the engine has honoured since Epic 1 but nobody could edit
@@ -48,6 +49,86 @@ const saveButtonStyle = {
 
 const canonical = (names) => SPECIALISTS.filter((s) => names.includes(s));
 
+const ROUTING_SOURCE_LABELS = {
+  pinned: 'Pinned by you',
+  auto: 'Auto routing',
+  run_default: 'Run default',
+};
+
+// S14: the read-only effective-model list inside the Model routing
+// card. Self-contained like the S10 machine card: it asks the
+// engine for the per-agent routing report on mount, on reconnect
+// and whenever the mode changes, and renders the engine's verdicts
+// and reasons verbatim — it computes nothing itself. The report's
+// per-agent decisions are computed on NEUTRAL signals (no task),
+// so the card labels them as the default decisions: each real
+// delegation is decided per task and can differ.
+function EffectiveAgentModels({ mode }) {
+  const { wsRef, sendMessage, isConnected, reconnectCount = 0 } = useAetherSocket();
+  const [report, setReport] = useState(null);
+
+  useEffect(() => {
+    sendMessage('AGENT_ROUTING_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+
+    const handleMessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'AGENT_ROUTING_RESPONSE') {
+          setReport(data.payload);
+        }
+      } catch (e) {
+        // Not JSON / not ours — other panels own their replies.
+      }
+    };
+
+    if (wsRef.current) {
+      wsRef.current.addEventListener('message', handleMessage);
+    }
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.removeEventListener('message', handleMessage);
+      }
+    };
+  }, [wsRef, sendMessage, reconnectCount, mode]);
+
+  if (!report) {
+    return (
+      <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+        {isConnected ? 'Asking the engine which models would serve each agent…' : 'Waiting for the engine — the effective models will appear here once it connects.'}
+      </div>
+    );
+  }
+  return (
+    <div data-testid="model-routing-effective-list" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      {(report.agents || []).map((row) => (
+        <div
+          key={row.agent}
+          data-testid={`model-routing-agent-${row.agent}`}
+          style={{ background: 'var(--bg-base)', border: '1px solid var(--border-default)', borderRadius: '10px', padding: '10px 14px' }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+            <span style={{ fontSize: '14px', fontWeight: 500 }}>{row.agent}</span>
+            <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+              {row.provider ? `${row.provider}:` : ''}{row.model}
+            </span>
+            <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', border: '1px solid var(--border-default)', borderRadius: '999px', padding: '2px 10px', whiteSpace: 'nowrap' }}>
+              {ROUTING_SOURCE_LABELS[row.source] || row.source}
+            </span>
+          </div>
+          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+            {row.reason}
+          </div>
+        </div>
+      ))}
+      <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '4px 0 0 0' }}>
+        Default decisions on a neutral task. Each real delegation is decided per task —
+        its length, its kind and the models&apos; recorded track record can change the pick,
+        and a failed run steps up one tier, once.
+      </p>
+    </div>
+  );
+}
+
 export default function OrchestrationPanel({ config, configError, onConfigUpdate, configReady }) {
   // RUX-C-11: until the first config answer lands, every control
   // below holds a local default — presenting those as the user's
@@ -62,6 +143,7 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
   const [delegationCap, setDelegationCap] = useState('8');
   const [capDirty, setCapDirty] = useState(false);
   const [subagentsEnabled, setSubagentsEnabled] = useState(true);
+  const [modelRouting, setModelRouting] = useState('off');
   const [subagentBounds, setSubagentBounds] = useState({
     maxPerTurn: '4', timeoutS: '120', tokenBudget: '20000', costBudget: '0',
   });
@@ -90,6 +172,7 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
       setDelegationCap(String(config.supervisor_delegation_cap));
     }
     setSubagentsEnabled(config.subagents_enabled !== false);
+    setModelRouting(config.model_routing === 'auto' ? 'auto' : 'off');
     if (!subagentBoundsDirty) {
       setSubagentBounds({
         maxPerTurn: String(config.subagents_max_per_turn ?? 4),
@@ -155,6 +238,16 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
     setSubagentsEnabled(checked);
     setLocalError('');
     onConfigUpdate({ subagents_enabled: checked });
+  };
+
+  // S14: automatic model routing — a two-value mode stored through
+  // the same config path; the engine validates it strictly
+  // (config_updates.py) and refuses anything else.
+  const handleModelRoutingToggle = (checked) => {
+    const next = checked ? 'auto' : 'off';
+    setModelRouting(next);
+    setLocalError('');
+    onConfigUpdate({ model_routing: next });
   };
 
   const SUBAGENT_FIELDS = {
@@ -405,6 +498,29 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
           records no usage leaves the timeout and the per-turn cap as the binding bounds.
           Applies when you leave a field.
         </p>
+      </div>
+
+      <div style={cardStyle}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)' }}>Model routing</h3>
+        <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: '0 0 16px 0' }}>
+          Off, every specialist without a model of its own (set in the Agents tab) runs on
+          the run&apos;s model — exactly as before. On, the engine picks the model per
+          delegation instead: from the sub-task itself, the models your configured
+          providers offer, and each model&apos;s recorded track record. A specialist whose
+          run fails steps up one model tier, once. Your Agents-tab pins always win —
+          routing never overrides a pinned model, and never escalates one.
+        </p>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', marginBottom: '16px', cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            data-testid="model-routing-toggle"
+            checked={modelRouting === 'auto'}
+            onChange={(e) => handleModelRoutingToggle(e.target.checked)}
+            style={{ accentColor: 'var(--accent)', width: '16px', height: '16px' }}
+          />
+          Choose models automatically per delegation
+        </label>
+        <EffectiveAgentModels mode={modelRouting} />
       </div>
 
       <div style={cardStyle}>

@@ -463,6 +463,13 @@ class EventType(str, Enum):
     # (the card's Re-probe action).
     MACHINE_CAPABILITY_REQUEST = "MACHINE_CAPABILITY_REQUEST"
     MACHINE_CAPABILITY_RESPONSE = "MACHINE_CAPABILITY_RESPONSE"
+    # Master build S14: the Settings → Agent Orchestration
+    # "Model routing" card — the per-agent effective-model
+    # report (langgraph/model_routing.effective_models_report):
+    # for each agent, the model that would serve it, from where
+    # (pin / auto / run default) and why in one sentence.
+    AGENT_ROUTING_REQUEST = "AGENT_ROUTING_REQUEST"
+    AGENT_ROUTING_RESPONSE = "AGENT_ROUTING_RESPONSE"
 
     # Epic 10: backup / restore, diagnostics export, update check.
     BACKUP_CREATE_REQUEST = "BACKUP_CREATE_REQUEST"

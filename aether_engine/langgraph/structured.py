@@ -88,6 +88,8 @@ def output_schema_for(config: dict, agent: str) -> dict | None:
 
 async def apply_output_schema(*, agent: str, config: dict, provider: Any,
                               messages: list, content: str, node_name: str,
+                              escalation_provider: Any = None,
+                              on_escalation: Any = None,
                               ) -> tuple[str, Any | None]:
     """Validate a specialist's final answer against its schema.
 
@@ -96,6 +98,20 @@ async def apply_output_schema(*, agent: str, config: dict, provider: Any,
     replaced by a loud failure message and the entry is
     ``{"error": ...}``; with no schema configured the entry is None
     and the content is untouched.
+
+    Master build S14: when the caller supplies an
+    ``escalation_provider`` (auto model routing's next-tier-up
+    model — see langgraph/model_routing.py), a correction retry
+    that STILL fails validation gets ONE further correction
+    attempt on that stronger model before the loud failure. The
+    provider may be given as a zero-arg factory instead of an
+    object, in which case it is constructed only at the moment
+    the step-up is actually needed — a run whose output validates
+    never builds a model it will not call. ``on_escalation`` (a
+    zero-arg callback) fires at the moment the escalated attempt
+    is made, so the caller can log/publish the step-up and
+    attribute the outcome. Both default to None — every pre-S14
+    caller sees exactly the old behaviour.
     """
     schema = output_schema_for(config, agent)
     if schema is None:
@@ -131,6 +147,48 @@ async def apply_output_schema(*, agent: str, config: dict, provider: Any,
     value, errors = parse_and_validate(retry_content, schema)
     if not errors:
         return retry_content, value
+
+    # S14 escalation: the same-model correction failed; when the
+    # caller supplied a stronger model, it gets ONE correction
+    # attempt with the same disclosure (schema + the latest
+    # errors) before the failure is declared. A step up, never a
+    # loop: this block runs at most once per call.
+    esc_provider = escalation_provider
+    if callable(esc_provider):
+        # A factory, not a provider object: build the stronger
+        # model only now that the step-up is certain to be used.
+        esc_provider = esc_provider()
+    if esc_provider is not None and esc_provider is not provider:
+        logger.warning(
+            "Structured output for %s still invalid after correction; "
+            "escalating the correction to the stronger model: %s",
+            agent, errors)
+        if on_escalation is not None:
+            on_escalation()
+        esc_correction = (
+            "Your previous reply was not valid structured output: "
+            + "; ".join(errors)
+            + ". Reply with ONLY a JSON value that matches the required "
+              "output schema — no prose, no code fences. "
+            + "The required output schema is: "
+            + json.dumps(schema)
+        )
+        esc_messages = [
+            *messages,
+            {"role": "assistant", "content": retry_content},
+            {"role": "user", "content": esc_correction},
+        ]
+        esc_parts: list[str] = []
+        async for chunk in esc_provider.call_stream(
+                esc_messages, tools=[], node_name=node_name):
+            if chunk.text:
+                esc_parts.append(chunk.text)
+            if chunk.finish_reason:
+                break
+        esc_content = "".join(esc_parts)
+        value, errors = parse_and_validate(esc_content, schema)
+        if not errors:
+            return esc_content, value
 
     detail = "; ".join(errors)
     logger.error("Structured output for %s failed validation after retry: %s", agent, detail)

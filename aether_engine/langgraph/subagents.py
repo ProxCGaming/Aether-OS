@@ -64,7 +64,10 @@ with every bound enforced in code:
   timeout and the caps are the binding bounds.
 * **Failure honesty.** A child that errors is retried ONCE within
   its time budget (fresh child thread; denials, timeouts and budget
-  stops never retry). Whatever happens — completion, failure,
+  stops never retry). Since S14 the retry is also the child's
+  escalation point: it carries a step-up flag, so under auto model
+  routing the second attempt runs one tier above its own routing
+  decision (a pinned role model is never stepped up). Whatever happens — completion, failure,
   timeout, budget stop, denial — the parent specialist receives a
   bounded summary as the tool result and a digest line lands on the
   blackboard (the supervisor reads it through the existing
@@ -597,6 +600,7 @@ async def _run_child_attempt(
     deadline: float,
     parent_agent: str,
     attempt: int,
+    escalate: bool = False,
 ) -> tuple[str, dict[str, Any] | None]:
     """Run (or resume) the child graph until it finishes or pauses.
 
@@ -625,6 +629,13 @@ async def _run_child_attempt(
         "is_subagent_run": True,
         "subagent_marker": marker,
     })
+    if escalate:
+        # S14: the retry after a genuine child failure runs one
+        # tier up — the flag is all this seam passes; the child's
+        # own model resolution (run_specialist, auto mode only,
+        # never for a pinned role) applies the step-up from its
+        # fresh decision and records it as an escalation.
+        child_configurable["model_routing_escalate"] = True
     child_config = {
         "configurable": child_configurable,
         "recursion_limit": CHILD_RECURSION_LIMIT,
@@ -915,6 +926,7 @@ async def execute_spawn(
     detail = ""
     child_values: dict[str, Any] | None = None
     attempts = 0
+    retry_escalate = False
     while attempts < 2:
         attempts += 1
         try:
@@ -922,7 +934,8 @@ async def execute_spawn(
                 state, configurable,
                 role=role, task=task, surface=surface, settings=settings,
                 marker=marker, seq=seq, deadline=deadline,
-                parent_agent=parent_agent, attempt=attempts)
+                parent_agent=parent_agent, attempt=attempts,
+                escalate=retry_escalate)
             detail = ""
             break
         except GraphInterrupt:
@@ -946,6 +959,11 @@ async def execute_spawn(
             if attempts >= 2 or time.time() >= deadline - 1:
                 status = "failed"
                 break
+            # S14: the retry is the child's escalation point — a
+            # genuine failure (never a denial, timeout or budget
+            # stop: those return a status above, they do not raise)
+            # retries one model tier up under auto routing.
+            retry_escalate = True
             logger.warning(
                 "Sub-agent %s #%d (parent %s) failed on attempt %d "
                 "(%s); retrying once within the time budget",

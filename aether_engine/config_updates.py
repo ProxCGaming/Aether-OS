@@ -72,6 +72,7 @@ HANDED_OFF_FIELDS = (
     "subagent_timeout_s",
     "subagent_token_budget",
     "subagent_cost_budget_usd",
+    "model_routing",
 )
 
 # The verdict vocabulary of tools/policy.py's _VERDICT_MAP and the
@@ -264,6 +265,20 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
         cleaned["subagent_cost_budget_usd"] = _bounded_float(
             "subagent_cost_budget_usd",
             config_data["subagent_cost_budget_usd"], 0.0, 10_000.0)
+
+    # S14: model routing is a closed two-value mode, validated like
+    # memory_backend — an unknown value is refused (naming the valid
+    # set), never coerced, so the Settings toggle can only ever store
+    # a mode the router actually implements.
+    if "model_routing" in config_data:
+        value = config_data["model_routing"]
+        if not isinstance(value, str) or not value.strip():
+            raise _fail("model_routing", "must be a routing mode")
+        mode = value.strip().lower()
+        if mode not in ("off", "auto"):
+            raise _fail("model_routing",
+                        f"unknown mode {value!r} (valid: off, auto)")
+        cleaned["model_routing"] = mode
 
     if "prewalk_agents" in config_data:
         cleaned["prewalk_agents"] = _str_list(

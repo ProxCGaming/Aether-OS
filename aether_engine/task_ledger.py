@@ -110,6 +110,7 @@ def _tap_entry(task_id: str) -> dict[str, Any]:
             "error": None,
             "delegations": [],
             "subagents": [],
+            "model_routing": [],
             "tool_calls": [],
             "node_activity": [],
             "approvals": [],
@@ -166,6 +167,26 @@ def record_executor_event(task_id: str | None, event: Any) -> None:
                     "seq": payload.get("subagent_seq"),
                     "summary": (out.get("summary") or "")[:OUTCOME_EXCERPT_CHARS] or None,
                     "tokens_used": out.get("tokens_used"),
+                    "timestamp": ts,
+                    "source": "executor_event",
+                })
+            elif action in ("model_routing", "model_escalation"):
+                # S14: an auto-routing decision (or the one-step
+                # escalation after a failure) for one specialist
+                # invocation. Recorded under its own list — it is
+                # neither a delegation nor a sub-agent spawn — and
+                # joined onto delegations in task_summary, so the
+                # summary can show which model ran each delegation.
+                out = payload.get("output_payload") or {}
+                _tap_append(entry, "model_routing", {
+                    "agent": payload.get("from_node"),
+                    "provider": out.get("provider"),
+                    "model": out.get("model"),
+                    "tier": out.get("tier"),
+                    "routing_source": out.get("source") or (
+                        "escalation" if action == "model_escalation" else "auto"),
+                    "reason": out.get("reason") or payload.get("reason", ""),
+                    "escalated_from": out.get("escalated_from"),
                     "timestamp": ts,
                     "source": "executor_event",
                 })
@@ -637,6 +658,45 @@ def _merge_approvals(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 # ── The joined summary ───────────────────────────────────────────────
 
+def _annotate_delegation_models(
+    delegations: list[dict[str, Any]],
+    routing_records: list[dict[str, Any]],
+) -> None:
+    """Attach the serving model to each delegation (S14), in place.
+
+    The join is by agent + time: a delegation is served by the
+    FIRST routing record for its agent at or after the delegation
+    was made (the specialist resolves its model when it starts,
+    which is always after the handoff). A delegation whose records
+    all predate it (a resumed run whose routing trail the tap has
+    partly evicted) takes the agent's latest record instead. A
+    delegation with no record for its agent keeps no model fields
+    — absence is honest, never backfilled from another agent.
+    """
+    by_agent: dict[str, list[dict[str, Any]]] = {}
+    for record in routing_records:
+        agent = record.get("agent")
+        if agent:
+            by_agent.setdefault(str(agent), []).append(record)
+    for delegation in delegations:
+        records = by_agent.get(str(delegation.get("agent") or ""))
+        if not records:
+            continue
+        ts = delegation.get("timestamp")
+        chosen = None
+        if isinstance(ts, (int, float)):
+            chosen = next(
+                (r for r in records
+                 if isinstance(r.get("timestamp"), (int, float))
+                 and r["timestamp"] >= ts),
+                None)
+        if chosen is None:
+            chosen = records[-1]
+        delegation["model"] = chosen.get("model")
+        delegation["model_provider"] = chosen.get("provider")
+        delegation["model_source"] = chosen.get("routing_source")
+
+
 async def task_summary(
     task_id: str, *, session_id: str | None = None,
     user_config: Any | None = None, backend: Any | None = None,
@@ -660,6 +720,13 @@ async def task_summary(
         or (episode or {}).get("session_id"), checkpoint_db=checkpoint_db)
 
     delegations = (checkpoint or {}).get("delegations") or (tap or {}).get("delegations") or []
+    # S14 (additive): join the live tap's routing records onto the
+    # delegations — each delegation names the model that actually
+    # ran it (and whether auto routing or an escalation chose it),
+    # not just the model the usage rows happened to bill.
+    routing_records = (tap or {}).get("model_routing") or []
+    if routing_records:
+        _annotate_delegation_models(delegations, routing_records)
     tool_calls = (checkpoint or {}).get("tool_calls") or (tap or {}).get("tool_calls") or []
     files = list((checkpoint or {}).get("files_touched") or [])
     for path in _files_from_tool_calls(tool_calls):
@@ -740,6 +807,11 @@ async def task_summary(
         # linkage). Live-only like the tap itself — child runs have
         # no checkpoint leg in the parent's thread.
         "subagents": (tap or {}).get("subagents") or [],
+        # S14 (additive): the tap's model-routing records (auto
+        # decisions + escalations) for this task, in order. The
+        # delegations above are annotated from these; the raw list
+        # stays available for surfaces that want the full trail.
+        "model_routing": routing_records,
         # S4 (additive): the checkpointed delegation counter for the
         # task's turn, or None when no checkpoint carries one.
         "delegation_count": (checkpoint or {}).get("delegation_count"),
@@ -860,6 +932,7 @@ def task_briefing(summary: dict[str, Any], *, max_chars: int = BRIEFING_MAX_CHAR
         rendered = ", ".join(
             f"{d.get('agent') or '?'}"
             + (" (denied)" if d.get("denied") else "")
+            + (f" on {d.get('model')}" if d.get("model") else "")
             + (f" ({str(d.get('reason'))[:60]})" if d.get("reason") else "")
             for d in delegations[:6])
         parts.append(f"Delegations: {rendered}")

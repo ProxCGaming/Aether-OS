@@ -37,6 +37,7 @@ from aether_engine.routes import websocket, ws_connection, ws_task_exec
 # loop's pre-pass handles it before the table is consulted.
 DISPATCHED_TYPES = (
     "AGENT_LIST_REQUEST",
+    "AGENT_ROUTING_REQUEST",
     "AGENT_UPDATE_REQUEST",
     "APPROVAL_GRANTS_REQUEST",
     "APPROVAL_GRANT_REVOKE_REQUEST",
@@ -268,7 +269,7 @@ class TestDispatchTable:
         assert d[EventType.PROJECT_CONFIG_GET_REQUEST] is \
             d[EventType.PROJECT_CONFIG_UPDATE_REQUEST]
 
-    def test_handlers_are_coroutine_functions_128_distinct(self):
+    def test_handlers_are_coroutine_functions_129_distinct(self):
         handlers = list(websocket._DISPATCH.values())
         assert all(inspect.iscoroutinefunction(h) for h in handlers)
         # 123 at the Wave 5 split; +1 for the calendar layer's
@@ -277,8 +278,10 @@ class TestDispatchTable:
         # (master build S3, 14 Nov 2026); +1 for the memory
         # backend picker's status handler (master build S9,
         # 14 Nov 2026); +1 for the machine capability report
-        # handler (master build S10, 14 Nov 2026).
-        assert len(set(handlers)) == 128
+        # handler (master build S10, 14 Nov 2026); +1 for the
+        # agent routing report handler (master build S14,
+        # 14 Nov 2026).
+        assert len(set(handlers)) == 129
 
 
 class _FakeSocket:

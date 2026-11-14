@@ -9,6 +9,19 @@ import OrchestrationPanel from '../OrchestrationPanel';
 import SpeechSettingsPanel from '../SpeechSettingsPanel';
 import ProjectConfigPanel from '../ProjectConfigPanel';
 
+// S14: OrchestrationPanel's Model routing card carries a
+// self-contained effective-models list that reads the socket
+// context (the S10 card pattern). These gate tests render the
+// panel bare, so the context is mocked to an inert socket.
+jest.mock('../../../contexts/SocketContext', () => ({
+  useAetherSocket: () => ({
+    wsRef: { current: null },
+    sendMessage: jest.fn(),
+    isConnected: false,
+    reconnectCount: 0,
+  }),
+}));
+
 describe('OrchestrationPanel config gate (RUX-C-11)', () => {
   it('configReady=false disables the whole control set', () => {
     render(<OrchestrationPanel config={null} configError="" onConfigUpdate={jest.fn()} configReady={false} />);

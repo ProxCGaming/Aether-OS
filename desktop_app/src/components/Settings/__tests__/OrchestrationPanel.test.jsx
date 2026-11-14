@@ -1,7 +1,8 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import OrchestrationPanel from '../OrchestrationPanel';
+import { useAetherSocket } from '../../../contexts/SocketContext';
 
 // OrchestrationPanel (E6-F05) is controlled: SettingsPanel owns the
 // socket and the applied config; the panel renders the applied
@@ -9,6 +10,51 @@ import OrchestrationPanel from '../OrchestrationPanel';
 // onConfigUpdate. These tests pin the per-panel contract the commit
 // gate requires (a <Name>.test.jsx per component); the shared
 // HandedOffSurfaces suite covers the cross-panel story.
+//
+// S14: the Model routing card's effective-model list is
+// self-contained (the S10 card pattern) and reads the socket
+// context, so the context is mocked with a capturable fake socket
+// (the MachineCapabilityCard test pattern).
+
+jest.mock('../../../contexts/SocketContext', () => ({
+  useAetherSocket: jest.fn(),
+}));
+
+let mockSendMessage;
+let mockWsRef;
+let messageListeners;
+
+beforeEach(() => {
+  mockSendMessage = jest.fn();
+  messageListeners = [];
+  mockWsRef = {
+    current: {
+      addEventListener: jest.fn((event, cb) => {
+        if (event === 'message') messageListeners.push(cb);
+      }),
+      removeEventListener: jest.fn((event, cb) => {
+        if (event === 'message') {
+          messageListeners = messageListeners.filter((l) => l !== cb);
+        }
+      }),
+      readyState: 1,
+    },
+  };
+  useAetherSocket.mockReturnValue({
+    wsRef: mockWsRef,
+    sendMessage: mockSendMessage,
+    isConnected: true,
+    reconnectCount: 0,
+  });
+});
+
+function simulateMessage(data) {
+  act(() => {
+    for (const cb of [...messageListeners]) {
+      cb({ data: JSON.stringify(data) });
+    }
+  });
+}
 
 const CONFIG = {
   supervisor_spawn_allowlist: ['planner'],
@@ -171,5 +217,51 @@ describe('OrchestrationPanel', () => {
     expect(screen.getByTestId('orchestration-error')).toHaveTextContent(
       'Sub-agent timeout (seconds) must be a whole number between 1 and 3600.');
     expect(onConfigUpdate).not.toHaveBeenCalled();
+  });
+
+  // S14: model routing — the mode toggle persists through the
+  // same onConfigUpdate path, and the effective-model list renders
+  // the engine's AGENT_ROUTING_RESPONSE verbatim (it computes
+  // nothing itself).
+  const ROUTING_REPORT = {
+    mode: 'auto',
+    agents: [
+      { agent: 'supervisor', provider: 'google_gemini', model: 'gemini-3.5-flash', source: 'run_default', tier: null, reason: 'The supervisor runs on the run\u2019s model \u2014 it does the delegating, so auto routing chooses models for the specialists instead.' },
+      { agent: 'researcher', provider: 'google_gemini', model: 'gemini-3.5-flash', source: 'auto', tier: 'small', reason: 'A standard task \u2014 your default model google_gemini:gemini-3.5-flash (small tier) fits.' },
+      { agent: 'planner', provider: 'google_gemini', model: 'gemini-3.5-flash', source: 'auto', tier: 'small', reason: 'A standard task \u2014 your default model google_gemini:gemini-3.5-flash (small tier) fits.' },
+      { agent: 'coder', provider: 'openai', model: 'gpt-4o', source: 'pinned', tier: null, reason: 'Pinned by you in Agents settings \u2014 routing never overrides a pin.' },
+    ],
+  };
+
+  test('the model routing toggle renders the applied mode and reports changes', () => {
+    const { onConfigUpdate } = renderPanel({ ...CONFIG, model_routing: 'auto' });
+    expect(screen.getByTestId('model-routing-toggle')).toBeChecked();
+    fireEvent.click(screen.getByTestId('model-routing-toggle'));
+    expect(onConfigUpdate).toHaveBeenCalledWith({ model_routing: 'off' });
+  });
+
+  test('a config without model_routing renders routing off (the engine default)', () => {
+    const { onConfigUpdate } = renderPanel();
+    expect(screen.getByTestId('model-routing-toggle')).not.toBeChecked();
+    fireEvent.click(screen.getByTestId('model-routing-toggle'));
+    expect(onConfigUpdate).toHaveBeenCalledWith({ model_routing: 'auto' });
+  });
+
+  test('the effective-model list requests the report and renders it verbatim', () => {
+    renderPanel({ ...CONFIG, model_routing: 'auto' });
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'AGENT_ROUTING_REQUEST', expect.objectContaining({ payload: {} }));
+    simulateMessage({ type: 'AGENT_ROUTING_RESPONSE', payload: ROUTING_REPORT });
+    const list = screen.getByTestId('model-routing-effective-list');
+    expect(list).toBeInTheDocument();
+    const coder = screen.getByTestId('model-routing-agent-coder');
+    expect(coder).toHaveTextContent('coder');
+    expect(coder).toHaveTextContent('openai:gpt-4o');
+    expect(coder).toHaveTextContent('Pinned by you');
+    expect(coder).toHaveTextContent('routing never overrides a pin');
+    const researcher = screen.getByTestId('model-routing-agent-researcher');
+    expect(researcher).toHaveTextContent('Auto routing');
+    expect(researcher).toHaveTextContent('gemini-3.5-flash');
+    expect(screen.getByTestId('model-routing-agent-supervisor')).toHaveTextContent('Run default');
   });
 });

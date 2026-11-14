@@ -5,6 +5,19 @@ import OrchestrationPanel from '../OrchestrationPanel';
 import PathRulesPanel from '../PathRulesPanel';
 import ProjectConfigPanel from '../ProjectConfigPanel';
 
+// S14: OrchestrationPanel's Model routing card carries a
+// self-contained effective-models list that reads the socket
+// context (the S10 card pattern). These surface tests render
+// the panel bare, so the context is mocked to an inert socket.
+jest.mock('../../../contexts/SocketContext', () => ({
+  useAetherSocket: () => ({
+    wsRef: { current: null },
+    sendMessage: jest.fn(),
+    isConnected: false,
+    reconnectCount: 0,
+  }),
+}));
+
 // E6-F05: the handed-off panels are controlled — SettingsPanel owns
 // the socket and the applied config; these tests pin the panels'
 // rendering of an applied config and the exact partial-config
