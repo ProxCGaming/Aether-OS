@@ -21,11 +21,33 @@ DB_PATH = Path.home() / ".aether" / "memory.db"
 
 # E4-F11: application schema version for this store's tables.
 # 1 = the original entities/facts schema; 2 = E4-02's supersede
-# columns (facts.status, facts.superseded_by). Bump with every
-# migration; init records the marker via _record_schema_version so
-# a future migration can gate on it instead of re-deriving the
-# schema's generation from its shape.
-SCHEMA_VERSION = 2
+# columns (facts.status, facts.superseded_by); 3 = S5's provenance
+# + importance + decay-anchor columns (facts.provenance,
+# facts.importance, facts.last_decayed_at).
+# Bump with every migration; init records the marker via
+# _record_schema_version so a future migration can gate on it
+# instead of re-deriving the schema's generation from its shape.
+SCHEMA_VERSION = 3
+
+# S5: provenance kinds for a fact. "stated" = the user asserted
+# this themselves (in their own words in the source exchange, or
+# by editing the fact in the management UI); "inferred" = the
+# extraction model derived it. The distinction is load-bearing:
+# only inferred facts decay (see decay_inferred_facts) and the
+# context assembler ranks the two differently through the same
+# confidence value. A fact whose provenance is unknown — every
+# pre-S5 row, and any extraction item that does not say — is
+# "inferred": the stated privilege (decay exemption) must be
+# earned by an explicit signal, never assumed.
+PROVENANCE_STATED = "stated"
+PROVENANCE_INFERRED = "inferred"
+VALID_PROVENANCE = (PROVENANCE_STATED, PROVENANCE_INFERRED)
+
+# S5: neutral importance for rows that carry no signal (pre-S5
+# rows, extraction items without an importance value the
+# heuristic below cannot tier). 0.5 on the 0..1 scale the
+# context assembler multiplies by — neither boosted nor buried.
+DEFAULT_IMPORTANCE = 0.5
 
 _SCHEMA_META_DDL = """
     CREATE TABLE IF NOT EXISTS aether_schema_meta (
@@ -145,6 +167,9 @@ def init_kg_db() -> None:
                 confidence REAL,
                 status TEXT NOT NULL DEFAULT 'active',
                 superseded_by TEXT,
+                provenance TEXT NOT NULL DEFAULT 'inferred',
+                importance REAL NOT NULL DEFAULT 0.5,
+                last_decayed_at INTEGER,
                 FOREIGN KEY(entity_id) REFERENCES entities(id) ON DELETE CASCADE
             )
         """)
@@ -156,6 +181,23 @@ def init_kg_db() -> None:
             conn.execute("ALTER TABLE facts ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
         if "superseded_by" not in columns:
             conn.execute("ALTER TABLE facts ADD COLUMN superseded_by TEXT")
+        # S5 migration: provenance + importance on pre-existing
+        # databases. Idempotent column adds, same pattern as E4-02.
+        # Existing rows default to provenance 'inferred' — their
+        # extraction never recorded whether the user stated them,
+        # and 'stated' (the decay-exempt kind) must not be assumed
+        # retroactively — and importance 0.5 (neutral: the S5
+        # assembler neither boosts nor buries them for lacking a
+        # signal they were never asked to carry).
+        if "provenance" not in columns:
+            conn.execute("ALTER TABLE facts ADD COLUMN provenance TEXT NOT NULL DEFAULT 'inferred'")
+        if "importance" not in columns:
+            conn.execute("ALTER TABLE facts ADD COLUMN importance REAL NOT NULL DEFAULT 0.5")
+        # S5 migration, cont.: the decay pass's anchor (see
+        # decay_inferred_facts). NULL = never decayed; the first
+        # pass measures elapsed time from the fact's timestamp.
+        if "last_decayed_at" not in columns:
+            conn.execute("ALTER TABLE facts ADD COLUMN last_decayed_at INTEGER")
         _record_schema_version(conn, "knowledge_graph", SCHEMA_VERSION)
         conn.commit()
     # Phase 10.3 A3: collapse any duplicate facts left by the old
@@ -330,6 +372,40 @@ def _ensure_kg_deduped() -> None:
     _DEDUPED_DB_PATHS.add(key)
     dedupe_facts()
 
+def _extraction_provenance(item: dict) -> str:
+    """S5: the provenance kind for one extraction item.
+
+    Only an explicit ``"stated"`` from the extractor earns the
+    stated kind — the user asserted the fact in their own words in
+    the source exchange (the extraction prompt defines it that
+    way). Anything else — "inferred", a junk value, or the field
+    missing (every pre-S5 extractor output) — is "inferred", the
+    kind that decays. Privilege is opt-in, never defaulted into.
+    """
+    value = str(item.get("provenance") or "").strip().lower()
+    return PROVENANCE_STATED if value == PROVENANCE_STATED else PROVENANCE_INFERRED
+
+
+def _extraction_importance(item: dict, provenance: str) -> float:
+    """S5: the importance for one extraction item, 0..1.
+
+    An explicit numeric importance from the extractor is clamped
+    and used. Otherwise a documented COARSE heuristic — three
+    tiers, deliberately not finer (the extractor has no stronger
+    signal and fake precision would poison the assembler's
+    ranking): a fact the user stated about themselves or their
+    preferences (entity_type Person / Preference) tiers 0.8; any
+    other stated fact 0.6; an inferred fact 0.4.
+    """
+    raw = item.get("importance")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return min(1.0, max(0.0, float(raw)))
+    if provenance == PROVENANCE_STATED:
+        entity_type = str(item.get("entity_type") or "").strip().lower()
+        return 0.8 if entity_type in ("person", "preference") else 0.6
+    return 0.4
+
+
 def _store_extracted_facts(facts_list: list, task_id: str) -> list[dict]:
     """Synchronous insert half of extract_and_store_facts — run via
     ``asyncio.to_thread`` by the caller (N-12): the insert loop,
@@ -398,11 +474,17 @@ def _store_extracted_facts(facts_list: list, task_id: str) -> list[dict]:
                 entity_id = cur.fetchone()["id"]
                 cur.execute("UPDATE entities SET last_updated = ? WHERE id = ?", (now, entity_id))
 
-                # Insert fact
+                # Insert fact (S5: with provenance + importance —
+                # see _extraction_provenance / _extraction_importance
+                # for how the item's signals become the stored kind
+                # and tier).
                 fact_id = str(uuid.uuid4())
+                provenance = _extraction_provenance(item)
+                importance = _extraction_importance(item, provenance)
                 cur.execute(
-                    "INSERT INTO facts (id, entity_id, fact_text, source_task_id, timestamp, confidence) VALUES (?, ?, ?, ?, ?, ?)",
-                    (fact_id, entity_id, fact_text, task_id, now, item.get("confidence", 1.0))
+                    "INSERT INTO facts (id, entity_id, fact_text, source_task_id, timestamp, confidence, provenance, importance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (fact_id, entity_id, fact_text, task_id, now,
+                     item.get("confidence", 1.0), provenance, importance)
                 )
 
                 _audit_logger.log_event("KNOWLEDGE_FACT_STORED", {
@@ -423,6 +505,8 @@ def _store_extracted_facts(facts_list: list, task_id: str) -> list[dict]:
                 "entity_id": entity_id,
                 "entity_name": entity_name,
                 "fact_text": fact_text,
+                "provenance": provenance,
+                "importance": importance,
             })
         conn.commit()
     return inserted_facts
@@ -450,6 +534,8 @@ Return a JSON array of objects, where each object has:
 - "entity_type": e.g. "Person", "Project", "Concept", "Preference".
 - "fact": A concise standalone statement (e.g. "User prefers Python over Java", "Project X uses SQLite").
 - "confidence": Float between 0.0 and 1.0.
+- "provenance": "stated" if the USER asserted this fact in their own words in the conversation, "inferred" if you derived it from context, the assistant's statements, or implication. When in doubt, use "inferred".
+- "importance": Float between 0.0 and 1.0 — how much this fact matters for helping this user long-term (identity, durable preferences and project facts high; incidental details low). Omit it if you have no real signal.
 
 Only extract facts that are actually useful to remember long-term.
 If no facts are present, return an empty array [].
@@ -607,7 +693,7 @@ def get_all_facts(limit: int = 100, include_history: bool = False) -> list[dict[
         cur = conn.cursor()
         status_filter = "" if include_history else "WHERE COALESCE(f.status, 'active') = 'active'"
         cur.execute(f"""
-            SELECT f.id as fact_id, e.id as entity_id, e.name as entity_name, e.entity_type, f.fact_text, f.timestamp, f.confidence, f.status, f.superseded_by
+            SELECT f.id as fact_id, e.id as entity_id, e.name as entity_name, e.entity_type, f.fact_text, f.timestamp, f.confidence, f.status, f.superseded_by, f.provenance, f.importance
             FROM facts f
             JOIN entities e ON f.entity_id = e.id
             {status_filter}
@@ -622,7 +708,11 @@ def update_fact(fact_id: str, new_text: str) -> bool:
     text is empty, or another ACTIVE fact of the same entity already
     carries the normalised text (the edit would mint a duplicate).
     The fact keeps its id, entity, and status; its timestamp bumps
-    so the edit is visible in recency orderings.
+    so the edit is visible in recency orderings. S5: the edit is an
+    explicit assertion by the user in the management UI, so the
+    fact's provenance becomes 'stated' — the corrected text is
+    something the user themselves stands behind, and decay (which
+    only touches inferred facts) must never erode it.
     """
     new_text = (new_text or "").strip()
     if not new_text:
@@ -640,7 +730,7 @@ def update_fact(fact_id: str, new_text: str) -> bool:
             logger.info("Refusing fact edit that would duplicate %s", duplicate)
             return False
         cur = conn.execute(
-            "UPDATE facts SET fact_text = ?, timestamp = ? WHERE id = ?",
+            "UPDATE facts SET fact_text = ?, timestamp = ?, provenance = 'stated' WHERE id = ?",
             (new_text, int(time.time()), fact_id),
         )
         conn.commit()
@@ -707,7 +797,7 @@ def search_facts(query: str, limit: int = 10, include_history: bool = False) -> 
         search_term = f"%{escaped}%"
         status_filter = "" if include_history else " AND COALESCE(f.status, 'active') = 'active'"
         cur.execute(f"""
-            SELECT f.id as fact_id, e.name as entity_name, e.entity_type, f.fact_text, f.timestamp, f.confidence, f.status, f.superseded_by
+            SELECT f.id as fact_id, e.name as entity_name, e.entity_type, f.fact_text, f.timestamp, f.confidence, f.status, f.superseded_by, f.provenance, f.importance
             FROM facts f
             JOIN entities e ON f.entity_id = e.id
             WHERE (e.name LIKE ? ESCAPE '\\' OR f.fact_text LIKE ? ESCAPE '\\'){status_filter}
@@ -831,4 +921,138 @@ def prune_facts(retention_days: int | None = None,
     }
     _audit_logger.log_event("KNOWLEDGE_GRAPH_PRUNED", result)
     logger.info("KNOWLEDGE_GRAPH_PRUNED %s", result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# S5: confidence decay for INFERRED facts only — the trust layer on
+# top of retention (the owner's #6 direction: the age/count caps in
+# prune_facts stay exactly as they are; they answer "how much may I
+# store", decay answers "how much do I still trust this").
+#
+# Only facts with provenance 'inferred' decay. A fact the user
+# stated explicitly ('stated') is EXEMPT — its confidence is never
+# lowered and it is never removed by this pass, however old it is.
+# Superseded facts are history already; they are not decayed.
+#
+# Formula: exponential decay with a half-life (UserConfig
+# memory_decay_half_life_days, default 45 days):
+#     confidence *= 0.5 ** (elapsed_days / half_life_days)
+# where elapsed is measured from the fact's timestamp on the first
+# pass and from facts.last_decayed_at on later passes — the anchor
+# column makes the total decay a function of the fact's age alone,
+# so a pass that runs twice in a week cannot compound faster than
+# a pass that runs once. A run with `now` at or before a fact's
+# anchor changes nothing for that fact.
+#
+# Demote-before-delete: decay first lowers confidence (and with it
+# the fact's retrieval rank everywhere confidence is read). Only a
+# fact whose DECAYED confidence falls below the floor (UserConfig
+# memory_decay_floor, default 0.1) is removed — and even then the
+# prune_facts safety guard applies unchanged: an entity's most
+# current fact is never removed, so decay can demote an entity's
+# last record but never erase the entity.
+# ---------------------------------------------------------------------------
+
+def decay_inferred_facts(half_life_days: float | None = None,
+                         floor: float | None = None,
+                         *, config: UserConfig | None = None,
+                         now: int | None = None) -> dict[str, Any]:
+    """Apply one confidence-decay pass to inferred KG facts.
+
+    Returns counts: examined (active inferred facts seen), decayed
+    (confidence actually lowered), removed_below_floor (deleted
+    because the decayed confidence fell below the floor and the
+    fact was not its entity's most current record),
+    kept_referenced (below-floor facts spared by that guard), and
+    the half_life_days / floor in force. Logged as
+    KNOWLEDGE_GRAPH_DECAYED. A half-life <= 0 disables decay
+    entirely (examined facts are still counted, nothing changes).
+    """
+    cfg = config if config is not None else load_config()
+    if half_life_days is None:
+        half_life_days = float(getattr(cfg, "memory_decay_half_life_days", 45.0))
+    if floor is None:
+        floor = float(getattr(cfg, "memory_decay_floor", 0.1))
+    now = int(time.time()) if now is None else int(now)
+
+    init_kg_db()
+    examined = decayed = removed = kept = 0
+    with _get_conn() as conn:
+        cur = conn.cursor()
+        # The most-current guard, selected before any deletion —
+        # the same discipline (and ranking) as prune_facts.
+        best_by_entity: dict[str, tuple] = {}
+        for row in cur.execute(
+            "SELECT id, entity_id, timestamp, confidence, "
+            "COALESCE(status, 'active') AS status FROM facts"
+        ).fetchall():
+            rank = (
+                0 if row["status"] == "active" else 1,
+                -row["timestamp"],
+                -_confidence_value(row),
+                row["id"],
+            )
+            current = best_by_entity.get(row["entity_id"])
+            if current is None or rank < current[0]:
+                best_by_entity[row["entity_id"]] = (rank, row["id"])
+        protected_fact_ids = {fid for _, fid in best_by_entity.values()}
+
+        rows = cur.execute(
+            "SELECT id, entity_id, timestamp, confidence, last_decayed_at "
+            "FROM facts WHERE COALESCE(status, 'active') = 'active' "
+            "AND COALESCE(provenance, 'inferred') = 'inferred'"
+        ).fetchall()
+        for row in rows:
+            examined += 1
+            if not half_life_days or half_life_days <= 0:
+                continue
+            anchor = row["last_decayed_at"] or row["timestamp"]
+            elapsed_days = (now - int(anchor)) / 86400.0
+            if elapsed_days <= 0:
+                continue
+            old_confidence = _confidence_value(row)
+            new_confidence = old_confidence * (0.5 ** (elapsed_days / float(half_life_days)))
+            if new_confidence < floor and old_confidence >= floor:
+                # Crossing the floor on THIS pass is what makes a
+                # fact removable; a fact already below the floor
+                # when first examined (stored with a tiny
+                # confidence) is demoted only — removal is a
+                # consequence of decay, not of a weak birth.
+                if row["id"] in protected_fact_ids:
+                    kept += 1
+                    cur.execute(
+                        "UPDATE facts SET confidence = ?, last_decayed_at = ? WHERE id = ?",
+                        (new_confidence, now, row["id"]),
+                    )
+                    decayed += 1
+                else:
+                    cur.execute("DELETE FROM facts WHERE id = ?", (row["id"],))
+                    removed += 1
+                continue
+            if new_confidence < old_confidence:
+                cur.execute(
+                    "UPDATE facts SET confidence = ?, last_decayed_at = ? WHERE id = ?",
+                    (new_confidence, now, row["id"]),
+                )
+                decayed += 1
+            else:
+                cur.execute(
+                    "UPDATE facts SET last_decayed_at = ? WHERE id = ?",
+                    (now, row["id"]),
+                )
+        cur.execute(
+            "DELETE FROM entities WHERE id NOT IN (SELECT DISTINCT entity_id FROM facts)")
+        conn.commit()
+
+    result = {
+        "examined_inferred": examined,
+        "decayed": decayed,
+        "removed_below_floor": removed,
+        "kept_referenced": kept,
+        "half_life_days": half_life_days,
+        "floor": floor,
+    }
+    _audit_logger.log_event("KNOWLEDGE_GRAPH_DECAYED", result)
+    logger.info("KNOWLEDGE_GRAPH_DECAYED %s", result)
     return result

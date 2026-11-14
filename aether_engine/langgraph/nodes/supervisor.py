@@ -126,35 +126,40 @@ async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id
 
         elif tool_name == "search_knowledge_graph":
             # Epic 4, E4-01: through the facade (configured backend).
+            # S5: the result is assembled by the single context
+            # assembler (memory/context_assembler.py) — KG facts and
+            # the curated consolidation document scored together
+            # (relevance x recency x confidence x importance) under
+            # the one context token budget, each line carrying its
+            # source id. The tool's own result cap below still
+            # applies as an outer safety limit.
             backend = backend_or_none(user_config, context="supervisor memory tool")
             if backend is None:
                 result_str = "Memory is unavailable: the configured memory backend cannot run here (see engine log)."
             else:
+                from aether_engine.memory.context_assembler import (
+                    assemble_memory_context,
+                )
+
                 query = args.get("query", "")
-                facts = backend.search_facts(query, limit=5)
-                if not facts:
-                    facts = backend.list_facts(limit=5)
-                if not facts:
-                    result_str = "No matching facts found in knowledge graph."
-                else:
-                    lines = [f"- {f.get('entity_name', 'Entity')} ({f.get('entity_type', 'Fact')}): {f.get('fact_text', '')}" for f in facts]
-                    result_str = "\n".join(lines)
+                assembled = await assemble_memory_context(
+                    backend, query, config=user_config, include_episodes=False)
+                result_str = assembled["text"] or "No matching facts found in knowledge graph."
 
         elif tool_name == "search_past_episodes":
             backend = backend_or_none(user_config, context="supervisor memory tool")
             if backend is None:
                 result_str = "Memory is unavailable: the configured memory backend cannot run here (see engine log)."
             else:
+                from aether_engine.memory.context_assembler import (
+                    assemble_memory_context,
+                )
+
                 query = args.get("query", original_prompt)
-                episodes = await backend.search_episodes(query, limit=3)
-                if not episodes:
-                    result_str = "No past episodes found matching query."
-                else:
-                    lines = []
-                    for ep in episodes:
-                        resp_trunc = ep.get('outcome', '')[:160].replace('\n', ' ')
-                        lines.append(f"- Past Task: '{ep.get('user_prompt', '')}' -> Outcome: '{resp_trunc}...'")
-                    result_str = "\n".join(lines)
+                assembled = await assemble_memory_context(
+                    backend, query, config=user_config,
+                    include_facts=False, include_curated=False)
+                result_str = assembled["text"] or "No past episodes found matching query."
 
         if len(result_str) > MEMORY_TOOL_RESULT_MAX_CHARS:
             result_str = result_str[:MEMORY_TOOL_RESULT_MAX_CHARS] + "\n...[memory result truncated to budget]"

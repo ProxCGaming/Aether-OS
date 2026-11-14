@@ -221,6 +221,21 @@ class UserConfig:
     episodic_similarity_threshold: float = 0.3
     kg_fact_retention_days: int = 365
     kg_max_facts: int = 5000
+    # S5: unified memory scoring + the single context assembler
+    # (memory/context_assembler.py). memory_context_token_budget is
+    # the ONE total token budget (estimated at the house 4 chars /
+    # token) for the assembler's scored KG + episodic + curated
+    # briefing — the sections it owns no longer each spend their own
+    # cap additively. memory_decay_*: the weekly decay pass for
+    # INFERRED KG facts only (knowledge_graph.decay_inferred_facts)
+    # — confidence halves every memory_decay_half_life_days, and a
+    # fact whose decayed confidence crosses below memory_decay_floor
+    # may be removed (demote-before-delete; stated facts exempt, an
+    # entity's most current fact always kept). Half-life <= 0
+    # disables decay.
+    memory_context_token_budget: int = 1500
+    memory_decay_half_life_days: float = 45.0
+    memory_decay_floor: float = 0.1
     session_retention_days: int = 180
     session_max_sessions: int = 200
     # Calendar layer (14 Nov 2026): the schedule in
@@ -331,6 +346,9 @@ class UserConfig:
             "episodic_similarity_threshold": self.episodic_similarity_threshold,
             "kg_fact_retention_days": self.kg_fact_retention_days,
             "kg_max_facts": self.kg_max_facts,
+            "memory_context_token_budget": self.memory_context_token_budget,
+            "memory_decay_half_life_days": self.memory_decay_half_life_days,
+            "memory_decay_floor": self.memory_decay_floor,
             "session_retention_days": self.session_retention_days,
             "session_max_sessions": self.session_max_sessions,
             "calendar_enabled": self.calendar_enabled,
@@ -455,6 +473,9 @@ class UserConfig:
             episodic_similarity_threshold=_as_float(d.get("episodic_similarity_threshold"), 0.3),
             kg_fact_retention_days=_as_int(d.get("kg_fact_retention_days"), 365),
             kg_max_facts=_as_int(d.get("kg_max_facts"), 5000),
+            memory_context_token_budget=_as_int(d.get("memory_context_token_budget"), 1500),
+            memory_decay_half_life_days=_as_float(d.get("memory_decay_half_life_days"), 45.0),
+            memory_decay_floor=_as_float(d.get("memory_decay_floor"), 0.1),
             session_retention_days=_as_int(d.get("session_retention_days"), 180),
             session_max_sessions=_as_int(d.get("session_max_sessions"), 200),
             calendar_enabled=bool(d.get("calendar_enabled", True)),
