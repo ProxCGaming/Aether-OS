@@ -243,6 +243,23 @@ class UserConfig:
     memory_context_token_budget: int = 1500
     memory_decay_half_life_days: float = 45.0
     memory_decay_floor: float = 0.1
+    # S7: fast-chat memory briefing (langgraph/fast_chat.py).
+    # Fast chat — the default conversational surface and the ONLY
+    # voice surface — was memory-blind: its prompt carried the
+    # persona, the session history and a one-line calendar
+    # itinerary, never a stored fact. fast_chat_memory_enabled
+    # gates the whole briefing (off = the pre-S7 prompt
+    # composition, byte for byte); fast_chat_memory_token_budget
+    # is the ONE sub-budget the whole memory section shares
+    # (profile digest + assembler-scored facts/episodes +
+    # lessons), passed INTO the assembler's call rather than
+    # reusing the supervisor-scale memory_context_token_budget
+    # (1,500 — a graph task can spend context a chat/voice turn
+    # cannot). 400 tokens (~1,600 chars at the house estimate)
+    # holds the digest plus a handful of scored lines alongside
+    # fast chat's 20-message / 24,000-char history window.
+    fast_chat_memory_enabled: bool = True
+    fast_chat_memory_token_budget: int = 400
     session_retention_days: int = 180
     session_max_sessions: int = 200
     # Calendar layer (14 Nov 2026): the schedule in
@@ -357,6 +374,8 @@ class UserConfig:
             "memory_context_token_budget": self.memory_context_token_budget,
             "memory_decay_half_life_days": self.memory_decay_half_life_days,
             "memory_decay_floor": self.memory_decay_floor,
+            "fast_chat_memory_enabled": self.fast_chat_memory_enabled,
+            "fast_chat_memory_token_budget": self.fast_chat_memory_token_budget,
             "session_retention_days": self.session_retention_days,
             "session_max_sessions": self.session_max_sessions,
             "calendar_enabled": self.calendar_enabled,
@@ -485,6 +504,8 @@ class UserConfig:
             memory_context_token_budget=_as_int(d.get("memory_context_token_budget"), 1500),
             memory_decay_half_life_days=_as_float(d.get("memory_decay_half_life_days"), 45.0),
             memory_decay_floor=_as_float(d.get("memory_decay_floor"), 0.1),
+            fast_chat_memory_enabled=bool(d.get("fast_chat_memory_enabled", True)),
+            fast_chat_memory_token_budget=_as_int(d.get("fast_chat_memory_token_budget"), 400),
             session_retention_days=_as_int(d.get("session_retention_days"), 180),
             session_max_sessions=_as_int(d.get("session_max_sessions"), 200),
             calendar_enabled=bool(d.get("calendar_enabled", True)),

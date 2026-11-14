@@ -648,6 +648,9 @@ async def start_task_message(conn: WsConnection, msg, req_id, previous_start):
             # inside sanctioned roots — the session
             # attachments dir plus these granted roots.
             workspace_roots=workspace_roots,
+            # S7: the run's resolved config layers drive the
+            # memory briefing (toggle + sub-budget + backend).
+            user_config=task_user_config,
         )
     else:
         # One central builder (PRD Q3) — task start, approval
@@ -772,7 +775,9 @@ async def start_task_message(conn: WsConnection, msg, req_id, previous_start):
                 _ctx["prompt"], fallback_instance, _ctx["history"],
                 request_id=_ctx["req_id"], session_id=_ctx["session_id"],
                 task_id=failed_task_id, attachments=_ctx.get("attachments"),
-                workspace_roots=_ctx.get("workspace_roots"))
+                workspace_roots=_ctx.get("workspace_roots"),
+                # S7: same resolved config as the original run.
+                user_config=_ctx["user_config"])
         else:
             gen = _websocket.run_langgraph_task(
                 prompt=_ctx["prompt"],

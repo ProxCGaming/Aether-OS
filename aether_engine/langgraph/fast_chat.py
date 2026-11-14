@@ -289,6 +289,189 @@ async def _record_message_point(
         logger.debug("Fast-chat rewind manifest recording failed", exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# S7: fast-chat memory briefing (master-build plan §4 S7, R9).
+#
+# Fast chat is the default conversational surface and the only
+# voice surface (voice/pipeline.py's talker adapts this runner),
+# and it was the one surface that never saw long-term memory: the
+# prompt carried the persona, the session history and C3's
+# one-line calendar itinerary — no KG facts, no episodes, no
+# profile, no lessons, while graph tasks got all of them. This
+# briefing closes that gap under the house briefing contract (the
+# calendar_briefing() pattern): capped, empty-when-absent, and it
+# NEVER breaks or blocks the turn.
+#
+# Composition — one system message, three blocks sharing ONE
+# sub-budget (UserConfig.fast_chat_memory_token_budget, default
+# 400 tokens at the house 4 chars/token estimate), in priority
+# order:
+#   1. the profile digest — a compact "who this user is" rendered
+#      from the S6 profile view's structured data (facade
+#      user_profile()): top stated facts about the user, the
+#      people's names, top preferences; hard-capped at
+#      _PROFILE_DIGEST_MAX_CHARS, inferred items labelled
+#      "(inferred)" exactly as the profile briefing labels them;
+#   2. the S5 assembler's scored recall for THIS message (KG
+#      facts + past episodes through the facade, hybrid
+#      candidates per S6) — the sub-budget remainder is passed
+#      INTO assemble_memory_context as its budget_tokens, so
+#      there is still exactly one scoring path and one budget
+#      discipline, never a second ranker;
+#   3. lessons (learned_briefing) filling whatever budget the
+#      first two blocks leave, when the remainder is worth a
+#      lessons block at all.
+# The header states plainly that this is long-term memory and
+# that the live conversation wins a conflict — the same honesty
+# the supervisor's memory framing carries.
+#
+# Failure contract: memory is additive, never a new failure mode
+# for chat. The toggle off, an unavailable backend, an empty
+# memory, or ANY exception in assembly returns "" and the caller
+# appends nothing — the messages are then exactly the pre-S7
+# composition. Assembly adds no LLM calls and no network calls
+# beyond the query embedding the S6 hybrid leg already makes
+# (which degrades to substring-only when embeddings are down);
+# its cost is logged at debug so the voice turn budget can be
+# audited against it.
+# ---------------------------------------------------------------------------
+
+_MEMORY_SECTION_HEADER = (
+    "What Aether remembers (long-term memory — it can be incomplete "
+    "or out of date; if it conflicts with what the user says in this "
+    "conversation, believe the user):"
+)
+
+# The digest's share of the section: ~100 tokens at the house
+# estimate. Identity context is small by nature — a few stated
+# facts, the people's names, the top preferences.
+_PROFILE_DIGEST_MAX_CHARS = 400
+
+# Below this remainder a lessons block would be its header plus a
+# truncation marker, which teaches the model nothing.
+_LESSONS_MIN_TOKENS = 40
+
+
+def _profile_digest(profile: dict[str, Any] | None) -> str:
+    """The compact profile digest from the S6 view's data.
+
+    Consumes the dict facade.user_profile() returns (the profile
+    is re-derived from the stored facts on every call — there is
+    nothing here to keep in sync). Stated facts lead (the view's
+    own trust order), inferred items keep their "(inferred)"
+    label, and the result is hard-capped at
+    _PROFILE_DIGEST_MAX_CHARS, cut at a line boundary — except a
+    single over-long first line, which is truncated rather than
+    dropped: identity context with one cut fact beats none.
+    """
+    if not profile:
+        return ""
+
+    def _shown(items: list[dict], limit: int) -> str:
+        parts = []
+        for item in items[:limit]:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            label = " (inferred)" if item.get("provenance") == "inferred" else ""
+            parts.append(f"{text}{label}")
+        return "; ".join(parts)
+
+    lines: list[str] = []
+    user_line = _shown(profile.get("user") or [], 3)
+    if user_line:
+        lines.append(f"About the user: {user_line}")
+    people = profile.get("people") or {}
+    if people:
+        lines.append("People in the user's life: " + ", ".join(people))
+    pref_line = _shown(profile.get("preferences") or [], 2)
+    if pref_line:
+        lines.append(f"Preferences: {pref_line}")
+
+    digest = ""
+    for line in lines:
+        candidate = line if not digest else f"{digest}\n{line}"
+        if len(candidate) <= _PROFILE_DIGEST_MAX_CHARS:
+            digest = candidate
+            continue
+        if not digest:
+            digest = line[: _PROFILE_DIGEST_MAX_CHARS - 1].rstrip() + "…"
+        break
+    return digest
+
+
+async def fast_chat_memory_briefing(
+    prompt: str,
+    user_config=None,
+) -> str:
+    """The per-turn memory section for fast chat's prompt, or "".
+
+    ``user_config`` is the run's resolved config when the caller
+    has one (the websocket task path); voice and other callers
+    pass nothing and the saved config is loaded, mirroring
+    fast_chat_itinerary_line(). Never raises — see the S7 block
+    comment above for the full contract.
+    """
+    started = time.perf_counter()
+    try:
+        config = user_config
+        if config is None:
+            from aether_engine.config import load_config
+
+            config = load_config()
+        if not getattr(config, "fast_chat_memory_enabled", True):
+            return ""
+        budget = int(getattr(config, "fast_chat_memory_token_budget", 400) or 0)
+        if budget <= 0:
+            return ""
+
+        from aether_engine.memory.context_assembler import (
+            assemble_memory_context,
+            estimate_tokens,
+        )
+        from aether_engine.memory.facade import backend_or_none
+
+        backend = backend_or_none(config, context="fast-chat memory briefing")
+        if backend is None:
+            return ""
+
+        digest = _profile_digest(backend.user_profile())
+        # Budget accounting in per-part ceilings — each part's
+        # estimate includes its join newline, the assembler's own
+        # convention — so when the parts' ceilings sum inside the
+        # budget, the joined section's estimate is inside it too.
+        used = estimate_tokens(_MEMORY_SECTION_HEADER + "\n")
+        if digest:
+            used += estimate_tokens(digest + "\n")
+        assembled = await assemble_memory_context(
+            backend, prompt, config=config,
+            budget_tokens=max(0, budget - used))
+        used += assembled["estimated_tokens"]
+
+        blocks = [block for block in (digest, assembled["text"]) if block]
+        remaining = budget - used
+        if remaining >= _LESSONS_MIN_TOKENS:
+            from aether_engine.memory.learned import learned_briefing
+
+            lessons = learned_briefing(max_chars=remaining * 4)
+            if lessons and estimate_tokens(lessons + "\n") <= remaining:
+                blocks.append(lessons)
+        if not blocks:
+            return ""
+        section = "\n".join([_MEMORY_SECTION_HEADER, *blocks])
+        logger.debug(
+            "Fast-chat memory briefing: %d scored items, digest=%s, "
+            "assembled in %.1f ms (est %d/%d tokens)",
+            len(assembled["items"]), bool(digest),
+            (time.perf_counter() - started) * 1000,
+            estimate_tokens(section), budget)
+        return section
+    except Exception:
+        # Memory is additive; it must never break a chat turn.
+        logger.debug("Fast-chat memory briefing unavailable", exc_info=True)
+        return ""
+
+
 async def run_fast_chat(
     prompt: str,
     provider: BaseProvider,
@@ -299,6 +482,7 @@ async def run_fast_chat(
     task_id: str | None = None,
     attachments: list[Any] | None = None,
     workspace_roots: list[str] | None = None,
+    user_config=None,
 ) -> AsyncGenerator[Event, None]:
     """Stream a direct chat reply for *prompt*, mirroring the graph
     runner's event contract (see module docstring)."""
@@ -339,6 +523,17 @@ async def run_fast_chat(
         _itinerary_line = ""
     if _itinerary_line:
         messages.append({"role": "system", "content": _itinerary_line})
+
+    # S7 (14 Nov 2026): the memory briefing — profile digest +
+    # assembler-scored facts/episodes for this message + lessons,
+    # under one small sub-budget (see the S7 block above). It
+    # rides beside the itinerary under the same contract:
+    # best-effort, empty = absent, never breaks the turn — so
+    # text chat and voice (whose talker calls this runner) stop
+    # being memory-blind. fast_chat_memory_briefing never raises.
+    _memory_briefing = await fast_chat_memory_briefing(prompt, user_config)
+    if _memory_briefing:
+        messages.append({"role": "system", "content": _memory_briefing})
 
     start_time = time.time()
 
