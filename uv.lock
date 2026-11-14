@@ -86,7 +86,7 @@ requires-dist = [
     { name = "playwright", specifier = "==1.64.1" },
     { name = "publicsuffix2", specifier = "==2.20191221" },
     { name = "pydantic", specifier = "==2.14.1" },
-    { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=306" },
+    { name = "pywin32", marker = "sys_platform == 'win32'", specifier = "==312" },
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "silero-vad", marker = "extra == 'voice'", specifier = "==6.2.3" },
     { name = "trafilatura", specifier = "==2.3.1" },

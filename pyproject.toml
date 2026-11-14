@@ -38,7 +38,7 @@ dependencies = [
     # aether_engine/langgraph/executor.py imports aiosqlite.
     "aiosqlite==0.22.1",
     # Windows-only: no Linux/macOS wheels exist; uv skips it elsewhere.
-    "pywin32>=306; sys_platform == 'win32'",
+    "pywin32==312; sys_platform == 'win32'",
     "pydantic==2.14.1",
     "langgraph-supervisor==0.0.31",
     "trafilatura==2.3.1",
