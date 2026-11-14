@@ -198,6 +198,23 @@ class EventType(str, Enum):
     USAGE_LEDGER_QUERY_REQUEST = "USAGE_LEDGER_QUERY_REQUEST"
     USAGE_LEDGER_QUERY_RESPONSE = "USAGE_LEDGER_QUERY_RESPONSE"
     TASK_COST_UPDATE = "TASK_COST_UPDATE"
+    # Master build S3: Task Ledger (Mission Control) read model.
+    # TASK_LEDGER_QUERY_REQUEST payload: {"task_id": str,
+    # "session_id": str | None (thread hint for the checkpoint leg)};
+    # TASK_LEDGER_QUERY_RESPONSE payload: the joined per-task summary
+    # {"task_id", "found": bool, "session_id", "prompt", "state",
+    # "outcome", "delegations", "tool_calls", "tests", "approvals",
+    # "files_touched", "models", "costs", "errors", "transitions",
+    # "blackboard_briefing", "coverage"} — "found" is False (with
+    # empty sections) for a task no writer knows, never fabricated.
+    # TASK_LEDGER_LIST_REQUEST payload: {"limit": int | None};
+    # TASK_LEDGER_LIST_RESPONSE payload: {"tasks": [ {task_id,
+    # session_id, prompt, summary, state, timestamp, sources,
+    # cost_usd} ], "count": int}.
+    TASK_LEDGER_QUERY_REQUEST = "TASK_LEDGER_QUERY_REQUEST"
+    TASK_LEDGER_QUERY_RESPONSE = "TASK_LEDGER_QUERY_RESPONSE"
+    TASK_LEDGER_LIST_REQUEST = "TASK_LEDGER_LIST_REQUEST"
+    TASK_LEDGER_LIST_RESPONSE = "TASK_LEDGER_LIST_RESPONSE"
     # Epic 8, E8-A8.1b: context breakdown + daily budget alerting.
     # CONTEXT_BREAKDOWN_REQUEST payload: {"session_id": str, "task_id": str | None, "model": str | None}.
     # CONTEXT_BREAKDOWN_RESPONSE payload: {"model": str, "context_limit": int, "total_tokens": int,

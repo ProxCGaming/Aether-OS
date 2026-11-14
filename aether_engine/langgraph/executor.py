@@ -88,6 +88,7 @@ from aether_engine.providers.base import (
     TimeoutError,
 )
 from aether_engine.rewind import manifest as rewind_manifest
+from aether_engine.task_ledger import record_executor_event
 from aether_engine.tools.registry import ToolRegistry
 
 logger = logging.getLogger("aether_engine.langgraph.executor")
@@ -156,6 +157,7 @@ __all__ = [
     "merge_segment_items",
     "message_dicts",
     "multimodal_user_content",
+    "record_executor_event",
     "resolve_summariser_provider",
     "resume_langgraph_task",
     "rewind_manifest",
@@ -257,6 +259,15 @@ async def run_langgraph_task(
     validate_transition(state_enum, TaskState.RUNNING)
     state_enum = TaskState.RUNNING
 
+    # S3 (master build): the Task Ledger's live tap records every
+    # event this path hands its caller (see the emit_event funnel and
+    # the terminal yields below; the resume path taps the same way).
+    record_executor_event(task_id, Event(
+        type=EventType.TASK_CREATED,
+        request_id=request_id,
+        payload={"task_id": task_id, "prompt": prompt, "state": state_enum.value,
+                 "session_id": session_id},
+    ))
     yield Event(
         type=EventType.TASK_CREATED,
         request_id=request_id,
@@ -522,6 +533,9 @@ async def run_langgraph_task(
 
         def emit_event(ev: Event) -> Event:
             record_thought(ev)
+            # S3: every funnelled event also lands in the Task
+            # Ledger's bounded live tap (observational, never raises).
+            record_executor_event(task_id, ev)
             return ev
 
         # N-34: bounded — the bus drops (and logs) when this fills,
@@ -633,6 +647,12 @@ async def run_langgraph_task(
                     if node_name == "__interrupt__":
                         intr_val = state_update[0].value
                         if isinstance(intr_val, dict) and intr_val.get("type") == "approval_request":
+                            record_executor_event(task_id, Event(
+                                type=EventType.TOOL_APPROVAL_REQUEST,
+                                request_id=request_id,
+                                payload={"tool_name": intr_val.get("tool_name"),
+                                         "task_id": task_id},
+                            ))
                             yield Event(
                                 type=EventType.TOOL_APPROVAL_REQUEST,
                                 request_id=request_id,
@@ -838,6 +858,14 @@ async def run_langgraph_task(
                 # kill-engine -> restart -> resume flow can pick the thread
                 # back up via its approval_key. Never TASK_FAILED/COMPLETED.
                 elapsed_ms = round((time.time() - start_time) * 1000, 2)
+                record_executor_event(task_id, Event(
+                    type=EventType.TASK_INTERRUPTED,
+                    request_id=request_id,
+                    payload={"task_id": task_id,
+                             "state": TaskState.PENDING_APPROVAL.value,
+                             "latency_ms": elapsed_ms,
+                             "session_id": session_id},
+                ))
                 yield Event(
                     type=EventType.TASK_INTERRUPTED,
                     request_id=request_id,
@@ -945,6 +973,14 @@ async def run_langgraph_task(
                 except Exception as art_err:  # noqa: BLE001 — summary artifact store is best-effort and must not fail the completed task
                     logger.warning(f"Failed to record summary artifact: {art_err}")
 
+                record_executor_event(task_id, Event(
+                    type=EventType.TASK_COMPLETED,
+                    request_id=request_id,
+                    payload={"task_id": task_id,
+                             "state": TaskState.SUCCEEDED.value,
+                             "latency_ms": elapsed_ms,
+                             "session_id": session_id},
+                ))
                 yield Event(
                     type=EventType.TASK_COMPLETED,
                     request_id=request_id,
@@ -961,6 +997,14 @@ async def run_langgraph_task(
             logger.exception("LangGraph task failed")
             elapsed_ms = round((time.time() - start_time) * 1000, 2) if 'start_time' in locals() else 0.0
             logger.exception(f"Graph execution failed for task {task_id}")
+            record_executor_event(task_id, Event(
+                type=EventType.TASK_FAILED,
+                request_id=request_id,
+                payload={"task_id": task_id,
+                         "state": TaskState.FAILED.value,
+                         "error": str(e),
+                         "latency_ms": elapsed_ms},
+            ))
             yield Event(
                 type=EventType.TASK_FAILED,
                 request_id=request_id,
@@ -1326,7 +1370,11 @@ async def resume_langgraph_task(
                     resume_value["edited_args"] = edited_args
                 if isinstance(browser_envelope, dict):
                     resume_value["browser_envelope"] = browser_envelope
+            # S3: the resume path's translated events tap into the
+            # Task Ledger here, at the segment funnel — the mirror of
+            # the run path's emit_event tap.
             async for _ev in _consume_segment(Command(resume=resume_value)):
+                record_executor_event(task_id, _ev)
                 yield _ev
 
             # Apply the drained steers as fresh segments on the same
@@ -1360,6 +1408,7 @@ async def resume_langgraph_task(
                     )
                 async for _ev in _consume_segment(
                         steer_state_update(steers_to_apply)):
+                    record_executor_event(task_id, _ev)
                     yield _ev
             if pending_steers:
                 # Paused again before the steers could be applied:
@@ -1374,6 +1423,14 @@ async def resume_langgraph_task(
                 # Phase 10.1 A2: same as the run path -- a re-interrupt on
                 # resume is still a pause for approval, not a failure.
                 elapsed_ms = round((time.time() - start_time) * 1000, 2)
+                record_executor_event(task_id, Event(
+                    type=EventType.TASK_INTERRUPTED,
+                    request_id=thread_id,
+                    payload={"task_id": task_id,
+                             "state": TaskState.PENDING_APPROVAL.value,
+                             "latency_ms": elapsed_ms,
+                             "session_id": state_obj.values.get("session_id")},
+                ))
                 yield Event(
                     type=EventType.TASK_INTERRUPTED,
                     request_id=thread_id,
@@ -1455,6 +1512,14 @@ async def resume_langgraph_task(
                 except Exception as art_err:  # noqa: BLE001 — summary artifact store is best-effort and must not fail the completed task
                     logger.warning(f"Failed to record summary artifact on resume: {art_err}")
 
+                record_executor_event(task_id, Event(
+                    type=EventType.TASK_COMPLETED,
+                    request_id=thread_id,
+                    payload={"task_id": task_id,
+                             "state": TaskState.SUCCEEDED.value,
+                             "latency_ms": elapsed_ms,
+                             "session_id": state_obj.values.get("session_id")},
+                ))
                 yield Event(
                     type=EventType.TASK_COMPLETED,
                     request_id=thread_id,
@@ -1470,6 +1535,14 @@ async def resume_langgraph_task(
             logger.exception("LangGraph task failed during resume")
             elapsed_ms = round((time.time() - start_time) * 1000, 2)
             retriable = _is_retriable_error(e)
+            record_executor_event(task_id, Event(
+                type=EventType.TASK_FAILED,
+                request_id=thread_id,
+                payload={"task_id": task_id,
+                         "state": TaskState.FAILED.value,
+                         "error": str(e),
+                         "latency_ms": elapsed_ms},
+            ))
             yield Event(
                 type=EventType.TASK_FAILED,
                 request_id=thread_id,

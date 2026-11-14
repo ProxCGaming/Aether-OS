@@ -134,6 +134,8 @@ DISPATCHED_TYPES = (
     "SKILL_TOGGLE_REQUEST",
     "SLASH_COMMAND_LIST_REQUEST",
     "START_TASK",
+    "TASK_LEDGER_LIST_REQUEST",
+    "TASK_LEDGER_QUERY_REQUEST",
     "TASK_REWIND_REQUEST",
     "TASK_REWIND_UNDO_REQUEST",
     "TOOL_APPROVAL_GRANTED",
@@ -264,12 +266,14 @@ class TestDispatchTable:
         assert d[EventType.PROJECT_CONFIG_GET_REQUEST] is \
             d[EventType.PROJECT_CONFIG_UPDATE_REQUEST]
 
-    def test_handlers_are_coroutine_functions_124_distinct(self):
+    def test_handlers_are_coroutine_functions_126_distinct(self):
         handlers = list(websocket._DISPATCH.values())
         assert all(inspect.iscoroutinefunction(h) for h in handlers)
         # 123 at the Wave 5 split; +1 for the calendar layer's
-        # CALENDAR_LIST_REQUEST handler (14 Nov 2026).
-        assert len(set(handlers)) == 124
+        # CALENDAR_LIST_REQUEST handler (14 Nov 2026); +2 for the
+        # Task Ledger read model's query + list handlers
+        # (master build S3, 14 Nov 2026).
+        assert len(set(handlers)) == 126
 
 
 class _FakeSocket:

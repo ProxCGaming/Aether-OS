@@ -1749,6 +1749,46 @@ async def _handle_usage_ledger_query_request(conn: WsConnection, msg: Event) -> 
         payload=result,
     ).to_json())
 
+async def _handle_task_ledger_query_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Master build S3: the Task Ledger read model (aether_engine/
+    # task_ledger.py) joins the five existing writers for one task;
+    # an unknown task answers found=False, never fabricated data.
+    from aether_engine.task_ledger import task_summary
+
+    task_id = msg.payload.get("task_id")
+    if not task_id:
+        result = {"task_id": None, "found": False,
+                  "error": "task_id is required"}
+    else:
+        result = await task_summary(
+            str(task_id),
+            session_id=msg.payload.get("session_id"),
+            user_config=engine_state.user_config,
+        )
+    await conn.ws.send_text(Event(
+        type=EventType.TASK_LEDGER_QUERY_RESPONSE,
+        request_id=req_id,
+        payload=result,
+    ).to_json())
+
+async def _handle_task_ledger_list_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Master build S3: recent tasks from the ledger's episodic + live
+    # tap spine (see task_ledger.recent_tasks for the honest scope).
+    from aether_engine.task_ledger import recent_tasks
+
+    tasks = await asyncio.to_thread(
+        recent_tasks,
+        msg.payload.get("limit") or 20,
+        user_config=engine_state.user_config,
+    )
+    await conn.ws.send_text(Event(
+        type=EventType.TASK_LEDGER_LIST_RESPONSE,
+        request_id=req_id,
+        payload={"tasks": tasks, "count": len(tasks)},
+    ).to_json())
+
 async def _handle_context_breakdown_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
     # Epic 8, E8-A8.1b: segmented context breakdown for header and settings
@@ -4096,6 +4136,8 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.ARTIFACT_GET_REQUEST: _handle_artifact_get_request,
     EventType.DEV_SERVER_DETECT_REQUEST: _handle_dev_server_detect_request,
     EventType.USAGE_LEDGER_QUERY_REQUEST: _handle_usage_ledger_query_request,
+    EventType.TASK_LEDGER_QUERY_REQUEST: _handle_task_ledger_query_request,
+    EventType.TASK_LEDGER_LIST_REQUEST: _handle_task_ledger_list_request,
     EventType.CONTEXT_BREAKDOWN_REQUEST: _handle_context_breakdown_request,
     EventType.DAILY_BUDGET_SET_REQUEST: _handle_daily_budget_set_request,
     EventType.BROWSER_TASK_PAUSE_REQUEST: _handle_browser_task_pause_request,
