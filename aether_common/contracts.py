@@ -455,6 +455,14 @@ class EventType(str, Enum):
     # set message.
     MEMORY_BACKENDS_REQUEST = "MEMORY_BACKENDS_REQUEST"
     MEMORY_BACKENDS_RESPONSE = "MEMORY_BACKENDS_RESPONSE"
+    # Master build S10: the Settings "This machine" card —
+    # the hardware probe + capability matrix report
+    # (machine_capability.py — the MACHINE, not the LLM
+    # benchmarks in the capability/ package). The payload
+    # may carry {"force": true} to bypass the report cache
+    # (the card's Re-probe action).
+    MACHINE_CAPABILITY_REQUEST = "MACHINE_CAPABILITY_REQUEST"
+    MACHINE_CAPABILITY_RESPONSE = "MACHINE_CAPABILITY_RESPONSE"
 
     # Epic 10: backup / restore, diagnostics export, update check.
     BACKUP_CREATE_REQUEST = "BACKUP_CREATE_REQUEST"

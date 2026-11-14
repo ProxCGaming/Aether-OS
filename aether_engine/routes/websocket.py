@@ -3367,6 +3367,26 @@ async def _handle_memory_backends_request(conn: WsConnection, msg: Event) -> Non
         payload=report,
     ).to_json())
 
+async def _handle_machine_capability_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Master build S10: the Settings "This machine" card —
+    # the hardware probe + capability matrix
+    # (machine_capability.py). Unlike the S9 report this one
+    # runs subprocesses and network connects (strictly
+    # timeout-bounded, a few seconds worst case), so it runs
+    # on a worker thread, never on the message loop; the
+    # probe itself is on-demand only, cached behind a TTL,
+    # and never runs on the startup path.
+    from aether_engine.machine_capability import machine_capability_report
+
+    report = await asyncio.to_thread(
+        machine_capability_report, bool(msg.payload.get("force")))
+    await conn.ws.send_text(Event(
+        type=EventType.MACHINE_CAPABILITY_RESPONSE,
+        request_id=req_id,
+        payload=report,
+    ).to_json())
+
 async def _handle_backup_create_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
     # Epic 10, E10-03: snapshot ~/.aether into a zip under
@@ -4253,6 +4273,7 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.MEMORY_FACT_UPDATE_REQUEST: _handle_memory_fact_update_request,
     EventType.MEMORY_EXPORT_REQUEST: _handle_memory_export_request,
     EventType.MEMORY_BACKENDS_REQUEST: _handle_memory_backends_request,
+    EventType.MACHINE_CAPABILITY_REQUEST: _handle_machine_capability_request,
     EventType.BACKUP_CREATE_REQUEST: _handle_backup_create_request,
     EventType.BACKUP_RESTORE_REQUEST: _handle_backup_restore_request,
     EventType.DIAGNOSTICS_EXPORT_REQUEST: _handle_diagnostics_export_request,

@@ -1,5 +1,6 @@
 import React from 'react';
 import LogsPanel from './LogsPanel';
+import MachineCapabilityCard from './MachineCapabilityCard';
 
 // Wave 5 (Annex C row 7): the Capabilities tab, extracted from
 // SettingsPanel.jsx — the diagnostics run's state, no-answer
@@ -74,6 +75,13 @@ export default function CapabilitiesPanel({ capabilityStatus, capabilityHistory,
           )}
         </div>
       </div>
+
+      {/* Master build S10: the "This machine" card — the
+          hardware probe + capability matrix. Self-contained
+          (its own socket request); the diagnostics card above
+          is about MODEL capability checks, a different thing,
+          and the card says so. */}
+      <MachineCapabilityCard />
 
       {/* Unified logging (5 Nov 2026): the Logs & Diagnostics
           cards (status / viewer / controls) live below the

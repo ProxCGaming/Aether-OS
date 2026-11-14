@@ -6,6 +6,29 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import CapabilitiesPanel from '../CapabilitiesPanel';
+import { useAetherSocket } from '../../../contexts/SocketContext';
+
+// S10: the panel now embeds MachineCapabilityCard, which owns
+// its own socket request (the MemoryManagement pattern) — the
+// socket context is mocked here as it is in that panel's tests.
+jest.mock('../../../contexts/SocketContext', () => ({
+  useAetherSocket: jest.fn()
+}));
+
+beforeEach(() => {
+  useAetherSocket.mockReturnValue({
+    wsRef: {
+      current: {
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
+        readyState: 1
+      }
+    },
+    sendMessage: jest.fn(),
+    isConnected: true,
+    reconnectCount: 0
+  });
+});
 
 function baseProps(overrides = {}) {
   return {

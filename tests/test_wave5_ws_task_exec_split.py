@@ -68,6 +68,7 @@ DISPATCHED_TYPES = (
     "LOCAL_MODEL_DOWNLOAD_CANCEL",
     "LOCAL_MODEL_DOWNLOAD_START",
     "LOCAL_MODEL_LIST_REQUEST",
+    "MACHINE_CAPABILITY_REQUEST",
     "MCP_PROMPT_LIST_REQUEST",
     "MCP_PROMPT_RUN_REQUEST",
     "MCP_RESOURCE_LIST_REQUEST",
@@ -267,7 +268,7 @@ class TestDispatchTable:
         assert d[EventType.PROJECT_CONFIG_GET_REQUEST] is \
             d[EventType.PROJECT_CONFIG_UPDATE_REQUEST]
 
-    def test_handlers_are_coroutine_functions_127_distinct(self):
+    def test_handlers_are_coroutine_functions_128_distinct(self):
         handlers = list(websocket._DISPATCH.values())
         assert all(inspect.iscoroutinefunction(h) for h in handlers)
         # 123 at the Wave 5 split; +1 for the calendar layer's
@@ -275,8 +276,9 @@ class TestDispatchTable:
         # Task Ledger read model's query + list handlers
         # (master build S3, 14 Nov 2026); +1 for the memory
         # backend picker's status handler (master build S9,
-        # 14 Nov 2026).
-        assert len(set(handlers)) == 127
+        # 14 Nov 2026); +1 for the machine capability report
+        # handler (master build S10, 14 Nov 2026).
+        assert len(set(handlers)) == 128
 
 
 class _FakeSocket:
