@@ -1,6 +1,6 @@
 """Itinerary briefing (C3): supervisor section + fast-chat line."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -62,6 +62,23 @@ def test_fast_chat_line(store):
     assert line.startswith("Calendar — upcoming:")
     assert "Lunch with Maa (today 1:00 PM)" in line
     assert "PTM (Sat 14 Nov" in line
+
+
+def test_itinerary_renders_in_reference_now_timezone(store):
+    """Regression (master build, 14 Nov 2026): the baseline gate's
+    one failure — this file's fast-chat line expected IST rendering
+    on a UTC machine. Events store epochs and ``start_dt`` renders
+    in the machine's zone, while the briefing's day windows already
+    use the reference ``now``'s zone; the render now follows the
+    reference zone too, so the same event reads 1:00 PM against an
+    IST ``now`` and 7:30 AM against a UTC ``now``, on any machine."""
+    _add(store, "Lunch with Maa", NOW.replace(hour=13))
+    utc_now = NOW.astimezone(UTC)
+    line = itinerary.fast_chat_itinerary_line(
+        store, now=utc_now, config=UserConfig())
+    assert "Lunch with Maa (today 7:30 AM)" in line
+    text = itinerary.calendar_briefing(store, now=NOW, config=UserConfig())
+    assert "Lunch with Maa — 1:00 PM" in text
 
 
 def test_supervisor_prompt_carries_itinerary(store, monkeypatch):

@@ -20,14 +20,30 @@ logger = logging.getLogger("aether_engine.calendar.itinerary")
 BRIEFING_MAX_CHARS = 1500
 
 
-def _fmt_time(event: CalendarEvent) -> str:
-    return event.start_dt.strftime("%I:%M %p").lstrip("0")
+def _in_tz(dt: datetime, tz) -> datetime:
+    """Render ``dt`` in the reference timezone ``tz``.
+
+    Events store epochs; ``start_dt`` renders them in the machine's
+    local zone. A briefing is generated relative to a reference
+    ``now``, so its times and day labels must be read in ``now``'s
+    zone — the same zone ``_day_bounds`` already uses for the day
+    windows. When the two zones differ (a caller injecting a ``now``
+    in another zone; a test doing the same), system-zone rendering
+    would label an event with the wrong day and clock time. In
+    production ``now`` defaults to the local zone, so this changes
+    nothing there.
+    """
+    return dt.astimezone(tz) if tz is not None else dt
 
 
-def _fmt_day_event(event: CalendarEvent) -> str:
-    text = f"{event.title} — {_fmt_time(event)}"
+def _fmt_time(event: CalendarEvent, tz=None) -> str:
+    return _in_tz(event.start_dt, tz).strftime("%I:%M %p").lstrip("0")
+
+
+def _fmt_day_event(event: CalendarEvent, tz=None) -> str:
+    text = f"{event.title} — {_fmt_time(event, tz)}"
     if event.end_dt is not None:
-        text += "–" + event.end_dt.strftime("%I:%M %p").lstrip("0")
+        text += "–" + _in_tz(event.end_dt, tz).strftime("%I:%M %p").lstrip("0")
     return text
 
 
@@ -36,7 +52,9 @@ def _day_bounds(day: datetime) -> tuple[float, float]:
     return start.timestamp(), (start + timedelta(days=1)).timestamp()
 
 
-def _conflict_lines(events: list[CalendarEvent], store: EventStore) -> list[str]:
+def _conflict_lines(
+    events: list[CalendarEvent], store: EventStore, tz=None
+) -> list[str]:
     lines: list[str] = []
     seen: set[tuple[str, str]] = set()
     for event in events:
@@ -49,7 +67,7 @@ def _conflict_lines(events: list[CalendarEvent], store: EventStore) -> list[str]
             seen.add(pair)
             lines.append(
                 f'Clash: "{event.title}" overlaps "{other.title}" '
-                f"({_fmt_day_event(event)} / {_fmt_day_event(other)})."
+                f"({_fmt_day_event(event, tz)} / {_fmt_day_event(other, tz)})."
             )
     return lines
 
@@ -96,19 +114,21 @@ def calendar_briefing(
         if today:
             lines.append(
                 f"- Today ({now.strftime('%a %d %b')}): "
-                + "; ".join(_fmt_day_event(e) for e in today)
+                + "; ".join(_fmt_day_event(e, now.tzinfo) for e in today)
             )
         if tomorrow:
             day_label = (now + timedelta(days=1)).strftime("%a %d %b")
             lines.append(
                 f"- Tomorrow ({day_label}): "
-                + "; ".join(_fmt_day_event(e) for e in tomorrow)
+                + "; ".join(_fmt_day_event(e, now.tzinfo) for e in tomorrow)
             )
         for event in week:
             lines.append(
-                f"- {event.start_dt.strftime('%a %d %b')}: {_fmt_day_event(event)}"
+                f"- {_in_tz(event.start_dt, now.tzinfo).strftime('%a %d %b')}: "
+                f"{_fmt_day_event(event, now.tzinfo)}"
             )
-        lines.extend(_conflict_lines(today + tomorrow + week, store))
+        lines.extend(
+            _conflict_lines(today + tomorrow + week, store, now.tzinfo))
         text = "\n".join(lines)
         return text[:BRIEFING_MAX_CHARS]
     except Exception:
@@ -138,10 +158,12 @@ def fast_chat_itinerary_line(
             return ""
         parts = []
         for event in upcoming:
+            start_local = _in_tz(event.start_dt, now.tzinfo)
             when = (
-                "today " + _fmt_time(event)
-                if event.start_dt.date() == now.date()
-                else event.start_dt.strftime("%a %d %b ") + _fmt_time(event)
+                "today " + _fmt_time(event, now.tzinfo)
+                if start_local.date() == now.date()
+                else start_local.strftime("%a %d %b ")
+                + _fmt_time(event, now.tzinfo)
             )
             parts.append(f"{event.title} ({when})")
         return "Calendar — upcoming: " + "; ".join(parts) + "."
