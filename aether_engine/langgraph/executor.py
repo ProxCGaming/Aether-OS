@@ -356,6 +356,12 @@ async def run_langgraph_task(
             "write_tool_used": False,
             "plan_mode": bool(kwargs.get("plan_mode")),
             "delegation_log": [],
+            # S4: the per-turn delegation counter starts at 0 for
+            # every new run — the cap is per user turn. The approval
+            # resume path never re-seeds state, so a delegation that
+            # pauses for approval keeps its count across the pause
+            # and is never counted twice.
+            "delegation_count": 0,
             "task_id": task_id,
             "session_id": session_id,
             "message_id": kwargs.get("message_id"),

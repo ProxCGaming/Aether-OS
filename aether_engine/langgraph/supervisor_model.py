@@ -58,7 +58,11 @@ from aether_engine.langgraph.nodes.supervisor import (
     _supervisor_system_prompt,
     repo_map_context,
 )
-from aether_engine.langgraph.state import blackboard_briefing, message_dicts
+from aether_engine.langgraph.state import (
+    blackboard_briefing,
+    delegation_briefing,
+    message_dicts,
+)
 from aether_engine.providers.base import ProviderError
 from aether_engine.tools.policy import resolve_policy_by_name
 
@@ -146,29 +150,143 @@ def _specialist_end_result() -> ChatResult:
     return ChatResult(generations=[ChatGeneration(message=message)])
 
 
-def _chain_end_reason(specialist_texts: list, delegation_cap: int) -> str | None:
+def _chain_end_reason(specialist_texts: list) -> str | None:
     """Why a post-specialist delegation must not run, or None to allow it.
 
     The no-progress breaker for the consultation the E1-F01 fix
-    introduced. It judges only what this seam can actually see: the
-    specialist answers in the message record. (The supervisor's own
-    handoff messages are consumed by the supervisor framework and
-    never re-enter the model's view, and the spawn-policy hook's
-    delegation count restarts with them — neither can bound the loop
-    from here.) Two shapes mean the chain has stopped progressing:
+    introduced. It judges only progress, in the one unit this seam
+    can actually see: the specialist answers in the message record.
+    The chain has stopped progressing when the last two specialist
+    answers are verbatim identical — the chain has converged on an
+    answer; delegating again can only re-ask for what is already the
+    latest input.
 
-    - the last two specialist answers are verbatim identical — the
-      chain has converged on an answer; delegating again can only
-      re-ask for what is already the latest input;
-    - the turn has already produced ``delegation_cap`` specialist
-      answers — the same budget the spawn policy puts on delegations,
-      counted in the units this seam can observe.
+    The delegation *cap* is deliberately NOT judged here any more
+    (master build S4): this seam cannot see the authoritative
+    delegation counter (the supervisor's handoff messages are
+    consumed by the framework and never re-enter the model's view,
+    so a count derived here was never the real count — audit G10).
+    The cap is enforced against ``state["delegation_count"]`` at the
+    post-model hook, the single place a delegation actually happens:
+    ``_spawn_policy_denial`` for the denial surface, and
+    ``_cap_end_update`` for the post-specialist surface this breaker
+    used to produce (latest answer standing, no denial text).
     """
     if len(specialist_texts) >= 2 and specialist_texts[-1] == specialist_texts[-2]:
         return "the last two specialist answers are identical"
-    if len(specialist_texts) >= delegation_cap:
-        return f"the turn already has {delegation_cap} specialist answers"
     return None
+
+
+def _delegation_count(state: dict) -> int:
+    """The authoritative delegation count for this turn (S4).
+
+    ``state["delegation_count"]`` is the counter of record, written
+    by the post-model hook at the moment each handoff executes.
+    States that predate the counter (a checkpoint resumed across the
+    S4 boundary, or a hand-built state in a direct policy call) fall
+    back to the delegation log — the checkpointed record of the same
+    events, counting only real delegations (not END decisions, not
+    memory steps, not denied attempts). A state with neither falls
+    back to handoff calls in its messages, excluding the pending
+    (last) handoff message, which has not executed yet.
+    """
+    count = (state or {}).get("delegation_count")
+    if isinstance(count, int) and count >= 0:
+        return count
+    log_count = 0
+    seen_log = False
+    for entry in (state or {}).get("delegation_log") or []:
+        if not isinstance(entry, dict):
+            continue
+        seen_log = True
+        decision = entry.get("decision") or {}
+        target = decision.get("next") if isinstance(decision, dict) else None
+        if not target or str(target).upper() == "END" or str(target) == "supervisor":
+            continue
+        if isinstance(decision, dict) and decision.get("denied"):
+            continue
+        log_count += 1
+    if seen_log:
+        return log_count
+    dict_messages = message_dicts((state or {}).get("messages", []))
+    last_user = max(
+        (i for i, m in enumerate(dict_messages) if m.get("role") == "user"),
+        default=-1,
+    )
+    handoffs = 0
+    for msg in dict_messages[last_user + 1:]:
+        for tc in msg.get("tool_calls") or []:
+            if (tc.get("function", {}).get("name") or "").startswith(HANDOFF_PREFIX):
+                handoffs += 1
+    # The pending handoff (the one being judged) is in the messages
+    # but has not executed; the executed count excludes it.
+    return max(0, handoffs - 1)
+
+
+def _delegation_cap(config: dict | None = None) -> int:
+    """The configured per-turn delegation cap (default 8)."""
+    if config is None:
+        try:
+            config = get_config()
+        except Exception:  # noqa: BLE001 — outside a graph run there is no config; the default cap applies.
+            config = {}
+    user_config = ((config or {}).get("configurable", {}) or {}).get("user_config")
+    cap = getattr(user_config, "supervisor_delegation_cap", 8)
+    return cap if isinstance(cap, int) and cap >= 0 else 8
+
+
+def _specialist_answers(state: dict) -> list:
+    """Specialist text answers since the last user message.
+
+    The same derivation the model adapter applies to its message
+    view: assistant messages with content and no tool calls, after
+    the last user message.
+    """
+    dict_messages = message_dicts((state or {}).get("messages", []))
+    last_user = max(
+        (i for i, m in enumerate(dict_messages) if m.get("role") == "user"),
+        default=-1,
+    )
+    return [
+        msg["content"]
+        for msg in dict_messages[last_user + 1:]
+        if msg.get("role") == "assistant" and msg.get("content") and not msg.get("tool_calls")
+    ]
+
+
+def _cap_end_update(state: dict) -> dict:
+    """End a capped post-specialist chain with the latest answer standing.
+
+    This is the state update equivalent of the model adapter's
+    ``_specialist_end_result`` (master build S4): the pending handoff
+    message is replaced in place (same message id) by an empty
+    end-guard message, so the supervisor's turn ends, the specialist's
+    answer already in the history stands as the result, and the
+    delegation log records the same END decision the model-produced
+    end records — no denial entry, no denial text. Used only when a
+    specialist answer exists to stand on; a cap hit with no answer
+    yet (e.g. cap 0 on the first hop) is the spawn policy's denial
+    surface instead.
+    """
+    messages = state.get("messages", [])
+    last = messages[-1] if messages else None
+    decision = {
+        "next": "END",
+        "reason": "Specialist has responded; task complete.",
+        "briefing": "",
+    }
+    stripped = AIMessage(
+        content="",
+        id=getattr(last, "id", None),
+        additional_kwargs={"aether_decision": decision, "aether_end_guard": True},
+    )
+    return {
+        "messages": [stripped],
+        "delegation_log": [
+            {"agent": "supervisor", "timestamp": time.time(), "decision": decision}
+        ],
+        "active_specialist": None,
+    }
 
 
 def _tool_name(tool: Any) -> str | None:
@@ -298,13 +416,10 @@ class AetherSupervisorModel(BaseChatModel):
             if msg.get("role") == "assistant" and msg.get("content") and not msg.get("tool_calls")
         ]
         specialist_responded = bool(specialist_texts)
-        # The turn's delegation budget, counted in specialist answers
-        # (the loop breaker's yardstick — see _chain_end_reason). The
-        # value mirrors the spawn policy's cap; the hook enforces that
-        # cap where it can see handoffs, this seam cannot (below).
-        _cap = getattr(configurable.get("user_config"),
-                       "supervisor_delegation_cap", 8)
-        delegation_cap = _cap if isinstance(_cap, int) and _cap >= 0 else 8
+        # The turn's delegation cap is NOT judged at this seam (S4):
+        # the model cannot see the authoritative delegation counter,
+        # so the cap is enforced at the post-model hook against
+        # state["delegation_count"] — see _chain_end_reason.
 
         forced_agent = configurable.get("forced_agent")
         if forced_agent and forced_agent in available:
@@ -364,7 +479,7 @@ class AetherSupervisorModel(BaseChatModel):
         if transfer_calls:
             target = transfer_calls[0].name[len(HANDOFF_PREFIX):]
             if specialist_responded:
-                chain_end = _chain_end_reason(specialist_texts, delegation_cap)
+                chain_end = _chain_end_reason(specialist_texts)
                 if chain_end is not None:
                     logger.warning(
                         "Post-specialist delegation to %s refused: %s; "
@@ -390,8 +505,7 @@ class AetherSupervisorModel(BaseChatModel):
 
         if specialist_responded:
             return self._post_specialist_result(
-                content, available, dropped_calls,
-                specialist_texts, delegation_cap)
+                content, available, dropped_calls, specialist_texts)
 
         decision = _decision_from_text(content or "", available)
         if not isinstance(decision, dict):
@@ -409,7 +523,7 @@ class AetherSupervisorModel(BaseChatModel):
 
     @staticmethod
     def _post_specialist_result(content, available, dropped_calls,
-                                specialist_texts, delegation_cap) -> ChatResult:
+                                specialist_texts) -> ChatResult:
         """Interpret the supervisor's reply after a specialist responded.
 
         The supervisor has the specialist's output in view, so its
@@ -444,7 +558,7 @@ class AetherSupervisorModel(BaseChatModel):
                 decision["dropped_tool_calls"] = dropped_calls
             next_node = decision.get("next", "END")
             if next_node != "END" and next_node in available:
-                chain_end = _chain_end_reason(specialist_texts, delegation_cap)
+                chain_end = _chain_end_reason(specialist_texts)
                 if chain_end is not None:
                     logger.warning(
                         "Post-specialist delegation to %s refused: %s; "
@@ -487,6 +601,13 @@ def supervisor_routing_prompt(state: dict) -> list:
     board = blackboard_briefing(state)
     if board:
         text += f"\n\nShared team blackboard (written by all agents in this task):\n{board}"
+    # S4: delegation read-back — the supervisor routes with its own
+    # delegation history in view (audit G7: delegation_log was
+    # write-only for the model). Same briefing contract as the
+    # blackboard: bounded, empty when nothing has been delegated.
+    delegations = delegation_briefing(state)
+    if delegations:
+        text += f"\n\nDelegation history for this task:\n{delegations}"
     summary_section = context_summary_section(state)
     if summary_section:
         text += f"\n\n{summary_section}"
@@ -544,20 +665,16 @@ def _spawn_policy_denial(state: dict, target: str, config: dict | None = None) -
         cap = getattr(user_config, "supervisor_delegation_cap", 8)
         if allowlist is not None and target not in allowlist:
             reason = f"'{target}' is not in the supervisor spawn allow-list ({', '.join(allowlist) or 'empty'})"
-        elif isinstance(cap, int) and cap >= 0:
-            dict_messages = message_dicts(state.get("messages", []))
-            last_user = max(
-                (i for i, m in enumerate(dict_messages) if m.get("role") == "user"),
-                default=-1,
-            )
-            delegations = 0
-            for msg in dict_messages[last_user + 1:]:
-                for tc in msg.get("tool_calls") or []:
-                    if (tc.get("function", {}).get("name") or "").startswith(HANDOFF_PREFIX):
-                        delegations += 1
-            # The count includes the pending handoff (the last message).
-            if delegations > cap:
-                reason = f"the delegation cap for one turn ({cap}) is reached"
+        # S4: the cap is judged against the authoritative delegation
+        # counter (see _delegation_count), not a count derived from
+        # message tool calls — handoff messages are consumed by the
+        # framework and never re-enter the model's view, so the
+        # derived count restarted with them (audit G10). The counter
+        # holds delegations that have actually executed; the pending
+        # handoff would be the next one, so it is denied when the
+        # counter already stands at the cap.
+        elif isinstance(cap, int) and cap >= 0 and _delegation_count(state) >= cap:
+            reason = f"the delegation cap for one turn ({cap}) is reached"
     if reason is None:
         return None
     messages = state.get("messages", [])
@@ -617,6 +734,23 @@ def supervisor_post_model_hook(state: dict) -> dict:
 
     if handoffs:
         target = handoffs[0]["name"][len(HANDOFF_PREFIX):]
+        # S4 cap surface, judged BEFORE the spawn-policy denial: when
+        # the authoritative counter already stands at the cap AND a
+        # specialist answer is in view, the chain ends with that
+        # answer standing — the surface _chain_end_reason's cap branch
+        # produced at the model seam before S4 moved cap enforcement
+        # to the counter. (The breaker at the model seam runs first
+        # there too: a capped post-specialist handoff never reached
+        # this hook's denial as a denial.) A cap hit with no answer
+        # standing — cap 0 on the first hop — falls through to the
+        # denial below, exactly as before.
+        if _specialist_answers(state) and _delegation_count(state) >= _delegation_cap():
+            logger.warning(
+                "Post-specialist delegation to %s refused: the turn "
+                "already has %s delegations (the cap); ending with "
+                "the latest answer standing.",
+                target, _delegation_count(state))
+            return _cap_end_update(state)
         denial = _spawn_policy_denial(state, target)
         if denial is not None:
             return denial
@@ -657,6 +791,13 @@ def supervisor_post_model_hook(state: dict) -> dict:
             "delegation_log": [
                 {"agent": "supervisor", "timestamp": time.time(), "decision": decision}
             ],
+            # S4: THE single increment of the authoritative counter.
+            # This return is the one place a handoff that has passed
+            # the spawn policy becomes a delegation that will execute
+            # (the framework routes to the specialist from here), so
+            # it is the one place the counter moves. Denials returned
+            # above, END decisions and memory steps never reach it.
+            "delegation_count": _delegation_count(state) + 1,
             "context_briefing": decision.get("briefing", "") or "",
             "plan": f"Goal: {reason}",
             "active_specialist": target,

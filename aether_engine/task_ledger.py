@@ -475,6 +475,10 @@ def _state_slice(values: dict[str, Any]) -> dict[str, Any]:
         "phase": values.get("current_phase"),
         "plan": values.get("plan"),
         "active_specialist": values.get("active_specialist"),
+        # S4 (additive): the authoritative per-turn delegation
+        # counter, when the checkpoint carries one (checkpoints from
+        # before S4 have no such field and report None).
+        "delegation_count": values.get("delegation_count"),
         "delegations": delegations,
         "tool_calls": _tool_calls_from_messages(values.get("messages") or []),
         "files_touched": files,
@@ -712,6 +716,9 @@ async def task_summary(
             "recorded_at": (episode or {}).get("timestamp"),
         },
         "delegations": delegations,
+        # S4 (additive): the checkpointed delegation counter for the
+        # task's turn, or None when no checkpoint carries one.
+        "delegation_count": (checkpoint or {}).get("delegation_count"),
         "tool_calls": tool_calls,
         "tests": [
             {"tool_name": c.get("tool_name"), "status": c.get("status"),

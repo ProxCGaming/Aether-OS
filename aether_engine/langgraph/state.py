@@ -395,6 +395,55 @@ def blackboard_briefing(state: dict, *, agent: str | None = None,
     return text[:max_chars]
 
 
+# ── Delegation read-back (master build S4) ───────────────────────────
+# delegation_briefing is the delegation_log counterpart of
+# blackboard_briefing: the log is the record, this is the bounded
+# summary of it that the supervisor's routing prompt reads. Entries
+# whose decision is not a delegation are excluded, exactly as the
+# Task Ledger (S3) excludes them: the finish decision (next="END")
+# and memory steps (next="supervisor") grow the log too, but neither
+# delegated anything. Denied delegations ARE delegations the
+# supervisor attempted, and are marked as denied.
+DELEGATION_BRIEFING_MAX_CHARS = 1200
+DELEGATION_BRIEFING_MAX_ENTRIES = 8
+DELEGATION_BRIEFING_REASON_MAX_CHARS = 80
+
+
+def delegation_briefing(state: dict, *, max_chars: int = DELEGATION_BRIEFING_MAX_CHARS) -> str:
+    """Render the delegation log as a bounded prompt section.
+
+    Empty when nothing has been delegated yet — the routing prompt
+    is unchanged in that case, exactly as with the blackboard
+    briefing. Hard-capped at ``max_chars`` regardless of how long
+    the log grows; only the most recent entries are rendered.
+    """
+    entries: list[tuple[str, dict]] = []
+    for entry in (state or {}).get("delegation_log") or []:
+        if not isinstance(entry, dict):
+            continue
+        decision = entry.get("decision") or {}
+        if not isinstance(decision, dict):
+            continue
+        target = decision.get("next")
+        if not target or str(target).upper() == "END" or str(target) == "supervisor":
+            continue
+        entries.append((str(target), decision))
+    if not entries:
+        return ""
+    recent = entries[-DELEGATION_BRIEFING_MAX_ENTRIES:]
+    rendered: list[str] = []
+    for target, decision in recent:
+        item = target
+        if decision.get("denied"):
+            item += " (denied)"
+        reason = str(decision.get("reason") or "").strip()
+        if reason:
+            item += f" — {reason[:DELEGATION_BRIEFING_REASON_MAX_CHARS]}"
+        rendered.append(item)
+    header = f"Delegations (latest {len(recent)} of {len(entries)}): " if len(entries) > len(recent) else "Delegations: "
+    return (header + "; ".join(rendered))[:max_chars]
+
+
 class AetherState(TypedDict):
     original_prompt: str
 
@@ -432,6 +481,23 @@ class AetherState(TypedDict):
     # Structured log entries for delegation decisions (echo-collapsed
     # like messages: the supervisor agent returns the full log).
     delegation_log: Annotated[list[dict[str, Any]], collapse_subgraph_echo]
+
+    # Authoritative delegation counter (master build S4): how many
+    # delegations have actually been handed off in this user turn.
+    # Incremented in exactly one place —
+    # supervisor_model.supervisor_post_model_hook, at the moment a
+    # handoff passes the spawn policy and is about to execute — so
+    # denied attempts, END decisions and memory steps never count.
+    # The spawn policy and the post-specialist chain breaker both
+    # read this counter instead of deriving counts from messages
+    # (handoff messages are consumed by the supervisor framework and
+    # never re-enter the model's view, and specialist answers are a
+    # different unit — audit G10). Seeded to 0 by the executor at the
+    # start of every run (the cap is per user turn) and checkpointed
+    # with the state, so it survives the approval pause, steering
+    # segments and engine restarts within the turn; a resume never
+    # re-seeds it, so an approved delegation is counted exactly once.
+    delegation_count: int
 
     # Shared agent blackboard (Epic 1, E1-15): every agent reads and
     # writes it through state updates; see merge_blackboard for the
