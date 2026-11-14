@@ -2695,6 +2695,34 @@ async def _handle_config_update_request(conn: WsConnection, msg: Event) -> None:
             payload={"success": False, "error": handed_off_error},
         ).to_json())
         return
+    # Master build S9: the availability half of the
+    # memory_backend contract. The NAME is already validated
+    # strictly by the F05 handed-off validator above (E4-F12:
+    # unknown names are refused there, and the cleaned value
+    # is applied from handed_off_values below). What F05
+    # cannot know is whether the named backend can run HERE:
+    # the Settings picker lists all four backends INCLUDING
+    # unavailable ones, so a valid-but-unavailable selection
+    # is refused here with the probe's own reason — the same
+    # words the picker shows — and NOTHING is applied or
+    # saved. Saving it would leave a config whose every
+    # memory call degrades loudly (facade.backend_or_none)
+    # until the user fixed the file by hand. Probing never
+    # constructs the backend (memory/backend_status.py).
+    if "memory_backend" in config_data:
+        from aether_engine.memory.backend_status import (
+            validate_memory_backend_switch,
+        )
+
+        backend_error = validate_memory_backend_switch(
+            config_data["memory_backend"])
+        if backend_error is not None:
+            await conn.ws.send_text(Event(
+                type=EventType.CONFIG_UPDATE_RESPONSE,
+                request_id=req_id,
+                payload={"success": False, "error": backend_error},
+            ).to_json())
+            return
     # E6-F07: snapshot before mutating — if the save
     # below fails, live state rolls back to exactly this
     # and the failure is answered, never swallowed. (The
@@ -2756,6 +2784,9 @@ async def _handle_config_update_request(conn: WsConnection, msg: Event) -> None:
             },
         ).to_json())
         return
+    if "memory_backend" in config_data:
+        engine_state.audit_logger.log_event("MEMORY_BACKEND_SET", {
+            "backend": engine_state.user_config.memory_backend})
     await conn.ws.send_text(Event(
         type=EventType.CONFIG_UPDATE_RESPONSE,
         request_id=req_id,
@@ -3320,6 +3351,21 @@ async def _handle_memory_export_request(conn: WsConnection, msg: Event) -> None:
     # the export is synchronous and scales with memory
     # size, so it runs on a worker thread (RUX-B-08).
     conn.spawn_background(send_memory_export_result(conn, req_id))
+
+async def _handle_memory_backends_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Master build S9: the Settings picker's status report —
+    # all four backends with probed states and reasons
+    # (memory/backend_status.py; probing never constructs a
+    # backend, so this is cheap and answered inline).
+    from aether_engine.memory.backend_status import memory_backend_statuses
+
+    report = memory_backend_statuses(engine_state.user_config)
+    await conn.ws.send_text(Event(
+        type=EventType.MEMORY_BACKENDS_RESPONSE,
+        request_id=req_id,
+        payload=report,
+    ).to_json())
 
 async def _handle_backup_create_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
@@ -4206,6 +4252,7 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.MEMORY_GRAPH_CLEAR_REQUEST: _handle_memory_graph_clear_request,
     EventType.MEMORY_FACT_UPDATE_REQUEST: _handle_memory_fact_update_request,
     EventType.MEMORY_EXPORT_REQUEST: _handle_memory_export_request,
+    EventType.MEMORY_BACKENDS_REQUEST: _handle_memory_backends_request,
     EventType.BACKUP_CREATE_REQUEST: _handle_backup_create_request,
     EventType.BACKUP_RESTORE_REQUEST: _handle_backup_restore_request,
     EventType.DIAGNOSTICS_EXPORT_REQUEST: _handle_diagnostics_export_request,

@@ -416,7 +416,20 @@ def _update(ws, config):
     raise AssertionError("no CONFIG_UPDATE_RESPONSE received")
 
 
-def test_config_update_applies_memory_backend(settings_env):
+def test_config_update_applies_memory_backend(settings_env, monkeypatch):
+    # S9 (14 Nov 2026): CONFIG_UPDATE now also refuses backends that
+    # cannot run in this install (langmem's package is not installed
+    # here) — the owner's picker decision: unavailable backends are
+    # visible but not selectable, server-side too (refusal pinned by
+    # test_s9_memory_backend_picker.py). This E4-F12 test is about
+    # the write being applied + persisted, so it stubs the
+    # availability probe to "available", as on a machine with the
+    # package installed.
+    from aether_engine.memory import backend_status
+
+    monkeypatch.setattr(
+        backend_status, "validate_memory_backend_switch",
+        lambda name, *, env=None: None)
     with _Socket() as ws:
         ev = _update(ws, {"memory_backend": "langmem"})
     # Pre-fix: success=True but the reply (and everything else) still
@@ -442,7 +455,13 @@ def test_config_update_memory_backend_takes_effect_on_the_facade(settings_env):
     assert backend is not None and backend.name == "native"
 
 
-def test_config_update_normalises_memory_backend(settings_env):
+def test_config_update_normalises_memory_backend(settings_env, monkeypatch):
+    # S9 availability stub — see test_config_update_applies_memory_backend.
+    from aether_engine.memory import backend_status
+
+    monkeypatch.setattr(
+        backend_status, "validate_memory_backend_switch",
+        lambda name, *, env=None: None)
     with _Socket() as ws:
         ev = _update(ws, {"memory_backend": " LangMem "})
     assert ev.payload["success"] is True

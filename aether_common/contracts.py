@@ -448,6 +448,13 @@ class EventType(str, Enum):
     MEMORY_FACT_UPDATE_RESPONSE = "MEMORY_FACT_UPDATE_RESPONSE"
     MEMORY_EXPORT_REQUEST = "MEMORY_EXPORT_REQUEST"
     MEMORY_EXPORT_RESPONSE = "MEMORY_EXPORT_RESPONSE"
+    # Master build S9: the Settings memory-backend picker —
+    # the status report for ALL four backends (states + reasons,
+    # memory/backend_status.py). Selecting a backend rides the
+    # existing CONFIG_UPDATE_REQUEST; there is no separate
+    # set message.
+    MEMORY_BACKENDS_REQUEST = "MEMORY_BACKENDS_REQUEST"
+    MEMORY_BACKENDS_RESPONSE = "MEMORY_BACKENDS_RESPONSE"
 
     # Epic 10: backup / restore, diagnostics export, update check.
     BACKUP_CREATE_REQUEST = "BACKUP_CREATE_REQUEST"

@@ -580,4 +580,160 @@ describe('MemoryManagement Component', () => {
     });
     expect(screen.queryByTestId('embedder-unavailable-note')).not.toBeInTheDocument();
   });
+
+  // S9: the memory-backend picker. The engine's report lists
+  // ALL four backends (owner decision — never installed-only);
+  // these fixtures mirror memory/backend_status.py's shape.
+  describe('memory backend picker (S9)', () => {
+    const BACKENDS = [
+      {
+        id: 'native', name: 'Native (built-in)',
+        description: "Aether's own memory in local storage.",
+        needs: 'Nothing — built into Aether.',
+        state: 'available', available: true, reason: null,
+        warnings: [], detail: 'The default backend, fully tested with Aether.',
+        current: true
+      },
+      {
+        id: 'mem0', name: 'Mem0',
+        description: 'The Mem0 service library as the memory store.',
+        needs: 'The mem0ai package, plus an LLM provider key.',
+        state: 'not_installed', available: false,
+        reason: "The mem0ai package is not installed in the engine's environment (pip install mem0ai).",
+        warnings: ['Experimental adapter: Aether\'s tests exercise it with stand-in doubles.'],
+        detail: null, current: false
+      },
+      {
+        id: 'langmem', name: 'LangMem',
+        description: 'A LangMem-style adapter with a local JSON store.',
+        needs: 'The langmem package.',
+        state: 'available', available: true, reason: null,
+        warnings: ['Search is word-matching (substring), not semantic.'],
+        detail: null, current: false
+      },
+      {
+        id: 'graphiti', name: 'Graphiti',
+        description: 'Graphiti temporal knowledge graph in Neo4j.',
+        needs: 'The graphiti-core package, plus a running Neo4j database.',
+        state: 'not_configured', available: false,
+        reason: "The graphiti-core package is installed, but NEO4J_PASSWORD is not set in the engine's environment.",
+        warnings: ['Facts and episodes cannot be edited, deleted or cleared from Aether on this backend.'],
+        detail: null, current: false
+      }
+    ];
+
+    const renderWithBackends = (backends = BACKENDS) => {
+      render(<MemoryManagement />);
+      act(() => {
+        simulateMessage({
+          type: 'MEMORY_BACKENDS_RESPONSE',
+          payload: { current: 'native', backends }
+        });
+      });
+    };
+
+    test('requests the backend report on mount and renders all four backends', async () => {
+      renderWithBackends();
+      expect(mockSendMessage).toHaveBeenCalledWith('MEMORY_BACKENDS_REQUEST', expect.any(Object));
+      for (const id of ['native', 'mem0', 'langmem', 'graphiti']) {
+        expect(await screen.findByTestId(`memory-backend-${id}`)).toBeInTheDocument();
+      }
+      // Status chips: Current / Available / Not installed / Not configured.
+      expect(screen.getByTestId('memory-backend-native')).toHaveTextContent('Current');
+      expect(screen.getByTestId('memory-backend-langmem')).toHaveTextContent('Available');
+      expect(screen.getByTestId('memory-backend-mem0')).toHaveTextContent('Not installed');
+      expect(screen.getByTestId('memory-backend-graphiti')).toHaveTextContent('Not configured');
+    });
+
+    test('unavailable backends show their reason and cannot be selected', async () => {
+      renderWithBackends();
+      expect(await screen.findByText(/mem0ai package is not installed/)).toBeInTheDocument();
+      expect(screen.getByText(/NEO4J_PASSWORD is not set/)).toBeInTheDocument();
+      expect(screen.getByTestId('memory-backend-switch-mem0')).toBeDisabled();
+      expect(screen.getByTestId('memory-backend-switch-graphiti')).toBeDisabled();
+      expect(screen.getByTestId('memory-backend-switch-native')).toBeDisabled();
+      expect(screen.getByTestId('memory-backend-switch-langmem')).not.toBeDisabled();
+      // Warnings are visible on the entries that carry them.
+      expect(screen.getByText(/stand-in doubles/)).toBeInTheDocument();
+      expect(screen.getByText(/word-matching \(substring\), not semantic/)).toBeInTheDocument();
+    });
+
+    test('switch asks first: confirmation names the no-migration consequence and only confirm sends', async () => {
+      renderWithBackends();
+      fireEvent.click(await screen.findByTestId('memory-backend-switch-langmem'));
+
+      const confirmPanel = await screen.findByTestId('memory-backend-confirm');
+      expect(confirmPanel).toHaveTextContent('Switch memory backend to LangMem?');
+      expect(confirmPanel).toHaveTextContent(/switches stores/);
+      expect(confirmPanel).toHaveTextContent(/not/);
+      expect(confirmPanel).toHaveTextContent(/moved or copied/);
+      expect(confirmPanel).toHaveTextContent(/switch back at any time/);
+      expect(confirmPanel).toHaveTextContent(/embeddings do not transfer/i);
+      expect(confirmPanel).toHaveTextContent(/next memory operation/);
+      // Nothing sent yet — opening the confirmation is not a switch.
+      expect(mockSendMessage.mock.calls.filter(c => c[0] === 'CONFIG_UPDATE_REQUEST')).toHaveLength(0);
+
+      // Cancel sends nothing either and closes the panel.
+      fireEvent.click(screen.getByTestId('memory-backend-cancel-switch'));
+      expect(screen.queryByTestId('memory-backend-confirm')).not.toBeInTheDocument();
+      expect(mockSendMessage.mock.calls.filter(c => c[0] === 'CONFIG_UPDATE_REQUEST')).toHaveLength(0);
+
+      // Re-open and confirm: exactly one config update, for langmem.
+      fireEvent.click(screen.getByTestId('memory-backend-switch-langmem'));
+      fireEvent.click(await screen.findByTestId('memory-backend-confirm-switch'));
+      const updates = mockSendMessage.mock.calls.filter(c => c[0] === 'CONFIG_UPDATE_REQUEST');
+      expect(updates).toHaveLength(1);
+      expect(updates[0][1].payload).toEqual({ config: { memory_backend: 'langmem' } });
+    });
+
+    test('a server refusal is surfaced verbatim and the panel closes', async () => {
+      renderWithBackends();
+      fireEvent.click(await screen.findByTestId('memory-backend-switch-langmem'));
+      fireEvent.click(await screen.findByTestId('memory-backend-confirm-switch'));
+
+      const refusal = "The langmem package is not installed in the engine's environment (pip install langmem).";
+      act(() => {
+        simulateMessage({
+          type: 'CONFIG_UPDATE_RESPONSE',
+          payload: { success: false, error: refusal }
+        });
+      });
+
+      expect(await screen.findByTestId('memory-backend-error')).toHaveTextContent(refusal);
+      expect(screen.queryByTestId('memory-backend-confirm')).not.toBeInTheDocument();
+      // The Current marker did not move.
+      expect(screen.getByTestId('memory-backend-native')).toHaveTextContent('Current');
+    });
+
+    test('a successful switch re-reads the report and the Current marker moves', async () => {
+      renderWithBackends();
+      fireEvent.click(await screen.findByTestId('memory-backend-switch-langmem'));
+      fireEvent.click(await screen.findByTestId('memory-backend-confirm-switch'));
+
+      const requestsBefore = mockSendMessage.mock.calls.filter(c => c[0] === 'MEMORY_BACKENDS_REQUEST').length;
+      act(() => {
+        simulateMessage({
+          type: 'CONFIG_UPDATE_RESPONSE',
+          payload: { success: true, config: { memory_backend: 'langmem' } }
+        });
+      });
+
+      expect(await screen.findByTestId('memory-backend-notice')).toHaveTextContent(/switched to LangMem/);
+      // The panel re-requested the report…
+      expect(mockSendMessage.mock.calls.filter(c => c[0] === 'MEMORY_BACKENDS_REQUEST').length)
+        .toBeGreaterThan(requestsBefore);
+      // …and when the new report arrives, Current has moved.
+      const moved = BACKENDS.map(b => ({ ...b, current: b.id === 'langmem' }));
+      act(() => {
+        simulateMessage({
+          type: 'MEMORY_BACKENDS_RESPONSE',
+          payload: { current: 'langmem', backends: moved }
+        });
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId('memory-backend-langmem')).toHaveTextContent('Current');
+      });
+      expect(screen.getByTestId('memory-backend-native')).toHaveTextContent('Available');
+    });
+  });
 });

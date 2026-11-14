@@ -28,12 +28,70 @@ export default function MemoryManagement() {
   // them instead of rendering them as emptiness or silent success.
   const [memoryError, setMemoryError] = useState(null);
   const [editError, setEditError] = useState(null);
+  // S9: the memory-backend picker. ALL four backends are listed
+  // (owner decision, 14 Nov 2026 — never installed-only), each
+  // with the engine's probed state and reason; selection rides
+  // CONFIG_UPDATE_REQUEST and the engine refuses unavailable
+  // ones server-side with the same reason shown here.
+  const [backends, setBackends] = useState(null);
+  const [backendsLoad, setBackendsLoad] = useState('loading');
+  const [pendingBackend, setPendingBackend] = useState(null);
+  const [backendError, setBackendError] = useState(null);
+  const [backendNotice, setBackendNotice] = useState(null);
+  const pendingSwitchRef = React.useRef(null);
 
   // Debounce the fact search input into the query used for graph requests
   useEffect(() => {
     const timer = setTimeout(() => setSearchQuery(searchInput.trim()), 300);
     return () => clearTimeout(timer);
   }, [searchInput]);
+
+  // S9: fetch the backend status report on mount, and own the
+  // CONFIG_UPDATE_RESPONSE for a switch this panel started
+  // (pendingSwitchRef distinguishes it from other panels'
+  // config writes).
+  useEffect(() => {
+    sendMessage('MEMORY_BACKENDS_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+
+    const handleBackendMessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'MEMORY_BACKENDS_RESPONSE') {
+          setBackends(data.payload.backends || []);
+          setBackendsLoad('ready');
+        } else if (data.type === 'CONFIG_UPDATE_RESPONSE' && pendingSwitchRef.current) {
+          const target = pendingSwitchRef.current;
+          pendingSwitchRef.current = null;
+          setPendingBackend(null);
+          if (data.payload.success) {
+            setBackendError(null);
+            setBackendNotice(`Memory backend switched to ${target.name}. It takes effect on the next memory operation — no restart needed.`);
+            // Re-read the report so the Current marker moves,
+            // and refresh the lists: they now read from the
+            // new backend's store.
+            sendMessage('MEMORY_BACKENDS_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+            sendMessage('MEMORY_EPISODES_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+            sendMessage('MEMORY_GRAPH_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+          } else {
+            // The server's refusal, verbatim — it is the same
+            // reason the picker showed for that backend.
+            setBackendError(data.payload.error || 'The backend switch was refused.');
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    if (wsRef.current) {
+      wsRef.current.addEventListener('message', handleBackendMessage);
+    }
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.removeEventListener('message', handleBackendMessage);
+      }
+    };
+  }, [wsRef, sendMessage]);
 
   useEffect(() => {
     // Initial fetch when component mounts or memory tab changes
@@ -194,6 +252,28 @@ export default function MemoryManagement() {
     sendMessage('MEMORY_EXPORT_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
   };
 
+  // S9: opening the confirmation is all a Switch click does —
+  // nothing is sent until the user confirms there.
+  const handleSwitchRequest = (backend) => {
+    setBackendError(null);
+    setBackendNotice(null);
+    setPendingBackend(backend);
+  };
+
+  const handleSwitchCancel = () => {
+    setPendingBackend(null);
+  };
+
+  const handleSwitchConfirm = () => {
+    if (!pendingBackend) return;
+    pendingSwitchRef.current = pendingBackend;
+    sendMessage('CONFIG_UPDATE_REQUEST', {
+      schema_version: 1,
+      request_id: Date.now().toString(),
+      payload: { config: { memory_backend: pendingBackend.id } }
+    });
+  };
+
   const handleStartEdit = (fact) => {
     setEditingFactId(fact.fact_id);
     setEditText(fact.fact_text ?? fact.content ?? '');
@@ -212,7 +292,92 @@ export default function MemoryManagement() {
     <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Memory & Storage</h2>
       <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>Manage the internal knowledge graph and episodic memory.</p>
-      
+
+      {/* S9: memory-backend picker — all four backends with
+          their probed states; unavailable ones stay visible
+          with the reason and cannot be selected. */}
+      <div data-testid="memory-backend-picker" style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px', marginBottom: '24px' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, margin: '0 0 4px 0' }}>Memory backend</h3>
+        <p style={{ color: 'var(--text-secondary)', fontSize: '13px', margin: '0 0 16px 0', lineHeight: '1.5' }}>
+          Aether can keep its long-term memory in different stores. Every backend is listed — including ones that cannot run on this machine, with the reason why.
+        </p>
+        {backendError && (
+          <div data-testid="memory-backend-error" style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '12px' }}>{backendError}</div>
+        )}
+        {backendNotice && (
+          <div data-testid="memory-backend-notice" style={{ color: 'var(--success)', fontSize: '13px', marginBottom: '12px' }}>{backendNotice}</div>
+        )}
+        {backendsLoad !== 'ready' ? (
+          <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>Loading backends…</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {(backends || []).map((b) => {
+              const chipLabel = b.current ? 'Current' : b.state === 'available' ? 'Available' : b.state === 'not_installed' ? 'Not installed' : 'Not configured';
+              const chipColor = b.current ? 'var(--accent)' : b.available ? 'var(--success)' : 'var(--text-secondary)';
+              return (
+                <div key={b.id} data-testid={`memory-backend-${b.id}`} style={{ background: 'var(--bg-base)', border: `1px solid ${b.current ? 'rgba(var(--accent-rgb),0.5)' : 'var(--border-default)'}`, borderRadius: '12px', padding: '14px 16px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '6px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontSize: '14px', fontWeight: 500 }}>{b.name}</span>
+                      <span style={{ fontSize: '11px', background: 'var(--bg-hover)', padding: '2px 8px', borderRadius: '12px', color: chipColor }}>{chipLabel}</span>
+                    </div>
+                    <button
+                      data-testid={`memory-backend-switch-${b.id}`}
+                      disabled={b.current || !b.available}
+                      onClick={() => handleSwitchRequest(b)}
+                      style={{ background: b.current || !b.available ? 'var(--bg-hover)' : 'rgba(var(--accent-rgb),0.15)', border: '1px solid var(--border-default)', color: b.current || !b.available ? 'var(--text-secondary)' : 'var(--accent)', padding: '6px 14px', borderRadius: '8px', fontSize: '12px', fontWeight: 500, cursor: b.current || !b.available ? 'not-allowed' : 'pointer', flexShrink: 0 }}
+                    >
+                      {b.current ? 'Current backend' : b.available ? `Switch to ${b.name}` : 'Unavailable'}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>{b.description}</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>Needs: {b.needs}</div>
+                  {b.detail && (
+                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>{b.detail}</div>
+                  )}
+                  {(b.warnings || []).map((w, i) => (
+                    <div key={i} style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '4px', lineHeight: '1.5' }}>⚠ {w}</div>
+                  ))}
+                  {!b.available && b.reason && (
+                    <div style={{ fontSize: '12px', color: 'var(--danger)', marginTop: '4px', lineHeight: '1.5' }}>{b.reason}</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {pendingBackend && (
+          <div data-testid="memory-backend-confirm" style={{ background: 'rgba(var(--accent-rgb), 0.08)', border: '1px solid rgba(var(--accent-rgb), 0.35)', borderRadius: '12px', padding: '16px', marginTop: '16px' }}>
+            <div style={{ fontSize: '14px', fontWeight: 500, marginBottom: '8px' }}>Switch memory backend to {pendingBackend.name}?</div>
+            <ul style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.6', margin: '0 0 8px 0', paddingLeft: '20px' }}>
+              <li>Switching backends switches stores: your existing memories stay in {(backends || []).find((x) => x.current)?.name || 'the current backend'} and are <strong>not</strong> moved or copied.</li>
+              <li>Nothing is deleted — switch back at any time and those memories are there again, untouched.</li>
+              <li>Semantic embeddings do not transfer; the new backend builds its own from its own store.</li>
+              <li>The switch takes effect on the next memory operation — no restart is needed.</li>
+            </ul>
+            {(pendingBackend.warnings || []).map((w, i) => (
+              <div key={i} style={{ fontSize: '12px', color: 'var(--accent)', lineHeight: '1.5' }}>⚠ {w}</div>
+            ))}
+            <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+              <button
+                data-testid="memory-backend-confirm-switch"
+                onClick={handleSwitchConfirm}
+                style={{ background: 'rgba(var(--accent-rgb),0.35)', border: '1px solid rgba(var(--accent-rgb),0.5)', color: 'var(--text-primary)', padding: '6px 14px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer' }}
+              >
+                Switch backend
+              </button>
+              <button
+                data-testid="memory-backend-cancel-switch"
+                onClick={handleSwitchCancel}
+                style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', padding: '6px 14px', borderRadius: '8px', fontSize: '13px', cursor: 'pointer' }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
         <div style={{ display: 'flex', background: 'var(--bg-overlay)', padding: '4px', borderRadius: '12px', width: 'fit-content' }}>
             <button 

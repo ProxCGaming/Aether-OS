@@ -84,6 +84,7 @@ DISPATCHED_TYPES = (
     "MEDIA_METADATA_UPDATE_REQUEST",
     "MEDIA_SEARCH_REQUEST",
     "CALENDAR_LIST_REQUEST",
+    "MEMORY_BACKENDS_REQUEST",
     "MEMORY_ENTITY_DELETE_REQUEST",
     "MEMORY_EPISODES_CLEAR_REQUEST",
     "MEMORY_EPISODES_REQUEST",
@@ -266,14 +267,16 @@ class TestDispatchTable:
         assert d[EventType.PROJECT_CONFIG_GET_REQUEST] is \
             d[EventType.PROJECT_CONFIG_UPDATE_REQUEST]
 
-    def test_handlers_are_coroutine_functions_126_distinct(self):
+    def test_handlers_are_coroutine_functions_127_distinct(self):
         handlers = list(websocket._DISPATCH.values())
         assert all(inspect.iscoroutinefunction(h) for h in handlers)
         # 123 at the Wave 5 split; +1 for the calendar layer's
         # CALENDAR_LIST_REQUEST handler (14 Nov 2026); +2 for the
         # Task Ledger read model's query + list handlers
-        # (master build S3, 14 Nov 2026).
-        assert len(set(handlers)) == 126
+        # (master build S3, 14 Nov 2026); +1 for the memory
+        # backend picker's status handler (master build S9,
+        # 14 Nov 2026).
+        assert len(set(handlers)) == 127
 
 
 class _FakeSocket:
