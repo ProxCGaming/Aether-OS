@@ -153,6 +153,28 @@ async def run_specialist(
         keep = registry.read_only_names()
         tools = [t for t in tools if t.get("function", {}).get("name") in keep]
 
+    # S13: bounded sub-agent spawning — a specialist may spawn a
+    # bounded sub-agent for a focused sub-task (langgraph/subagents).
+    # Offered only; every bound is enforced at execution time in
+    # subagents.execute_spawn. Never offered inside a sub-agent run:
+    # depth (supervisor -> specialist -> sub-agent) is enforced by
+    # construction, the child's surface is built without this tool.
+    # Never offered in plan mode either: spawning is an execution
+    # act, and plan mode's contract is plan-only (the supervisor
+    # spawn policy takes the same stance). The system prompt is
+    # unchanged either way — the contract rides the tool
+    # description — so with sub-agents disabled the prompt is
+    # byte-identical to pre-S13.
+    if (not state.get("plan_mode")
+            and not config.get("configurable", {}).get("is_subagent_run")):
+        from aether_engine.langgraph.subagents import (
+            spawn_tool_definition,
+            subagent_settings,
+        )
+
+        if subagent_settings(_uc).enabled:
+            tools = [*tools, spawn_tool_definition()]
+
     plan_text = state.get("plan", "")
     plan_info = f"\nCurrent Plan & Context:\n{plan_text}\n" if plan_text and plan_text != "No plan currently." else ""
     # Skill Injection

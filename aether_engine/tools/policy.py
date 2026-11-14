@@ -19,6 +19,15 @@ KNOWN_NON_REGISTRY_TOOLS: dict[str, ToolRisk] = {
     # for all memory tools — see _memory_tool_gate; there is no
     # approval-pause seam inside the supervisor for its own tools.)
     "forget_memory": ToolRisk.DESTRUCTIVE,
+    # S13: the specialists' sub-agent spawn seam. The spawn itself
+    # performs no mutation — it is a delegation act whose child's
+    # own tool calls are each policy-gated in the child's graph —
+    # so it resolves READ_ONLY and routes straight to execution,
+    # where langgraph/subagents enforces the spawn bounds. A user
+    # may still set an explicit per-tool policy on the name: "Deny"
+    # is honoured at the seam, "Require Approval" pauses the spawn
+    # itself through the ordinary approval channel.
+    "spawn_subagent": ToolRisk.READ_ONLY,
 }
 
 _VERDICT_MAP = {"Always Allow": "allow", "Require Approval": "ask", "Deny": "deny"}

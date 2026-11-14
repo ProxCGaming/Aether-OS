@@ -108,4 +108,68 @@ describe('OrchestrationPanel', () => {
     expect(screen.getByTestId('orchestration-error')).toHaveTextContent(
       'agent_output_schemas: not an object');
   });
+
+  // S13: bounded sub-agent spawning controls — rendered from the
+  // applied config and persisted through the same onConfigUpdate
+  // path (CONFIG_UPDATE with strict engine-side validation).
+  const SUBAGENT_CONFIG = {
+    ...CONFIG,
+    subagents_enabled: true,
+    subagents_max_per_turn: 3,
+    subagent_timeout_s: 90,
+    subagent_token_budget: 15000,
+    subagent_cost_budget_usd: 0.5,
+  };
+
+  test('renders the applied sub-agent bounds', () => {
+    renderPanel(SUBAGENT_CONFIG);
+    expect(screen.getByTestId('subagents-enabled-toggle')).toBeChecked();
+    expect(screen.getByTestId('subagents-max-per-turn')).toHaveValue(3);
+    expect(screen.getByTestId('subagent-timeout-s')).toHaveValue(90);
+    expect(screen.getByTestId('subagent-token-budget')).toHaveValue(15000);
+    expect(screen.getByTestId('subagent-cost-budget')).toHaveValue(0.5);
+  });
+
+  test('a config without sub-agent fields renders the engine defaults', () => {
+    renderPanel();
+    expect(screen.getByTestId('subagents-enabled-toggle')).toBeChecked();
+    expect(screen.getByTestId('subagents-max-per-turn')).toHaveValue(4);
+    expect(screen.getByTestId('subagent-timeout-s')).toHaveValue(120);
+    expect(screen.getByTestId('subagent-token-budget')).toHaveValue(20000);
+    expect(screen.getByTestId('subagent-cost-budget')).toHaveValue(0);
+  });
+
+  test('the sub-agents toggle reports the boolean through onConfigUpdate', () => {
+    const { onConfigUpdate } = renderPanel(SUBAGENT_CONFIG);
+    fireEvent.click(screen.getByTestId('subagents-enabled-toggle'));
+    expect(onConfigUpdate).toHaveBeenCalledWith({ subagents_enabled: false });
+  });
+
+  test('sub-agent bounds report parsed values on blur', () => {
+    const { onConfigUpdate } = renderPanel(SUBAGENT_CONFIG);
+    const maxPerTurn = screen.getByTestId('subagents-max-per-turn');
+    fireEvent.change(maxPerTurn, { target: { value: '0' } });
+    fireEvent.blur(maxPerTurn);
+    expect(onConfigUpdate).toHaveBeenCalledWith({ subagents_max_per_turn: 0 });
+
+    const timeout = screen.getByTestId('subagent-timeout-s');
+    fireEvent.change(timeout, { target: { value: '45' } });
+    fireEvent.blur(timeout);
+    expect(onConfigUpdate).toHaveBeenCalledWith({ subagent_timeout_s: 45 });
+
+    const cost = screen.getByTestId('subagent-cost-budget');
+    fireEvent.change(cost, { target: { value: '1.25' } });
+    fireEvent.blur(cost);
+    expect(onConfigUpdate).toHaveBeenCalledWith({ subagent_cost_budget_usd: 1.25 });
+  });
+
+  test('an out-of-range sub-agent bound is refused locally and reports nothing', () => {
+    const { onConfigUpdate } = renderPanel(SUBAGENT_CONFIG);
+    const timeout = screen.getByTestId('subagent-timeout-s');
+    fireEvent.change(timeout, { target: { value: '0' } });
+    fireEvent.blur(timeout);
+    expect(screen.getByTestId('orchestration-error')).toHaveTextContent(
+      'Sub-agent timeout (seconds) must be a whole number between 1 and 3600.');
+    expect(onConfigUpdate).not.toHaveBeenCalled();
+  });
 });

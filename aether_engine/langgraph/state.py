@@ -499,6 +499,34 @@ class AetherState(TypedDict):
     # re-seeds it, so an approved delegation is counted exactly once.
     delegation_count: int
 
+    # Sub-agent spawns this user turn (master build S13): how many
+    # sub-agents specialists have actually started. A SEPARATE counter
+    # from delegation_count — that one bounds supervisor -> specialist
+    # handoffs, this one bounds specialist -> sub-agent spawns, and
+    # the two caps are configured separately. Incremented in exactly
+    # one place (langgraph/subagents.execute_spawn, in the state
+    # update a started spawn returns — denied spawns never count, and
+    # because the increment rides the node's committed update, an
+    # approval pause mid-spawn counts the spawn exactly once, when it
+    # completes). Seeded to 0 by the executor per run, checkpointed
+    # like delegation_count; pre-S13 checkpoints carry no value and
+    # readers treat absence as 0.
+    subagent_count: int
+
+    # Sub-agent stop marker (master build S13, child runs only): set
+    # by the child specialist node when a per-sub-agent budget stops
+    # the run before a model call — "token_budget", "cost_budget" or
+    # "deadline" — so the spawn seam can report WHY the child stopped
+    # instead of mistaking the stop message for a result. Parent runs
+    # never set it; it stays None there.
+    subagent_stop: str | None
+
+    # Sub-agent wall-clock deadline (master build S13, child runs
+    # only): epoch seconds by which the child must finish, seeded by
+    # the spawn seam from subagent_timeout_s and read by the child's
+    # pre-call gate. None outside child runs.
+    subagent_deadline: float | None
+
     # Shared agent blackboard (Epic 1, E1-15): every agent reads and
     # writes it through state updates; see merge_blackboard for the
     # per-section merge rules and blackboard_briefing for how it is

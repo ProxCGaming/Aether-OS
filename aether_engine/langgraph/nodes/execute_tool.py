@@ -40,6 +40,7 @@ from aether_engine.langgraph.steering import (
     has_pending_steers,
     steer_state_update,
 )
+from aether_engine.langgraph.subagents import SPAWN_TOOL_NAME
 from aether_engine.tools.approval_cache import get_default_cache
 from aether_engine.tools.registry import ToolExecutionError, ToolNotFoundError
 from aether_engine.tools.scratchpad import (
@@ -247,6 +248,19 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
     registry = configurable.get("tool_registry")
     workspace_roots = configurable.get("workspace_roots", [])
     task_class = configurable.get("task_class", "standard")
+
+    # ── S13: sub-agent spawn interception ───────────────────────────
+    # spawn_subagent is a synthetic tool (offered by run_specialist,
+    # never registered): executing it runs the bounded child graph in
+    # langgraph/subagents and returns its summary as the tool result.
+    # The interception is disabled inside a child run — depth is
+    # enforced by construction, and a spawn call there falls through
+    # to the ordinary allow-list refusal below instead.
+    if tool_name == SPAWN_TOOL_NAME and not configurable.get("is_subagent_run"):
+        from aether_engine.langgraph.subagents import execute_spawn
+
+        return _apply_pending_steers(
+            state, config, await execute_spawn(state, config, pending))
 
     # Check if tool is allowed for the active specialist
     active_agent = state.get("active_specialist")

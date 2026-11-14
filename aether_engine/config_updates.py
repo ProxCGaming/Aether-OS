@@ -67,6 +67,11 @@ HANDED_OFF_FIELDS = (
     "calendar_reminder_day_before",
     "calendar_reminder_lead_minutes",
     "eq_enabled",
+    "subagents_enabled",
+    "subagents_max_per_turn",
+    "subagent_timeout_s",
+    "subagent_token_budget",
+    "subagent_cost_budget_usd",
 )
 
 # The verdict vocabulary of tools/policy.py's _VERDICT_MAP and the
@@ -104,6 +109,14 @@ def _bounded_int(field: str, value: Any, low: int, high: int) -> int:
     if not low <= value <= high:
         raise _fail(field, f"must be between {low} and {high}")
     return value
+
+
+def _bounded_float(field: str, value: Any, low: float, high: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _fail(field, "must be a number")
+    if not low <= float(value) <= high:
+        raise _fail(field, f"must be between {low} and {high}")
+    return float(value)
 
 
 def _validate_schema(field: str, agent: str, schema: Any) -> dict:
@@ -225,6 +238,33 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
             "supervisor_delegation_cap",
             config_data["supervisor_delegation_cap"], 0, 1000)
 
+    # S13: bounded sub-agent spawning. Ranges mirror the consumer's
+    # semantics in langgraph/subagents: the per-turn cap floors at 0
+    # (0 blocks all spawning, like the delegation cap), the timeout
+    # floors at 1 (a 0-second child could never run), and the token /
+    # cost budgets floor at 0 where 0 DISABLES that budget (the
+    # timeout and cap still bind) — a stored value must mean exactly
+    # what the spawn seam reads.
+    if "subagents_max_per_turn" in config_data:
+        cleaned["subagents_max_per_turn"] = _bounded_int(
+            "subagents_max_per_turn",
+            config_data["subagents_max_per_turn"], 0, 100)
+
+    if "subagent_timeout_s" in config_data:
+        cleaned["subagent_timeout_s"] = _bounded_int(
+            "subagent_timeout_s",
+            config_data["subagent_timeout_s"], 1, 3600)
+
+    if "subagent_token_budget" in config_data:
+        cleaned["subagent_token_budget"] = _bounded_int(
+            "subagent_token_budget",
+            config_data["subagent_token_budget"], 0, 10_000_000)
+
+    if "subagent_cost_budget_usd" in config_data:
+        cleaned["subagent_cost_budget_usd"] = _bounded_float(
+            "subagent_cost_budget_usd",
+            config_data["subagent_cost_budget_usd"], 0.0, 10_000.0)
+
     if "prewalk_agents" in config_data:
         cleaned["prewalk_agents"] = _str_list(
             "prewalk_agents", config_data["prewalk_agents"])
@@ -297,8 +337,10 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
     # S11: eq_enabled joins the strict booleans on the same
     # rule — the Settings → Conversation switch is a real
     # boolean, refused rather than coerced when it is not.
+    # S13: subagents_enabled joins them for the same reason — the
+    # Orchestration switch is a real boolean.
     for bool_field in ("calendar_enabled", "calendar_reminder_day_before",
-                       "eq_enabled"):
+                       "eq_enabled", "subagents_enabled"):
         if bool_field in config_data:
             value = config_data[bool_field]
             if not isinstance(value, bool):

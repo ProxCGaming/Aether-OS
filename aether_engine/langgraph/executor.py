@@ -472,6 +472,10 @@ async def run_langgraph_task(
             # pauses for approval keeps its count across the pause
             # and is never counted twice.
             "delegation_count": 0,
+            # S13: the per-turn sub-agent counter, seeded and
+            # checkpointed exactly like delegation_count (separate
+            # channel, separate cap — see state.py).
+            "subagent_count": 0,
             "task_id": task_id,
             "session_id": session_id,
             "message_id": kwargs.get("message_id"),

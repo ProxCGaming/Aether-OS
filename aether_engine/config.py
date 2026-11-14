@@ -182,6 +182,24 @@ class UserConfig:
     # supervisor_model.supervisor_post_model_hook.
     supervisor_spawn_allowlist: list[str] | None = None
     supervisor_delegation_cap: int = 8
+    # Master build S13: bounded sub-agent spawning. A specialist may
+    # spawn a bounded sub-agent (one of the three roles) for a focused
+    # sub-task; enforcement lives in langgraph/subagents.py, modelled
+    # on the E1-11 spawn policy above. Deliberately a SEPARATE budget
+    # from supervisor_delegation_cap: that cap bounds supervisor ->
+    # specialist handoffs, these fields bound specialist -> sub-agent
+    # spawns, and each is counted in its own state channel
+    # (delegation_count vs subagent_count). Enabled by default — the
+    # owner authorised the programme; the caps below are the control.
+    # subagent_token_budget / subagent_cost_budget_usd are PER
+    # SUB-AGENT, enforced from UsageLedger rows the provider layer
+    # records for the child's calls; 0 disables that budget (the
+    # timeout and the per-turn cap still bind).
+    subagents_enabled: bool = True
+    subagents_max_per_turn: int = 4
+    subagent_timeout_s: int = 120
+    subagent_token_budget: int = 20000
+    subagent_cost_budget_usd: float = 0.0
     # Epic 1, E1-10: per-agent output schemas (agent name -> JSON-Schema
     # dict). When set, the agent's final answer must validate against
     # the schema; see aether_engine/langgraph/structured.py.
@@ -369,6 +387,11 @@ class UserConfig:
             "agent_skills": self.agent_skills,
             "supervisor_spawn_allowlist": self.supervisor_spawn_allowlist,
             "supervisor_delegation_cap": self.supervisor_delegation_cap,
+            "subagents_enabled": self.subagents_enabled,
+            "subagents_max_per_turn": self.subagents_max_per_turn,
+            "subagent_timeout_s": self.subagent_timeout_s,
+            "subagent_token_budget": self.subagent_token_budget,
+            "subagent_cost_budget_usd": self.subagent_cost_budget_usd,
             "agent_output_schemas": self.agent_output_schemas,
             "prewalk_agents": self.prewalk_agents,
             "custom_slash_commands": self.custom_slash_commands,
@@ -497,6 +520,11 @@ class UserConfig:
             agent_skills=_as_list_dict(d.get("agent_skills")),
             supervisor_spawn_allowlist=_as_optional_str_list(d.get("supervisor_spawn_allowlist")),
             supervisor_delegation_cap=_as_int(d.get("supervisor_delegation_cap"), 8),
+            subagents_enabled=bool(d.get("subagents_enabled", True)),
+            subagents_max_per_turn=_as_int(d.get("subagents_max_per_turn"), 4),
+            subagent_timeout_s=_as_int(d.get("subagent_timeout_s"), 120),
+            subagent_token_budget=_as_int(d.get("subagent_token_budget"), 20000),
+            subagent_cost_budget_usd=_as_float(d.get("subagent_cost_budget_usd"), 0.0),
             agent_output_schemas=_as_dict(d.get("agent_output_schemas")),
             prewalk_agents=d.get("prewalk_agents") if isinstance(d.get("prewalk_agents"), list) else [],
             custom_slash_commands=_as_dict(d.get("custom_slash_commands")),

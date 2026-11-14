@@ -109,6 +109,7 @@ def _tap_entry(task_id: str) -> dict[str, Any]:
             "latency_ms": None,
             "error": None,
             "delegations": [],
+            "subagents": [],
             "tool_calls": [],
             "node_activity": [],
             "approvals": [],
@@ -150,10 +151,28 @@ def record_executor_event(task_id: str | None, event: Any) -> None:
 
         if etype == EventType.NODE_ACTIVITY:
             action = payload.get("action")
+            if isinstance(action, str) and action.startswith("subagent_"):
+                # S13: sub-agent spawns ride the same NODE_ACTIVITY
+                # type as delegations but are a distinct record —
+                # child work attributed to its parent-of-record (the
+                # spawning specialist), never merged into the
+                # supervisor's delegation list.
+                out = payload.get("output_payload") or {}
+                _tap_append(entry, "subagents", {
+                    "parent_agent": payload.get("parent_agent") or payload.get("from_node"),
+                    "role": payload.get("to_node"),
+                    "action": action,
+                    "status": out.get("status") or payload.get("status"),
+                    "seq": payload.get("subagent_seq"),
+                    "summary": (out.get("summary") or "")[:OUTCOME_EXCERPT_CHARS] or None,
+                    "tokens_used": out.get("tokens_used"),
+                    "timestamp": ts,
+                    "source": "executor_event",
+                })
             # A supervisor decision of "END" grows delegation_log too,
             # but it is a finish decision, not a delegation — it is
             # recorded as plain node activity, never as a delegation.
-            if (action in ("delegation", "delegation_denied")
+            elif (action in ("delegation", "delegation_denied")
                     and str(payload.get("to_node") or "").lower() != "end"):
                 decision = (payload.get("output_payload") or {}).get("decision") or {}
                 _tap_append(entry, "delegations", {
@@ -716,6 +735,11 @@ async def task_summary(
             "recorded_at": (episode or {}).get("timestamp"),
         },
         "delegations": delegations,
+        # S13 (additive): sub-agent runs recorded by the live tap
+        # (spawn / completion / failure / denial, with parent
+        # linkage). Live-only like the tap itself — child runs have
+        # no checkpoint leg in the parent's thread.
+        "subagents": (tap or {}).get("subagents") or [],
         # S4 (additive): the checkpointed delegation counter for the
         # task's turn, or None when no checkpoint carries one.
         "delegation_count": (checkpoint or {}).get("delegation_count"),
@@ -839,6 +863,13 @@ def task_briefing(summary: dict[str, Any], *, max_chars: int = BRIEFING_MAX_CHAR
             + (f" ({str(d.get('reason'))[:60]})" if d.get("reason") else "")
             for d in delegations[:6])
         parts.append(f"Delegations: {rendered}")
+    subagents = summary.get("subagents") or []
+    if subagents:
+        rendered = ", ".join(
+            f"{s.get('role') or '?'} #{s.get('seq')} ({s.get('status') or '?'})"
+            f" by {s.get('parent_agent') or '?'}"
+            for s in subagents[:6])
+        parts.append(f"Sub-agents: {rendered}")
     calls = summary.get("tool_calls") or []
     if calls:
         failed = sum(1 for c in calls if c.get("status") == "failed")

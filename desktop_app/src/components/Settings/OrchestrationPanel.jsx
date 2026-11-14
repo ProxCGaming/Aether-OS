@@ -61,6 +61,11 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
   const [spawnAllowed, setSpawnAllowed] = useState([...SPECIALISTS]);
   const [delegationCap, setDelegationCap] = useState('8');
   const [capDirty, setCapDirty] = useState(false);
+  const [subagentsEnabled, setSubagentsEnabled] = useState(true);
+  const [subagentBounds, setSubagentBounds] = useState({
+    maxPerTurn: '4', timeoutS: '120', tokenBudget: '20000', costBudget: '0',
+  });
+  const [subagentBoundsDirty, setSubagentBoundsDirty] = useState(false);
   const [prewalk, setPrewalk] = useState([]);
   const [schemas, setSchemas] = useState({});
   const [schemaText, setSchemaText] = useState({});
@@ -83,6 +88,15 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
     }
     if (!capDirty && config.supervisor_delegation_cap !== undefined && config.supervisor_delegation_cap !== null) {
       setDelegationCap(String(config.supervisor_delegation_cap));
+    }
+    setSubagentsEnabled(config.subagents_enabled !== false);
+    if (!subagentBoundsDirty) {
+      setSubagentBounds({
+        maxPerTurn: String(config.subagents_max_per_turn ?? 4),
+        timeoutS: String(config.subagent_timeout_s ?? 120),
+        tokenBudget: String(config.subagent_token_budget ?? 20000),
+        costBudget: String(config.subagent_cost_budget_usd ?? 0),
+      });
     }
     setPrewalk(config.prewalk_agents || []);
     const sch = config.agent_output_schemas || {};
@@ -132,6 +146,34 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
     setLocalError('');
     setCapDirty(false);
     onConfigUpdate({ supervisor_delegation_cap: parsed });
+  };
+
+  // S13: bounded sub-agent spawning — the same blur-save contract as
+  // the delegation cap, one field per input, with ranges mirroring
+  // the engine's CONFIG_UPDATE validators (config_updates.py).
+  const handleSubagentsToggle = (checked) => {
+    setSubagentsEnabled(checked);
+    setLocalError('');
+    onConfigUpdate({ subagents_enabled: checked });
+  };
+
+  const SUBAGENT_FIELDS = {
+    maxPerTurn: ['subagents_max_per_turn', 'Sub-agents per turn', 0, 100, true],
+    timeoutS: ['subagent_timeout_s', 'Sub-agent timeout (seconds)', 1, 3600, true],
+    tokenBudget: ['subagent_token_budget', 'Sub-agent token budget', 0, 10000000, true],
+    costBudget: ['subagent_cost_budget_usd', 'Sub-agent cost budget (USD)', 0, 10000, false],
+  };
+
+  const handleSubagentBoundBlur = (key) => {
+    const [field, label, low, high, whole] = SUBAGENT_FIELDS[key];
+    const parsed = Number(subagentBounds[key]);
+    if (Number.isNaN(parsed) || (whole && !Number.isInteger(parsed)) || parsed < low || parsed > high) {
+      setLocalError(`${label} must be ${whole ? 'a whole number' : 'a number'} between ${low} and ${high}.`);
+      return;
+    }
+    setLocalError('');
+    setSubagentBoundsDirty(false);
+    onConfigUpdate({ [field]: parsed });
   };
 
   const handlePrewalkToggle = (name, checked) => {
@@ -277,6 +319,92 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
           />
           <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>0 blocks all delegation. Applies when you leave the field.</span>
         </div>
+      </div>
+
+      <div style={cardStyle}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)' }}>Sub-agents</h3>
+        <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: '0 0 16px 0' }}>
+          A specialist may spawn a bounded sub-agent (another specialist role) for a
+          focused sub-task and receives its result as a summary. Sub-agents cannot spawn
+          further sub-agents, start with read-only tools, and pass the same policy and
+          approval checks as their parent. These bounds are separate from the delegation
+          cap above: that cap limits supervisor delegations, these limit specialist spawns.
+        </p>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', marginBottom: '16px', cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            data-testid="subagents-enabled-toggle"
+            checked={subagentsEnabled}
+            onChange={(e) => handleSubagentsToggle(e.target.checked)}
+            style={{ accentColor: 'var(--accent)', width: '16px', height: '16px' }}
+          />
+          Allow specialists to spawn sub-agents
+        </label>
+        <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+          <div>
+            <label htmlFor="subagents-max-per-turn" style={{ display: 'block', fontSize: '13px', marginBottom: '6px' }}>Max per turn</label>
+            <input
+              id="subagents-max-per-turn"
+              data-testid="subagents-max-per-turn"
+              type="number"
+              min="0"
+              max="100"
+              value={subagentBounds.maxPerTurn}
+              onChange={(e) => { setSubagentBounds((prev) => ({ ...prev, maxPerTurn: e.target.value })); setSubagentBoundsDirty(true); }}
+              onBlur={() => handleSubagentBoundBlur('maxPerTurn')}
+              style={{ ...inputStyle, width: '110px' }}
+            />
+          </div>
+          <div>
+            <label htmlFor="subagent-timeout-s" style={{ display: 'block', fontSize: '13px', marginBottom: '6px' }}>Timeout (seconds)</label>
+            <input
+              id="subagent-timeout-s"
+              data-testid="subagent-timeout-s"
+              type="number"
+              min="1"
+              max="3600"
+              value={subagentBounds.timeoutS}
+              onChange={(e) => { setSubagentBounds((prev) => ({ ...prev, timeoutS: e.target.value })); setSubagentBoundsDirty(true); }}
+              onBlur={() => handleSubagentBoundBlur('timeoutS')}
+              style={{ ...inputStyle, width: '110px' }}
+            />
+          </div>
+          <div>
+            <label htmlFor="subagent-token-budget" style={{ display: 'block', fontSize: '13px', marginBottom: '6px' }}>Token budget per sub-agent</label>
+            <input
+              id="subagent-token-budget"
+              data-testid="subagent-token-budget"
+              type="number"
+              min="0"
+              max="10000000"
+              value={subagentBounds.tokenBudget}
+              onChange={(e) => { setSubagentBounds((prev) => ({ ...prev, tokenBudget: e.target.value })); setSubagentBoundsDirty(true); }}
+              onBlur={() => handleSubagentBoundBlur('tokenBudget')}
+              style={{ ...inputStyle, width: '130px' }}
+            />
+          </div>
+          <div>
+            <label htmlFor="subagent-cost-budget" style={{ display: 'block', fontSize: '13px', marginBottom: '6px' }}>Cost budget per sub-agent (USD)</label>
+            <input
+              id="subagent-cost-budget"
+              data-testid="subagent-cost-budget"
+              type="number"
+              min="0"
+              max="10000"
+              step="0.05"
+              value={subagentBounds.costBudget}
+              onChange={(e) => { setSubagentBounds((prev) => ({ ...prev, costBudget: e.target.value })); setSubagentBoundsDirty(true); }}
+              onBlur={() => handleSubagentBoundBlur('costBudget')}
+              style={{ ...inputStyle, width: '130px' }}
+            />
+          </div>
+        </div>
+        <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '12px 0 0 0' }}>
+          Token and cost budgets are enforced from the usage ledger&apos;s records of the
+          sub-agent&apos;s own model calls; 0 disables that budget. A model provider that
+          records no usage leaves the timeout and the per-turn cap as the binding bounds.
+          Applies when you leave a field.
+        </p>
       </div>
 
       <div style={cardStyle}>
