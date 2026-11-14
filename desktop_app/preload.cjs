@@ -62,6 +62,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   captureScreen: (rect) => ipcRenderer.invoke('capture-screen', rect),
   openPath: (filePath) => ipcRenderer.invoke('open-path', filePath),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  openReleasePage: (url) => ipcRenderer.invoke('open-release-page', url),
   registerSnipShortcut: (shortcut) => ipcRenderer.invoke('register-snip-shortcut', shortcut),
   getSnipShortcut: () => ipcRenderer.invoke('get-snip-shortcut')
 });

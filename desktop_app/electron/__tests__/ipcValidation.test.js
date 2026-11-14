@@ -359,6 +359,10 @@ const EXPECTED_CHANNELS = [
   // handles for the Diagnostics log viewer / bundle export.
   'append-ui-log', 'read-logs', 'get-desktop-diagnostics',
   'clear-logs', 'set-log-level',
+  // Update-check channels (15 Nov 2026) — same sender guard;
+  // 'open-release-page' validates its URL at the boundary with
+  // validateReleaseUrl (electron/updateCheck.cjs).
+  'check-for-updates', 'open-release-page',
 ];
 
 function registrationSlices(source) {
@@ -405,6 +409,7 @@ describe('S3-M3 main.cjs wiring contract', () => {
     expect(byChannel['show-open-dialog']).toContain('validateShowOpenDialogOptions');
     expect(byChannel['open-floating-chat']).toContain('validateSessionId');
     expect(byChannel['append-ui-log']).toContain('validateUiLogEntry');
+    expect(byChannel['open-release-page']).toContain('validateReleaseUrl');
   });
 
   it('capture-screen keeps its existing geometry validation', () => {

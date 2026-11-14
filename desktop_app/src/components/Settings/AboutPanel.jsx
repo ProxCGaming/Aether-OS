@@ -12,6 +12,45 @@ import LoadStateRow from './LoadStateRow';
 // open attempt's status is this panel's own state.
 export default function AboutPanel({ workspaces, workspacesAnswered, isConnected }) {
   const [guideStatus, setGuideStatus] = useState('');
+  // Update check (15 Nov 2026): the shell checks GitHub Releases
+  // (electron/updateCheck.cjs). Updating = running the new
+  // installer, which replaces the whole app and every bundled
+  // library with that release's pinned set — never an in-place
+  // patch of individual packages.
+  const [updateCheck, setUpdateCheck] = useState({ phase: 'idle', result: null });
+  const [downloadStatus, setDownloadStatus] = useState('');
+
+  const runUpdateCheck = async () => {
+    if (!window.electronAPI?.checkForUpdates) {
+      setUpdateCheck({
+        phase: 'done',
+        result: { status: 'error', message: 'Update checks are not available in this shell.' },
+      });
+      return;
+    }
+    setUpdateCheck({ phase: 'checking', result: null });
+    setDownloadStatus('');
+    try {
+      const result = await window.electronAPI.checkForUpdates();
+      setUpdateCheck({ phase: 'done', result });
+    } catch (err) {
+      setUpdateCheck({
+        phase: 'done',
+        result: { status: 'error', message: `Could not check for updates: ${err?.message || 'unknown error'}` },
+      });
+    }
+  };
+
+  const openDownload = async () => {
+    const url = updateCheck.result?.releaseUrl;
+    if (!url || !window.electronAPI?.openReleasePage) {
+      setDownloadStatus('Opening the download page is not available in this shell.');
+      return;
+    }
+    const err = await window.electronAPI.openReleasePage(url);
+    setDownloadStatus(err || '');
+  };
+
   return (
     <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>About Aether-OS</h2>
@@ -24,6 +63,41 @@ export default function AboutPanel({ workspaces, workspacesAnswered, isConnected
             (the APP_VERSION mirror), never a literal here. */}
         <div style={{ fontSize: '15px', fontWeight: 500, marginBottom: '4px' }}>Aether-OS</div>
         <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Version {appPackage.version}</div>
+      </div>
+
+      <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '24px', marginBottom: '20px' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px', color: 'var(--text-primary)' }}>Updates</h3>
+        <p style={{ color: 'var(--text-muted)', fontSize: '13px', margin: '0 0 16px 0' }}>
+          Aether-OS updates as a whole: a new version is a new installer that replaces the entire app —
+          shell, engine and every bundled library — with that release's exact pinned set. Your data
+          (in ~/.aether) is kept. Nothing is downloaded or changed until you run an installer yourself.
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+          <button
+            onClick={runUpdateCheck}
+            disabled={updateCheck.phase === 'checking'}
+            style={{ background: 'rgba(var(--accent-rgb),0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb),0.4)', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 500 }}
+          >
+            {updateCheck.phase === 'checking' ? 'Checking…' : 'Check for updates'}
+          </button>
+          {updateCheck.phase === 'done' && updateCheck.result && (
+            <span
+              data-testid="about-update-status"
+              style={{ fontSize: '13px', color: updateCheck.result.status === 'error' ? 'var(--danger)' : 'var(--text-secondary)' }}
+            >
+              {updateCheck.result.message}
+            </span>
+          )}
+          {updateCheck.result?.status === 'update-available' && (
+            <button
+              onClick={openDownload}
+              style={{ background: 'var(--accent)', color: 'var(--bg-base)', border: 'none', padding: '9px 18px', borderRadius: '10px', cursor: 'pointer', fontWeight: 600 }}
+            >
+              Download the new installer
+            </button>
+          )}
+        </div>
+        {downloadStatus && <div style={{ fontSize: '13px', color: 'var(--danger)', marginTop: '12px' }}>{downloadStatus}</div>}
       </div>
 
       <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '24px' }}>

@@ -31,4 +31,52 @@ describe('AboutPanel', () => {
     fireEvent.click(screen.getByText('Open the system guide'));
     expect(await screen.findByText('Opening local files is not available in this shell.')).toBeInTheDocument();
   });
+
+  describe('update check (15 Nov 2026)', () => {
+    afterEach(() => {
+      delete window.electronAPI;
+    });
+
+    test('without the shell bridge the check explains itself', async () => {
+      render(<AboutPanel workspaces={[]} workspacesAnswered isConnected />);
+      fireEvent.click(screen.getByText('Check for updates'));
+      expect(await screen.findByText('Update checks are not available in this shell.')).toBeInTheDocument();
+    });
+
+    test('an available update is reported and the download button opens the release page', async () => {
+      const openReleasePage = jest.fn(async () => '');
+      window.electronAPI = {
+        checkForUpdates: async () => ({
+          status: 'update-available',
+          currentVersion: '0.3.5',
+          latestVersion: '0.4.0',
+          releaseUrl: 'https://github.com/ProxCGaming/Aether-OS/releases/latest',
+          message: 'Version 0.4.0 is available — you have 0.3.5.',
+        }),
+        openReleasePage,
+      };
+      render(<AboutPanel workspaces={[]} workspacesAnswered isConnected />);
+      fireEvent.click(screen.getByText('Check for updates'));
+      expect(await screen.findByText('Version 0.4.0 is available — you have 0.3.5.')).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Download the new installer'));
+      expect(openReleasePage).toHaveBeenCalledWith('https://github.com/ProxCGaming/Aether-OS/releases/latest');
+    });
+
+    test('up-to-date is reported plainly, with no download button', async () => {
+      window.electronAPI = {
+        checkForUpdates: async () => ({
+          status: 'up-to-date',
+          currentVersion: '0.3.5',
+          latestVersion: '0.3.5',
+          releaseUrl: 'https://github.com/ProxCGaming/Aether-OS/releases/latest',
+          message: "You're on the latest version (0.3.5).",
+        }),
+        openReleasePage: async () => '',
+      };
+      render(<AboutPanel workspaces={[]} workspacesAnswered isConnected />);
+      fireEvent.click(screen.getByText('Check for updates'));
+      expect(await screen.findByText("You're on the latest version (0.3.5).")).toBeInTheDocument();
+      expect(screen.queryByText('Download the new installer')).not.toBeInTheDocument();
+    });
+  });
 });

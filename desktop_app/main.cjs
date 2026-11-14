@@ -34,6 +34,7 @@ const { shouldNotify, notificationContent } = require('./electron/notify.cjs');
 const { computeCaptureGeometry, selectScreenSource } = require('./electron/snipGeometry.cjs');
 const { defaultSnipAccelerator } = require('./electron/snipShortcut.cjs');
 const { createTransferStateStore } = require('./electron/transferState.cjs');
+const { checkForUpdates, validateReleaseUrl, RELEASES_PAGE_URL } = require('./electron/updateCheck.cjs');
 const {
   DEV_ORIGIN,
   isTrustedSender,
@@ -1038,4 +1039,36 @@ ipcMain.handle('open-path', async (event, filePath) => {
   if (!check.ok) return check.error;
   const { shell } = require('electron');
   return shell.openPath(check.value);
+});
+
+// Update check (15 Nov 2026): Settings → About asks whether a newer
+// GitHub Release exists. Read-only — the check itself downloads
+// nothing; updating means the user runs the new installer, which
+// replaces the whole app + engine payload (see
+// electron/updateCheck.cjs and docs/dependencies.md). The result
+// object is returned verbatim; the module never throws.
+ipcMain.handle('check-for-updates', async (event) => {
+  if (!isTrustedIpcSender(event, 'check-for-updates')) {
+    return {
+      status: 'error',
+      currentVersion: app.getVersion(),
+      latestVersion: null,
+      releaseUrl: RELEASES_PAGE_URL,
+      message: 'Refused: untrusted sender.',
+    };
+  }
+  return checkForUpdates({ currentVersion: app.getVersion() });
+});
+
+// The About panel's "Download the new installer" button: opens the
+// release page in the user's browser. The URL is validated at the
+// boundary (validateReleaseUrl: https, github.com, this repo's
+// releases tree only) before shell.openExternal is reached.
+ipcMain.handle('open-release-page', async (event, url) => {
+  if (!isTrustedIpcSender(event, 'open-release-page')) return 'Refused: untrusted sender.';
+  const check = validateReleaseUrl(url);
+  if (!check.ok) return check.error;
+  const { shell } = require('electron');
+  await shell.openExternal(check.value);
+  return '';
 });
