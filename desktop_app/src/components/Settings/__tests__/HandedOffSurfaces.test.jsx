@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import OrchestrationPanel from '../OrchestrationPanel';
 import PathRulesPanel from '../PathRulesPanel';
@@ -9,14 +9,51 @@ import ProjectConfigPanel from '../ProjectConfigPanel';
 // self-contained effective-models list that reads the socket
 // context (the S10 card pattern). These surface tests render
 // the panel bare, so the context is mocked to an inert socket.
+//
+// S21 (D2-38): the panel ALSO self-fetches the engine's agent
+// list now — its spawn / prewalk / schema cards enumerate the
+// AGENT_LIST roster instead of a hard-coded trio — so the mock
+// socket captures message listeners and renderOrchestration
+// delivers the engine's list (the handler's real payload
+// shape) before asserting.
+let mockSurfaceListeners = [];
 jest.mock('../../../contexts/SocketContext', () => ({
   useAetherSocket: () => ({
-    wsRef: { current: null },
+    wsRef: {
+      current: {
+        addEventListener: (event, cb) => {
+          if (event === 'message') mockSurfaceListeners.push(cb);
+        },
+        removeEventListener: (event, cb) => {
+          if (event === 'message') {
+            mockSurfaceListeners = mockSurfaceListeners.filter((l) => l !== cb);
+          }
+        },
+        readyState: 1,
+      },
+    },
     sendMessage: jest.fn(),
-    isConnected: false,
+    isConnected: true,
     reconnectCount: 0,
   }),
 }));
+
+const AGENT_LIST_PAYLOAD = {
+  agents: [
+    { id: 'supervisor', name: 'Supervisor', description: 'Routes tasks and queries memory.', model: 'inherit', tools: null },
+    { id: 'planner', name: 'Planner Agent', description: 'Breaks goals into structured steps.', model: 'inherit', tools: null },
+    { id: 'coder', name: 'Coder Agent', description: 'Writes, tests, and debugs code.', model: 'inherit', tools: null },
+    { id: 'researcher', name: 'Researcher Agent', description: 'Gathers information and synthesizes findings.', model: 'inherit', tools: null },
+  ],
+};
+
+function deliverAgentList() {
+  act(() => {
+    for (const cb of [...mockSurfaceListeners]) {
+      cb({ data: JSON.stringify({ type: 'AGENT_LIST_RESPONSE', payload: AGENT_LIST_PAYLOAD }) });
+    }
+  });
+}
 
 // E6-F05: the handed-off panels are controlled — SettingsPanel owns
 // the socket and the applied config; these tests pin the panels'
@@ -40,6 +77,9 @@ function renderOrchestration(config = ORCH_CONFIG, configError = '') {
   render(
     <OrchestrationPanel config={config} configError={configError} onConfigUpdate={onConfigUpdate} />
   );
+  // S21: the roster arrives over the socket; deliver it before
+  // asserting on the cards that enumerate it.
+  deliverAgentList();
   return { onConfigUpdate };
 }
 
@@ -70,8 +110,11 @@ describe('OrchestrationPanel (E6-F05: Epic 1 handoff)', () => {
   test('checking a specialist reports the expanded allowlist in canonical order', () => {
     const { onConfigUpdate } = renderOrchestration();
     fireEvent.click(screen.getByTestId('spawn-allow-researcher'));
+    // S21: canonical order is the ENGINE-REPORTED roster order
+    // (planner, coder, researcher in the AGENT_LIST answer), not
+    // the old hard-coded trio's order.
     expect(onConfigUpdate).toHaveBeenCalledWith({
-      supervisor_spawn_allowlist: ['researcher', 'coder'],
+      supervisor_spawn_allowlist: ['coder', 'researcher'],
     });
   });
 

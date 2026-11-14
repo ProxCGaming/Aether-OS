@@ -1,6 +1,8 @@
 import React from 'react';
 import LogsPanel from './LogsPanel';
 import MachineCapabilityCard from './MachineCapabilityCard';
+import CapabilityCheckCard from './CapabilityCheckCard';
+import FeatureStateCard from './FeatureStateCard';
 
 // Wave 5 (Annex C row 7): the Capabilities tab, extracted from
 // SettingsPanel.jsx — the diagnostics run's state, no-answer
@@ -8,7 +10,7 @@ import MachineCapabilityCard from './MachineCapabilityCard';
 // resolves the run); this panel renders the status card and the
 // Logs panel and fires the run/export through the handlers it
 // is given.
-export default function CapabilitiesPanel({ capabilityStatus, capabilityHistory, isDiagnosticsRunning, diagnosticsQueued, diagnosticsError, onRunDiagnostics, isConnected, sendSettingsAction, onExportBundle }) {
+export default function CapabilitiesPanel({ capabilityStatus, capabilityHistory, isDiagnosticsRunning, diagnosticsQueued, diagnosticsError, onRunDiagnostics, isConnected, sendSettingsAction, onExportBundle, engineConfig = null }) {
   return (
     <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Engine Capabilities</h2>
@@ -82,6 +84,14 @@ export default function CapabilitiesPanel({ capabilityStatus, capabilityHistory,
           is about MODEL capability checks, a different thing,
           and the card says so. */}
       <MachineCapabilityCard />
+
+      {/* Master build S21 (R17 wire): the capability-check
+          scheduler card — scheduled and on-demand MODEL checks
+          (the diagnostics card above is environment health) —
+          and the per-feature state+reason card, which reads the
+          same S10 report plus the applied config. */}
+      <CapabilityCheckCard />
+      <FeatureStateCard config={engineConfig} />
 
       {/* Unified logging (5 Nov 2026): the Logs & Diagnostics
           cards (status / viewer / controls) live below the

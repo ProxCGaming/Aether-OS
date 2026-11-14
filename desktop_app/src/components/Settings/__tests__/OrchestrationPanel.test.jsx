@@ -68,11 +68,30 @@ const CONFIG = {
   compaction_keep_recent: 10,
 };
 
+// S21 (D2-38): the panel enumerates the engine's AGENT_LIST
+// roster — the fixture is the handler's real payload shape
+// (aether_engine/routes/websocket.py _handle_agent_list_request).
+const AGENT_LIST_PAYLOAD = {
+  agents: [
+    { id: 'supervisor', name: 'Supervisor', description: 'Routes tasks and queries memory.', model: 'inherit', tools: null },
+    { id: 'planner', name: 'Planner Agent', description: 'Breaks goals into structured steps.', model: 'inherit', tools: null },
+    { id: 'coder', name: 'Coder Agent', description: 'Writes, tests, and debugs code.', model: 'google_gemini:gemini-3.5-flash', tools: null },
+    { id: 'researcher', name: 'Researcher Agent', description: 'Gathers information and synthesizes findings.', model: 'inherit', tools: null },
+  ],
+};
+
+function deliverAgentList() {
+  simulateMessage({ type: 'AGENT_LIST_RESPONSE', payload: AGENT_LIST_PAYLOAD });
+}
+
 function renderPanel(config = CONFIG, configError = '') {
   const onConfigUpdate = jest.fn();
   render(
     <OrchestrationPanel config={config} configError={configError} onConfigUpdate={onConfigUpdate} />
   );
+  // S21: deliver the roster before asserting on the cards that
+  // enumerate it (they render a load note until it lands).
+  deliverAgentList();
   return { onConfigUpdate };
 }
 
@@ -104,9 +123,48 @@ describe('OrchestrationPanel', () => {
   test('turning the restriction on reports the full canonical allowlist', () => {
     const { onConfigUpdate } = renderPanel({ ...CONFIG, supervisor_spawn_allowlist: null });
     fireEvent.click(screen.getByTestId('spawn-restrict-toggle'));
+    // S21: the canonical order is the engine-reported roster
+    // order (planner, coder, researcher), not the old
+    // hard-coded trio's order.
     expect(onConfigUpdate).toHaveBeenCalledWith({
-      supervisor_spawn_allowlist: ['researcher', 'planner', 'coder'],
+      supervisor_spawn_allowlist: ['planner', 'coder', 'researcher'],
     });
+  });
+
+  // S21 (D2-38): the roster is the engine's AGENT_LIST answer.
+  test('the panel requests the agent list and renders the roster with pins', () => {
+    renderPanel();
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'AGENT_LIST_REQUEST', expect.objectContaining({ payload: {} }));
+    const roster = screen.getByTestId('orchestration-agent-roster');
+    expect(roster).toHaveTextContent('Supervisor');
+    expect(roster).toHaveTextContent('Routes tasks and queries memory.');
+    expect(screen.getByTestId('orchestration-agent-coder')).toHaveTextContent('pinned to google_gemini:gemini-3.5-flash');
+    expect(screen.getByTestId('orchestration-agent-planner')).toHaveTextContent('no Agents-tab pin');
+    // The supervisor is in the roster but is NOT a spawn /
+    // prewalk / schema target — it does the delegating.
+    expect(screen.queryByTestId('spawn-allow-supervisor')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('prewalk-supervisor')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('schema-supervisor')).not.toBeInTheDocument();
+  });
+
+  test('before the list lands, the enumerating cards show a note, not guessed agents', () => {
+    const onConfigUpdate = jest.fn();
+    render(<OrchestrationPanel config={CONFIG} configError="" onConfigUpdate={onConfigUpdate} />);
+    expect(screen.getAllByTestId('orchestration-agents-note').length).toBeGreaterThan(0);
+    expect(screen.queryByTestId('spawn-allow-coder')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('orchestration-agent-roster')).not.toBeInTheDocument();
+    // Non-enumerating controls are unaffected by the wait.
+    expect(screen.getByTestId('delegation-cap-input')).toHaveValue(4);
+  });
+
+  test('an errored agent-list reply shows the error in the note', () => {
+    const onConfigUpdate = jest.fn();
+    render(<OrchestrationPanel config={CONFIG} configError="" onConfigUpdate={onConfigUpdate} />);
+    simulateMessage({ type: 'AGENT_LIST_RESPONSE', payload: { error: 'agent registry unavailable' } });
+    expect(screen.getAllByTestId('orchestration-agents-note')[0]).toHaveTextContent(
+      'The engine could not report its agent list: agent registry unavailable');
+    expect(screen.queryByTestId('spawn-allow-coder')).not.toBeInTheDocument();
   });
 
   test('the delegation cap reports a parsed integer on blur, including zero', () => {

@@ -12,9 +12,19 @@ import SettingsPanel from '../SettingsPanel';
 jest.mock('../components/Settings/DiagnosticsPanel', () => () => (
   <div data-testid="diagnostics-stub" />
 ));
+// S21: OrchestrationPanel's useAgentList (like S14's
+// EffectiveAgentModels before it) listens on the CONTEXT socket,
+// not SettingsPanel's prop channel — the mock must be a working
+// bus or the roster answer can never arrive in this harness.
+const mockContextListeners = new Set();
 jest.mock('../contexts/SocketContext', () => ({
   useAetherSocket: () => ({
-    wsRef: { current: { addEventListener: jest.fn(), removeEventListener: jest.fn() } },
+    wsRef: {
+      current: {
+        addEventListener: (event, handler) => { if (event === 'message') mockContextListeners.add(handler); },
+        removeEventListener: (event, handler) => { mockContextListeners.delete(handler); },
+      },
+    },
     sendMessage: jest.fn(),
   }),
 }));
@@ -31,7 +41,12 @@ function makeWsRef() {
   };
   const sent = () => wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
   const deliver = (data) => {
-    act(() => { messageHandler({ data: JSON.stringify(data) }); });
+    act(() => {
+      messageHandler({ data: JSON.stringify(data) });
+      // S21: context-socket listeners (useAgentList et al.) hear
+      // the same engine traffic as the prop channel.
+      mockContextListeners.forEach((h) => h({ data: JSON.stringify(data) }));
+    });
   };
   return { wsRef, getHandler: () => messageHandler, sent, deliver };
 }
@@ -57,6 +72,21 @@ describe('SettingsPanel handed-off surfaces (E6-F05)', () => {
     // Opening Agents fetches the config for the controlled panel.
     expect(sent().map((m) => m.type)).toContain('CONFIG_GET_REQUEST');
     deliver({ type: 'CONFIG_GET_RESPONSE', payload: { config: FULL_CONFIG } });
+    // S21 (D2-38): the Orchestration panel enumerates the engine's
+    // AGENT_LIST roster — the spawn/prewalk checkboxes render only
+    // once the roster answer arrives (previously a hard-coded
+    // SPECIALISTS trio rendered them immediately).
+    deliver({
+      type: 'AGENT_LIST_RESPONSE',
+      payload: {
+        agents: [
+          { id: 'supervisor', name: 'Supervisor', description: 'Routes tasks and queries memory.', model: 'inherit', tools: null },
+          { id: 'planner', name: 'Planner Agent', description: 'Breaks goals into structured steps.', model: 'inherit', tools: null },
+          { id: 'coder', name: 'Coder Agent', description: 'Writes, tests, and debugs code.', model: 'inherit', tools: null },
+          { id: 'researcher', name: 'Researcher Agent', description: 'Gathers information and synthesizes findings.', model: 'inherit', tools: null },
+        ],
+      },
+    });
     expect(screen.getByTestId('spawn-restrict-toggle')).toBeChecked();
     expect(screen.getByTestId('spawn-allow-coder')).toBeChecked();
     expect(screen.getByTestId('delegation-cap-input')).toHaveValue(3);

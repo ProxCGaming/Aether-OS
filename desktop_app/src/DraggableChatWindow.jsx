@@ -789,6 +789,15 @@ export default function DraggableChatWindow({
   const costMenuRef = useRef(null);
   const [showContextPopover, setShowContextPopover] = useState(false);
   const contextMenuRef = useRef(null);
+  // S21: the configured default model for the context bar's
+  // no-breakdown state — derived from the provider list's
+  // is_default entry exactly as the header model picker below
+  // derives its value (the PROVIDER_LIST_RESPONSE channel), so
+  // the bar names the user's real default instead of a literal.
+  const configuredDefaultModel = (() => {
+    const activeProvider = (Array.isArray(providers) ? providers : []).find(p => p.is_default);
+    return activeProvider && activeProvider.default_model ? activeProvider.default_model : '';
+  })();
   const [showStepPicker, setShowStepPicker] = useState(false);
   const stepPickerRef = useRef(null);
   // Epic 8, M12: the header step picker's data — the manifest's
@@ -1544,6 +1553,7 @@ export default function DraggableChatWindow({
                 }
                 placeholder="Select Model..."
                 style={{ maxWidth: '240px' }}
+                testId="chat-model-picker"
               />
 
             </div>
@@ -1552,6 +1562,7 @@ export default function DraggableChatWindow({
             {/* Compact default-model context bar (Epic 8, E8-A8.1b) */}
             <CompactContextBar
               breakdown={contextBreakdown}
+              defaultModel={configuredDefaultModel}
               onClick={() => {
                 setShowContextPopover((prev) => !prev);
                 if (!showContextPopover) onRequestContextBreakdown();
@@ -1625,7 +1636,7 @@ export default function DraggableChatWindow({
                 <span>Context</span>
               </button>
               {showContextPopover && (
-                <ContextBar breakdown={contextBreakdown} />
+                <ContextBar breakdown={contextBreakdown} defaultModel={configuredDefaultModel} />
               )}
             </div>
             {/* Artifacts Canvas Toggle (Epic 8, E8-2.1) */}

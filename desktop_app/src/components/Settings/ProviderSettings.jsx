@@ -25,6 +25,22 @@ export default function ProviderSettings({ providers = [], health = {}, provider
   // saving ref + timer mirror the test pair exactly.
   const savingRef = useRef({});
   const saveTimersRef = useRef({});
+  // S21 (R17 wiring): reveal-key. A revealed key lives ONLY in
+  // this state — rendered in a read-only field until the user
+  // hides it, collapses the card, or leaves the panel; like every
+  // key in this panel it is never written to renderer storage
+  // (Phase 10.1 C1). The engine audits each successful reveal
+  // (SECRET_LOADED, provider name only) in its secret store.
+  const [revealedKeys, setRevealedKeys] = useState({});
+  const [revealPending, setRevealPending] = useState({});
+  const [revealMsg, setRevealMsg] = useState({});
+  // S21 (R17 wiring): refresh-models. In-flight refresh keys (a
+  // provider name, or '__all__') with the house no-answer timer
+  // discipline — a refresh is up to ~100s of engine-side
+  // discovery, so its timer is 120s, not the 35s Test/Save one.
+  const [refreshingKeys, setRefreshingKeys] = useState({});
+  const [refreshMsg, setRefreshMsg] = useState('');
+  const refreshTimersRef = useRef({});
 
   useEffect(() => {
     if (Object.keys(testingSince).length === 0) return;
@@ -35,6 +51,7 @@ export default function ProviderSettings({ providers = [], health = {}, provider
   useEffect(() => () => {
     Object.values(testTimersRef.current).forEach(clearTimeout);
     Object.values(saveTimersRef.current).forEach(clearTimeout);
+    Object.values(refreshTimersRef.current).forEach(clearTimeout);
   }, []);
 
   const clearTestTracking = (provider) => {
@@ -122,6 +139,40 @@ export default function ProviderSettings({ providers = [], health = {}, provider
               setValidationMsg(prev => ({ ...prev, [provider]: data.payload.error || 'Failed to save', ...(isCustomSave ? { custom_openai: data.payload.error || 'Failed to save' } : {}) }));
             }
           }
+        } else if (data.type === 'PROVIDER_REVEAL_KEY_RESPONSE') {
+          // S21: correlated on the provider name, like the save /
+          // validate replies above. The key lands in reveal-only
+          // state; a refusal names the engine's error and no key
+          // is shown.
+          const provider = data.payload.provider;
+          if (typeof provider === 'string' && provider) {
+            setRevealPending(prev => {
+              if (!(provider in prev)) return prev;
+              const next = { ...prev };
+              delete next[provider];
+              return next;
+            });
+            if (data.payload.success) {
+              setRevealedKeys(prev => ({ ...prev, [provider]: data.payload.api_key || '' }));
+              setRevealMsg(prev => {
+                if (!(provider in prev)) return prev;
+                const next = { ...prev };
+                delete next[provider];
+                return next;
+              });
+            } else {
+              setRevealMsg(prev => ({ ...prev, [provider]: data.payload.error || 'The engine could not reveal that key.' }));
+            }
+          }
+        } else if (data.type === 'REFRESH_MODELS_RESPONSE') {
+          // S21: a refresh answer settles every in-flight refresh
+          // spinner — the engine answers per request, and the
+          // refreshed provider list itself is applied to App's
+          // state by useEngineMessages.
+          Object.values(refreshTimersRef.current).forEach(clearTimeout);
+          refreshTimersRef.current = {};
+          setRefreshingKeys({});
+          setRefreshMsg('Model lists updated just now.');
         }
       } catch (e) {
         // ignore
@@ -233,6 +284,61 @@ export default function ProviderSettings({ providers = [], health = {}, provider
     });
   };
 
+  // S21: reveal is an explicit per-click ask — nothing prefetches
+  // a stored key, and the engine's answer is the only source.
+  const handleRevealKey = (providerName) => {
+    setRevealPending(prev => ({ ...prev, [providerName]: true }));
+    setRevealMsg(prev => {
+      if (!(providerName in prev)) return prev;
+      const next = { ...prev };
+      delete next[providerName];
+      return next;
+    });
+    sendMessage('PROVIDER_REVEAL_KEY_REQUEST', {
+      schema_version: 1,
+      request_id: Date.now().toString(),
+      payload: {
+        provider: providerName
+      }
+    });
+  };
+
+  const handleHideKey = (providerName) => {
+    setRevealedKeys(prev => {
+      if (!(providerName in prev)) return prev;
+      const next = { ...prev };
+      delete next[providerName];
+      return next;
+    });
+  };
+
+  // S21: one refresh starter for both scopes — a targeted
+  // per-provider refresh and the all-providers refresh ride the
+  // same request; the engine persists a registered provider's
+  // refreshed list exactly like the full refresh (E5-F14).
+  const startRefresh = (key, payload) => {
+    setRefreshMsg('');
+    setRefreshingKeys(prev => ({ ...prev, [key]: true }));
+    if (refreshTimersRef.current[key]) {
+      clearTimeout(refreshTimersRef.current[key]);
+    }
+    refreshTimersRef.current[key] = setTimeout(() => {
+      delete refreshTimersRef.current[key];
+      setRefreshingKeys(prev => {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      setRefreshMsg('No answer from the engine in 120s — the refresh may still be running; the lists update when it lands.');
+    }, 120000);
+    sendMessage('REFRESH_MODELS_REQUEST', {
+      schema_version: 1,
+      request_id: Date.now().toString(),
+      payload
+    });
+  };
+
   const handleDisconnect = (e, providerName) => {
     e.stopPropagation();
     // D2-24: removing a provider discards its saved configuration
@@ -258,8 +364,25 @@ export default function ProviderSettings({ providers = [], health = {}, provider
   return (
     <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>API Providers</h2>
-      <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>Configure your API keys for cloud-based inference.</p>
-      
+      <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '16px' }}>Configure your API keys for cloud-based inference.</p>
+
+      {/* S21: the all-providers model refresh (R17) — re-runs
+          discovery for every stored provider; each provider card
+          below carries the same refresh for itself alone. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
+        <button
+          data-testid="refresh-models-all"
+          onClick={() => startRefresh('__all__', {})}
+          disabled={!!refreshingKeys.__all__}
+          style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', fontSize: '13px' }}
+        >
+          {refreshingKeys.__all__ ? 'Refreshing…' : 'Refresh model lists'}
+        </button>
+        {refreshMsg && (
+          <span data-testid="refresh-models-msg" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{refreshMsg}</span>
+        )}
+      </div>
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
         {/* RUX-C-03 (Wave 3 slice 1): an empty providers prop used to
             render unexplained blank space — the cold-start window
@@ -295,8 +418,14 @@ export default function ProviderSettings({ providers = [], health = {}, provider
           
           return (
             <div key={providerName} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', overflow: 'hidden', transition: 'all 0.3s' }}>
-              <div 
-                onClick={() => setExpandedProvider(isExpanded ? null : providerName)}
+              <div
+                onClick={() => {
+                  // S21: collapsing the card clears any revealed
+                  // key for it — a revealed key never outlives the
+                  // card it was revealed in.
+                  if (isExpanded) handleHideKey(providerName);
+                  setExpandedProvider(isExpanded ? null : providerName);
+                }}
                 style={{ padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', background: isExpanded ? 'var(--bg-raised)' : 'transparent' }}
               >
                 <h3 style={{ fontSize: '16px', margin: 0 }}>{displayName}</h3>
@@ -354,15 +483,58 @@ export default function ProviderSettings({ providers = [], health = {}, provider
                       style={{ padding: '12px 16px', color: 'var(--text-primary)', outline: 'none', width: '100%', marginBottom: '4px' }}
                     />
                   )}
-                  <input 
-                    type="password" 
+                  <input
+                    type="password"
                     value={keys[providerName] || ''}
                     onChange={(e) => setKeys({...keys, [providerName]: e.target.value})}
-                    className="ios-glass-input" 
-                    placeholder={isConfigured ? `API Key (Stored Securely)` : `Enter ${displayName} API Key`} 
+                    className="ios-glass-input"
+                    placeholder={isConfigured ? `API Key (Stored Securely)` : `Enter ${displayName} API Key`}
                     style={{ padding: '12px 16px', color: 'var(--text-primary)', outline: 'none', width: '100%' }}
                   />
-                  
+
+                  {/* S21: reveal the saved key (R17). An explicit
+                      click per reveal; the engine audits every
+                      successful reveal, and the key is shown only
+                      here until it is hidden or the card closes. */}
+                  {isConfigured && (
+                    <div style={{ marginTop: '4px' }}>
+                      {revealedKeys[providerName] !== undefined ? (
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                          <input
+                            type="text"
+                            readOnly
+                            aria-label={`Saved API key for ${displayName}`}
+                            data-testid={`revealed-key-${providerName}`}
+                            value={revealedKeys[providerName]}
+                            className="ios-glass-input"
+                            style={{ padding: '12px 16px', color: 'var(--text-primary)', outline: 'none', flex: 1, fontFamily: 'var(--font-mono)', fontSize: '13px' }}
+                          />
+                          <button
+                            onClick={() => handleHideKey(providerName)}
+                            style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', flexShrink: 0 }}
+                          >
+                            Hide
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          data-testid={`reveal-key-${providerName}`}
+                          onClick={() => handleRevealKey(providerName)}
+                          disabled={!!revealPending[providerName]}
+                          style={{ background: 'transparent', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.4)', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                        >
+                          {revealPending[providerName] ? 'Revealing…' : 'Reveal saved key'}
+                        </button>
+                      )}
+                      {revealMsg[providerName] && (
+                        <div data-testid={`reveal-key-error-${providerName}`} style={{ color: 'var(--danger)', fontSize: '13px', marginTop: '6px' }}>{revealMsg[providerName]}</div>
+                      )}
+                      <div style={{ color: 'var(--text-muted)', fontSize: '12px', marginTop: '6px' }}>
+                        The engine records each reveal in its audit log. A revealed key is shown only here — it is cleared when you hide it or close this card, and is never saved by the app.
+                      </div>
+                    </div>
+                  )}
+
                   {validationState[providerName] === 'error' && (
                     <div style={{ color: 'var(--danger)', fontSize: '13px', marginTop: '4px' }}>{validationMsg[providerName]}</div>
                   )}
@@ -371,7 +543,15 @@ export default function ProviderSettings({ providers = [], health = {}, provider
                   )}
 
                   <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '8px', gap: '8px' }}>
-                    <button 
+                    <button
+                      data-testid={`refresh-models-${providerName}`}
+                      onClick={() => startRefresh(providerName, { provider: providerName })}
+                      disabled={!!refreshingKeys[providerName]}
+                      style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '8px 24px', borderRadius: '12px', cursor: 'pointer', transition: 'all 0.2s', fontWeight: 500 }}
+                    >
+                      {refreshingKeys[providerName] ? 'Refreshing…' : 'Refresh models'}
+                    </button>
+                    <button
                       onClick={() => handleTestKey(providerName)}
                       disabled={validationState[providerName] === 'testing'}
                       style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '8px 24px', borderRadius: '12px', cursor: 'pointer', transition: 'all 0.2s', fontWeight: 500 }}

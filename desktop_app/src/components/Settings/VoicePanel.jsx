@@ -6,7 +6,7 @@ import LoadStateRow from './LoadStateRow';
 // SettingsPanel.jsx — the shell keeps the slider values, the
 // commit-on-release handlers (D2-08) and the config plumbing;
 // this panel is the controlled rendering.
-export default function VoicePanel({ configAnswered, configLoadError, isConnected, onRetryConfigLoad, vadThreshold, setVadThreshold, commitVadThreshold, pendingVadValue, silenceDurationMs, setSilenceDurationMs, commitSilenceDuration, pendingSilenceValue }) {
+export default function VoicePanel({ configAnswered, configLoadError, isConnected, onRetryConfigLoad, vadThreshold, setVadThreshold, commitVadThreshold, pendingVadValue, silenceDurationMs, setSilenceDurationMs, commitSilenceDuration, pendingSilenceValue, smartTurnSensitivity, setSmartTurnSensitivity, commitSmartTurnSensitivity, pendingSmartTurnValue }) {
   return (
     <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Voice Tuning</h2>
@@ -131,6 +131,52 @@ export default function VoicePanel({ configAnswered, configLoadError, isConnecte
           {pendingSilenceValue !== undefined && (
             <div data-testid="silence-duration-queued" style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px' }}>
               Silence duration change to {pendingSilenceValue} ms queued — will apply when the engine reconnects.
+            </div>
+          )}
+        </div>
+
+        {/* Master build S21 (voice G8): Smart Turn sensitivity —
+            the third endpointing control. The engine field
+            (UserConfig.smart_turn_sensitivity) has been read by
+            the Endpointer all along; it simply had no UI. Same
+            D2-08 commit-on-release wiring as the sliders above,
+            and 0.00 is a real value (Smart Turn off), not an
+            unset state. */}
+        <div style={{ marginTop: '24px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+            <label htmlFor="smart-turn-sensitivity-slider" style={{ fontWeight: 500, fontSize: '14px', color: 'var(--text-primary)' }}>
+              Smart Turn Sensitivity
+            </label>
+            <span data-testid="smart-turn-sensitivity-value" style={{ fontSize: '13px', color: 'var(--accent)', fontWeight: 600 }}>
+              {smartTurnSensitivity.toFixed(2)}
+            </span>
+          </div>
+          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '10px' }}>
+            How strongly the built-in Smart Turn heuristic bends the silence window (default: 0.50). It judges the partial transcript as you speak: a sentence that sounds finished ends the turn earlier, an unfinished one is held longer — bounded between 120 ms and 1,200 ms either way. At 0.00 Smart Turn is off and turns end on silence alone.
+          </div>
+          <input
+            id="smart-turn-sensitivity-slider"
+            data-testid="smart-turn-sensitivity-slider"
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            disabled={!configAnswered}
+            value={smartTurnSensitivity}
+            onChange={(e) => {
+              // D2-08: same commit-on-release conversion as the
+              // sliders above — display follows the drag; the
+              // write lands once, on release.
+              setSmartTurnSensitivity(parseFloat(e.target.value));
+            }}
+            onPointerUp={commitSmartTurnSensitivity}
+            onKeyUp={commitSmartTurnSensitivity}
+            onBlur={commitSmartTurnSensitivity}
+            style={{ width: '100%', accentColor: 'var(--accent)', cursor: 'pointer' }}
+          />
+          {pendingSmartTurnValue !== undefined && (
+            <div data-testid="smart-turn-sensitivity-queued" style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px' }}>
+              Smart Turn sensitivity change to {Number(pendingSmartTurnValue).toFixed(2)} queued — will apply when the engine reconnects.
             </div>
           )}
         </div>

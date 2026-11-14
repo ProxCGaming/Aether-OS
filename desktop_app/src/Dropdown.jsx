@@ -7,7 +7,8 @@ export default function Dropdown({
   options = [],
   placeholder = 'Select...',
   style = {},
-  align = 'left'
+  align = 'left',
+  testId
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef(null);
@@ -93,7 +94,7 @@ export default function Dropdown({
   }
 
   return (
-    <div className="nodrag" style={{ position: 'relative', width: style.width || 'auto', WebkitAppRegion: 'no-drag', cursor: 'auto' }} ref={dropdownRef}>
+    <div className="nodrag" data-testid={testId} style={{ position: 'relative', width: style.width || 'auto', WebkitAppRegion: 'no-drag', cursor: 'auto' }} ref={dropdownRef}>
       <button 
         type="button"
         onClick={() => setIsOpen(!isOpen)}

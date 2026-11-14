@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 
 // E6-F05 (Epic 1 handoff): Settings surfaces for the orchestration
@@ -17,8 +17,6 @@ import { useAetherSocket } from '../../contexts/SocketContext';
 // locally and marked dirty so a config echo — e.g. from toggling a
 // checkbox — never clobbers text the user is still typing; the echo
 // of the field's own save re-syncs it.
-
-const SPECIALISTS = ['researcher', 'planner', 'coder'];
 
 const cardStyle = {
   background: 'var(--bg-raised)',
@@ -47,7 +45,54 @@ const saveButtonStyle = {
   fontWeight: 500,
 };
 
-const canonical = (names) => SPECIALISTS.filter((s) => names.includes(s));
+// S21 (D2-38): the panel's agent roster comes from the engine's
+// AGENT_LIST answer — the same report the Agents tab renders —
+// not the hard-coded trio this file used to carry. AGENT_LIST
+// reports every agent including the supervisor, each with its
+// Agents-tab model pin; the supervisor is the delegator, never
+// a delegation target, so the spawn / prewalk / schema cards
+// enumerate the specialists (the list minus the supervisor).
+// S14's AGENT_ROUTING report stays the source for EFFECTIVE
+// models (pin vs auto vs run default, with reasons); this list
+// is the source for who exists and what they are pinned to.
+function useAgentList() {
+  const { wsRef, sendMessage, reconnectCount = 0 } = useAetherSocket();
+  const [agents, setAgents] = useState(null);
+  const [agentsError, setAgentsError] = useState('');
+
+  useEffect(() => {
+    sendMessage('AGENT_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+
+    const handleMessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'AGENT_LIST_RESPONSE') {
+          // RUX-C-10 pattern (AgentsPanel): an errored reply is
+          // the error state, never an empty roster.
+          if (data.payload && data.payload.error) {
+            setAgentsError(data.payload.error);
+          } else {
+            setAgents((data.payload && data.payload.agents) || []);
+            setAgentsError('');
+          }
+        }
+      } catch (e) {
+        // Not JSON / not ours — other panels own their replies.
+      }
+    };
+
+    if (wsRef.current) {
+      wsRef.current.addEventListener('message', handleMessage);
+    }
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.removeEventListener('message', handleMessage);
+      }
+    };
+  }, [wsRef, sendMessage, reconnectCount]);
+
+  return { agents, agentsError };
+}
 
 const ROUTING_SOURCE_LABELS = {
   pinned: 'Pinned by you',
@@ -138,8 +183,27 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
   // that don't pass configReady get the derived rule: a non-null
   // config IS an answer.
   const ready = configReady !== undefined ? configReady : config != null;
+  // S21 (D2-38): the roster the cards enumerate — the engine's
+  // AGENT_LIST specialists, in engine order. Null until the
+  // answer lands: before that, the enumerating cards show a
+  // load note instead of a guessed set of agents.
+  const { agents, agentsError } = useAgentList();
+  const { isConnected } = useAetherSocket();
+  // Memoised on the answer: effects below key off this list's
+  // identity, so it must change only when a new answer lands.
+  const specialists = useMemo(
+    () => (agents ? agents.filter((a) => a.id !== 'supervisor').map((a) => a.id) : null),
+    [agents]
+  );
+  const canonical = (names) => {
+    if (!specialists) return [...names];
+    const ordered = specialists.filter((s) => names.includes(s));
+    // A name the engine no longer reports (a stale config entry)
+    // keeps its place at the end rather than vanishing mid-edit.
+    return [...ordered, ...names.filter((n) => !specialists.includes(n))];
+  };
   const [spawnRestricted, setSpawnRestricted] = useState(false);
-  const [spawnAllowed, setSpawnAllowed] = useState([...SPECIALISTS]);
+  const [spawnAllowed, setSpawnAllowed] = useState([]);
   const [delegationCap, setDelegationCap] = useState('8');
   const [capDirty, setCapDirty] = useState(false);
   const [subagentsEnabled, setSubagentsEnabled] = useState(true);
@@ -163,7 +227,10 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
     const allow = config.supervisor_spawn_allowlist;
     if (allow === null || allow === undefined) {
       setSpawnRestricted(false);
-      setSpawnAllowed([...SPECIALISTS]);
+      // S21: an unrestricted config seeds the allowed set from
+      // the engine roster when it is known (the roster effect
+      // below seeds it when the list lands after the config).
+      setSpawnAllowed(specialists ? [...specialists] : []);
     } else {
       setSpawnRestricted(true);
       setSpawnAllowed(allow);
@@ -186,7 +253,10 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
     setSchemas(sch);
     setSchemaText((prev) => {
       const next = { ...prev };
-      for (const a of SPECIALISTS) {
+      // S21: seed a textarea per engine-reported specialist,
+      // plus any agent the config itself carries a schema for.
+      const seedFor = [...new Set([...(specialists || []), ...Object.keys(sch)])];
+      for (const a of seedFor) {
         if (!dirtySchemas[a]) {
           next[a] = sch[a] ? JSON.stringify(sch[a], null, 2) : '';
         }
@@ -202,13 +272,31 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
     }
   }, [config]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // S21: when the roster lands AFTER the config and the config
+  // is unrestricted, seed the allowed set from it (the config
+  // effect above can only seed from a roster already known).
+  useEffect(() => {
+    if (!specialists || !config) return;
+    if (config.supervisor_spawn_allowlist === null
+      || config.supervisor_spawn_allowlist === undefined) {
+      setSpawnAllowed([...specialists]);
+    }
+  }, [specialists]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const error = localError || configError || '';
 
   const handleRestrictToggle = (checked) => {
     setSpawnRestricted(checked);
     setLocalError('');
+    // S21: turning the restriction on before the roster (and so
+    // the seeded allowed set) has landed must not report an
+    // empty allowlist — the roster is the seed.
+    const base = spawnAllowed.length ? spawnAllowed : (specialists || []);
+    if (checked && !spawnAllowed.length && specialists) {
+      setSpawnAllowed([...specialists]);
+    }
     onConfigUpdate({
-      supervisor_spawn_allowlist: checked ? canonical(spawnAllowed) : null,
+      supervisor_spawn_allowlist: checked ? canonical(base) : null,
     });
   };
 
@@ -326,6 +414,25 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
     onConfigUpdate({ agent_output_schemas: next });
   };
 
+  // S21: what the agent-enumerating cards show before the
+  // engine's list lands (or when it refuses) — a stated wait,
+  // never a guessed set of agents.
+  const rosterNote = (
+    <div data-testid="orchestration-agents-note" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+      {agentsError
+        ? `The engine could not report its agent list: ${agentsError}`
+        : isConnected
+          ? 'Asking the engine for its agent list…'
+          : 'Waiting for the engine — the agent list will appear here once it connects.'}
+    </div>
+  );
+  // The schema card enumerates the roster plus any agent the
+  // applied config itself carries a schema for (a schema must
+  // stay editable even before the list lands).
+  const schemaIds = specialists
+    ? canonical([...specialists, ...Object.keys(schemas)])
+    : (Object.keys(schemas).length ? Object.keys(schemas) : null);
+
   const checkboxRow = (testId, name, checked, onChange, disabled = false) => (
     <label
       key={name}
@@ -388,14 +495,31 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
           />
           Restrict which specialists may be started
         </label>
+        {/* S21: the roster itself, from the engine's AGENT_LIST
+            answer — every agent (supervisor included), what it
+            does, and its Agents-tab pin. The checkboxes below
+            enumerate this list's specialists. */}
+        {agents && (
+          <div data-testid="orchestration-agent-roster" style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '16px' }}>
+            {agents.map((a) => (
+              <div key={a.id} data-testid={`orchestration-agent-${a.id}`} style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{a.name}</span>
+                {' — '}{a.description}
+                <span style={{ color: 'var(--text-muted)' }}>
+                  {' · '}{a.model && a.model !== 'inherit' ? `pinned to ${a.model}` : 'no Agents-tab pin'}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
         <div style={{ display: 'flex', gap: '20px', marginBottom: '20px' }}>
-          {SPECIALISTS.map((name) => checkboxRow(
+          {specialists ? specialists.map((name) => checkboxRow(
             `spawn-allow-${name}`,
             name,
             spawnRestricted ? spawnAllowed.includes(name) : true,
             handleSpawnToggle,
             !spawnRestricted
-          ))}
+          )) : rosterNote}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <label htmlFor="delegation-cap-input" style={{ fontSize: '14px' }}>Delegation cap per turn</label>
@@ -530,8 +654,8 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
           Agents-tab model only when it first writes or executes something.
         </p>
         <div style={{ display: 'flex', gap: '20px' }}>
-          {SPECIALISTS.map((name) => checkboxRow(
-            `prewalk-${name}`, name, prewalk.includes(name), handlePrewalkToggle))}
+          {specialists ? specialists.map((name) => checkboxRow(
+            `prewalk-${name}`, name, prewalk.includes(name), handlePrewalkToggle)) : rosterNote}
         </div>
       </div>
 
@@ -543,7 +667,7 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
           Leave empty for free-form answers.
         </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {SPECIALISTS.map((name) => (
+          {schemaIds ? schemaIds.map((name) => (
             <div key={name}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
                 <label htmlFor={`schema-${name}`} style={{ fontSize: '14px', fontWeight: 500 }}>{name}</label>
@@ -570,7 +694,7 @@ export default function OrchestrationPanel({ config, configError, onConfigUpdate
                 style={{ ...inputStyle, width: '100%', fontFamily: 'var(--font-mono)', resize: 'vertical', boxSizing: 'border-box' }}
               />
             </div>
-          ))}
+          )) : rosterNote}
         </div>
       </div>
 

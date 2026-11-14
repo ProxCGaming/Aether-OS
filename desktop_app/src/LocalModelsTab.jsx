@@ -10,6 +10,7 @@ import {
   downloadButtonStyle,
 } from './modelHubLabels';
 import { DownloadProgressRow, DownloadedModelsSection } from './components/DownloadedModels';
+import OllamaModelList from './components/OllamaModelList';
 
 // Model Hub (H4): this tab is the renderer's window onto the hub
 // contracts built in H1–H3. Search runs against two live sources —
@@ -181,6 +182,13 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
   const pendingDeleteFor = useCallback((row) => pendingHubEntry(
     'MODEL_HUB_DELETE_REQUEST',
     (p) => p.source === row.source && p.id === row.id
+  ), [pendingHubEntry]);
+  // S21: the engine-list section's queued deletes derive from
+  // the same real queue, keyed by model name (the
+  // LOCAL_MODEL_DELETE_REQUEST payload's only field).
+  const pendingOllamaDeleteFor = useCallback((modelName) => pendingHubEntry(
+    'LOCAL_MODEL_DELETE_REQUEST',
+    (p) => p.model === modelName
   ), [pendingHubEntry]);
   const pendingSetActiveFor = useCallback((row) => pendingHubEntry(
     'MODEL_SET_DEFAULT',
@@ -765,6 +773,14 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
         onSetActive={handleSetActive}
         onUseAsEmbedder={handleUseAsEmbedder}
         onDeleteDownloaded={handleDeleteDownloaded}
+      />
+
+      {/* S21 (R17): the engine's own Ollama list + its delete —
+          a daemon inventory distinct from the hub's downloaded
+          section above (see components/OllamaModelList). */}
+      <OllamaModelList
+        sendRequest={sendRequest}
+        pendingDeleteFor={pendingOllamaDeleteFor}
       />
 
     </div>

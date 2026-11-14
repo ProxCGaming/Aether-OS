@@ -182,12 +182,18 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   // Voice Tuning State (E8-5.2)
   const [vadThreshold, setVadThreshold] = useState(0.5);
   const [silenceDurationMs, setSilenceDurationMs] = useState(700);
+  // S21 (voice G8): Smart Turn sensitivity joins the other two
+  // endpointing values on the same discipline — the engine field
+  // has existed (and been applied by its CONFIG_UPDATE handler,
+  // clamped to [0.0, 1.0]) since E8-5.2; only the UI was missing.
+  const [smartTurnSensitivity, setSmartTurnSensitivity] = useState(0.5);
   // D2-08: the last slider value actually committed (sent, or
   // applied from a config reply). A drag updates only the local
   // state; the commit handlers below send once, on release, when
   // the value differs from this.
   const vadCommittedRef = useRef(0.5);
   const silenceCommittedRef = useRef(700);
+  const smartTurnCommittedRef = useRef(0.5);
 
   // A5: State for Reasoning Effort and Node model override
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem('reasoning_effort') || 'standard');
@@ -253,6 +259,11 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     if (silenceCommittedRef.current === silenceDurationMs) return;
     silenceCommittedRef.current = silenceDurationMs;
     sendSettingsAction('CONFIG_UPDATE_REQUEST', { config: { silence_duration_ms: silenceDurationMs } });
+  };
+  const commitSmartTurnSensitivity = () => {
+    if (smartTurnCommittedRef.current === smartTurnSensitivity) return;
+    smartTurnCommittedRef.current = smartTurnSensitivity;
+    sendSettingsAction('CONFIG_UPDATE_REQUEST', { config: { smart_turn_sensitivity: smartTurnSensitivity } });
   };
 
   // D2-07: the diagnostics run's no-answer timer bookkeeping.
@@ -753,6 +764,11 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
       if (config.silence_duration_ms !== undefined && config.silence_duration_ms !== null) {
         setSilenceDurationMs(config.silence_duration_ms);
         silenceCommittedRef.current = config.silence_duration_ms;
+      }
+      if (config.smart_turn_sensitivity !== undefined && config.smart_turn_sensitivity !== null) {
+        setSmartTurnSensitivity(config.smart_turn_sensitivity);
+        // D2-08: an applied value is by definition committed.
+        smartTurnCommittedRef.current = config.smart_turn_sensitivity;
       }
       if (config.approval_binding_mode) {
         setApprovalBindingMode(config.approval_binding_mode);
@@ -1346,6 +1362,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             isConnected={isConnected}
             sendSettingsAction={sendSettingsAction}
             onExportBundle={handleLogsExportBundle}
+            engineConfig={engineConfig}
           />
         )}
 
@@ -1527,6 +1544,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             setSilenceDurationMs={setSilenceDurationMs}
             commitSilenceDuration={commitSilenceDuration}
             pendingSilenceValue={pendingConfigValue('silence_duration_ms')}
+            smartTurnSensitivity={smartTurnSensitivity}
+            setSmartTurnSensitivity={setSmartTurnSensitivity}
+            commitSmartTurnSensitivity={commitSmartTurnSensitivity}
+            pendingSmartTurnValue={pendingConfigValue('smart_turn_sensitivity')}
           />
         )}
       </div>

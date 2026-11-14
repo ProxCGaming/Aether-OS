@@ -45,20 +45,35 @@ export function componentSharePct(component, breakdown) {
   return denominator > 0 ? (component.tokens / denominator) * 100 : 0;
 }
 
-export function CompactContextBar({ breakdown, onClick }) {
-  const model = breakdown?.model || 'gemini-3.5-flash';
+export function CompactContextBar({ breakdown, defaultModel = '', onClick }) {
+  // S21 (D2-38 sibling): the model named here is the breakdown's
+  // own model, or — before any breakdown exists — the caller's
+  // configured default (DraggableChatWindow derives it from the
+  // provider list's is_default entry, the same source as its
+  // model picker). The old hard-coded 'gemini-3.5-flash'
+  // fallback named a model the user may never have configured.
+  const model = breakdown?.model || defaultModel || '';
   const totalTokens = breakdown?.total_tokens || 0;
   const capacity = contextCapacity(breakdown);
   const percentUsed = breakdown?.percent_used != null ? breakdown.percent_used : 0;
+  // S21: no breakdown is its own state. The old render showed
+  // the fallback model with a 0% meter — an unmeasured session
+  // impersonating a measured, empty one. Now the meter stays
+  // empty and the percentage reads '—' until the engine reports.
+  const hasBreakdown = breakdown != null;
 
   return (
     <button
       type="button"
       data-testid="compact-context-bar"
       onClick={onClick}
-      title={capacity != null
-        ? `Default model context: ${model} (${totalTokens.toLocaleString()} / ${capacity.toLocaleString()} tokens - ${percentUsed}%)`
-        : `Default model context: ${model} (${totalTokens.toLocaleString()} tokens, window size unknown)`}
+      title={!hasBreakdown
+        ? (model
+          ? `Default model context: ${model} — no breakdown measured yet`
+          : 'Context: no breakdown measured yet')
+        : capacity != null
+          ? `Default model context: ${model} (${totalTokens.toLocaleString()} / ${capacity.toLocaleString()} tokens - ${percentUsed}%)`
+          : `Default model context: ${model} (${totalTokens.toLocaleString()} tokens, window size unknown)`}
       style={{
         background: 'var(--bg-hover)',
         border: '1px solid var(--border-default)',
@@ -76,7 +91,7 @@ export function CompactContextBar({ breakdown, onClick }) {
     >
       <Layers size={13} style={{ color: '#F5B942' }} />
       <span style={{ color: 'var(--text-secondary)', fontSize: '11px', maxWidth: '110px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {model}
+        {model || 'Context'}
       </span>
       <div
         style={{
@@ -88,51 +103,85 @@ export function CompactContextBar({ breakdown, onClick }) {
           display: 'flex',
         }}
       >
-        <div
-          style={{
-            width: `${Math.min(100, Math.max(percentUsed > 0 ? 3 : 0, percentUsed))}%`,
-            background: percentUsed > 90 ? '#ef4444' : (percentUsed > 70 ? '#f59e0b' : '#38bdf8'),
-            borderRadius: '3px',
-            transition: 'width 0.3s ease',
-          }}
-        />
+        {hasBreakdown && (
+          <div
+            style={{
+              width: `${Math.min(100, Math.max(percentUsed > 0 ? 3 : 0, percentUsed))}%`,
+              background: percentUsed > 90 ? '#ef4444' : (percentUsed > 70 ? '#f59e0b' : '#38bdf8'),
+              borderRadius: '3px',
+              transition: 'width 0.3s ease',
+            }}
+          />
+        )}
       </div>
-      <span style={{ fontSize: '11px', color: 'var(--text-primary)', fontWeight: 600 }}>
-        {percentUsed}%
+      <span data-testid="compact-context-percent" style={{ fontSize: '11px', color: 'var(--text-primary)', fontWeight: 600 }}>
+        {hasBreakdown ? `${percentUsed}%` : '—'}
       </span>
     </button>
   );
 }
 
-export default function ContextBar({ breakdown = null }) {
-  const model = breakdown?.model || 'gemini-3.5-flash';
+const panelStyle = {
+  position: 'absolute',
+  top: '100%',
+  right: 0,
+  marginTop: '6px',
+  background: 'rgba(16, 16, 18, 0.66)',
+  backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+  WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+  border: '1px solid var(--glass-edge)',
+  borderRadius: 'var(--radius-lg)',
+  padding: '12px 14px',
+  minWidth: '340px',
+  maxWidth: '400px',
+  boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
+  color: 'var(--text-primary)',
+  fontSize: '12px',
+  zIndex: 1100,
+};
+
+export default function ContextBar({ breakdown = null, defaultModel = '' }) {
+  // S21: same rule as the compact bar — the model is the
+  // breakdown's own, else the configured default the caller
+  // passes, never a hard-coded literal.
+  const model = breakdown?.model || defaultModel || '';
   const totalTokens = breakdown?.total_tokens || 0;
   const capacity = contextCapacity(breakdown);
   const { basis } = contextShareBasis(breakdown);
   const percentUsed = breakdown?.percent_used != null ? breakdown.percent_used : 0;
   const components = breakdown?.components || [];
 
+  // S21: the real no-breakdown state. Before the first
+  // CONTEXT_BREAKDOWN_RESPONSE the panel used to render the
+  // full meter over zeroed/fabricated data; now it says plainly
+  // that nothing has been measured yet, under the configured
+  // default model's name.
+  if (breakdown == null) {
+    return (
+      <div data-testid="context-bar-panel" style={panelStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <Layers size={14} style={{ color: '#F5B942' }} />
+            <span style={{ fontWeight: 600, fontSize: '13px' }}>Context Window</span>
+          </div>
+          {model && (
+            <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
+              {model}
+            </span>
+          )}
+        </div>
+        <div data-testid="context-no-breakdown" style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+          No context breakdown yet — the engine reports how the window is being
+          used once it measures a task in this session.
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       data-testid="context-bar-panel"
-      style={{
-        position: 'absolute',
-        top: '100%',
-        right: 0,
-        marginTop: '6px',
-        background: 'rgba(16, 16, 18, 0.66)',
-        backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-        WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-        border: '1px solid var(--glass-edge)',
-        borderRadius: 'var(--radius-lg)',
-        padding: '12px 14px',
-        minWidth: '340px',
-        maxWidth: '400px',
-        boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
-        color: 'var(--text-primary)',
-        fontSize: '12px',
-        zIndex: 1100,
-      }}
+      style={panelStyle}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>

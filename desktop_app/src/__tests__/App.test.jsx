@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import fs from 'fs';
 import path from 'path';
@@ -120,6 +120,12 @@ describe('App socket facade and providers (Phase 10.3 C1)', () => {
     expect(source).not.toContain('lastRawIpcTime');
   });
 
+  // S21: the compact ContextBar now also names the configured
+  // default model (it previously rendered a hard-coded literal),
+  // so the model name appears twice on screen. These tests pin
+  // the chat model PICKER's behaviour — scope their queries to it.
+  const picker = () => within(screen.getByTestId('chat-model-picker'));
+
   it('MODEL_DEFAULT_CHANGED updates the default model in the chat model picker', async () => {
     render(<App />);
     await flushPromises();
@@ -128,15 +134,15 @@ describe('App socket facade and providers (Phase 10.3 C1)', () => {
       type: 'PROVIDER_LIST_RESPONSE',
       payload: { providers: [openaiProvider(), anthropicProvider()] },
     });
-    expect(screen.getByText('gpt-4')).toBeInTheDocument();
+    expect(picker().getByText('gpt-4')).toBeInTheDocument();
 
     emitEngineMessage({
       type: 'MODEL_DEFAULT_CHANGED',
       payload: { provider: 'anthropic', model: 'claude-sonnet-4' },
     });
 
-    expect(screen.getByText('claude-sonnet-4')).toBeInTheDocument();
-    expect(screen.queryByText('gpt-4')).not.toBeInTheDocument();
+    expect(picker().getByText('claude-sonnet-4')).toBeInTheDocument();
+    expect(picker().queryByText('gpt-4')).not.toBeInTheDocument();
   });
 
   it('normalises a provider list that arrives as an object into an array, so MODEL_DEFAULT_CHANGED works on it', async () => {
@@ -154,15 +160,15 @@ describe('App socket facade and providers (Phase 10.3 C1)', () => {
         },
       },
     });
-    expect(screen.getByText('gpt-4')).toBeInTheDocument();
+    expect(picker().getByText('gpt-4')).toBeInTheDocument();
 
     emitEngineMessage({
       type: 'MODEL_DEFAULT_CHANGED',
       payload: { provider: 'anthropic', model: 'claude-sonnet-4' },
     });
 
-    expect(screen.getByText('claude-sonnet-4')).toBeInTheDocument();
-    expect(screen.queryByText('gpt-4')).not.toBeInTheDocument();
+    expect(picker().getByText('claude-sonnet-4')).toBeInTheDocument();
+    expect(picker().queryByText('gpt-4')).not.toBeInTheDocument();
   });
 
   it('queues a model change made while offline and sends it on reconnect', async () => {
@@ -173,11 +179,11 @@ describe('App socket facade and providers (Phase 10.3 C1)', () => {
       type: 'PROVIDER_LIST_RESPONSE',
       payload: { providers: [openaiProvider(), anthropicProvider()] },
     });
-    expect(screen.getByText('gpt-4')).toBeInTheDocument();
+    expect(picker().getByText('gpt-4')).toBeInTheDocument();
 
     // Open the model picker and choose the Anthropic model.
-    fireEvent.click(screen.getByText('gpt-4'));
-    fireEvent.click(screen.getByText('claude-sonnet-4'));
+    fireEvent.click(picker().getByText('gpt-4'));
+    fireEvent.click(picker().getByText('claude-sonnet-4'));
 
     // Offline: the request must be queued by the single facade, not dropped
     // and not sent into the void.

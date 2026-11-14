@@ -22,6 +22,10 @@ function baseProps(overrides = {}) {
     setSilenceDurationMs: jest.fn(),
     commitSilenceDuration: jest.fn(),
     pendingSilenceValue: undefined,
+    smartTurnSensitivity: 0.5,
+    setSmartTurnSensitivity: jest.fn(),
+    commitSmartTurnSensitivity: jest.fn(),
+    pendingSmartTurnValue: undefined,
     ...overrides,
   };
 }
@@ -61,5 +65,33 @@ describe('VoicePanel', () => {
     render(<VoicePanel {...baseProps({ pendingVadValue: 0.7, pendingSilenceValue: 900 })} />);
     expect(screen.getByTestId('vad-threshold-queued')).toHaveTextContent('VAD threshold change to 0.70 queued');
     expect(screen.getByTestId('silence-duration-queued')).toHaveTextContent('Silence duration change to 900 ms queued');
+  });
+
+  // S21 (voice G8): the Smart Turn slider — the engine field
+  // (smart_turn_sensitivity) existed and was applied on
+  // CONFIG_UPDATE all along; only the control was missing. It
+  // follows the same D2-08 commit-on-release discipline, and
+  // 0.00 (Smart Turn off) is a real, displayable value.
+  test('the Smart Turn slider renders, drags locally and commits on release', () => {
+    const props = baseProps();
+    render(<VoicePanel {...props} />);
+    const slider = screen.getByTestId('smart-turn-sensitivity-slider');
+    expect(screen.getByTestId('smart-turn-sensitivity-value')).toHaveTextContent('0.50');
+    fireEvent.change(slider, { target: { value: '0.8' } });
+    expect(props.setSmartTurnSensitivity).toHaveBeenCalledWith(0.8);
+    expect(props.commitSmartTurnSensitivity).not.toHaveBeenCalled();
+    fireEvent.pointerUp(slider);
+    expect(props.commitSmartTurnSensitivity).toHaveBeenCalledTimes(1);
+  });
+
+  test('the Smart Turn slider is inert before the config answer and shows 0.00 as off, not unset', () => {
+    render(<VoicePanel {...baseProps({ configAnswered: false, smartTurnSensitivity: 0 })} />);
+    expect(screen.getByTestId('smart-turn-sensitivity-slider')).toBeDisabled();
+    expect(screen.getByTestId('smart-turn-sensitivity-value')).toHaveTextContent('0.00');
+  });
+
+  test('a queued Smart Turn value is named under its slider (RUX-A-15)', () => {
+    render(<VoicePanel {...baseProps({ pendingSmartTurnValue: 0.25 })} />);
+    expect(screen.getByTestId('smart-turn-sensitivity-queued')).toHaveTextContent('Smart Turn sensitivity change to 0.25 queued');
   });
 });

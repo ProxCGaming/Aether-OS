@@ -196,4 +196,42 @@ describe('ContextBar', () => {
     fireEvent.click(compactBar);
     expect(onClick).toHaveBeenCalledTimes(1);
   });
+
+  // S21: the model named before any breakdown exists is the
+  // caller's configured default (from the provider list's
+  // is_default entry), never the old hard-coded literal; and a
+  // null breakdown is a real state — an empty meter and a '—',
+  // not a fabricated 0% over a model the user may not have.
+  test('no breakdown: the compact bar names the configured default and shows no measured percentage', () => {
+    render(<CompactContextBar breakdown={null} defaultModel="qwen3:8b" onClick={() => {}} />);
+    const compactBar = screen.getByTestId('compact-context-bar');
+    expect(compactBar).toHaveTextContent('qwen3:8b');
+    expect(compactBar).not.toHaveTextContent('gemini-3.5-flash');
+    expect(screen.getByTestId('compact-context-percent')).toHaveTextContent('—');
+    expect(compactBar).not.toHaveTextContent('0%');
+    expect(compactBar.title).toContain('no breakdown measured yet');
+  });
+
+  test('no breakdown and no configured default: the compact bar claims no model at all', () => {
+    render(<CompactContextBar breakdown={null} onClick={() => {}} />);
+    const compactBar = screen.getByTestId('compact-context-bar');
+    expect(compactBar).not.toHaveTextContent('gemini-3.5-flash');
+    expect(screen.getByTestId('compact-context-percent')).toHaveTextContent('—');
+  });
+
+  test('no breakdown: the popover panel states it plainly instead of rendering a zeroed meter', () => {
+    render(<ContextBar breakdown={null} defaultModel="qwen3:8b" />);
+    expect(screen.getByTestId('context-bar-panel')).toBeInTheDocument();
+    expect(screen.getByTestId('context-no-breakdown')).toHaveTextContent('No context breakdown yet');
+    expect(screen.getByTestId('context-bar-panel')).toHaveTextContent('qwen3:8b');
+    expect(screen.queryByTestId('context-segmented-bar')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('context-breakdown-list')).not.toBeInTheDocument();
+  });
+
+  test('a breakdown without a model falls back to the configured default, not the literal', () => {
+    const noModelBreakdown = { ...sampleBreakdown, model: undefined };
+    render(<ContextBar breakdown={noModelBreakdown} defaultModel="qwen3:8b" />);
+    expect(screen.getByTestId('context-bar-panel')).toHaveTextContent('qwen3:8b');
+    expect(screen.getByTestId('context-bar-panel')).not.toHaveTextContent('gemini-3.5-flash');
+  });
 });

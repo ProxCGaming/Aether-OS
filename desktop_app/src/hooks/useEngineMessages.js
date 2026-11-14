@@ -1073,6 +1073,17 @@ export function useEngineMessages(deps) {
             setProviderHealth(data.payload.health);
             setProviderHealthLoaded(true);
           }
+        } else if (data.type === 'REFRESH_MODELS_RESPONSE') {
+          // S21: the refresh answer carries the same provider
+          // list shape as PROVIDER_LIST_RESPONSE (the engine
+          // rebuilds the list after re-discovery) — apply it the
+          // same way, or a completed refresh would change
+          // nothing on screen and the feature would still be
+          // dead from the user. It carries no health field, so
+          // provider health is left as the list last reported it.
+          const list = data.payload.providers;
+          setProviders(Array.isArray(list) ? list : (list && typeof list === 'object' ? Object.values(list) : []));
+          setProvidersLoaded(true);
         } else if (data.type === 'CONFIG_GET_RESPONSE' || data.type === 'CONFIG_UPDATE_RESPONSE' || data.type === 'CONFIG_RESET_RESPONSE') {
           if (data.payload && data.payload.config) setEngineConfig(data.payload.config);
           if (data.type === 'CONFIG_RESET_RESPONSE' && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
