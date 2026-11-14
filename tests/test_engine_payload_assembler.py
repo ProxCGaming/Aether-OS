@@ -190,6 +190,16 @@ def test_download_runtime_uses_a_timeout(tmp_path, monkeypatch):
     # Every other step in this script is timeout-bounded; the one
     # network step was the exception — a stalled connection hung a
     # release build forever.
+    # Since 15 Nov 2026 the checksum table is filled, so the fake
+    # bytes need a matching pin (the checksum behaviour itself has
+    # its own two tests below; this one is only about the timeout).
+    import hashlib
+
+    monkeypatch.setattr(
+        assembler,
+        "RUNTIME_SHA256",
+        {"linux": hashlib.sha256(b"runtime-bytes").hexdigest()},
+    )
     calls = _fake_urlopen(monkeypatch, b"runtime-bytes")
     dest = tmp_path / "runtime.tar.gz"
     assembler._download_runtime("linux", dest)

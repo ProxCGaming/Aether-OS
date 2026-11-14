@@ -37,12 +37,20 @@ Runtime acquisition, in priority order:
                         RUNTIME_PIN + CPYTHON_VERSION together and
                         re-verify, never float to "latest".
 
-Dependencies are the project's own [project] dependencies from
-pyproject.toml, installed INTO the payload runtime with
-``uv pip install --python <payload python> --system`` so platform
-markers (e.g. pywin32) resolve against the payload interpreter.
-Assemble on the target platform (the release workflow's matrix does
-exactly that): wheels are platform-specific.
+Dependencies are installed INTO the payload runtime from the
+project's ONE source of truth, ``uv.lock`` — never from pyproject
+version ranges. The assembler exports the lock for the target
+platform (``uv export --locked --format requirements-txt``, hashes
+included) and installs that file with
+``uv pip install --python <payload python> --system``, so the
+payload carries exactly the versions dev and CI tested, byte-for-
+byte hash-verified. (Before 15 Nov 2026 this step installed the
+pyproject ranges fresh; that drift is how an installer shipped
+litellm 1.108.0 + mcp 1.30.0 — a pair whose tool-carrying calls all
+crash — while the lock held a different pair.) Platform markers
+(e.g. pywin32) resolve against the target platform triple. Assemble
+on the target platform (the release workflow's matrix does exactly
+that): wheels are platform-specific.
 
 The engine's own configuration needs nothing from this payload: user
 config, secrets and data live under ~/.aether regardless of CWD, and
@@ -72,7 +80,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -107,13 +114,14 @@ DOWNLOAD_TIMEOUT_SECONDS = 300
 # The downloaded bytes become the interpreter inside every shipped
 # installer, so when a digest is pinned here the download is
 # verified against it before anything is extracted (D4-03).
-# EMPTY today: the digests for the 20261026 assets have not been
-# transcribed from the release page yet — an unpinned platform
-# downloads over TLS alone, exactly as before this check existed.
-# Fill an entry in the same commit that bumps RUNTIME_PIN, from
-# the release's checksum listing, never from the downloaded bytes
-# themselves.
-RUNTIME_SHA256: dict[str, str] = {}
+# Filled 15 Nov 2026 from the 20261026 release's own SHA256SUMS
+# asset (the release's checksum listing — never from downloaded
+# bytes). Fill an entry in the same commit that bumps RUNTIME_PIN.
+RUNTIME_SHA256: dict[str, str] = {
+    "win32": "590dfcbe3a34c07301e6332e13e2188b98655cd072b08afa45a7998dc4c22bc5",
+    "linux": "6a79e922e50006b601f29e688407659da1c2b86ebcd4e9c7254cf234be8b89de",
+    "darwin": "a962e47df522889eaa7ff0d6a56203f1079f68aabb65ffdbe8455f362bc769f3",
+}
 
 HOST_PLATFORMS = {"win32": "win32", "linux": "linux", "darwin": "darwin"}
 
@@ -249,10 +257,49 @@ def copy_app_packages(layout: dict, out_dir: Path, repo_root: Path = REPO_ROOT) 
         )
 
 
-def project_dependencies(repo_root: Path = REPO_ROOT) -> list[str]:
-    with open(repo_root / "pyproject.toml", "rb") as fh:
-        project = tomllib.load(fh)["project"]
-    return list(project.get("dependencies", []))
+def export_locked_requirements(
+    platform: str,
+    dest: Path,
+    repo_root: Path = REPO_ROOT,
+    runner=subprocess.run,
+) -> str:
+    """Export ``uv.lock`` to a hashed requirements file for a platform.
+
+    uv.lock is the single source of truth for every Python version
+    the app runs with; this export is the ONLY dependency input the
+    payload ever installs from. ``--locked`` makes uv refuse when
+    the lock disagrees with pyproject.toml, and the export carries
+    each package's sha256, which the install step then verifies.
+    Platform-specific packages (e.g. pywin32) travel as environment
+    markers in the export and are selected by the install step
+    against the payload interpreter — which is why assembly must
+    run on the target platform. The ``platform`` argument is kept
+    for call-site clarity and future per-platform exports.
+    Returns the sha256 of the exported file (recorded in the
+    payload manifest, so an assembled payload names the exact
+    dependency set inside it).
+    """
+    uv = shutil.which("uv")
+    if uv is None:
+        raise AssemblerError(
+            "The dependency step needs the `uv` binary on PATH "
+            "(the project's own toolchain — see .github/workflows/ci.yml)"
+        )
+    if not (repo_root / "uv.lock").is_file():
+        raise AssemblerError(f"uv.lock not found at {repo_root / 'uv.lock'}")
+    cmd = [
+        uv, "export",
+        "--format", "requirements-txt",
+        "--locked",
+        "--no-emit-project",
+        "--no-dev",
+        "--output-file", str(dest),
+    ]
+    proc = runner(cmd, capture_output=True, text=True, timeout=300, cwd=repo_root)
+    if proc.returncode != 0 or not dest.is_file():
+        tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-25:])
+        raise AssemblerError(f"Exporting uv.lock for the payload failed:\n{tail}")
+    return hashlib.sha256(dest.read_bytes()).hexdigest()
 
 
 def install_dependencies(
@@ -261,7 +308,12 @@ def install_dependencies(
     out_dir: Path,
     repo_root: Path = REPO_ROOT,
     runner=subprocess.run,
-) -> None:
+) -> str:
+    """Install the locked dependency set into the payload runtime.
+
+    Returns the sha256 of the exported requirements file that was
+    installed (see export_locked_requirements).
+    """
     uv = shutil.which("uv")
     if uv is None:
         raise AssemblerError(
@@ -269,23 +321,46 @@ def install_dependencies(
             "(the project's own toolchain — see .github/workflows/ci.yml)"
         )
     python_exe = out_dir / runtime_exe_rel(layout, platform)
-    deps = project_dependencies(repo_root)
-    if not deps:
-        raise AssemblerError("pyproject.toml declares no [project] dependencies")
     with tempfile.TemporaryDirectory(prefix="aether-deps-") as tmp:
         req = Path(tmp) / "requirements.txt"
-        req.write_text("\n".join(deps) + "\n", encoding="utf-8")
+        req_sha256 = export_locked_requirements(
+            platform, req, repo_root=repo_root, runner=runner,
+        )
         cmd = [
             uv, "pip", "install",
             "--python", str(python_exe),
             "--system",
             "--requirement", str(req),
         ]
-        print(f"Installing {len(deps)} project dependencies into the payload runtime...")
+        print("Installing the uv.lock dependency set into the payload runtime...")
         proc = runner(cmd, capture_output=True, text=True, timeout=1800)
     if proc.returncode != 0:
         tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-25:])
         raise AssemblerError(f"Dependency installation failed:\n{tail}")
+    return req_sha256
+
+
+# The litellm smoke below exists because of a shipped failure
+# (15 Nov 2026): litellm's tool-carrying completion path imports
+# its MCP handler chain, and a litellm/mcp pair that disagrees
+# about `mcp.types.CacheableResult` makes EVERY agent task fail
+# with a misleading "network/service error" — while plain imports
+# and tool-less calls succeed, so the engine-import check alone
+# shipped the broken pair. A mock-response call with a tool runs
+# the exact import chain with no network and no API key.
+LITELLM_TOOLS_SMOKE = (
+    "import asyncio, litellm\n"
+    "TOOLS = [{'type': 'function', 'function': {'name': 'smoke', "
+    "'description': 'smoke', 'parameters': {'type': 'object', "
+    "'properties': {}}}}]\n"
+    "async def _main():\n"
+    "    await litellm.acompletion(\n"
+    "        model='gemini/gemini-2.5-flash',\n"
+    "        messages=[{'role': 'user', 'content': 'smoke'}],\n"
+    "        mock_response='ok', tools=TOOLS)\n"
+    "asyncio.run(_main())\n"
+    "print('payload litellm tools ok')\n"
+)
 
 
 def verify_payload(
@@ -294,23 +369,34 @@ def verify_payload(
     out_dir: Path,
     runner=subprocess.run,
 ) -> None:
-    """The payload interpreter must import the engine entry point."""
+    """The payload interpreter must import the engine entry point
+    AND run a tool-carrying litellm call (see LITELLM_TOOLS_SMOKE)."""
     python_exe = out_dir / runtime_exe_rel(layout, platform)
     app_dir = out_dir / layout["appDir"]
     env = dict(os.environ)
     env["PYTHONPATH"] = str(app_dir)
+    checks = [
+        (
+            "engine import",
+            (
+                "import aether_engine.main, aether_common, aether_worker; "
+                "print('payload import ok')"
+            ),
+            "payload import ok",
+        ),
+        ("litellm tools smoke", LITELLM_TOOLS_SMOKE, "payload litellm tools ok"),
+    ]
     with tempfile.TemporaryDirectory(prefix="aether-verify-") as cwd:
-        proc = runner(
-            [
-                str(python_exe), "-c",
-                ("import aether_engine.main, aether_common, aether_worker; "
-                 "print('payload import ok')"),
-            ],
-            capture_output=True, text=True, timeout=300, cwd=cwd, env=env,
-        )
-    if proc.returncode != 0 or "payload import ok" not in proc.stdout:
-        tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-25:])
-        raise AssemblerError(f"Payload verification (engine import) failed:\n{tail}")
+        for label, code, marker in checks:
+            proc = runner(
+                [str(python_exe), "-c", code],
+                capture_output=True, text=True, timeout=300, cwd=cwd, env=env,
+            )
+            if proc.returncode != 0 or marker not in proc.stdout:
+                tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-25:])
+                raise AssemblerError(
+                    f"Payload verification ({label}) failed:\n{tail}"
+                )
 
 
 def write_manifest(
@@ -319,12 +405,20 @@ def write_manifest(
     out_dir: Path,
     runtime_source: str,
     python_version: str,
+    requirements_sha256: str | None = None,
+    uv_lock_sha256: str | None = None,
 ) -> dict:
     manifest = {
         "format": 1,
         "platform": platform,
         "python_version": python_version,
         "runtime_source": runtime_source,
+        # Dependency provenance: the payload's packages came from
+        # this exact uv.lock (sha256 of the lock file) via the
+        # hashed export named here — an installed app can be
+        # checked against the repo's lock byte-for-byte.
+        "uv_lock_sha256": uv_lock_sha256,
+        "requirements_sha256": requirements_sha256,
         "runtime_dir": layout["runtimeDir"],
         "app_dir": layout["appDir"],
         "app_packages": list(layout["appPackages"]),
@@ -379,9 +473,20 @@ def assemble(
     python_exe = out_dir / runtime_exe_rel(layout, platform)
     python_version = check_runtime_version(python_exe, runner=runner)
     copy_app_packages(layout, out_dir, repo_root=repo_root)
+    requirements_sha256 = None
     if not skip_deps:
-        install_dependencies(layout, platform, out_dir, repo_root=repo_root, runner=runner)
-    manifest = write_manifest(layout, platform, out_dir, runtime_source, python_version)
+        requirements_sha256 = install_dependencies(
+            layout, platform, out_dir, repo_root=repo_root, runner=runner,
+        )
+    uv_lock = repo_root / "uv.lock"
+    uv_lock_sha256 = (
+        hashlib.sha256(uv_lock.read_bytes()).hexdigest() if uv_lock.is_file() else None
+    )
+    manifest = write_manifest(
+        layout, platform, out_dir, runtime_source, python_version,
+        requirements_sha256=requirements_sha256,
+        uv_lock_sha256=uv_lock_sha256,
+    )
     if not skip_verify:
         verify_payload(layout, platform, out_dir, runner=runner)
     return manifest
