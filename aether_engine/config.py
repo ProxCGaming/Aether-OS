@@ -260,6 +260,18 @@ class UserConfig:
     # fast chat's 20-message / 24,000-char history window.
     fast_chat_memory_enabled: bool = True
     fast_chat_memory_token_budget: int = 400
+    # S11: EQ adaptation (aether_engine/eq.py). eq_enabled gates
+    # the whole EQ path in BOTH prompt builders (fast chat and
+    # the supervisor routing prompt): off = the pre-S11 prompt
+    # composition, byte for byte. Detection is local and
+    # deterministic (signals over the recent conversation — no
+    # LLM call, nothing leaves the machine) and the read is
+    # transient: computed per turn, held in run/session state
+    # only, NEVER written to long-term memory. The adaptation is
+    # behaviour guidance to the model (pace, directness,
+    # simplify when things go wrong) — the read is never shown
+    # to the user as a diagnosis.
+    eq_enabled: bool = True
     session_retention_days: int = 180
     session_max_sessions: int = 200
     # Calendar layer (14 Nov 2026): the schedule in
@@ -376,6 +388,7 @@ class UserConfig:
             "memory_decay_floor": self.memory_decay_floor,
             "fast_chat_memory_enabled": self.fast_chat_memory_enabled,
             "fast_chat_memory_token_budget": self.fast_chat_memory_token_budget,
+            "eq_enabled": self.eq_enabled,
             "session_retention_days": self.session_retention_days,
             "session_max_sessions": self.session_max_sessions,
             "calendar_enabled": self.calendar_enabled,
@@ -506,6 +519,7 @@ class UserConfig:
             memory_decay_floor=_as_float(d.get("memory_decay_floor"), 0.1),
             fast_chat_memory_enabled=bool(d.get("fast_chat_memory_enabled", True)),
             fast_chat_memory_token_budget=_as_int(d.get("fast_chat_memory_token_budget"), 400),
+            eq_enabled=bool(d.get("eq_enabled", True)),
             session_retention_days=_as_int(d.get("session_retention_days"), 180),
             session_max_sessions=_as_int(d.get("session_max_sessions"), 200),
             calendar_enabled=bool(d.get("calendar_enabled", True)),

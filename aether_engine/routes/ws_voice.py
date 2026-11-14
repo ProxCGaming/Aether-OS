@@ -157,10 +157,24 @@ async def send_voice_session_start_result(conn, req_id_, payload_):
                 background.add(task)
                 task.add_done_callback(background.discard)
 
+            def _note_voice_affect(read, _conn=conn) -> None:
+                """S11: record each turn's EQ read on the pipeline.
+
+                Late-bound on purpose: the pipeline is created
+                below with this talker inside it, so the lookup
+                happens per turn, once voice_state holds it.
+                Recording only — note_affect_read applies no
+                prosody (the current TTS has none to apply).
+                """
+                pipeline = _conn.voice_state.get("pipeline")
+                if pipeline is not None:
+                    pipeline.note_affect_read(read)
+
             voice_pipeline, voice_error = create_voice_pipeline(
                 session_id=voice_session_id,
                 talker=fast_chat_talker(
-                    voice_provider, session_id=voice_session_id),
+                    voice_provider, session_id=voice_session_id,
+                    on_affect_read=_note_voice_affect),
                 emit=lambda event: emit_voice_event(conn, event),
                 on_user_final=_persist_voice_user,
                 on_assistant_final=_persist_voice_assistant,

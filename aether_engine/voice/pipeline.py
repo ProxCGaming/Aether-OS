@@ -142,6 +142,12 @@ class VoicePipeline:
         escalation_ack: str = DEFAULT_ESCALATION_ACK,
     ):
         self.session_id = session_id
+        # S11: the latest EQ affect read for this session,
+        # recorded via note_affect_read (the talker's fast-chat
+        # run computes one per turn). Session state only — it is
+        # never persisted anywhere (eq.py: transient by
+        # construction).
+        self._latest_affect_read = None
         self._vad = vad
         self._stt = stt
         self._tts = tts
@@ -213,6 +219,30 @@ class VoicePipeline:
     def endpointer(self) -> Endpointer:
         """The turn-taking endpointer driving this session."""
         return self._endpointer
+
+    @property
+    def current_affect(self):
+        """The latest EQ affect read for this session, or None.
+
+        The read exists so a future TTS with prosody controls
+        has something to consume (see note_affect_read); today
+        it informs nothing audible.
+        """
+        return self._latest_affect_read
+
+    def note_affect_read(self, read) -> None:
+        """Record the talker's latest EQ affect read (S11).
+
+        PROSODY NO-OP, stated plainly: this records the read and
+        applies NOTHING. The current TTS stage synthesises from
+        text + voice id only (``TtsEngine.synthesize(text, *,
+        voice)``) — it has no rate, pitch or SSML control — so
+        there is no honest way to make the voice sound slower,
+        calmer or more careful today, and this hook does not
+        pretend otherwise. When a TTS with prosody controls
+        lands, it consumes ``current_affect`` here.
+        """
+        self._latest_affect_read = read
 
     # -- availability --------------------------------------------------
 
@@ -376,12 +406,19 @@ class VoicePipeline:
 # Factories
 # ---------------------------------------------------------------------------
 
-def fast_chat_talker(provider, *, session_id: str | None) -> Talker:
+def fast_chat_talker(provider, *, session_id: str | None,
+                     on_affect_read=None) -> Talker:
     """Adapt ``run_fast_chat`` to the pipeline's talker contract:
     an async generator of reply text deltas for one user turn.
 
     History is loaded per turn from the session store, so voice
     turns and typed turns share one conversation.
+
+    ``on_affect_read`` (S11) is forwarded to run_fast_chat: each
+    turn's EQ read is reported there so the session owner can
+    record it on the pipeline (note_affect_read). The EQ
+    briefing itself rides inside run_fast_chat's prompt, exactly
+    as for typed chat — there is no voice-specific fork.
     """
 
     async def talk(text: str) -> AsyncIterator[str]:
@@ -392,7 +429,8 @@ def fast_chat_talker(provider, *, session_id: str | None) -> Talker:
 
         history = load_session_history(session_id, text)
         async for event in run_fast_chat(
-            text, provider, history, session_id=session_id):
+            text, provider, history, session_id=session_id,
+            on_affect_read=on_affect_read):
             if event.type == EventType.TASK_PROGRESS:
                 delta = event.payload.get("text_delta")
                 if delta:

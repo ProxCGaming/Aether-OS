@@ -573,6 +573,92 @@ class AetherSupervisorModel(BaseChatModel):
         return _end_result(text, decision=decision)
 
 
+def _eq_task_outcomes(state: dict) -> list[str]:
+    """Within-task outcome labels for the EQ failure signals.
+
+    Only what this run genuinely holds: tool results in the
+    message channel (a tool message whose status says error is a
+    failure; any other tool result is a completion) and denied
+    delegations from the delegation log. Previous tasks' outcomes
+    live in episodic memory, which the EQ path must never touch
+    (aether_engine/eq.py: transient by construction) — so the
+    streak this sees is the current task's, and the
+    conversation-level signals come from the user's own words in
+    the session history instead.
+    """
+    outcomes: list[str] = []
+    for message in state.get("messages") or []:
+        if isinstance(message, dict):
+            role = message.get("role")
+            status = message.get("status")
+        else:
+            role = getattr(message, "type", None)
+            status = getattr(message, "status", None)
+        if role in ("tool", "function"):
+            outcomes.append(
+                "failed" if status == "error" else "succeeded")
+    for entry in state.get("delegation_log") or []:
+        if not isinstance(entry, dict):
+            continue
+        decision = entry.get("decision") or {}
+        if isinstance(decision, dict) and decision.get("denied"):
+            outcomes.append("failed")
+    return outcomes
+
+
+def _eq_briefing_for_state(state: dict, config: dict) -> str:
+    """The EQ briefing section for the routing prompt, or "".
+
+    Master-build S11: the supervisor routes — and writes the
+    final answer — with behaviour guidance from the
+    conversation's signals (aether_engine/eq.py), under the same
+    briefing contract as the blackboard/delegation sections:
+    bounded, empty when the read is neutral or low-confidence,
+    and it NEVER breaks routing (any failure is an empty
+    section). Inputs are only what the run already holds: the
+    session's user turns (via fast chat's shared history loader)
+    plus the current request, and this task's own tool/delegation
+    outcomes. The memory facade is never touched — the read is
+    transient and is persisted nowhere.
+    """
+    try:
+        user_config = (config.get("configurable", {}) or {}).get(
+            "user_config")
+        if user_config is not None and not getattr(
+                user_config, "eq_enabled", True):
+            return ""
+        from aether_engine.eq import detect_affect, eq_briefing
+        from aether_engine.langgraph.fast_chat import (
+            load_session_history,
+        )
+
+        original_prompt = str(state.get("original_prompt") or "")
+        history = load_session_history(
+            state.get("session_id"), original_prompt)
+        user_messages = [
+            str(m.get("content"))
+            for m in history
+            if isinstance(m, dict) and m.get("role") == "user"
+            and isinstance(m.get("content"), str)
+        ]
+        if original_prompt:
+            user_messages.append(original_prompt)
+        if not user_messages:
+            # Fresh thread with no session behind it: the state
+            # channel's own user turns are what the run holds.
+            user_messages = [
+                str(d.get("content"))
+                for d in message_dicts(state.get("messages", []))
+                if isinstance(d, dict) and d.get("role") == "user"
+                and isinstance(d.get("content"), str)
+            ]
+        read = detect_affect(user_messages, _eq_task_outcomes(state))
+        return eq_briefing(read)
+    except Exception:  # EQ must never break routing
+        logger.debug("Supervisor EQ briefing unavailable", exc_info=True)
+        return ""
+
+
 def supervisor_routing_prompt(state: dict) -> list:
     """create_supervisor prompt callable: the routing prompt, tool mode.
 
@@ -608,6 +694,15 @@ def supervisor_routing_prompt(state: dict) -> list:
     delegations = delegation_briefing(state)
     if delegations:
         text += f"\n\nDelegation history for this task:\n{delegations}"
+    # S11: EQ briefing — behaviour guidance from the
+    # conversation's signals, beside the delegation read-back
+    # under the same contract (bounded, empty when neutral or
+    # low-confidence, never breaks routing). It shapes how the
+    # supervisor works and phrases the final answer; it is not
+    # a fact about the user and is persisted nowhere.
+    eq_section = _eq_briefing_for_state(state, config)
+    if eq_section:
+        text += f"\n\n{eq_section}"
     summary_section = context_summary_section(state)
     if summary_section:
         text += f"\n\n{summary_section}"

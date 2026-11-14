@@ -487,6 +487,66 @@ async def fast_chat_memory_briefing(
         return ""
 
 
+# ---------------------------------------------------------------------------
+# S11: EQ briefing (master-build plan §4 S11, R5).
+#
+# Beside the S7 memory section rides a second, independent
+# adaptation: aether_engine/eq.py reads the recent conversation's
+# signals (frustration, corrections, re-asked questions, hurry,
+# confusion) locally and deterministically — no LLM call, no
+# memory access — and renders BEHAVIOUR guidance (pace,
+# directness, simplify, offer a stopping point), never a label
+# for the user and never a claim about their feelings. Same
+# house contract as the briefings above: capped, empty when the
+# read is neutral or low-confidence, and it NEVER breaks the
+# turn. The toggle (UserConfig.eq_enabled) off, or any failure,
+# leaves the message list exactly as it was — the pre-S11
+# composition byte for byte.
+#
+# The read also leaves this runner through the optional
+# on_affect_read callback: voice is the one consumer that holds
+# per-session state outside the prompt (the pipeline records it
+# via note_affect_read). Nothing is persisted — the read lives
+# for the turn, and in a voice session for the session, only.
+# ---------------------------------------------------------------------------
+
+def _eq_read_for_turn(
+    prompt: str,
+    history: list[dict[str, Any]] | None,
+    user_config=None,
+):
+    """The EQ affect read for this turn, or None.
+
+    None when the toggle is off or anything fails — the caller
+    then appends nothing. Never raises. Inputs are only what
+    fast chat already holds: the session history's user turns
+    plus the current prompt. Fast chat has no task-outcome
+    stream, so outcomes are honestly None (the failure-streak
+    signal simply never fires on this path).
+    """
+    try:
+        config = user_config
+        if config is None:
+            from aether_engine.config import load_config
+
+            config = load_config()
+        if not getattr(config, "eq_enabled", True):
+            return None
+        from aether_engine.eq import detect_affect
+
+        user_messages = [
+            str(m.get("content"))
+            for m in (history or [])
+            if isinstance(m, dict) and m.get("role") == "user"
+            and isinstance(m.get("content"), str)
+        ]
+        user_messages.append(prompt)
+        return detect_affect(user_messages)
+    except Exception:
+        logger.debug("Fast-chat EQ read unavailable", exc_info=True)
+        return None
+
+
 async def run_fast_chat(
     prompt: str,
     provider: BaseProvider,
@@ -498,6 +558,7 @@ async def run_fast_chat(
     attachments: list[Any] | None = None,
     workspace_roots: list[str] | None = None,
     user_config=None,
+    on_affect_read=None,
 ) -> AsyncGenerator[Event, None]:
     """Stream a direct chat reply for *prompt*, mirroring the graph
     runner's event contract (see module docstring)."""
@@ -549,6 +610,26 @@ async def run_fast_chat(
     _memory_briefing = await fast_chat_memory_briefing(prompt, user_config)
     if _memory_briefing:
         messages.append({"role": "system", "content": _memory_briefing})
+
+    # S11 (14 Nov 2026): the EQ briefing — behaviour guidance
+    # from the conversation's own signals (see the S11 block
+    # above _eq_read_for_turn). Reuses the exact same eq module
+    # + briefing as the supervisor path; nothing here forks the
+    # detector. Voice rides this runner, so voice turns get the
+    # same adaptation, and the read is handed to the pipeline
+    # through on_affect_read when a caller supplied one.
+    _eq_read = _eq_read_for_turn(prompt, history, user_config)
+    if _eq_read is not None:
+        from aether_engine.eq import eq_briefing
+
+        _eq_section = eq_briefing(_eq_read)
+        if _eq_section:
+            messages.append({"role": "system", "content": _eq_section})
+        if on_affect_read is not None:
+            try:
+                on_affect_read(_eq_read)
+            except Exception:  # a consumer's callback must never break the turn
+                logger.debug("on_affect_read callback failed", exc_info=True)
 
     start_time = time.time()
 

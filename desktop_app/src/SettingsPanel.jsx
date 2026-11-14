@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info, CalendarDays } from 'lucide-react';
+import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info, CalendarDays, MessagesSquare } from 'lucide-react';
 import './chat.css';
 import { resolveSnipHotkey, defaultSnipHotkey } from './snipHotkey';
 import ProviderSettings from './components/Settings/ProviderSettings';
@@ -19,6 +19,7 @@ import AdvancedPanel from './components/Settings/AdvancedPanel';
 import AboutPanel from './components/Settings/AboutPanel';
 import VoicePanel from './components/Settings/VoicePanel';
 import CalendarPanel from './components/Settings/CalendarPanel';
+import ConversationPanel from './components/Settings/ConversationPanel';
 
 // Wave 5 (Annex C row 7): this file is the Settings shell —
 // sidebar navigation, the one socket message handler, the
@@ -72,6 +73,8 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   const [calendarEnabled, setCalendarEnabled] = useState(true);
   const [calendarDayBefore, setCalendarDayBefore] = useState(true);
   const [calendarLeadMinutes, setCalendarLeadMinutes] = useState(30);
+  // Master build S11: the EQ switch lives here on the same rule.
+  const [eqEnabled, setEqEnabled] = useState(true);
   const [fallbackChain, setFallbackChain] = useState('');
   // E6-F05: the last applied engine config — the controlled panels
   // for the Epic 1/2 handed-off surfaces (OrchestrationPanel,
@@ -531,6 +534,12 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     sendConfigUpdate({ calendar_reminder_day_before: val });
   };
 
+  // Master build S11: same one-flow rule as every settings edit.
+  const handleEqEnabledChange = (val) => {
+    setEqEnabled(val);
+    sendConfigUpdate({ eq_enabled: val });
+  };
+
   const handleCalendarLeadMinutesCommit = (val) => {
     setCalendarLeadMinutes(val);
     sendConfigUpdate({ calendar_reminder_lead_minutes: val });
@@ -631,6 +640,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
       setConfigLoadError('');
       setDisableFallbacks(config.disable_fallbacks || false);
       setCalendarEnabled(config.calendar_enabled !== false);
+      setEqEnabled(config.eq_enabled !== false);
       setCalendarDayBefore(config.calendar_reminder_day_before !== false);
       setCalendarLeadMinutes(
         Number.isInteger(config.calendar_reminder_lead_minutes)
@@ -1073,6 +1083,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     { keywords: 'password vault credentials logins totp ask every time autofill', id: 'PasswordVault', icon: <Lock size={18} />, label: 'Password Vault' },
     { keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
     { keywords: 'calendar events reminders schedule itinerary upcoming', id: 'Calendar', icon: <CalendarDays size={18} />, label: 'Calendar & Reminders' },
+    { keywords: 'conversation adaptive replies tone pace eq signals chat behaviour', id: 'Conversation', icon: <MessagesSquare size={18} />, label: 'Conversation' },
     { keywords: 'capabilities diagnostics environment scheduler machine hardware cpu ram gpu disk this machine', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
     { keywords: 'voice tuning audio vad endpointing silence threshold mic speech', id: 'Voice', icon: <Mic size={18} />, label: 'Voice Tuning' },
     { keywords: 'advanced routing fallbacks reset defaults developer project config layer overlay', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' },
@@ -1319,6 +1330,16 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             onCalendarDayBeforeChange={handleCalendarDayBeforeChange}
             calendarLeadMinutes={calendarLeadMinutes}
             onCalendarLeadMinutesCommit={handleCalendarLeadMinutesCommit}
+          />
+        )}
+
+        {activeMenu === 'Conversation' && (
+          <ConversationPanel
+            configAnswered={!!answered.config}
+            isConnected={isConnected}
+            configError={configUpdateError}
+            eqEnabled={eqEnabled}
+            onEqEnabledChange={handleEqEnabledChange}
           />
         )}
 

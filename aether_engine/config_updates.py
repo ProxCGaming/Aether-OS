@@ -66,6 +66,7 @@ HANDED_OFF_FIELDS = (
     "calendar_enabled",
     "calendar_reminder_day_before",
     "calendar_reminder_lead_minutes",
+    "eq_enabled",
 )
 
 # The verdict vocabulary of tools/policy.py's _VERDICT_MAP and the
@@ -293,7 +294,11 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
     # refused, not coerced, or the UI would show a state the engine
     # never agreed to. Lead minutes are bounded like every other
     # count here; 0 is meaningful (it disables the lead reminder).
-    for bool_field in ("calendar_enabled", "calendar_reminder_day_before"):
+    # S11: eq_enabled joins the strict booleans on the same
+    # rule — the Settings → Conversation switch is a real
+    # boolean, refused rather than coerced when it is not.
+    for bool_field in ("calendar_enabled", "calendar_reminder_day_before",
+                       "eq_enabled"):
         if bool_field in config_data:
             value = config_data[bool_field]
             if not isinstance(value, bool):
