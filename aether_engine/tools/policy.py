@@ -7,7 +7,18 @@ KNOWN_NON_REGISTRY_TOOLS: dict[str, ToolRisk] = {
     "get_current_chat_history": ToolRisk.READ_ONLY,
     "search_knowledge_graph": ToolRisk.READ_ONLY,
     "search_past_episodes": ToolRisk.READ_ONLY,
+    "get_user_profile": ToolRisk.READ_ONLY,
     "get_current_time": ToolRisk.READ_ONLY,
+    # S8: the one MUTATING supervisor memory tool — it deletes
+    # long-term memory (tombstoned + undoable, engine-executed via
+    # the facade). Classified DESTRUCTIVE so every name-level
+    # policy surface resolves it honestly: the default verdict is
+    # "ask" and an "Always Allow" setting is ignored for it, the
+    # same treatment registry DESTRUCTIVE tools get. (The
+    # supervisor's own memory-tool gate enforces deny + allow-list
+    # for all memory tools — see _memory_tool_gate; there is no
+    # approval-pause seam inside the supervisor for its own tools.)
+    "forget_memory": ToolRisk.DESTRUCTIVE,
 }
 
 _VERDICT_MAP = {"Always Allow": "allow", "Require Approval": "ask", "Deny": "deny"}

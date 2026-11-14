@@ -124,6 +124,79 @@ class MemoryBackend:
     def delete_episode(self, task_id: str) -> bool:
         raise NotImplementedError
 
+    # -- S8: snapshots + conversational forget ---------------------
+    def snapshot_fact(self, fact_id: str) -> dict[str, Any] | None:
+        """The FULL stored record for one fact (every field, any
+        status) — the tombstone snapshot conversational forget
+        restores from. Backends whose stores cannot hand back a
+        complete record raise NotImplementedError: the forget
+        service then still deletes through delete_fact, but
+        reports undo as unsupported rather than faking it."""
+        raise NotImplementedError(
+            f"The {self.name} backend cannot snapshot facts for restore")
+
+    def restore_fact_snapshot(self, snapshot: dict[str, Any]) -> bool:
+        """Re-insert a snapshot from :meth:`snapshot_fact` with its
+        original id and fields. True only when a row was inserted."""
+        raise NotImplementedError(
+            f"The {self.name} backend cannot restore fact snapshots")
+
+    def snapshot_episode(self, task_id: str) -> dict[str, Any] | None:
+        """The FULL stored record for one episode — the episodic
+        twin of :meth:`snapshot_fact`, same honest-gap contract."""
+        raise NotImplementedError(
+            f"The {self.name} backend cannot snapshot episodes for restore")
+
+    def restore_episode_snapshot(self, snapshot: dict[str, Any]) -> bool:
+        """Re-insert a snapshot from :meth:`snapshot_episode` with
+        its original task_id and timestamp."""
+        raise NotImplementedError(
+            f"The {self.name} backend cannot restore episode snapshots")
+
+    def find_forget_candidates(
+        self,
+        topic: str,
+        *,
+        fact_ids: list[str] | None = None,
+        episode_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """S8: resolve a forget topic (or explicit ids) to the
+        concrete records a forget would delete, deleting nothing
+        (memory/forget.py — literal matching, never embeddings:
+        recall may be fuzzy, deletion must not be)."""
+        from aether_engine.memory import forget
+
+        return forget.find_forget_candidates(
+            self, topic, fact_ids=fact_ids, episode_ids=episode_ids)
+
+    def forget_memory(
+        self,
+        topic: str,
+        *,
+        phrase: str = "",
+        fact_ids: list[str] | None = None,
+        episode_ids: list[str] | None = None,
+        config=None,
+    ) -> dict[str, Any]:
+        """S8: execute a conversational forget — cascading delete
+        across facts, episodes, learned.md and the curated
+        document, with a tombstone snapshot for undo. The result
+        lists exactly what was deleted (empty = nothing matched,
+        nothing deleted) and whether undo is supported on this
+        backend."""
+        from aether_engine.memory import forget
+
+        return forget.execute_forget(
+            self, topic, phrase=phrase, fact_ids=fact_ids,
+            episode_ids=episode_ids, config=config)
+
+    def restore_last_forget(self, *, config=None) -> dict[str, Any] | None:
+        """S8: undo the most recent conversational forget (restore
+        its tombstone, mark it consumed). None = nothing to undo."""
+        from aether_engine.memory import forget
+
+        return forget.restore_last_forget(self, config=config)
+
     def clear_facts(self) -> bool:
         raise NotImplementedError
 
@@ -219,6 +292,26 @@ class NativeMemoryBackend(MemoryBackend):
         from aether_engine.memory import episodic
 
         return episodic.delete_episode(task_id)
+
+    def snapshot_fact(self, fact_id):
+        from aether_engine.memory import knowledge_graph
+
+        return knowledge_graph.get_fact_snapshot(fact_id)
+
+    def restore_fact_snapshot(self, snapshot):
+        from aether_engine.memory import knowledge_graph
+
+        return knowledge_graph.restore_fact_snapshot(snapshot)
+
+    def snapshot_episode(self, task_id):
+        from aether_engine.memory import episodic
+
+        return episodic.get_episode_snapshot(task_id)
+
+    def restore_episode_snapshot(self, snapshot):
+        from aether_engine.memory import episodic
+
+        return episodic.restore_episode_snapshot(snapshot)
 
     def clear_facts(self):
         from aether_engine.memory import knowledge_graph

@@ -93,6 +93,32 @@ SUPERVISOR_MEMORY_TOOLS = [
                 "properties": {}
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forget_memory",
+            "description": (
+                "Forget a specific topic from long-term memory when the user asks to "
+                "forget it (e.g. 'forget my Berlin trip'). The ENGINE resolves the topic "
+                "to concrete facts, past task records and lessons, deletes them itself "
+                "(cascading across every memory surface), snapshots them for undo, and "
+                "reports exactly what was deleted. Report its result verbatim in "
+                "substance: name what was forgotten, and never claim a deletion it did "
+                "not report. There is no forget-everything here — a request with no "
+                "specific topic belongs in Settings → Memory Management."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "What to forget, as the user named it (e.g. 'Berlin trip', 'my old address', 'Project Falcon')."
+                    }
+                },
+                "required": ["topic"]
+            }
+        }
     }
 ]
 
@@ -102,6 +128,41 @@ SUPERVISOR_MEMORY_TOOLS = [
 # lines are already short (facts are one-liners, episode outcomes
 # truncate at 160 chars) — this is the overall budget.
 MEMORY_TOOL_RESULT_MAX_CHARS = 2000
+
+
+def _forget_result_text(outcome: dict) -> str:
+    """Render a forget service outcome for the supervisor: exactly
+    what was deleted (the reply must not overclaim beyond this),
+    the undo position, and any honest degradation."""
+    counts = outcome.get("counts", {})
+    total = counts.get("facts", 0) + counts.get("episodes", 0) + counts.get("lessons", 0)
+    topic = outcome.get("topic") or ""
+    if total == 0:
+        return (
+            f'Nothing in long-term memory matched "{topic}" — '
+            "nothing was deleted. Tell the user exactly that.")
+    deleted = outcome.get("deleted", {})
+    lines = [f'Forgot "{topic}" — the engine deleted:']
+    for fact in deleted.get("facts", []):
+        lines.append(f'- fact: {fact.get("text", "")}')
+    for episode in deleted.get("episodes", []):
+        lines.append(f'- past task record: {episode.get("text", "")}')
+    for lesson in deleted.get("lessons", []):
+        lines.append(f'- lesson: {lesson.get("text", "")}')
+    if outcome.get("undo_supported"):
+        lines.append(
+            'The deletion is snapshotted: the user can say "undo '
+            'forget" in chat to restore it.')
+    else:
+        lines.append(
+            "This deletion cannot be undone from chat with the "
+            "active memory backend — do not promise an undo.")
+    if outcome.get("truncated_candidates"):
+        lines.append(
+            f'{outcome["truncated_candidates"]} further matching '
+            "item(s) were NOT deleted (the per-request cap); "
+            "repeating the request forgets more.")
+    return "\n".join(lines)
 
 
 async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id: str | None, original_prompt: str, task_id: str, user_config=None) -> str:
@@ -176,6 +237,33 @@ async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id
                     backend, query, config=user_config,
                     include_facts=False, include_curated=False)
                 result_str = assembled["text"] or "No past episodes found matching query."
+
+        elif tool_name == "forget_memory":
+            # S8: conversational forget through the SAME facade
+            # service fast chat uses (memory/forget.py) — the
+            # engine resolves the topic and deletes, tombstoned
+            # for "undo forget"; this branch only formats the
+            # outcome. Memory tools execute inside the supervisor
+            # under _memory_tool_gate (deny + allow-list); there
+            # is no approval-pause seam for the supervisor's own
+            # tools, so the tombstone + undo is this tool's safety
+            # net, and its name-level policy class is DESTRUCTIVE
+            # (tools/policy.py KNOWN_NON_REGISTRY_TOOLS) so every
+            # policy surface defaults it to "ask" and can never
+            # auto-allow it.
+            backend = backend_or_none(user_config, context="supervisor memory tool")
+            if backend is None:
+                result_str = "Memory is unavailable: the configured memory backend cannot run here (see engine log)."
+            else:
+                topic = str(args.get("topic") or "").strip()
+                if not topic:
+                    result_str = (
+                        "forget_memory needs a topic — ask the user "
+                        "what specifically should be forgotten.")
+                else:
+                    outcome = backend.forget_memory(
+                        topic, phrase=original_prompt, config=user_config)
+                    result_str = _forget_result_text(outcome)
 
         elif tool_name == "get_user_profile":
             # S6: the profile VIEW over the KG (memory/profile.py),
@@ -385,7 +473,8 @@ def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: 
         "- get_current_chat_history: fetch previous messages in this current open chat session\n"
         "- search_knowledge_graph: fetch long-term user facts, preferences, or project entities\n"
         "- search_past_episodes: fetch past completed tasks across previous sessions\n"
-        "- get_user_profile: fetch the stored profile of the user — who they are, their people and relationships, and their preferences\n\n"
+        "- get_user_profile: fetch the stored profile of the user — who they are, their people and relationships, and their preferences\n"
+        "- forget_memory: when the user asks to forget a specific topic, delete it from long-term memory (engine-executed, snapshotted for undo); report exactly what it says was deleted — never claim a deletion it did not report, and never use it for a topic-less 'forget everything' (that belongs in Settings → Memory Management)\n\n"
         "THINK CAREFULLY:\n"
         "1. NEVER call memory tools for self-contained requests. Examples that must be handled WITHOUT any tool call: "
         "current time/date, greetings, basic math, code generation, generic explanations, definitions. "
@@ -476,6 +565,20 @@ async def get_user_profile(*, runtime: ToolRuntime) -> str:
     )
 
 
+@tool
+async def forget_memory(topic: str, *, runtime: ToolRuntime) -> str:
+    """Forget a specific topic from long-term memory when the user asks to forget it. The engine resolves the topic to concrete facts, past task records and lessons, deletes them itself (snapshotted for undo), and reports exactly what was deleted — report that, and never claim a deletion it did not report."""
+    gate = _memory_tool_gate("forget_memory", runtime.config)
+    if gate:
+        return gate
+    state = runtime.state
+    return await _execute_supervisor_memory_tool(
+        "forget_memory", {"topic": topic},
+        state.get("session_id"), state.get("original_prompt", ""), state.get("task_id") or "",
+        user_config=runtime.config.get("configurable", {}).get("user_config"),
+    )
+
+
 def build_supervisor_memory_tools() -> list:
     """The supervisor's memory tools as LangChain tools (Epic 1).
 
@@ -483,7 +586,7 @@ def build_supervisor_memory_tools() -> list:
     execution path (audit events, TOOL_ACTIVITY events) — for the
     create_supervisor agent's ToolNode.
     """
-    return [get_current_chat_history, search_knowledge_graph, search_past_episodes, get_user_profile]
+    return [get_current_chat_history, search_knowledge_graph, search_past_episodes, get_user_profile, forget_memory]
 
 
 def repo_map_context(

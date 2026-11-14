@@ -1249,6 +1249,59 @@ def clear_all_episodes() -> bool:
     _audit_logger.log_event("EPISODIC_MEMORY_CLEARED_ALL", {})
     return True
 
+# ---------------------------------------------------------------------------
+# S8: episode snapshots for conversational forget (memory/forget.py).
+# A snapshot is the full stored record — the FTS row plus its
+# thinking log — so a tombstoned deletion can be undone with the
+# episode's original task_id and timestamp intact. The embedding
+# row is deliberately NOT part of the snapshot: vectors are derived
+# data, rebuilt from the episode text by the embedding backfill
+# after a restore (the restored episode is simply in the store's
+# ordinary "unembedded" state until then, and its FTS/BM25 recall
+# works immediately).
+# ---------------------------------------------------------------------------
+
+def get_episode_snapshot(task_id: str) -> dict[str, Any] | None:
+    """The full stored record for one episode, or None."""
+    init_episodic_db()
+    with _get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT e.*, t.thinking_log
+            FROM episodic_memory e
+            LEFT JOIN episodic_thinking t ON e.task_id = t.task_id
+            WHERE e.task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+
+def restore_episode_snapshot(snapshot: dict[str, Any]) -> bool:
+    """Re-insert a snapshotted episode with its original task_id
+    and timestamp. Returns True only when a row was inserted: an
+    episode that is already present (never deleted, or already
+    restored) reports False and is left untouched — restore never
+    overwrites a live record."""
+    task_id = snapshot.get("task_id")
+    if not task_id:
+        return False
+    init_episodic_db()
+    if get_episode_snapshot(task_id) is not None:
+        return False
+    timestamp = snapshot.get("timestamp")
+    _write_episode_row(
+        task_id,
+        snapshot.get("user_prompt") or "",
+        snapshot.get("task_summary") or "",
+        snapshot.get("tags") or "",
+        snapshot.get("outcome") or "",
+        snapshot.get("thinking_log"),
+        int(timestamp) if timestamp is not None else int(time.time()),
+    )
+    _audit_logger.log_event("EPISODIC_MEMORY_RESTORED", {"task_id": task_id})
+    return True
+
 # (mem_file, emb_file) pairs the orphan reconciliation has already
 # run for in this process — the same once-per-process-per-DB guard
 # shape as _DEDUPED_DB_PATHS.

@@ -241,6 +241,21 @@ async def learn_fast_chat_exchange(
     """
     from aether_engine.memory.facade import backend_or_none
 
+    # S8 (14 Nov 2026): never learn from a forget/undo exchange. The
+    # reply to a forget command quotes the deleted item (the engine's
+    # note enumerates it), so extraction over this exchange could
+    # re-store a fresh fact about — or even containing — the very
+    # thing the user just ordered forgotten. A forget command is an
+    # instruction to memory, not content for memory: no episode, no
+    # facts, no lessons are recorded from it.
+    try:
+        from aether_engine.memory.forget import detect_forget_intent
+
+        if detect_forget_intent(prompt) is not None:
+            return
+    except Exception:  # a detector fault must not break learning
+        logger.debug("Fast-chat forget-intent check failed", exc_info=True)
+
     try:
         backend = backend_or_none(user_config, context="fast-chat memory")
         if backend is None:
@@ -585,6 +600,25 @@ async def run_fast_chat(
         _calendar_note = None
     if _calendar_note:
         messages.append({"role": "system", "content": _calendar_note})
+
+    # S8 (14 Nov 2026): conversational forget, same pattern as the
+    # calendar note above — if the prompt is a forget/undo command,
+    # the ENGINE has already resolved and deleted (or restored)
+    # the memory by the time the model replies; this system note
+    # makes the reply announce exactly what happened, including
+    # when nothing matched and nothing was deleted. The model
+    # itself never deletes. Best-effort — the hook never raises,
+    # and a failure here must not break the turn.
+    try:
+        from aether_engine.memory.forget import (
+            note_for_message_if_enabled as forget_note_for_message,
+        )
+
+        _forget_note = forget_note_for_message(prompt, user_config=user_config)
+    except Exception:  # noqa: BLE001
+        _forget_note = None
+    if _forget_note:
+        messages.append({"role": "system", "content": _forget_note})
 
     parts: list[str] = []
     try:

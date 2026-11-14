@@ -192,6 +192,37 @@ def _record_lessons_locked(lessons: list[str], task_id: str,
     return {"added": [], "skipped_duplicates": skipped, "total": len(existing)}
 
 
+def remove_lessons(texts: list[str], path: Path | None = None) -> list[str]:
+    """Remove specific lessons from learned.md (S8: the delete leg
+    of conversational forget). Matching is by the module's dedupe
+    normalisation, so a caller holding the exact line text from
+    :func:`load_lessons` always matches. Returns the lesson texts
+    actually removed (the caller's snapshot for undo); the file is
+    rewritten only when something was removed, under the same
+    record lock as :func:`record_lessons` so a concurrent append
+    cannot resurrect or lose lines."""
+    target = path if path is not None else LEARNED_MD_PATH
+    wanted = {_normalise_lesson(text) for text in texts or []}
+    if not wanted:
+        return []
+    with _RECORD_LOCK:
+        existing = load_lessons(target)
+        removed = [lesson for lesson in existing
+                   if _normalise_lesson(lesson) in wanted]
+        if not removed:
+            return []
+        kept = [lesson for lesson in existing
+                if _normalise_lesson(lesson) not in wanted]
+        _write_lessons(kept, target)
+        _audit_logger.log_event("LESSONS_REMOVED", {
+            "removed": len(removed),
+            "total": len(kept),
+        })
+        logger.info("Removed %d lesson(s) from learned.md (%d remain)",
+                    len(removed), len(kept))
+        return removed
+
+
 async def extract_and_record_lessons(
     provider: BaseProvider,
     user_prompt: str,

@@ -844,6 +844,121 @@ def clear_all_facts() -> bool:
     _audit_logger.log_event("KNOWLEDGE_GRAPH_CLEARED_ALL", {})
     return True
 
+# ---------------------------------------------------------------------------
+# S8: fact snapshots for conversational forget (memory/forget.py).
+# A snapshot is the FULL stored record — every facts column plus the
+# owning entity's identity — so a tombstoned deletion can be undone
+# with the record's original id, provenance, confidence and status
+# intact, not re-extracted as a new, lesser fact. The fact's
+# embedding row is deliberately NOT part of the snapshot: vectors
+# are derived data (S6), rebuilt from fact text by the backfill
+# after a restore, exactly as a pre-S6 fact's vector is.
+# ---------------------------------------------------------------------------
+
+def get_fact_snapshot(fact_id: str) -> dict[str, Any] | None:
+    """The full stored record for one fact (any status), or None."""
+    init_kg_db()
+    with _get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT f.*, e.name AS entity_name, e.entity_type AS entity_type,
+                   e.first_seen AS entity_first_seen,
+                   e.last_updated AS entity_last_updated
+            FROM facts f JOIN entities e ON f.entity_id = e.id
+            WHERE f.id = ?
+            """,
+            (fact_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+
+def restore_fact_snapshot(snapshot: dict[str, Any]) -> bool:
+    """Re-insert a snapshotted fact with its original id and fields.
+
+    Returns True only when a row was actually inserted: a fact id
+    that is already present (never deleted, or already restored)
+    reports False and changes nothing — restore is idempotent, so
+    an undo can never mint a duplicate. The owning entity is
+    restored first: an existing entity with the snapshot's name
+    wins (identity is by name, per the dedupe note above), then
+    the snapshot's original entity id, then a fresh insert of the
+    snapshot's entity row.
+    """
+    fact_id = snapshot.get("id") or snapshot.get("fact_id")
+    fact_text = snapshot.get("fact_text")
+    entity_name = snapshot.get("entity_name")
+    if not fact_id or fact_text is None or not entity_name:
+        return False
+    init_kg_db()
+    with _get_conn() as conn:
+        if conn.execute(
+            "SELECT 1 FROM facts WHERE id = ?", (fact_id,)
+        ).fetchone():
+            return False
+        row = conn.execute(
+            "SELECT id FROM entities WHERE name = ?", (entity_name,)
+        ).fetchone()
+        if row is not None:
+            entity_id = row["id"]
+        elif conn.execute(
+            "SELECT 1 FROM entities WHERE id = ?",
+            (snapshot.get("entity_id"),),
+        ).fetchone() is None and snapshot.get("entity_id"):
+            entity_id = snapshot["entity_id"]
+            now = int(time.time())
+            conn.execute(
+                "INSERT INTO entities (id, name, entity_type, first_seen, last_updated) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    entity_id,
+                    entity_name,
+                    snapshot.get("entity_type"),
+                    snapshot.get("entity_first_seen") or now,
+                    snapshot.get("entity_last_updated") or now,
+                ),
+            )
+        else:
+            # The snapshot's entity id is taken by a different name
+            # (should not happen — ids are uuids); mint a fresh id
+            # rather than overwrite another entity's identity.
+            import uuid
+
+            entity_id = uuid.uuid4().hex
+            now = int(time.time())
+            conn.execute(
+                "INSERT INTO entities (id, name, entity_type, first_seen, last_updated) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    entity_id,
+                    entity_name,
+                    snapshot.get("entity_type"),
+                    snapshot.get("entity_first_seen") or now,
+                    snapshot.get("entity_last_updated") or now,
+                ),
+            )
+        conn.execute(
+            "INSERT INTO facts (id, entity_id, fact_text, source_task_id, "
+            "timestamp, confidence, status, superseded_by, provenance, "
+            "importance, last_decayed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                fact_id,
+                entity_id,
+                fact_text,
+                snapshot.get("source_task_id"),
+                snapshot.get("timestamp") or int(time.time()),
+                snapshot.get("confidence"),
+                snapshot.get("status") or "active",
+                snapshot.get("superseded_by"),
+                snapshot.get("provenance") or "inferred",
+                snapshot.get("importance")
+                if snapshot.get("importance") is not None else 0.5,
+                snapshot.get("last_decayed_at"),
+            ),
+        )
+        conn.commit()
+    _audit_logger.log_event("KNOWLEDGE_FACT_RESTORED", {"fact_id": fact_id})
+    return True
+
 def search_facts(query: str, limit: int = 10, include_history: bool = False) -> list[dict[str, Any]]:
     init_kg_db()
     with _get_conn() as conn:
