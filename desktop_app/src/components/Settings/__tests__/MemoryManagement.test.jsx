@@ -736,4 +736,70 @@ describe('MemoryManagement Component', () => {
       expect(screen.getByTestId('memory-backend-native')).toHaveTextContent('Available');
     });
   });
+
+  // S5 provenance + importance, surfaced in the facts list. The
+  // native KG's fact dicts carry provenance ('stated' | 'inferred')
+  // and a 0..1 importance on BOTH the list and search paths; the
+  // external backends' dicts carry neither field. The UI renders
+  // exactly what it is given: a chip per known/unknown provenance
+  // value, no chip at all when the field is absent, and one panel
+  // note when NO fact in the list carries provenance.
+  describe('fact provenance and importance', () => {
+    test('stated and inferred facts render their chips and importance percentages', async () => {
+      goToKgWithFacts([
+        { fact_id: 'f1', entity_name: 'Arindam', entity_type: 'Person', fact_text: 'Lives in Kolkata', status: 'active', provenance: 'stated', importance: 0.9 },
+        { fact_id: 'f2', entity_name: 'Arindam', entity_type: 'Person', fact_text: 'Probably likes tea', status: 'active', provenance: 'inferred', importance: 0.25 }
+      ]);
+
+      const statedChip = await screen.findByTestId('fact-provenance-f1');
+      expect(statedChip).toHaveTextContent('Stated');
+      const inferredChip = screen.getByTestId('fact-provenance-f2');
+      expect(inferredChip).toHaveTextContent('Inferred');
+      // Inferred is the muted treatment; stated carries the accent.
+      expect(inferredChip).toHaveStyle({ color: 'var(--text-secondary)' });
+      expect(statedChip).toHaveStyle({ color: 'var(--accent)' });
+
+      expect(screen.getByTestId('fact-importance-f1')).toHaveTextContent('importance 90%');
+      expect(screen.getByTestId('fact-importance-f2')).toHaveTextContent('importance 25%');
+      // At least one fact carries provenance — no panel note.
+      expect(screen.queryByTestId('memory-provenance-note')).not.toBeInTheDocument();
+    });
+
+    test('a fact without provenance or importance renders neither, and the panel note explains why', async () => {
+      // The external-backend shape: no provenance / importance keys.
+      goToKgWithFacts([
+        { fact_id: 'f1', entity_name: 'Arindam', entity_type: 'Person', fact_text: 'Likes tea', status: 'active' }
+      ]);
+      await screen.findByText('Likes tea');
+
+      expect(screen.queryByTestId('fact-provenance-f1')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('fact-importance-f1')).not.toBeInTheDocument();
+      const note = screen.getByTestId('memory-provenance-note');
+      expect(note).toHaveTextContent(/does not record provenance/);
+    });
+
+    test('an unknown provenance value renders verbatim, not mapped to a label', async () => {
+      goToKgWithFacts([
+        { fact_id: 'f1', entity_name: 'Arindam', entity_type: 'Person', fact_text: 'Likes tea', status: 'active', provenance: 'heard-elsewhere' }
+      ]);
+
+      const chip = await screen.findByTestId('fact-provenance-f1');
+      expect(chip).toHaveTextContent('heard-elsewhere');
+      expect(chip).not.toHaveTextContent('Inferred');
+      expect(chip).not.toHaveTextContent('Stated');
+    });
+
+    test('mixed list: chip only where the field exists, and no panel note', async () => {
+      goToKgWithFacts([
+        { fact_id: 'f1', entity_name: 'Arindam', entity_type: 'Person', fact_text: 'Lives in Kolkata', status: 'active', provenance: 'stated', importance: 0.5 },
+        { fact_id: 'f2', entity_name: 'Arindam', entity_type: 'Person', fact_text: 'Likes tea', status: 'active' }
+      ]);
+      await screen.findByText('Likes tea');
+
+      expect(screen.getByTestId('fact-provenance-f1')).toHaveTextContent('Stated');
+      expect(screen.queryByTestId('fact-provenance-f2')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('fact-importance-f2')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('memory-provenance-note')).not.toBeInTheDocument();
+    });
+  });
 });

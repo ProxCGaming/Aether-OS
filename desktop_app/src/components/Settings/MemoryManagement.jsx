@@ -3,6 +3,17 @@ import { Trash2, Pencil, Download } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 import LoadStateRow from './LoadStateRow';
 
+// S5 provenance, surfaced in the facts list: the native knowledge
+// graph records whether each fact was stated by the user or
+// inferred by the engine, plus a 0..1 importance. The two known
+// values get friendly labels; any other value a store returns is
+// shown verbatim — never relabelled into a wrong one. The
+// external backends (Mem0 / LangMem / Graphiti) do not track
+// provenance at all: their fact dicts carry no provenance field,
+// and those facts render NO chip (the panel shows one note
+// instead — see the Knowledge Graph tab below).
+const PROVENANCE_LABELS = { stated: 'Stated', inferred: 'Inferred' };
+
 export default function MemoryManagement() {
   const { wsRef, sendMessage, isConnected } = useAetherSocket();
   // Wave 3 slice 1 (RUX-C-01 umbrella): whether each memory list
@@ -600,6 +611,14 @@ export default function MemoryManagement() {
           {exportStatus && (
             <div style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '16px' }}>{exportStatus}</div>
           )}
+          {factsLoad === 'ready' && facts.length > 0 && !facts.some(f => f.provenance != null && f.provenance !== '') && (
+            <div
+              data-testid="memory-provenance-note"
+              style={{ color: 'var(--text-secondary)', background: 'var(--bg-base)', border: '1px solid var(--border-default)', borderRadius: '8px', padding: '8px 12px', marginBottom: '16px', fontSize: '13px', lineHeight: '1.5' }}
+            >
+              The active memory backend{(() => { const current = (backends || []).find(b => b.current); return current ? ` (${current.name})` : ''; })()} does not record provenance — whether a fact was stated by you or inferred by Aether — so no Stated / Inferred labels are shown for these facts.
+            </div>
+          )}
           {facts.length === 0 ? (
             memoryError ? (
               <div style={{ color: 'var(--text-secondary)', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'var(--bg-base)', borderRadius: '12px' }}>
@@ -648,6 +667,16 @@ export default function MemoryManagement() {
                     {entityFacts.map(fact => {
                       const isSuperseded = fact.status === 'superseded';
                       const isEditing = editingFactId === fact.fact_id;
+                      // S5: render provenance only when the backend
+                      // actually supplied the field (external
+                      // backends omit it — no chip, never a guess),
+                      // and importance only when it is a real
+                      // number (the native store's 0..1 float).
+                      const hasProvenance = fact.provenance != null && fact.provenance !== '';
+                      const provenanceLabel = hasProvenance
+                        ? (PROVENANCE_LABELS[fact.provenance] ?? fact.provenance)
+                        : null;
+                      const hasImportance = typeof fact.importance === 'number' && Number.isFinite(fact.importance);
                       return (
                         <div key={fact.fact_id} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', background: 'var(--bg-base)', padding: '12px', borderRadius: '8px', opacity: isSuperseded ? 0.55 : 1 }}>
                           {isEditing ? (
@@ -680,6 +709,21 @@ export default function MemoryManagement() {
                             <>
                               <div style={{ flex: 1, fontSize: '13px', lineHeight: '1.5' }}>
                                 {fact.fact_text ?? fact.content}
+                                {hasProvenance && (
+                                  <span
+                                    data-testid={`fact-provenance-${fact.fact_id}`}
+                                    style={fact.provenance === 'stated'
+                                      ? { marginLeft: '8px', fontSize: '10px', background: 'rgba(var(--accent-rgb),0.15)', color: 'var(--accent)', padding: '1px 6px', borderRadius: '8px', textTransform: 'uppercase', letterSpacing: '0.04em' }
+                                      : { marginLeft: '8px', fontSize: '10px', background: 'var(--bg-hover)', color: 'var(--text-secondary)', padding: '1px 6px', borderRadius: '8px', textTransform: 'uppercase', letterSpacing: '0.04em' }}
+                                  >
+                                    {provenanceLabel}
+                                  </span>
+                                )}
+                                {hasImportance && (
+                                  <span data-testid={`fact-importance-${fact.fact_id}`} style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-muted)' }}>
+                                    importance {Math.round(fact.importance * 100)}%
+                                  </span>
+                                )}
                                 {isSuperseded && (
                                   <span style={{ marginLeft: '8px', fontSize: '10px', background: 'rgba(var(--accent-rgb),0.15)', color: 'var(--accent)', padding: '1px 6px', borderRadius: '8px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>superseded</span>
                                 )}
