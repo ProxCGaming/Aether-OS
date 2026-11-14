@@ -73,6 +73,7 @@ HANDED_OFF_FIELDS = (
     "subagent_token_budget",
     "subagent_cost_budget_usd",
     "model_routing",
+    "voice_speculation_enabled",
 )
 
 # The verdict vocabulary of tools/policy.py's _VERDICT_MAP and the
@@ -354,8 +355,12 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
     # boolean, refused rather than coerced when it is not.
     # S13: subagents_enabled joins them for the same reason — the
     # Orchestration switch is a real boolean.
+    # S16: voice_speculation_enabled joins them too — a config
+    # write for the speculation opt-in must be a real boolean,
+    # refused rather than coerced when it is not.
     for bool_field in ("calendar_enabled", "calendar_reminder_day_before",
-                       "eq_enabled", "subagents_enabled"):
+                       "eq_enabled", "subagents_enabled",
+                       "voice_speculation_enabled"):
         if bool_field in config_data:
             value = config_data[bool_field]
             if not isinstance(value, bool):

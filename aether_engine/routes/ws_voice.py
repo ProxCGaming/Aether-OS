@@ -170,11 +170,33 @@ async def send_voice_session_start_result(conn, req_id_, payload_):
                 if pipeline is not None:
                     pipeline.note_affect_read(read)
 
+            # S16: speculative read-only preparation on partial
+            # transcripts — opt-in only (cfg.voice_speculation_enabled,
+            # default off; see the speculation module for the
+            # evidence). ONE preparer per session, shared by the
+            # pipeline (delivery notes stable partials to it) and
+            # the talker (its only consumer). Its single allowed
+            # callable is the S7 briefing builder itself.
+            voice_speculation = None
+            if cfg.voice_speculation_enabled:
+                from aether_engine.langgraph.fast_chat import (
+                    fast_chat_memory_briefing,
+                )
+                from aether_engine.voice.speculation import (
+                    SpeculativePreparer,
+                )
+
+                voice_speculation = SpeculativePreparer(
+                    prepare_briefing=(
+                        lambda text: fast_chat_memory_briefing(text)))
+
             voice_pipeline, voice_error = create_voice_pipeline(
                 session_id=voice_session_id,
                 talker=fast_chat_talker(
                     voice_provider, session_id=voice_session_id,
-                    on_affect_read=_note_voice_affect),
+                    on_affect_read=_note_voice_affect,
+                    speculation=voice_speculation),
+                speculation=voice_speculation,
                 emit=lambda event: emit_voice_event(conn, event),
                 on_user_final=_persist_voice_user,
                 on_assistant_final=_persist_voice_assistant,

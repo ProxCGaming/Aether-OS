@@ -171,6 +171,7 @@ class VoicePipeline:
         escalation_ack: str = DEFAULT_ESCALATION_ACK,
         degradation: SessionDegradation | None = None,
         stt_factory: Callable[[str], SttEngine] | None = None,
+        speculation=None,
     ):
         self.session_id = session_id
         # S15: the session's degradation tracker (None = no
@@ -255,6 +256,11 @@ class VoicePipeline:
             degradation=degradation,
             swap_stt=self.swap_stt_engine,
             on_fatal=self._end_session_fatal,
+            # S16: the session's speculative preparer (shared with
+            # the talker, which is its only consumer) — delivery
+            # notes stable partials to it and drops its pending
+            # work at conversational boundaries. None = pre-S16.
+            speculation=speculation,
         )
         self._intake.bind_delivery(self._delivery)
 
@@ -583,7 +589,7 @@ class VoicePipeline:
 # ---------------------------------------------------------------------------
 
 def fast_chat_talker(provider, *, session_id: str | None,
-                     on_affect_read=None) -> Talker:
+                     on_affect_read=None, speculation=None) -> Talker:
     """Adapt ``run_fast_chat`` to the pipeline's talker contract:
     an async generator of reply text deltas for one user turn.
 
@@ -595,6 +601,16 @@ def fast_chat_talker(provider, *, session_id: str | None,
     record it on the pipeline (note_affect_read). The EQ
     briefing itself rides inside run_fast_chat's prompt, exactly
     as for typed chat — there is no voice-specific fork.
+
+    ``speculation`` (S16) is the session's SpeculativePreparer,
+    shared with the delivery half: each turn first takes from it
+    — adopting the briefing prepared from this utterance's stable
+    partials when the final text matches — and hands the result
+    to run_fast_chat as ``prepared_memory_briefing``. A take that
+    returns None (no speculation, still running, mismatched)
+    leaves the turn on the ordinary path, which builds the same
+    briefing itself. The talker is the preparer's ONLY consumer,
+    and it only ever runs inside a real, finalised turn.
     """
 
     async def talk(text: str) -> AsyncIterator[str]:
@@ -604,9 +620,11 @@ def fast_chat_talker(provider, *, session_id: str | None,
         )
 
         history = load_session_history(session_id, text)
+        prepared = speculation.take(text) if speculation is not None else None
         async for event in run_fast_chat(
             text, provider, history, session_id=session_id,
-            on_affect_read=on_affect_read):
+            on_affect_read=on_affect_read,
+            prepared_memory_briefing=prepared):
             if event.type == EventType.TASK_PROGRESS:
                 delta = event.payload.get("text_delta")
                 if delta:
@@ -660,6 +678,7 @@ def create_voice_pipeline(
     escalation_ack: str = DEFAULT_ESCALATION_ACK,
     endpointer: Endpointer | None = None,
     endpointer_config: EndpointerConfig | None = None,
+    speculation=None,
     stt_model: str | None = None,
     tts_voice: str = DEFAULT_VOICE,
     capability_report: dict | None = None,
@@ -747,5 +766,6 @@ def create_voice_pipeline(
         stt_factory=(
             (lambda model: FasterWhisperStt(model=model))
             if stt is None else None),
+        speculation=speculation,
     )
     return pipeline, None

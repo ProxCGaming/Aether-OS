@@ -154,6 +154,7 @@ class VoiceDelivery:
         degradation: SessionDegradation | None = None,
         swap_stt: SttSwapFn | None = None,
         on_fatal: FatalFn | None = None,
+        speculation=None,
     ):
         self.session_id = session_id
         self._stt = stt
@@ -168,6 +169,15 @@ class VoiceDelivery:
         self._degradation = degradation
         self._swap_stt = swap_stt
         self._on_fatal = on_fatal
+        # S16: the speculative preparer (voice/speculation.py), or
+        # None — the pre-S16 session, where partials feed only the
+        # display + endpointer. When wired, delivery reports
+        # STABLE partials to it and drops its pending work at
+        # every boundary where a partial's context dies (a new
+        # utterance, a barge-in, an escalated turn, session end);
+        # the talker — never delivery — adopts a finished
+        # speculation, inside the real turn only.
+        self._speculation = speculation
         self._talker = talker
         self._emit = emit
         self._on_user_final = on_user_final
@@ -194,6 +204,13 @@ class VoiceDelivery:
         self._is_stopping = is_stopping
 
         self._last_partial_text = ""
+        # S16 stability tracking (per utterance): the last raw
+        # partial text, how many consecutive partial passes over a
+        # GROWN snapshot reproduced it verbatim, and that
+        # snapshot's size. See _observe_partial_stability.
+        self._stability_text = ""
+        self._stability_repeats = 0
+        self._stability_snapshot_len = -1
         self._turn_active = False
         self._turn_task: asyncio.Task | None = None
         # E7-07: partial transcription runs as its own task off
@@ -259,6 +276,10 @@ class VoiceDelivery:
         if self._partial_task is not None and not self._partial_task.done():
             self._partial_task.cancel()
         self._turn_active = False
+        # S16: the session is ending — a pending speculation dies
+        # with it, unadopted.
+        if self._speculation is not None:
+            self._speculation.discard("session ending")
 
     # -- degradation seams (S15) -----------------------------------------
 
@@ -490,6 +511,12 @@ class VoiceDelivery:
         how the desktop knows not to commit it as one.
         """
         announcement_id = self._announcing_id if self._announcing else None
+        # S16: a barge-in kills any pending speculation — it was
+        # prepared for a conversational context the user just
+        # talked over, and the interrupting utterance starts
+        # fresh (its own partials will note their own stability).
+        if self._speculation is not None:
+            self._speculation.discard("barge-in")
         if self.output_active:
             self._interrupt_requested = True
             if not self._progress_seen:
@@ -521,6 +548,51 @@ class VoiceDelivery:
         """A new utterance started on the intake path: the
         partial machinery's per-utterance text state resets."""
         self._last_partial_text = ""
+        # S16: stability is per-utterance evidence, and a
+        # speculation left over from the previous utterance (its
+        # final was empty, or its turn never adopted it) is stale
+        # the moment new speech begins.
+        self._reset_stability()
+        if self._speculation is not None:
+            self._speculation.discard("new utterance began")
+
+    def _reset_stability(self) -> None:
+        self._stability_text = ""
+        self._stability_repeats = 0
+        self._stability_snapshot_len = -1
+
+    def _observe_partial_stability(self, text: str, snapshot: bytes) -> None:
+        """S16: the stability signal for speculation.
+
+        The Smart Turn endpointer exposes no stability/confidence
+        value to this half — ``observe_transcript`` is one-way —
+        so the honest proxy stands: a partial is STABLE when two
+        consecutive transcription passes over a GROWN audio
+        snapshot produce the identical text (the STT, given more
+        of the utterance, independently re-derives the same words)
+        and the first of those passes was published — i.e. the
+        endpointer has observed exactly this text. Re-transcribing
+        an ungrown snapshot proves nothing (a deterministic STT
+        repeats itself trivially), so growth is required for the
+        repeat to count. A changed text restarts the count; a
+        stale pass (the live buffer no longer extends the
+        snapshot — the utterance ended or moved on) resets it.
+        """
+        if self._speculation is None or not text:
+            return
+        if not self._utterance_extends(snapshot):
+            self._reset_stability()
+            return
+        if text == self._stability_text:
+            if len(snapshot) <= self._stability_snapshot_len:
+                return
+            self._stability_repeats += 1
+        else:
+            self._stability_text = text
+            self._stability_repeats = 0
+        self._stability_snapshot_len = len(snapshot)
+        if self._stability_repeats >= 1:
+            self._speculation.note_stable_partial(text)
 
     def request_partial(self) -> None:
         """Schedule a provisional transcription of the growing
@@ -555,6 +627,11 @@ class VoiceDelivery:
                         "voice partial transcription failed", exc_info=True)
                     return
                 text = (text or "").strip()
+                # S16: stability observation rides the same pass —
+                # it sees every transcribed text, including the
+                # repeats the publish branch below deliberately
+                # skips (a repeat IS the stability evidence).
+                self._observe_partial_stability(text, snapshot)
                 # The utterance this snapshot belonged to may have
                 # ended (or a new one begun) while transcription
                 # ran: publish only when the live buffer still
@@ -600,6 +677,7 @@ class VoiceDelivery:
         failure feeds the consecutive-failure ladder instead of
         always just dropping the turn."""
         self._last_partial_text = ""
+        self._reset_stability()
         transcribe_started = time.perf_counter()
         try:
             text = await self._stt.transcribe(audio, sample_rate=self._sample_rate)
@@ -611,6 +689,11 @@ class VoiceDelivery:
             (time.perf_counter() - transcribe_started) * 1000.0)
         text = (text or "").strip()
         if not text:
+            # S16: no turn will run for this utterance — a
+            # speculation prepared from its partials has nothing
+            # to serve and is dropped, not carried over.
+            if self._speculation is not None:
+                self._speculation.discard("final transcript empty")
             return
         await self._emit(Event(
             type=EventType.VOICE_PARTIAL_TRANSCRIPT,
@@ -632,6 +715,16 @@ class VoiceDelivery:
         self._interrupt_requested = False
         self._reset_heard()
         if await self._should_escalate(text):
+            # S16: an escalated turn NEVER consumes speculation —
+            # the prepared briefing exists only for the fast-chat
+            # talker, and launching work speculatively would break
+            # the guard by definition. (Speculation may have
+            # *prepared* during this utterance's partials —
+            # escalation is only decidable on the final — but the
+            # result is discarded here, unadopted, and the work
+            # path sees nothing of it.)
+            if self._speculation is not None:
+                self._speculation.discard("turn escalated to a task")
             self._turn_task = asyncio.ensure_future(
                 self._run_escalation_turn(text))
         else:

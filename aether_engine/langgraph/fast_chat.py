@@ -559,6 +559,7 @@ async def run_fast_chat(
     workspace_roots: list[str] | None = None,
     user_config=None,
     on_affect_read=None,
+    prepared_memory_briefing: str | None = None,
 ) -> AsyncGenerator[Event, None]:
     """Stream a direct chat reply for *prompt*, mirroring the graph
     runner's event contract (see module docstring)."""
@@ -607,7 +608,21 @@ async def run_fast_chat(
     # best-effort, empty = absent, never breaks the turn — so
     # text chat and voice (whose talker calls this runner) stop
     # being memory-blind. fast_chat_memory_briefing never raises.
-    _memory_briefing = await fast_chat_memory_briefing(prompt, user_config)
+    #
+    # S16 (14 Nov 2026): a voice turn may arrive with the briefing
+    # already prepared — the session's SpeculativePreparer ran
+    # THIS SAME BUILDER on the utterance's stable partial
+    # transcript while the user was still speaking, and the
+    # preparer's match rule verified the final transcript against
+    # the partial before adopting. prepared_memory_briefing is
+    # that builder's output, adopted verbatim instead of
+    # recomputed: still ONE builder, no fork. None — every typed
+    # caller and every unmatched/unprepared voice turn — runs the
+    # builder here exactly as pre-S16, byte for byte.
+    if prepared_memory_briefing is not None:
+        _memory_briefing = prepared_memory_briefing
+    else:
+        _memory_briefing = await fast_chat_memory_briefing(prompt, user_config)
     if _memory_briefing:
         messages.append({"role": "system", "content": _memory_briefing})
 

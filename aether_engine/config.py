@@ -301,6 +301,24 @@ class UserConfig:
     # simplify when things go wrong) — the read is never shown
     # to the user as a diagnosis.
     eq_enabled: bool = True
+    # S16: speculative read-only preparation on voice partial
+    # transcripts (aether_engine/voice/speculation.py). When on,
+    # a voice session runs the S7 memory-briefing builder on a
+    # STABLE partial transcript while the user is still speaking,
+    # and the turn adopts the result when the final transcript
+    # matches — nothing is ever executed, sent, or committed on
+    # a partial; only the final transcript's own turn consumes
+    # it. DEFAULT OFF, on evidence: the builder's hybrid recall
+    # leg is not side-effect-free today — the KG semantic search
+    # embeds the query through LiteLLM (local Ollama by default,
+    # but a cloud embedder is a supported configuration) and the
+    # KG + episodic legs lazily backfill embedding rows on the
+    # read path, so a speculative call can fire a network
+    # embedding request and derived-store writes for text the
+    # user has not finished saying. Opt-in until the read path
+    # grows a no-embed/no-backfill mode; see the speculation
+    # module's docstring for the full reasoning.
+    voice_speculation_enabled: bool = False
     session_retention_days: int = 180
     session_max_sessions: int = 200
     # Calendar layer (14 Nov 2026): the schedule in
@@ -424,6 +442,7 @@ class UserConfig:
             "fast_chat_memory_enabled": self.fast_chat_memory_enabled,
             "fast_chat_memory_token_budget": self.fast_chat_memory_token_budget,
             "eq_enabled": self.eq_enabled,
+            "voice_speculation_enabled": self.voice_speculation_enabled,
             "session_retention_days": self.session_retention_days,
             "session_max_sessions": self.session_max_sessions,
             "calendar_enabled": self.calendar_enabled,
@@ -561,6 +580,8 @@ class UserConfig:
             fast_chat_memory_enabled=bool(d.get("fast_chat_memory_enabled", True)),
             fast_chat_memory_token_budget=_as_int(d.get("fast_chat_memory_token_budget"), 400),
             eq_enabled=bool(d.get("eq_enabled", True)),
+            voice_speculation_enabled=bool(
+                d.get("voice_speculation_enabled", False)),
             session_retention_days=_as_int(d.get("session_retention_days"), 180),
             session_max_sessions=_as_int(d.get("session_max_sessions"), 200),
             calendar_enabled=bool(d.get("calendar_enabled", True)),
