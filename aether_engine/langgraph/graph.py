@@ -28,7 +28,10 @@ from aether_engine.langgraph.nodes.execute_tool import execute_tool_node
 from aether_engine.langgraph.nodes.pause import dummy_pause_node
 from aether_engine.langgraph.nodes.planner import planner_node
 from aether_engine.langgraph.nodes.researcher import researcher_node
-from aether_engine.langgraph.nodes.supervisor import build_supervisor_memory_tools
+from aether_engine.langgraph.nodes.supervisor import (
+    build_supervisor_desktop_tools,
+    build_supervisor_memory_tools,
+)
 from aether_engine.langgraph.state import AetherState
 from aether_engine.langgraph.supervisor_model import (
     AetherSupervisorModel,
@@ -153,7 +156,11 @@ def create_graph(checkpointer=None):
     return create_supervisor(
         specialists,
         model=AetherSupervisorModel(),
-        tools=build_supervisor_memory_tools(),
+        # S19: the desktop-observe tool is bound beside the
+        # memory tools; the adapter offers it only when
+        # Computer Use + Observe are enabled, so a bound-but-
+        # never-offered tool changes nothing when off.
+        tools=build_supervisor_memory_tools() + build_supervisor_desktop_tools(),
         prompt=supervisor_routing_prompt,
         state_schema=AetherState,
         post_model_hook=supervisor_post_model_hook,

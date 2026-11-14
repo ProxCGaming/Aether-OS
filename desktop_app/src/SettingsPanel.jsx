@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info, CalendarDays, MessagesSquare } from 'lucide-react';
+import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info, CalendarDays, MessagesSquare, Monitor } from 'lucide-react';
 import './chat.css';
 import { resolveSnipHotkey, defaultSnipHotkey } from './snipHotkey';
 import ProviderSettings from './components/Settings/ProviderSettings';
@@ -20,6 +20,7 @@ import AboutPanel from './components/Settings/AboutPanel';
 import VoicePanel from './components/Settings/VoicePanel';
 import CalendarPanel from './components/Settings/CalendarPanel';
 import ConversationPanel from './components/Settings/ConversationPanel';
+import ComputerUsePanel from './components/Settings/ComputerUsePanel';
 
 // Wave 5 (Annex C row 7): this file is the Settings shell —
 // sidebar navigation, the one socket message handler, the
@@ -75,6 +76,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   const [calendarLeadMinutes, setCalendarLeadMinutes] = useState(30);
   // Master build S11: the EQ switch lives here on the same rule.
   const [eqEnabled, setEqEnabled] = useState(true);
+  // S19: Computer Use — all default OFF, matching the engine.
+  const [computerUseEnabled, setComputerUseEnabled] = useState(false);
+  const [computerUseObserve, setComputerUseObserve] = useState(false);
+  const [computerUseVisionCapture, setComputerUseVisionCapture] = useState('off');
   const [fallbackChain, setFallbackChain] = useState('');
   // E6-F05: the last applied engine config — the controlled panels
   // for the Epic 1/2 handed-off surfaces (OrchestrationPanel,
@@ -540,6 +545,24 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     sendConfigUpdate({ eq_enabled: val });
   };
 
+  // S19: Computer Use fields ride the same CONFIG_UPDATE path;
+  // the engine strictly validates all three (bools must be
+  // bools, the vision mode is a closed set).
+  const handleComputerUseEnabledChange = (val) => {
+    setComputerUseEnabled(val);
+    sendConfigUpdate({ computer_use_enabled: val });
+  };
+
+  const handleComputerUseObserveChange = (val) => {
+    setComputerUseObserve(val);
+    sendConfigUpdate({ computer_use_observe: val });
+  };
+
+  const handleComputerUseVisionCaptureChange = (val) => {
+    setComputerUseVisionCapture(val);
+    sendConfigUpdate({ computer_use_vision_capture: val });
+  };
+
   const handleCalendarLeadMinutesCommit = (val) => {
     setCalendarLeadMinutes(val);
     sendConfigUpdate({ calendar_reminder_lead_minutes: val });
@@ -641,6 +664,12 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
       setDisableFallbacks(config.disable_fallbacks || false);
       setCalendarEnabled(config.calendar_enabled !== false);
       setEqEnabled(config.eq_enabled !== false);
+    setComputerUseEnabled(config.computer_use_enabled === true);
+    setComputerUseObserve(config.computer_use_observe === true);
+    setComputerUseVisionCapture(
+      ['off', 'ask', 'on_demand'].includes(config.computer_use_vision_capture)
+        ? config.computer_use_vision_capture
+        : 'off');
       setCalendarDayBefore(config.calendar_reminder_day_before !== false);
       setCalendarLeadMinutes(
         Number.isInteger(config.calendar_reminder_lead_minutes)
@@ -1084,6 +1113,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     { keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
     { keywords: 'calendar events reminders schedule itinerary upcoming', id: 'Calendar', icon: <CalendarDays size={18} />, label: 'Calendar & Reminders' },
     { keywords: 'conversation adaptive replies tone pace eq signals chat behaviour', id: 'Conversation', icon: <MessagesSquare size={18} />, label: 'Conversation' },
+    { keywords: 'computer use desktop observe screen accessibility windows uia control vision capture', id: 'ComputerUse', icon: <Monitor size={18} />, label: 'Computer Use' },
     { keywords: 'capabilities diagnostics environment scheduler machine hardware cpu ram gpu disk this machine', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
     { keywords: 'voice tuning audio vad endpointing silence threshold mic speech', id: 'Voice', icon: <Mic size={18} />, label: 'Voice Tuning' },
     { keywords: 'advanced routing fallbacks reset defaults developer project config layer overlay', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' },
@@ -1340,6 +1370,21 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             configError={configUpdateError}
             eqEnabled={eqEnabled}
             onEqEnabledChange={handleEqEnabledChange}
+          />
+        )}
+
+        {activeMenu === 'ComputerUse' && (
+          <ComputerUsePanel
+            configAnswered={!!answered.config}
+            isConnected={isConnected}
+            configError={configUpdateError}
+            computerUseEnabled={computerUseEnabled}
+            onComputerUseEnabledChange={handleComputerUseEnabledChange}
+            computerUseObserve={computerUseObserve}
+            onComputerUseObserveChange={handleComputerUseObserveChange}
+            visionCapture={computerUseVisionCapture}
+            onVisionCaptureChange={handleComputerUseVisionCaptureChange}
+            approvalMode={approvalMode}
           />
         )}
 

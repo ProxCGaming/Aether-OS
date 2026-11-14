@@ -89,10 +89,12 @@ class TestProbeIsolation:
         report = mc.build_report()
         assert isinstance(report["probed_at"], float)
         machine = report["machine"]
+        # S19: the probe gains a "desktop" section (the UIA
+        # package gate for desktop observe).
         assert set(machine) == {
             "platform", "cpu", "ram", "disk", "gpu", "microphone",
             "network", "ollama_reachable", "voice_dependencies",
-            "browser"}
+            "browser", "desktop"}
         assert [f["id"] for f in report["features"]] == [
             "local_voice", "local_models", "cloud_providers",
             "semantic_embeddings", "browser_automation",
@@ -212,12 +214,32 @@ class TestMatrix:
         assert _verdict(machine, "browser_automation")["status"] == "unavailable"
 
     def test_desktop_control_is_a_platform_verdict(self):
+        # S19: the verdict goes live for OBSERVE — on Windows it
+        # now turns on the probed UIA package (available when
+        # present, degraded naming the missing package when
+        # absent, unknown when unprobed); the non-Windows and
+        # unidentified-platform verdicts are unchanged from S10.
         windows = _machine(platform={"system": "Windows", "release": "11",
                                      "architecture": "AMD64",
                                      "python": "3.12.3"})
         verdict = _verdict(windows, "desktop_control")
-        assert verdict["status"] == "degraded"
-        assert "not built yet" in verdict["reason"]
+        assert verdict["status"] == "unknown"
+        ready = _verdict(
+            _machine(platform={"system": "Windows", "release": "11",
+                               "architecture": "AMD64",
+                               "python": "3.12.3"},
+                     desktop={"uia_package": True}),
+            "desktop_control")
+        assert ready["status"] == "available"
+        assert "cannot click or type" in ready["reason"]
+        missing = _verdict(
+            _machine(platform={"system": "Windows", "release": "11",
+                               "architecture": "AMD64",
+                               "python": "3.12.3"},
+                     desktop={"uia_package": False}),
+            "desktop_control")
+        assert missing["status"] == "degraded"
+        assert "uiautomation" in missing["reason"]
         linux = _verdict(_machine(), "desktop_control")
         assert linux["status"] == "unavailable"
         assert "Windows UI Automation" in linux["reason"]

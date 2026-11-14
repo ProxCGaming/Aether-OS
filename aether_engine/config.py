@@ -319,6 +319,29 @@ class UserConfig:
     # grows a no-embed/no-backfill mode; see the speculation
     # module's docstring for the full reasoning.
     voice_speculation_enabled: bool = False
+    # Master build S19: Computer Use — desktop observe
+    # (aether_engine/desktop/). computer_use_enabled is the
+    # master switch: off (the default) means the supervisor's
+    # get_screen_state tool is not even OFFERED — the tool list
+    # and the routing prompt are byte-identical to pre-S19.
+    # computer_use_observe is the separate "See" switch: the
+    # master alone does not imply seeing; both must be on
+    # before a read can happen, and the gate is re-checked at
+    # call time (desktop.observe_permitted). There is
+    # deliberately NO computer_use_control field in this slice:
+    # actuation is S20 (owner decision O1), nothing could read
+    # such a field yet, and a stored-but-unread switch would
+    # claim a state the engine does not have — the Settings
+    # panel renders the Control toggle disabled as pure UI
+    # state instead. computer_use_vision_capture IS stored:
+    # "off" | "ask" | "on_demand" (default "off") — it is the
+    # user's standing instruction for the S20 vision fallback,
+    # shown and editable now so the choice is recorded before
+    # the feature exists; S19 itself takes no screenshots in
+    # any mode, which the panel copy states plainly.
+    computer_use_enabled: bool = False
+    computer_use_observe: bool = False
+    computer_use_vision_capture: str = "off"
     session_retention_days: int = 180
     session_max_sessions: int = 200
     # Calendar layer (14 Nov 2026): the schedule in
@@ -443,6 +466,9 @@ class UserConfig:
             "fast_chat_memory_token_budget": self.fast_chat_memory_token_budget,
             "eq_enabled": self.eq_enabled,
             "voice_speculation_enabled": self.voice_speculation_enabled,
+            "computer_use_enabled": self.computer_use_enabled,
+            "computer_use_observe": self.computer_use_observe,
+            "computer_use_vision_capture": self.computer_use_vision_capture,
             "session_retention_days": self.session_retention_days,
             "session_max_sessions": self.session_max_sessions,
             "calendar_enabled": self.calendar_enabled,
@@ -582,6 +608,13 @@ class UserConfig:
             eq_enabled=bool(d.get("eq_enabled", True)),
             voice_speculation_enabled=bool(
                 d.get("voice_speculation_enabled", False)),
+            computer_use_enabled=bool(d.get("computer_use_enabled", False)),
+            computer_use_observe=bool(d.get("computer_use_observe", False)),
+            computer_use_vision_capture=(
+                d.get("computer_use_vision_capture")
+                if d.get("computer_use_vision_capture")
+                in ("off", "ask", "on_demand")
+                else "off"),
             session_retention_days=_as_int(d.get("session_retention_days"), 180),
             session_max_sessions=_as_int(d.get("session_max_sessions"), 200),
             calendar_enabled=bool(d.get("calendar_enabled", True)),

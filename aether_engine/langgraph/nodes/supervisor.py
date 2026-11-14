@@ -122,6 +122,41 @@ SUPERVISOR_MEMORY_TOOLS = [
     }
 ]
 
+# Master build S19: the supervisor's desktop-observe tool,
+# kept in its own list (not SUPERVISOR_MEMORY_TOOLS) because
+# its availability is config-gated in a way the memory tools'
+# is not: it is only OFFERED when Computer Use + Observe are
+# both enabled (desktop.observe_permitted), and with them off
+# the offered tool list and the routing prompt are
+# byte-identical to pre-S19. It is a sibling of the memory
+# tools in every other respect — it executes inside the
+# supervisor under the same deny + allow-list gate pattern
+# (_desktop_tool_gate), and its name-level policy class is
+# READ_ONLY (tools/policy.py KNOWN_NON_REGISTRY_TOOLS).
+SUPERVISOR_SCREEN_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_screen_state",
+            "description": (
+                "Read the user's screen as accessibility TEXT: the foreground "
+                "window (title and app), its element tree (names, roles and "
+                "values, the focused element marked), and the other visible "
+                "windows. Call this only when the task is about what is on "
+                "the user's screen or which app/window they are working in. "
+                "It reads text the OS exposes — it cannot click, type, or "
+                "take screenshots, and nothing is watched continuously."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    }
+]
+
+SCREEN_TOOL_NAMES = {t["function"]["name"] for t in SUPERVISOR_SCREEN_TOOLS}
+
 
 # Epic 4, E4-07: memory-tool results feed the supervisor's context;
 # cap them so a large store cannot flood the briefing. Individual
@@ -328,6 +363,83 @@ async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id
         return f"Error executing {tool_name}: {e}"
 
 
+async def _execute_supervisor_screen_tool(task_id: str, user_config=None) -> str:
+    """Execute get_screen_state: one desktop-observe read,
+    rendered as the bounded summary. Mirrors
+    _execute_supervisor_memory_tool's contract — TOOL_ACTIVITY
+    events around the call, an audit record, the result capped
+    (the desktop summary's own cap is the primary bound; this
+    is the outer safety limit) — and, like the memory tools,
+    any failure degrades to an honest string for the model,
+    never an exception into the routing step."""
+    from aether_engine.desktop import (
+        SCREEN_STATE_MAX_CHARS,
+        get_desktop_provider,
+        summarise_screen_state,
+    )
+
+    try:
+        if task_id:
+            event_bus.publish(task_id, Event(
+                type=EventType.TOOL_ACTIVITY,
+                payload={
+                    "task_id": task_id,
+                    "tool_name": "get_screen_state",
+                    "tool_args": {},
+                    "status": "pending",
+                    "node": "supervisor",
+                    "timestamp": int(time.time())
+                }
+            ))
+
+        state = await get_desktop_provider().screen_state()
+        if not state.available:
+            result_str = (
+                "Desktop observe is unavailable: "
+                f"{state.reason or 'no reason was given.'}")
+        else:
+            result_str = summarise_screen_state(state)
+        if len(result_str) > SCREEN_STATE_MAX_CHARS:
+            result_str = result_str[:SCREEN_STATE_MAX_CHARS] \
+                + "\n...[screen result truncated to budget]"
+
+        _audit_logger.log_event("SUPERVISOR_DESKTOP_TOOL_CALLED", {
+            "tool_name": "get_screen_state",
+            "result_preview": result_str[:200]
+        })
+
+        if task_id:
+            event_bus.publish(task_id, Event(
+                type=EventType.TOOL_ACTIVITY,
+                payload={
+                    "task_id": task_id,
+                    "tool_name": "get_screen_state",
+                    "tool_args": {},
+                    "status": "completed",
+                    "result": result_str,
+                    "node": "supervisor",
+                    "timestamp": int(time.time())
+                }
+            ))
+        return result_str
+    except Exception as e:  # noqa: BLE001 — the desktop backend is an external boundary; any failure degrades to an error string for the model.
+        logger.warning(f"Supervisor desktop tool get_screen_state failed: {e}")
+        if task_id:
+            event_bus.publish(task_id, Event(
+                type=EventType.TOOL_ACTIVITY,
+                payload={
+                    "task_id": task_id,
+                    "tool_name": "get_screen_state",
+                    "tool_args": {},
+                    "status": "failed",
+                    "result": f"Error: {e}",
+                    "node": "supervisor",
+                    "timestamp": int(time.time())
+                }
+            ))
+        return f"Error executing get_screen_state: {e}"
+
+
 SPECIALIST_NAMES = ["researcher", "planner", "coder"]
 MEMORY_TOOL_NAMES = {t["function"]["name"] for t in SUPERVISOR_MEMORY_TOOLS}
 
@@ -509,6 +621,31 @@ def _memory_tool_gate(tool_name: str, config: RunnableConfig | None) -> str | No
     return None
 
 
+def _desktop_tool_gate(tool_name: str, config: RunnableConfig | None) -> str | None:
+    """Config + policy gate for the supervisor's desktop tools.
+
+    Desktop tools execute inside the supervisor like the memory
+    tools, so the registry pipeline does not see them; the gate
+    is enforced here, at call time, in two layers: first the
+    Computer Use config (master switch + Observe switch —
+    desktop.observe_permitted, the same check that governs
+    whether the tool is OFFERED at all, re-checked here so a
+    call that arrives anyway is refused honestly), then the
+    memory tools' own deny + allow-list gate, unchanged.
+    Returns an error string when the call is forbidden, else
+    None.
+    """
+    from aether_engine.desktop import observe_permitted
+
+    configurable = (config or {}).get("configurable", {}) if config else {}
+    if not observe_permitted(configurable.get("user_config")):
+        return (
+            f"Error: Tool '{tool_name}' is not available: Computer Use "
+            "observe is off. The user can enable it in Settings → "
+            "Computer Use (the master switch and Observe).")
+    return _memory_tool_gate(tool_name, config)
+
+
 @tool
 async def get_current_chat_history(limit: int = 6, *, runtime: ToolRuntime) -> str:
     """Retrieve recent messages from the currently open chat session. Call this if the user refers to something said earlier in this conversation, asks for their name, or references earlier discussion in this chat."""
@@ -587,6 +724,29 @@ def build_supervisor_memory_tools() -> list:
     create_supervisor agent's ToolNode.
     """
     return [get_current_chat_history, search_knowledge_graph, search_past_episodes, get_user_profile, forget_memory]
+
+
+@tool
+async def get_screen_state(*, runtime: ToolRuntime) -> str:
+    """Read the user's screen as accessibility text: the foreground window and its element tree, plus the other visible windows. Call only when the task is about what is on the user's screen or which app/window they are in. Text only — no clicking, typing, or screenshots."""
+    gate = _desktop_tool_gate("get_screen_state", runtime.config)
+    if gate:
+        return gate
+    state = runtime.state
+    return await _execute_supervisor_screen_tool(
+        state.get("task_id") or "",
+        user_config=runtime.config.get("configurable", {}).get("user_config"),
+    )
+
+
+def build_supervisor_desktop_tools() -> list:
+    """The supervisor's desktop-observe tools as LangChain
+    tools (S19). Bound into the graph beside the memory tools;
+    whether the model ever SEES this one is decided per run by
+    the adapter's offered-tools gate (Computer Use + Observe
+    config), and _desktop_tool_gate re-checks at call time.
+    """
+    return [get_screen_state]
 
 
 def repo_map_context(

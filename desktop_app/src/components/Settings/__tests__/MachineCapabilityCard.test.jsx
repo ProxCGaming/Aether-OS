@@ -34,7 +34,8 @@ const FIXTURE_REPORT = {
     { id: 'cloud_providers', name: 'Cloud model providers', status: 'available', reason: 'Provider endpoints are reachable from this machine (api.openai.com).' },
     { id: 'semantic_embeddings', name: 'Semantic memory embeddings', status: 'available', reason: 'Ollama is answering at 127.0.0.1:11434.' },
     { id: 'browser_automation', name: 'Browser automation', status: 'degraded', reason: 'Playwright is installed, but no Chromium build was found in the default browsers directory.' },
-    { id: 'desktop_control', name: 'Desktop control (Computer Use)', status: 'degraded', reason: 'This platform supports desktop automation (Windows UI Automation), but Aether\u2019s Computer Use feature is not built yet.' }
+    // S19: the engine's desktop verdict is live for observe now — this fixture models a Windows machine whose UIA package is missing (degraded, naming the package), which is the wording the engine sends at this tip.
+    { id: 'desktop_control', name: 'Desktop control (Computer Use)', status: 'degraded', reason: 'Desktop observe is built on this platform (Windows UI Automation), but the \u2018uiautomation\u2019 package is not installed in the engine\u2019s environment, so the accessibility tree cannot be read until it is.' }
   ]
 };
 
@@ -94,7 +95,8 @@ describe('MachineCapabilityCard', () => {
     expect(screen.getByTestId('machine-feature-local_voice')).toHaveTextContent('run accelerated instead of on CPU');
     expect(screen.getByTestId('machine-feature-status-browser_automation')).toHaveTextContent('Degraded');
     expect(screen.getByTestId('machine-feature-browser_automation')).toHaveTextContent('no Chromium build was found');
-    expect(screen.getByTestId('machine-feature-desktop_control')).toHaveTextContent('not built yet');
+    expect(screen.getByTestId('machine-feature-status-desktop_control')).toHaveTextContent('Degraded');
+    expect(screen.getByTestId('machine-feature-desktop_control')).toHaveTextContent('\u2018uiautomation\u2019 package is not installed');
   });
 
   test('an unavailable and an unknown verdict render their own chips', async () => {

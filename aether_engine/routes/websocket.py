@@ -2409,6 +2409,7 @@ async def _handle_tool_list_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
     from aether_engine.langgraph.nodes.supervisor import (
         SUPERVISOR_MEMORY_TOOLS,
+        SUPERVISOR_SCREEN_TOOLS,
     )
     from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
     from aether_engine.tools.policy import (
@@ -2447,8 +2448,12 @@ async def _handle_tool_list_request(conn: WsConnection, msg: Event) -> None:
         d = t.to_definition()
         defs.append(enrich_tool(d, t.name, t.risk))
 
-    # Add Supervisor Memory Tools
-    for mt in SUPERVISOR_MEMORY_TOOLS:
+    # Add Supervisor Memory Tools — and (S19) the supervisor's
+    # desktop-observe tool, listed unconditionally like the
+    # memory tools: its per-tool policy (incl. Deny) is managed
+    # here even though the tool is only OFFERED to the model
+    # when Computer Use + Observe are enabled.
+    for mt in SUPERVISOR_MEMORY_TOOLS + SUPERVISOR_SCREEN_TOOLS:
         d = mt.copy()
         name = d["function"]["name"]
         risk = KNOWN_NON_REGISTRY_TOOLS.get(name, ToolRisk.EXECUTE)

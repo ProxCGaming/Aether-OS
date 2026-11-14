@@ -28,6 +28,16 @@ KNOWN_NON_REGISTRY_TOOLS: dict[str, ToolRisk] = {
     # is honoured at the seam, "Require Approval" pauses the spawn
     # itself through the ordinary approval channel.
     "spawn_subagent": ToolRisk.READ_ONLY,
+    # S19: the supervisor's desktop-observe tool. It reads the
+    # foreground window's accessibility tree as text — no
+    # actuation, no screenshot — so it classifies READ_ONLY and
+    # the default verdict is "allow", like its sibling
+    # supervisor tools. The real gate is config, not policy:
+    # the tool is only OFFERED when Computer Use + Observe are
+    # both enabled (desktop.observe_permitted) and the gate is
+    # re-checked at call time; a per-tool "Deny" here is
+    # honoured by that same gate.
+    "get_screen_state": ToolRisk.READ_ONLY,
 }
 
 _VERDICT_MAP = {"Always Allow": "allow", "Require Approval": "ask", "Deny": "deny"}

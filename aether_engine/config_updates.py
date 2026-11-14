@@ -74,6 +74,9 @@ HANDED_OFF_FIELDS = (
     "subagent_cost_budget_usd",
     "model_routing",
     "voice_speculation_enabled",
+    "computer_use_enabled",
+    "computer_use_observe",
+    "computer_use_vision_capture",
 )
 
 # The verdict vocabulary of tools/policy.py's _VERDICT_MAP and the
@@ -358,14 +361,38 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
     # S16: voice_speculation_enabled joins them too — a config
     # write for the speculation opt-in must be a real boolean,
     # refused rather than coerced when it is not.
+    # S19: computer_use_enabled / computer_use_observe join
+    # them — the Computer Use master and Observe switches are
+    # real booleans; a truthy string would show a state the
+    # engine never agreed to, and for a screen-reading feature
+    # that distinction is the whole point of the switch.
     for bool_field in ("calendar_enabled", "calendar_reminder_day_before",
                        "eq_enabled", "subagents_enabled",
-                       "voice_speculation_enabled"):
+                       "voice_speculation_enabled",
+                       "computer_use_enabled", "computer_use_observe"):
         if bool_field in config_data:
             value = config_data[bool_field]
             if not isinstance(value, bool):
                 raise _fail(bool_field, "must be true or false")
             cleaned[bool_field] = value
+
+    # S19: the vision capture mode is a closed three-value set,
+    # validated like model_routing — an unknown value is refused
+    # (naming the valid set), never coerced, so the Settings
+    # selector can only ever store a mode S20 will implement.
+    # There is deliberately no "always_on" value: continuous
+    # capture is not offered anywhere in Computer Use.
+    if "computer_use_vision_capture" in config_data:
+        value = config_data["computer_use_vision_capture"]
+        if not isinstance(value, str) or not value.strip():
+            raise _fail("computer_use_vision_capture",
+                        "must be a capture mode")
+        mode = value.strip().lower()
+        if mode not in ("off", "ask", "on_demand"):
+            raise _fail("computer_use_vision_capture",
+                        f"unknown mode {value!r} "
+                        "(valid: off, ask, on_demand)")
+        cleaned["computer_use_vision_capture"] = mode
 
     if "calendar_reminder_lead_minutes" in config_data:
         cleaned["calendar_reminder_lead_minutes"] = _bounded_int(

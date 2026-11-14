@@ -80,6 +80,12 @@ _OLLAMA_PORT = 11434
 # matrix says the same thing before the user finds out live.
 _VOICE_MODULES = ("faster_whisper", "kokoro", "onnxruntime", "numpy", "aiortc")
 
+# The desktop-observe backend's dependency gate, mirrored from
+# desktop/windows_uia.py (UIA_PACKAGE_MODULE): the Windows UIA
+# provider reads the accessibility tree through the third-party
+# "uiautomation" package; absent, observe cannot run (S19).
+_DESKTOP_UIA_MODULE = "uiautomation"
+
 _GIB = 1024 ** 3
 
 # ---------------------------------------------------------------------------
@@ -383,6 +389,13 @@ def _probe_voice_dependencies() -> dict[str, Any]:
     return {module: _package_state(module) for module in _VOICE_MODULES}
 
 
+def _probe_desktop() -> dict[str, Any]:
+    """Desktop-observe readiness: whether the UIA package the
+    Windows backend needs is present (tri-state, find_spec —
+    the package is located, never imported, by a probe)."""
+    return {"uia_package": _package_state(_DESKTOP_UIA_MODULE)}
+
+
 def _probe_browser() -> dict[str, Any]:
     installed = _package_state("playwright")
     browsers_found = False
@@ -426,6 +439,7 @@ def probe_machine() -> dict[str, Any]:
             {module: None for module in _VOICE_MODULES}),
         "browser": _isolated(
             _probe_browser, {"playwright_installed": None, "chromium_found": False}),
+        "desktop": _isolated(_probe_desktop, {"uia_package": None}),
     }
 
 
@@ -643,13 +657,36 @@ def _desktop_control(machine: dict[str, Any]) -> dict[str, Any]:
     name = "Desktop control (Computer Use)"
     system = (machine.get("platform") or {}).get("system")
     if system == "Windows":
+        # S19: the verdict goes live for OBSERVE — desktop
+        # observe (reading the foreground window's accessibility
+        # tree as text, when the user enables it) is built; what
+        # it still cannot do is ACT (click/type), which is S20.
+        # The remaining gate is the UIA package the backend
+        # reads through, probed like every other dependency.
+        uia = (machine.get("desktop") or {}).get("uia_package")
+        if uia is True:
+            return _verdict(
+                "desktop_control", name, "available",
+                "Desktop observe is built on this platform "
+                "(Windows UI Automation): with Computer Use and "
+                "Observe enabled in Settings, Aether can read "
+                "the foreground window's accessibility tree as "
+                "text when a task asks. It cannot click or type "
+                "— actuation is not built yet.")
+        if uia is False:
+            return _verdict(
+                "desktop_control", name, "degraded",
+                "Desktop observe is built on this platform "
+                "(Windows UI Automation), but the 'uiautomation' "
+                "package is not installed in the engine's "
+                "environment, so the accessibility tree cannot "
+                "be read until it is.")
         return _verdict(
-            "desktop_control", name, "degraded",
-            "This platform supports desktop automation (Windows "
-            "UI Automation), but Aether's Computer Use feature is "
-            "not built yet — nothing in this build can see or "
-            "control the desktop. This verdict tracks platform "
-            "support only.")
+            "desktop_control", name, "unknown",
+            "Desktop observe is built on this platform (Windows "
+            "UI Automation), but whether the 'uiautomation' "
+            "package is installed could not be determined, so "
+            "readiness is unjudged.")
     if system:
         return _verdict(
             "desktop_control", name, "unavailable",

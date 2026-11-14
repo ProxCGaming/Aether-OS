@@ -46,12 +46,14 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.config import get_config
 from pydantic import Field
 
+from aether_engine.desktop import observe_permitted
 from aether_engine.langgraph.compaction import (
     context_summary_section,
     model_facing_messages,
 )
 from aether_engine.langgraph.nodes.supervisor import (
     MEMORY_TOOL_NAMES,
+    SCREEN_TOOL_NAMES,
     _available_specialists,
     _decision_from_text,
     _resolve_supervisor_provider,
@@ -368,7 +370,14 @@ class AetherSupervisorModel(BaseChatModel):
                 if name[len(HANDOFF_PREFIX):] in available:
                     offered.append(convert_to_openai_tool(tool))
                 continue
-            if name not in MEMORY_TOOL_NAMES:
+            # S19: the desktop-observe tool exists for the model
+            # only when Computer Use + Observe are enabled —
+            # never offered (and never annotated as disabled)
+            # otherwise, so the offered list with Computer Use
+            # off is byte-identical to pre-S19.
+            if name in SCREEN_TOOL_NAMES and not observe_permitted(user_config):
+                continue
+            if name not in MEMORY_TOOL_NAMES and name not in SCREEN_TOOL_NAMES:
                 continue
             if user_config and resolve_policy_by_name(name, user_config.tool_policies) == "deny":
                 continue
@@ -458,7 +467,12 @@ class AetherSupervisorModel(BaseChatModel):
                 logger.warning(f"Supervisor adapter text fallback also failed: {retry_error}")
                 return _end_result(f"Supervisor model call failed: {retry_error}")
 
-        memory_calls = [tc for tc in tool_calls if tc.name in MEMORY_TOOL_NAMES]
+        # The supervisor's OWN tools: the memory tools plus
+        # (S19) the desktop-observe tool — both execute inside
+        # the supervisor via its ToolNode, under their gates.
+        memory_calls = [tc for tc in tool_calls
+                        if tc.name in MEMORY_TOOL_NAMES
+                        or tc.name in SCREEN_TOOL_NAMES]
         transfer_calls = [tc for tc in tool_calls if tc.name.startswith(HANDOFF_PREFIX)]
         # Epic 3, E3-01 (issue 012 diagnosability): calls that are
         # neither memory nor handoff are NOT the supervisor's to run —
@@ -719,6 +733,25 @@ def supervisor_routing_prompt(state: dict) -> list:
     )
     if repo_section:
         text += f"\n\n{repo_section}"
+    # S19: desktop observe — the section exists only when the
+    # user has enabled Computer Use + Observe (the same gate
+    # that offers the tool); with it off the prompt is
+    # byte-identical to pre-S19. Pull-only discipline, like the
+    # memory tools: the screen is read when the task is about
+    # the screen, never ambiently.
+    _user_config = (config.get("configurable", {}) or {}).get("user_config")
+    if observe_permitted(_user_config):
+        text += (
+            "\n\nYou have a desktop observation tool:\n"
+            "- get_screen_state: read the user's foreground window as "
+            "accessibility TEXT (window title, app, and the element "
+            "tree — names, roles, values, the focused element marked) "
+            "plus the list of visible windows. Call it only when the "
+            "task is about what is on the user's screen or which "
+            "app/window they are working in. It reads text only — it "
+            "cannot click, type, or take screenshots, and nothing is "
+            "watched continuously."
+        )
     # E1-06: the routing model sees the compacted view (summary above +
     # verbatim tail), never the folded middle turns. The state channel
     # itself keeps the full history.
