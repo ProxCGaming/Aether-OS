@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,52 @@ _DEFAULT_DB_PATH = Path.home() / ".aether" / "workspace_rag.db"
 
 _META_EMBEDDER = "embedder"
 _META_CONSENT_PREFIX = "consent:"
+
+
+def _ensure_wal_mode(conn: sqlite3.Connection) -> None:
+    """Switch the DB file to WAL, tolerating the first-open race.
+
+    Mirrors ``memory/knowledge_graph._ensure_wal_mode`` (the N-07
+    fix, ``5e677a7e``), replicated per store as the calendar store
+    did: this store is deliberately standalone (see the module
+    docstring — it does not switch with the memory backend), so
+    it must not import the memory layer just for this helper.
+    The journal mode is persistent per database file, so this is
+    a one-time transition — but it needs exclusive access, and
+    SQLite does not apply busy_timeout to journal-mode changes:
+    a connection that asks for WAL while another connection
+    holds a transaction on a not-yet-WAL file gets "database is
+    locked" immediately. Once the file is in WAL the same
+    request is a no-op that cannot fail that way.
+
+    So: skip the request when the file is already WAL, retry the
+    transition briefly while a competing writer finishes, and if
+    it still cannot land, carry on without it — this connection
+    works correctly in the rollback journal and a later
+    connection completes the transition. Housekeeping must never
+    kill a caller.
+    """
+    try:
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+    except sqlite3.Error:
+        return
+    if row is not None and str(row[0]).lower() == "wal":
+        return
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or time.monotonic() >= deadline:
+                logger.warning(
+                    "Could not switch the workspace RAG database to "
+                    "WAL journal mode (%s); continuing in the "
+                    "rollback journal — a later connection retries "
+                    "the transition",
+                    e)
+                return
+            time.sleep(0.05)
 
 
 def document_id(workspace_root: str, file_path: str) -> str:
@@ -57,7 +104,7 @@ class WorkspaceRagStore:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
+        _ensure_wal_mode(conn)
         conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 

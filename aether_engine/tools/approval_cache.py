@@ -54,6 +54,54 @@ logger = logging.getLogger("aether_engine.tools.approval_cache")
 RISK_ORDER: dict[str, int] = {risk.value: idx for idx, risk in enumerate(ToolRisk)}
 
 
+def _ensure_wal_mode(conn: sqlite3.Connection) -> None:
+    """Switch the DB file to WAL, tolerating the first-open race.
+
+    Mirrors ``memory/knowledge_graph._ensure_wal_mode`` (the N-07
+    fix, ``5e677a7e``), replicated per store as the calendar store
+    did: the tools layer must not import the memory layer (its
+    provider/config chain) just for this helper. The journal
+    mode is persistent per database file, so this is a one-time
+    transition — but it needs exclusive access, and SQLite does
+    not apply busy_timeout to journal-mode changes: a connection
+    that asks for WAL while another connection holds a
+    transaction on a not-yet-WAL file gets "database is locked"
+    immediately. Once the file is in WAL the same request is a
+    no-op that cannot fail that way. This cache's shared
+    connection is serialised by its lock, but a second process —
+    or a profile restore racing a reopen (E10-F05) — can still
+    hold the fresh file when this connection first opens it.
+
+    So: skip the request when the file is already WAL, retry the
+    transition briefly while a competing writer finishes, and if
+    it still cannot land, carry on without it — this connection
+    works correctly in the rollback journal and a later
+    connection completes the transition. Housekeeping must never
+    kill a caller.
+    """
+    try:
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+    except sqlite3.Error:
+        return
+    if row is not None and str(row[0]).lower() == "wal":
+        return
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or time.monotonic() >= deadline:
+                logger.warning(
+                    "Could not switch the approval-cache database "
+                    "to WAL journal mode (%s); continuing in the "
+                    "rollback journal — a later connection retries "
+                    "the transition",
+                    e)
+                return
+            time.sleep(0.05)
+
+
 def default_cache_path() -> Path:
     return Path.home() / ".aether" / "approval-cache.db"
 
@@ -73,7 +121,7 @@ class ApprovalCache:
 
     def _open_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
+        _ensure_wal_mode(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS grants (
