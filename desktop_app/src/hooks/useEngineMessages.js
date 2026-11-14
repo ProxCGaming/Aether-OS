@@ -101,6 +101,24 @@ export function useEngineMessages(deps) {
         setChatMessages(prev => expireVaultFillCards(prev));
       }
     };
+    // S2 (master build): a system line routed to the session that
+    // owns it — visible chat when that session is on screen, the
+    // session cache otherwise (the TOOL_APPROVAL_REQUEST routing
+    // pattern, for status pushes that carry their own session id).
+    const appendSystemMessage = (sessionId, content, idPrefix) => {
+      const systemMsg = {
+        id: `${idPrefix}-${Date.now()}`,
+        role: 'system',
+        content,
+        isFinal: true,
+      };
+      if (sessionId && sessionId !== activeSessionRef.current) {
+        const cached = sessionCacheRef.current[sessionId] || [];
+        sessionCacheRef.current[sessionId] = [...cached, systemMsg];
+      } else {
+        setChatMessages(prev => [...prev, systemMsg]);
+      }
+    };
     const handleMessage = (event) => {
       let data;
       try {
@@ -501,11 +519,43 @@ export function useEngineMessages(deps) {
           } else {
             setChatMessages(updateFailedMessages);
           }
+        } else if (data.type === 'TASK_INTERRUPTED') {
+          // S2 (master build): the executor emits this when a task
+          // pauses for approval (state PENDING_APPROVAL) — it is NOT
+          // a terminal event: the approval card (TOOL_APPROVAL_REQUEST,
+          // which arrives first) stays armed in pendingApprovalsRef,
+          // the streaming bubble stays open so the resumed run can
+          // stream into it, and the task stays in activeTaskIds until
+          // its real terminal event. What was missing before this
+          // branch: nothing in the transcript said the task had
+          // paused, so the pause was only visible as the approval
+          // card itself — and a push arriving without its card (e.g.
+          // after a reconnect) left a stale running state behind.
+          setIsThinking(false);
+          appendSystemMessage(
+            data.payload?.session_id || activeTaskSessionRef.current,
+            '⏸ Task paused — waiting for your approval to continue.',
+            'task-interrupted');
         } else if (data.type === 'SESSION_RENAME_RESPONSE') {
           // Epic 1 UI batch (E1-08): the engine confirms renames; only
           // a confirmed rename changes the local list.
           if (data.payload?.renamed && data.payload.session_id) {
             setSessions(prev => prev.map(s => s.id === data.payload.session_id ? { ...s, title: data.payload.title } : s));
+          }
+        } else if (data.type === 'SESSION_TRUNCATE_RESPONSE') {
+          // S2 (master build): the answer to SESSION_TRUNCATE_REQUEST
+          // (edit-and-resend / regenerate). The local list is pruned
+          // optimistically at send time, so a confirmed truncate needs
+          // no further change — but a REFUSED one (truncated: false)
+          // means the stored session still holds the pruned branch
+          // and it would reappear on the next reload. Before this
+          // branch that answer was unheard and the divergence was
+          // invisible; now the refusal is surfaced where it happened.
+          if (data.payload && data.payload.truncated === false) {
+            appendSystemMessage(
+              data.payload.session_id || activeSessionRef.current,
+              '⚠️ The engine could not truncate this conversation — the messages you removed are still in the stored session and may reappear when it is reloaded.',
+              'session-truncate-failed');
           }
         } else if (data.type === 'SESSION_TITLE_UPDATED') {
           // Epic 1 UI batch (E1-08): the engine wrote a model title for
@@ -1221,6 +1271,27 @@ export function useEngineMessages(deps) {
             setVoiceRtcRemoteCandidate({
               seq: voiceRtcSeqRef.current,
               candidate: p.candidate ?? null,
+            });
+          }
+        } else if (data.type === 'VOICE_RTC_ICE_RESPONSE') {
+          // S2 (master build): the answer to VOICE_RTC_ICE_REQUEST —
+          // the renderer's local candidates going up. ok:true is a
+          // pure acknowledgement (the engine's own candidates arrive
+          // separately as VOICE_RTC_ICE pushes, handled above), so
+          // only a refusal acts: mirror the VOICE_RTC_OFFER_RESPONSE
+          // refusal — if the engine says it could not take the
+          // candidate for the session the overlay believes is live
+          // (e.g. no active voice session), the voice state is the
+          // error state, never a live-looking overlay behind which
+          // negotiation has actually failed.
+          const p = data.payload || {};
+          const current = voiceStateRef.current;
+          if (current && p.session_id === current.sessionId && !p.ok) {
+            applyVoiceState({
+              ...current,
+              status: 'error',
+              error: p.error || 'Voice connection failed.',
+              webrtcConfig: null,
             });
           }
         } else if (data.type === 'DICTATION_START_RESPONSE') {

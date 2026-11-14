@@ -592,6 +592,26 @@ async def ws_tasks(ws: WebSocket):
             handler = _DISPATCH.get(msg.type)
             if handler is not None:
                 await handler(conn, msg)
+            else:
+                # S2 (master build): a message that parses as a valid
+                # EventType but has no dispatch entry (e.g. shell/engine
+                # version skew) must not vanish silently — the UI would
+                # wait forever on a response that never comes. Answer
+                # it with ERROR and log the type, like the parse-level
+                # failures above.
+                logger.warning(
+                    f"No handler for valid message type {msg.type.value}; "
+                    "answering ERROR")
+                await ws.send_text(Event(
+                    type=EventType.ERROR,
+                    request_id=req_id,
+                    payload={
+                        "error": (
+                            f"No handler for message type "
+                            f"{msg.type.value}; the engine cannot "
+                            "process this request."),
+                    },
+                ).to_json())
 
     except WebSocketDisconnect:
         logger.info(f"Client disconnected from {ip}:{port}")
