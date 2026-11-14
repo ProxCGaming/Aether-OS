@@ -126,7 +126,11 @@ describe('Dashboard metric honesty (RUX-C-14)', () => {
     // count are unknowns, not zeros.
     expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText('0 Active')).not.toBeInTheDocument();
-    expect(screen.getByText(/Waiting for the engine/)).toBeInTheDocument();
+    // Task Ledger mount (S3 UI): the dashboard now carries a second
+    // "Waiting for the engine" surface — the Task Ledger panel's
+    // offline state — so this matches all occurrences instead of
+    // expecting exactly one (getByText throws on multiple matches).
+    expect(screen.getAllByText(/Waiting for the engine/).length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText('No providers reporting yet')).not.toBeInTheDocument();
   });
 
@@ -154,7 +158,11 @@ describe('Dashboard metric honesty (RUX-C-14)', () => {
       expect(screen.queryByText(/taking longer than usual/)).not.toBeInTheDocument();
       const { act } = require('@testing-library/react');
       act(() => { jest.advanceTimersByTime(20000); });
-      expect(screen.getByText(/taking longer than usual/)).toBeInTheDocument();
+      // Task Ledger mount (S3 UI): the Task Ledger panel's
+      // LoadStateRow shares the same slow notice, so after 20 s the
+      // text legitimately appears twice on the dashboard — match
+      // all occurrences; the memory card's notice is among them.
+      expect(screen.getAllByText(/taking longer than usual/).length).toBeGreaterThanOrEqual(1);
     } finally {
       jest.useRealTimers();
     }

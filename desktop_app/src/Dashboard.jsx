@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Activity, Cpu, Database, HardDrive, HeartPulse, Network, Zap } from 'lucide-react';
 import './chat.css';
 import { useSlowLoad, DEFAULT_SLOW_TEXT } from './components/Settings/LoadStateRow';
+import TaskLedgerPanel from './components/TaskLedgerPanel';
 
 export default function Dashboard({ status = 'Initializing', activeTasks = 0, pluginCount = null, memoryMb = null, providerHealth = null, providerHealthLoaded = null, wsRef = null, reconnectCount = 0, onStartWorkflow }) {
   // RUX-C-14: a metric the engine has not answered yet is unknown
@@ -158,6 +159,13 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
             <Zap size={16} /> Start New Workflow
           </button>
         </div>
+      </div>
+
+      {/* Task Ledger (master build S3 UI): the engine's task
+          ledger read model, previously engine-only — recent tasks
+          plus the joined per-task detail, over the same wsRef. */}
+      <div style={{ marginTop: '32px' }}>
+        <TaskLedgerPanel wsRef={wsRef} reconnectCount={reconnectCount} isConnected={isOnline} />
       </div>
     </div>
   );
