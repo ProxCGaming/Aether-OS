@@ -72,6 +72,14 @@ def _rate_limit():
     return litellm.RateLimitError("rate limited", "openai", "gpt-4o-mini")
 
 
+def _not_found():
+    return litellm.NotFoundError(
+        "This model models/gemini-2.5-flash is no longer available",
+        "google_gemini",
+        "gemini-2.5-flash",
+    )
+
+
 @pytest.fixture
 def audit_spy(monkeypatch):
     events = []
@@ -125,6 +133,80 @@ def test_tool_results_in_history_block_fallback(monkeypatch):
     with pytest.raises(RateLimitError):
         asyncio.run(_collect(_provider(), messages))
     assert len(calls) == 1  # the fallback model was never attempted
+
+
+def test_model_not_found_with_tool_history_falls_back(monkeypatch):
+    """Owner-approved E5-01 exception (15 Nov 2026): a terminal
+    model-not-found yielded nothing and caused no side effects, so
+    the tools-in-history arm does NOT block its fallback — the case
+    that killed the owner's haiku task (dead pinned model called
+    after the planner had already produced tool results)."""
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs["model"])
+        if len(calls) == 1:
+            raise _not_found()
+        return _Stream([_chunk("hello", finish="stop")])
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    messages = [
+        {"role": "user", "content": "run it"},
+        {"role": "assistant", "content": ""},
+        {"role": "tool", "content": "tool output"},
+    ]
+    chunks = asyncio.run(_collect(_provider(), messages))
+    assert [c.text for c in chunks if c.text] == ["hello"]
+    assert len(calls) == 2  # primary 404'd, fallback served
+
+
+def test_bad_request_model_not_found_with_tool_history_falls_back(monkeypatch):
+    """Same exception on the BadRequestError not-found path."""
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs["model"])
+        if len(calls) == 1:
+            raise litellm.BadRequestError(
+                "model not found: gemini-2.5-flash", "google_gemini", "gemini-2.5-flash"
+            )
+        return _Stream([_chunk("hello", finish="stop")])
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    messages = [
+        {"role": "user", "content": "run it"},
+        {"role": "assistant", "content": ""},
+        {"role": "tool", "content": "tool output"},
+    ]
+    chunks = asyncio.run(_collect(_provider(), messages))
+    assert [c.text for c in chunks if c.text] == ["hello"]
+    assert len(calls) == 2
+
+
+def test_model_not_found_after_partial_stream_does_not_restart(monkeypatch):
+    """The streamed-output arm stays absolute even for not-found:
+    once text flowed, a restart would duplicate it."""
+    from aether_engine.providers.base import ProviderError
+
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs["model"])
+        return _Stream([_chunk("part-1")], error=_not_found(), error_after=1)
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    seen = []
+
+    async def run():
+        async for c in _provider().call_stream(
+            [{"role": "user", "content": "hi"}], node_name="planner"
+        ):
+            seen.append(c)
+
+    with pytest.raises(ProviderError):
+        asyncio.run(run())
+    assert [c.text for c in seen if c.text] == ["part-1"]
+    assert len(calls) == 1  # fallback never attempted
 
 
 def test_partial_stream_failure_does_not_restart(monkeypatch):

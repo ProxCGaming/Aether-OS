@@ -574,6 +574,12 @@ class LiteLLMProvider(BaseProvider):
         #     mid-task after side effects is unsafe; or
         # (b) this call already yielded output — a restarted stream
         #     would duplicate text and repeat tool calls.
+        #
+        # Owner-approved exception (15 Nov 2026), model-not-found
+        # ONLY — see _fallback_blocked_for_model_not_found: arm (a)
+        # does not apply to a terminal not-found, because that
+        # attempt provably caused no side effects of its own. Arm
+        # (b) stays absolute for every error type.
         tools_already_executed = any(
             isinstance(m, dict) and m.get("role") == "tool" for m in (messages or [])
         )
@@ -582,6 +588,19 @@ class LiteLLMProvider(BaseProvider):
         def _fallback_blocked() -> str | None:
             if tools_already_executed:
                 return "tools have already executed in this task (no mid-task model switch)"
+            if yielded_any:
+                return "this call already streamed output (a restart would duplicate it)"
+            return None
+
+        def _fallback_blocked_for_model_not_found() -> str | None:
+            # The E5-01 tools arm guards a model switch after side
+            # effects the FAILING attempt caused. A terminal
+            # model-not-found states the model does not exist for
+            # this key: the attempt generated no text, emitted no
+            # tool calls, caused nothing — and the tool results in
+            # the conversation are inputs the fallback model
+            # receives identically. So only the streamed-output arm
+            # blocks a not-found fallback.
             if yielded_any:
                 return "this call already streamed output (a restart would duplicate it)"
             return None
@@ -1014,27 +1033,37 @@ class LiteLLMProvider(BaseProvider):
                 import re
                 is_model_not_found = any(re.search(pattern, err_str, re.IGNORECASE) for pattern in model_not_found_indicators)
                 last_error = e
-                if is_model_not_found and (model_idx < len(models_to_try) - 1) and _fallback_blocked() is None:
-                    logger.warning(
-                        f"Model '{current_model}' failed with retriable error: {e}. "
-                        f"Trying next fallback..."
-                    )
-                    continue
-                if is_model_not_found and _fallback_blocked() is not None:
+                if is_model_not_found and model_idx < len(models_to_try) - 1:
+                    # Model-not-found uses the narrower gate (the
+                    # E5-01 tools arm does not apply — see
+                    # _fallback_blocked_for_model_not_found).
+                    blocked = _fallback_blocked_for_model_not_found()
+                    if blocked is None:
+                        logger.warning(
+                            f"Model '{current_model}' failed with retriable error: {e}. "
+                            f"Trying next fallback..."
+                        )
+                        continue
+                    logger.warning(f"Fallback blocked for model '{current_model}': {blocked}")
+                elif is_model_not_found and _fallback_blocked() is not None:
                     logger.warning(f"Fallback blocked for model '{current_model}': {_fallback_blocked()}")
                 if is_model_not_found:
                     _learn_unusable_model(current_model)
                 raise ProviderError(f"Bad request: {e}", retriable=is_model_not_found) from e
             except litellm.NotFoundError as e:
                 last_error = e
-                if _fallback_blocked() is not None and model_idx < len(models_to_try) - 1:
-                    logger.warning(f"Fallback blocked for model '{current_model}': {_fallback_blocked()}")
-                if model_idx < len(models_to_try) - 1 and _fallback_blocked() is None:
-                    logger.warning(
-                        f"Model '{current_model}' failed with retriable error: {e}. "
-                        f"Trying next fallback..."
-                    )
-                    continue
+                if model_idx < len(models_to_try) - 1:
+                    # Narrower gate, as in the BadRequest not-found
+                    # path: the tools arm does not block a terminal
+                    # not-found that yielded nothing.
+                    blocked = _fallback_blocked_for_model_not_found()
+                    if blocked is None:
+                        logger.warning(
+                            f"Model '{current_model}' failed with retriable error: {e}. "
+                            f"Trying next fallback..."
+                        )
+                        continue
+                    logger.warning(f"Fallback blocked for model '{current_model}': {blocked}")
                 _learn_unusable_model(current_model)
                 raise ProviderError(f"Model not found: {e}", retriable=True) from e
             except retriable_errors as e:
