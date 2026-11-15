@@ -80,6 +80,19 @@ async def run_specialist(
     secret_store = config.get("configurable", {}).get("secret_store")
 
     agent_model_override = agent_models.get(spec.name)
+    # 15 Nov 2026: a pin naming a KNOWN_UNUSABLE_MODELS entry (e.g. a
+    # stale gemini-2.5-flash pin) is refused here and the agent runs
+    # on the run's default provider — the model selected in Settings.
+    # Without this, the pin constructs fine and the provider call
+    # 404s mid-run, failing the whole task.
+    from aether_engine.langgraph.model_routing import pin_targets_unusable_model
+
+    if pin_targets_unusable_model(agent_model_override):
+        logger.warning(
+            f"{spec.display_name} agent_models override {agent_model_override!r} "
+            "names a known-unusable model, using default provider"
+        )
+        agent_model_override = None
     # S14: a pin is any non-"inherit" value, captured BEFORE the
     # prewalk split below can null the override for this round —
     # a pinned agent is never auto-routed and never escalated, in

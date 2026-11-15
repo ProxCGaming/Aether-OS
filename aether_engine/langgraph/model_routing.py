@@ -108,6 +108,29 @@ TIER_NAMES = {TIER_SMALL: "small", TIER_STANDARD: "standard", TIER_STRONG: "stro
 #: applies the same exclusion by name).
 KNOWN_UNUSABLE_MODELS = frozenset({"gemini-2.5-flash"})
 
+
+def pin_targets_unusable_model(pin: str | None) -> bool:
+    """True when an ``agent_models`` pin names a known-unusable model.
+
+    Pins bypass routing's exclusion by design (S14: a pinned agent is
+    never auto-routed) — which let a stale ``gemini-2.5-flash`` pin
+    kill a task with a provider 404 on the owner's machine
+    (15 Nov 2026): the pin constructed fine, the call died, and the
+    whole run failed after other nodes had already produced output.
+    The provider resolvers (specialist runner, supervisor) consult
+    this BEFORE constructing a pinned provider and fall back to the
+    run's default provider — the model the owner selected in
+    Settings — never to a hardcoded substitute.
+
+    Accepts the pin's stored forms: ``provider:model``, a bare model
+    name, or a litellm-style ``provider/model`` suffix.
+    """
+    if not pin or pin == "inherit":
+        return False
+    model = pin.split(":", 1)[1] if ":" in pin else pin
+    model = model.rsplit("/", 1)[-1].strip().lower()
+    return model in KNOWN_UNUSABLE_MODELS
+
 #: An outcome record needs at least this many samples for an agent
 #: before a losing record demotes the model in ranking — one bad
 #: run is noise, a pattern is signal.
