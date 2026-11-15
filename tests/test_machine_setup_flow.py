@@ -156,3 +156,20 @@ def test_readme_points_at_the_scripts():
     readme = _read(REPO_ROOT / "README.md")
     assert "scripts/setup.sh" in readme
     assert "scripts/run.sh" in readme
+
+
+def test_powershell_scripts_are_pure_ascii():
+    """Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI
+    (Windows-1252), where the UTF-8 bytes of an em dash include 0x94
+    — a closing smart quote — so one "—" inside a string ended the
+    string early and run.ps1 failed to PARSE at all on the owner's
+    PC (15 Nov 2026: blank, frozen terminal, nothing executed; the
+    engine and venv were healthy). Every .ps1 must stay pure ASCII
+    so 5.1 and pwsh read it identically."""
+    offenders = []
+    for script in sorted((REPO_ROOT / "scripts").glob("*.ps1")):
+        data = script.read_bytes()
+        bad = sorted({b for b in data if b > 127})
+        if bad:
+            offenders.append(f"{script.name}: bytes {[hex(b) for b in bad]}")
+    assert not offenders, "non-ASCII bytes in PowerShell scripts: " + "; ".join(offenders)
