@@ -506,6 +506,25 @@ class LiteLLMProvider(BaseProvider):
             else:
                 normalized_chat.append(m)
 
+        # 16 Nov 2026: Gemini / Vertex also reject a request ENDING
+        # with a model turn ("Requests ending with a model turn are
+        # not supported", 400 INVALID_ARGUMENT) — seen live when a
+        # specialist's text output became the last message of the
+        # supervisor's next decision call and the whole task failed
+        # after the specialist had completed. Close the conversation
+        # with the same synthetic user turn the first-turn fix above
+        # uses. A trailing assistant message carrying tool_calls is
+        # a different shape (its tool results are missing, not a
+        # completed model turn) and is left alone.
+        if (
+            normalized_chat
+            and normalized_chat[-1].get("role") == "assistant"
+            and not normalized_chat[-1].get("tool_calls")
+        ):
+            normalized_chat.append(
+                {"role": "user", "content": "Please proceed with the task."}
+            )
+
         return system_msgs + normalized_chat
 
     def _convert_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
