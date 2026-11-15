@@ -257,6 +257,24 @@ def _bare_model_id(litellm_model: str) -> str:
     return litellm_model
 
 
+def _learn_unusable_model(model: str) -> None:
+    """Learn a model that just answered a terminal model-not-found.
+
+    The learned set (langgraph/model_routing.py) makes every later
+    agent pin to this model refused up front, so one dead model
+    costs at most the first call that discovers it. Best-effort and
+    lazily imported: learning must never break the call path, and
+    the provider layer does not import the graph layer at module
+    scope.
+    """
+    try:
+        from aether_engine.langgraph.model_routing import learn_unusable_model
+
+        learn_unusable_model(model)
+    except Exception:  # learning must never raise
+        logger.debug("unusable-model learning hook failed", exc_info=True)
+
+
 @dataclass
 class FallbackModel:
     """Configuration for a fallback model including its provider-specific credentials."""
@@ -1004,6 +1022,8 @@ class LiteLLMProvider(BaseProvider):
                     continue
                 if is_model_not_found and _fallback_blocked() is not None:
                     logger.warning(f"Fallback blocked for model '{current_model}': {_fallback_blocked()}")
+                if is_model_not_found:
+                    _learn_unusable_model(current_model)
                 raise ProviderError(f"Bad request: {e}", retriable=is_model_not_found) from e
             except litellm.NotFoundError as e:
                 last_error = e
@@ -1015,6 +1035,7 @@ class LiteLLMProvider(BaseProvider):
                         f"Trying next fallback..."
                     )
                     continue
+                _learn_unusable_model(current_model)
                 raise ProviderError(f"Model not found: {e}", retriable=True) from e
             except retriable_errors as e:
                 # Retriable errors — try next fallback model if available

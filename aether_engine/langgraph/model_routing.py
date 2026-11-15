@@ -109,8 +109,20 @@ TIER_NAMES = {TIER_SMALL: "small", TIER_STANDARD: "standard", TIER_STRONG: "stro
 KNOWN_UNUSABLE_MODELS = frozenset({"gemini-2.5-flash"})
 
 
-def pin_targets_unusable_model(pin: str | None) -> bool:
-    """True when an ``agent_models`` pin names a known-unusable model.
+def _normalize_model_id(model: str) -> str:
+    """The bare, comparable form of a model id: last path segment
+    (``gemini/gemini-2.5-flash`` -> ``gemini-2.5-flash``), lowered."""
+    return model.rsplit("/", 1)[-1].strip().lower()
+
+
+def pin_targets_unusable_model(
+    pin: str | None, *, learned: Any | None = None
+) -> bool:
+    """True when an ``agent_models`` pin names an unusable model.
+
+    Unusable = on the static ``KNOWN_UNUSABLE_MODELS`` list OR in
+    the learned set (models a provider reported as not-found at call
+    time, persisted by :func:`learn_unusable_model`).
 
     Pins bypass routing's exclusion by design (S14: a pinned agent is
     never auto-routed) — which let a stale ``gemini-2.5-flash`` pin
@@ -123,13 +135,176 @@ def pin_targets_unusable_model(pin: str | None) -> bool:
     Settings — never to a hardcoded substitute.
 
     Accepts the pin's stored forms: ``provider:model``, a bare model
-    name, or a litellm-style ``provider/model`` suffix.
+    name, or a litellm-style ``provider/model`` suffix. ``learned``
+    overrides the learned set (tests); None reads the persisted one.
     """
     if not pin or pin == "inherit":
         return False
     model = pin.split(":", 1)[1] if ":" in pin else pin
-    model = model.rsplit("/", 1)[-1].strip().lower()
-    return model in KNOWN_UNUSABLE_MODELS
+    model = _normalize_model_id(model)
+    if model in KNOWN_UNUSABLE_MODELS:
+        return True
+    learned_set = learned if learned is not None else _learned_unusable_models()
+    return model in learned_set
+
+
+def note_pin_refused(agent_name: str, pin: str | None) -> None:
+    """Mark a refused dead-model pin: warning log + audit event.
+
+    The refusal itself happens in the resolvers; this is its durable
+    receipt (the audit trail is what survives the run — a log line
+    alone scrolls away). Best-effort: marking never breaks a run.
+    """
+    logger.warning(
+        "Agent model pin refused for %s: %r names an unusable model; "
+        "using the run's default provider (the model selected in Settings)",
+        agent_name,
+        pin,
+    )
+    try:
+        from aether_engine.audit import AuditLogger
+
+        AuditLogger().log_event(
+            "AGENT_MODEL_PIN_REFUSED", {"agent": agent_name, "pin": pin}
+        )
+    except Exception:  # marking must never break a run
+        logger.debug("pin-refusal audit write failed", exc_info=True)
+
+
+# ── Learned unusable models ───────────────────────────────────────
+#
+# The static list above only knows models someone already added by
+# hand. A model that dies later (retired by its provider, renamed,
+# key loses access) is learned instead: when the LiteLLM provider's
+# call ends in a terminal model-not-found, it records the model
+# here, and from then on pin_targets_unusable_model refuses pins to
+# it up front — the NEXT run never pays for the discovery.
+#
+# KNOWN LIMIT (marked 15 Nov 2026, owner's instruction): the FIRST
+# failure of a not-yet-known dead model still fails that one call —
+# in-graph provider fallback is deliberately blocked once tools
+# have executed or output has streamed (E5-01), so there is no safe
+# mid-run swap at that point. Learning converts every LATER hit
+# into a clean up-front refusal; it does not resurrect the run that
+# taught it. Second marked limit: refusal is a runtime act — the
+# dead pin still sits in the owner's saved Settings (marked in the
+# audit trail on every refusal) until they edit it; nothing here
+# rewrites user config.
+
+
+class LearnedUnusableStore:
+    """Models learned as not-found at call time, SQLite.
+
+    House style mirrors ModelOutcomeStore: a bounded SQLite file in
+    the data home, short-lived connections, recording that never
+    raises into the call it observes.
+    """
+
+    def __init__(self, db_path: Path | str | None = None):
+        self.db_path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+        self._initialized = False
+
+    def _get_conn(self) -> sqlite3.Connection:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self, conn: sqlite3.Connection) -> None:
+        if self._initialized:
+            return
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS learned_unusable_models (
+                model_name TEXT PRIMARY KEY,
+                provider_name TEXT,
+                learned_at INTEGER NOT NULL,
+                source TEXT NOT NULL
+            )
+        """)
+        self._initialized = True
+
+    def record(
+        self,
+        model_name: str,
+        *,
+        provider_name: str | None = None,
+        source: str = "provider-not-found",
+    ) -> None:
+        try:
+            conn = self._get_conn()
+            try:
+                self._init_db(conn)
+                conn.execute(
+                    "INSERT OR IGNORE INTO learned_unusable_models "
+                    "(model_name, provider_name, learned_at, source) "
+                    "VALUES (?, ?, ?, ?)",
+                    (model_name, provider_name, int(time.time()), source),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:  # learning must never raise
+            logger.debug("learned-unusable write failed", exc_info=True)
+
+    def all_models(self) -> set[str]:
+        try:
+            conn = self._get_conn()
+            try:
+                self._init_db(conn)
+                rows = conn.execute(
+                    "SELECT model_name FROM learned_unusable_models"
+                ).fetchall()
+                return {row["model_name"] for row in rows}
+            finally:
+                conn.close()
+        except Exception:  # reads degrade to empty
+            logger.debug("learned-unusable read failed", exc_info=True)
+            return set()
+
+
+_learned_store: LearnedUnusableStore | None = None
+_learned_cache: set[str] | None = None
+
+
+def _learned_unusable_models() -> set[str]:
+    """The persisted learned set, loaded once and kept current by
+    :func:`learn_unusable_model` in this process."""
+    global _learned_cache, _learned_store
+    if _learned_cache is None:
+        if _learned_store is None:
+            _learned_store = LearnedUnusableStore()
+        _learned_cache = _learned_store.all_models()
+    return _learned_cache
+
+
+def learn_unusable_model(
+    model_id: str | None,
+    *,
+    provider_name: str | None = None,
+    store: LearnedUnusableStore | None = None,
+) -> str | None:
+    """Learn that *model_id* answered model-not-found at call time.
+
+    Returns the normalized id recorded (or the static-list id, which
+    needs no learning). Never raises: a failed write just means the
+    next run learns it again.
+    """
+    if not model_id:
+        return None
+    normalized = _normalize_model_id(str(model_id))
+    if not normalized or normalized in KNOWN_UNUSABLE_MODELS:
+        return normalized or None
+    try:
+        if store is not None:
+            store.record(normalized, provider_name=provider_name)
+        else:
+            cache = _learned_unusable_models()  # ensures the singleton
+            assert _learned_store is not None
+            _learned_store.record(normalized, provider_name=provider_name)
+            cache.add(normalized)
+    except Exception:  # learning must never raise
+        logger.debug("learn_unusable_model failed", exc_info=True)
+    return normalized
 
 #: An outcome record needs at least this many samples for an agent
 #: before a losing record demotes the model in ranking — one bad

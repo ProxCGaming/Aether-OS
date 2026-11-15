@@ -85,13 +85,13 @@ async def run_specialist(
     # on the run's default provider — the model selected in Settings.
     # Without this, the pin constructs fine and the provider call
     # 404s mid-run, failing the whole task.
-    from aether_engine.langgraph.model_routing import pin_targets_unusable_model
+    from aether_engine.langgraph.model_routing import (
+        note_pin_refused,
+        pin_targets_unusable_model,
+    )
 
     if pin_targets_unusable_model(agent_model_override):
-        logger.warning(
-            f"{spec.display_name} agent_models override {agent_model_override!r} "
-            "names a known-unusable model, using default provider"
-        )
+        note_pin_refused(spec.name, agent_model_override)
         agent_model_override = None
     # S14: a pin is any non-"inherit" value, captured BEFORE the
     # prewalk split below can null the override for this round —

@@ -462,13 +462,13 @@ def _resolve_supervisor_provider(config: RunnableConfig):
     # 15 Nov 2026: same dead-pin guard as the specialist runner — a
     # pin naming a known-unusable model falls back to the graph's
     # default provider (the model selected in Settings).
-    from aether_engine.langgraph.model_routing import pin_targets_unusable_model
+    from aether_engine.langgraph.model_routing import (
+        note_pin_refused,
+        pin_targets_unusable_model,
+    )
 
     if pin_targets_unusable_model(agent_model_override):
-        logger.warning(
-            f"Supervisor agent_models override {agent_model_override!r} "
-            "names a known-unusable model, using default provider"
-        )
+        note_pin_refused("supervisor", agent_model_override)
         agent_model_override = None
     if agent_model_override and agent_model_override != "inherit" and secret_store:
         try:

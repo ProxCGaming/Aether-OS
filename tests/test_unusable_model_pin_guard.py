@@ -90,3 +90,62 @@ def test_runner_consults_the_guard_before_constructing_a_pin():
     guard_at = text.index("pin_targets_unusable_model(agent_model_override)")
     construct_at = text.index("_create_provider_instance")
     assert guard_at < construct_at
+
+
+# ── Learning: a model that 404s once is refused up front later ─────
+
+
+def test_learned_unlisted_model_becomes_refusable(tmp_path):
+    """The go-further case: a model on NO static list dies at call
+    time, is learned, and a pin to it is then refused — the first
+    failure is the tuition, never the second."""
+    from aether_engine.langgraph.model_routing import (
+        LearnedUnusableStore,
+        learn_unusable_model,
+    )
+
+    store = LearnedUnusableStore(tmp_path / "routing.db")
+    pin = "acme:acme-9-turbo"
+    assert pin_targets_unusable_model(pin, learned=store.all_models()) is False
+
+    recorded = learn_unusable_model(
+        "acme/acme-9-turbo", provider_name="acme", store=store
+    )
+    assert recorded == "acme-9-turbo"
+    assert pin_targets_unusable_model(pin, learned=store.all_models()) is True
+
+
+def test_learned_models_persist_across_store_instances(tmp_path):
+    from aether_engine.langgraph.model_routing import (
+        LearnedUnusableStore,
+        learn_unusable_model,
+    )
+
+    db = tmp_path / "routing.db"
+    learn_unusable_model("dead-model-1", store=LearnedUnusableStore(db))
+    fresh = LearnedUnusableStore(db)
+    assert fresh.all_models() == {"dead-model-1"}
+
+
+def test_learning_a_static_model_is_a_noop_record(tmp_path):
+    from aether_engine.langgraph.model_routing import (
+        LearnedUnusableStore,
+        learn_unusable_model,
+    )
+
+    store = LearnedUnusableStore(tmp_path / "routing.db")
+    assert learn_unusable_model("gemini/gemini-2.5-flash", store=store) == (
+        "gemini-2.5-flash"
+    )
+    assert store.all_models() == set()  # static list already covers it
+
+
+def test_provider_learns_at_terminal_model_not_found():
+    """The LiteLLM provider must call the learner at BOTH terminal
+    model-not-found raises (NotFoundError, and BadRequestError with
+    a not-found verdict) — pinned textually, house style."""
+    text = (REPO_ROOT / "aether_engine/providers/litellm_provider.py").read_text(
+        encoding="utf-8"
+    )
+    assert text.count("_learn_unusable_model(current_model)") >= 2
+    assert "def _learn_unusable_model" in text
