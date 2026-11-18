@@ -2015,8 +2015,10 @@ function AppContent() {
         )}
 
       {activeTab === 'Chat' && !isChatDetached && (
-        <DraggableChatWindow 
-          messages={chatMessages} 
+        <DraggableChatWindow
+          inputDeviceId={engineConfig?.speech_input_device_id || ''}
+          dictationMode={engineConfig?.dictation_mode || 'hold'}
+          messages={chatMessages}
           sessionId={activeSession}
           sessionSwitchPending={!!sessionSwitchPendingId && sessionSwitchPendingId === activeSession}
           onExportSession={handleExportSession}
