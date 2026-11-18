@@ -80,7 +80,7 @@
   --font-sans: 'Inter', sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
 
-  /* Glass — floating layers only; applied in a later slice */
+  /* Glass — floating layers only; scope applied by Full Furnish S-1 */
   --glass-fill: rgba(255, 255, 255, 0.07);
   --glass-edge: rgba(255, 255, 255, 0.22);
   --glass-specular: rgba(255, 255, 255, 0.45);
@@ -137,6 +137,46 @@ code,
   background: var(--panel-bg);
   border-right: 1px solid var(--panel-border);
   z-index: 10;
+}
+
+/* Full Furnish S-1 — the solid shell family. The non-Chat content
+   panel is a permanent surface, so it takes the sidebar's treatment:
+   solid token ground, elevation by its 1px border plus the raised
+   elevation token. Glass stays on floating layers only (palette,
+   modals, popovers, context menus, voice overlay, snip/media
+   toolbars) — the recipe itself lives in chat.css and is unchanged. */
+.aether-content-panel {
+  position: relative;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elevation-raised);
+}
+
+/* S-1 — solid card on a permanent list or panel, mirroring the
+   Dashboard / Projects row treatment exactly. */
+.aether-solid-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+}
+
+/* S-1 — solid button for permanent surfaces (Settings controls,
+   model-list actions). Callers keep their inline background /
+   border / radius overrides; this class supplies the solid base
+   the glass recipe used to sit under them. */
+.aether-solid-btn {
+  position: relative;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: border-color var(--motion-base) ease;
+}
+
+.aether-solid-btn:hover {
+  border-color: var(--border-strong);
 }
 
 /* Typography */

@@ -128,7 +128,7 @@ function ToolApprovalMessage({
           <button 
             onClick={() => onApproveTool && onApproveTool(msg.id, false, msg.approval_key)}
             disabled={!!msg.decisionQueued}
-            className="ios-close-btn"
+            className="aether-solid-btn"
             style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-strong)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: 'var(--text-primary)', display: 'flex', alignItems: 'center' }}
           >
             <X size={16} style={{ marginRight: '6px' }} />
@@ -140,7 +140,7 @@ function ToolApprovalMessage({
                 onClick={() => approveToolWithEdits(msg, 'file')}
             disabled={!!msg.decisionQueued}
 
-                className="ios-close-btn"
+                className="aether-solid-btn"
                 style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-strong)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: 'var(--text-primary)', display: 'flex', alignItems: 'center' }}
               >
                 Approve + remember file
@@ -149,7 +149,7 @@ function ToolApprovalMessage({
                 onClick={() => approveToolWithEdits(msg, 'folder')}
             disabled={!!msg.decisionQueued}
 
-                className="ios-close-btn"
+                className="aether-solid-btn"
                 style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-strong)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: 'var(--text-primary)', display: 'flex', alignItems: 'center' }}
               >
                 Approve + remember folder
@@ -160,7 +160,7 @@ function ToolApprovalMessage({
             onClick={() => approveToolWithEdits(msg)}
             disabled={!!msg.decisionQueued}
 
-            className="ios-close-btn"
+            className="aether-solid-btn"
             style={{ background: 'var(--accent)', border: '1px solid var(--accent)', color: 'var(--accent-on)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
           >
             <TerminalSquare size={16} style={{ marginRight: '6px' }} />
@@ -202,7 +202,7 @@ function PluginApprovalMessage({ msg, onApprovePlugin }) {
           <button 
             onClick={() => onApprovePlugin && onApprovePlugin(msg.id, false)}
             disabled={!!msg.decisionQueued}
-            className="ios-close-btn"
+            className="aether-solid-btn"
             style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-strong)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: 'var(--text-primary)', display: 'flex', alignItems: 'center' }}
           >
             <X size={16} style={{ marginRight: '6px' }} />
@@ -211,7 +211,7 @@ function PluginApprovalMessage({ msg, onApprovePlugin }) {
           <button 
             onClick={() => onApprovePlugin && onApprovePlugin(msg.id, true)}
             disabled={!!msg.decisionQueued}
-            className="ios-close-btn"
+            className="aether-solid-btn"
             style={{ background: 'var(--accent)', border: '1px solid var(--accent)', color: 'var(--accent-on)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
           >
             <TerminalSquare size={16} style={{ marginRight: '6px' }} />
@@ -266,7 +266,7 @@ function VaultFillApprovalMessage({ msg, onVaultFillApproval }) {
             data-testid="vault-fill-deny-btn"
             onClick={() => onVaultFillApproval && onVaultFillApproval(msg.id, false)}
             disabled={decided || expired}
-            className="ios-close-btn"
+            className="aether-solid-btn"
             style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-strong)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', color: 'var(--text-primary)', display: 'flex', alignItems: 'center' }}
           >
             <X size={16} style={{ marginRight: '6px' }} />
@@ -276,7 +276,7 @@ function VaultFillApprovalMessage({ msg, onVaultFillApproval }) {
             data-testid="vault-fill-approve-btn"
             onClick={() => onVaultFillApproval && onVaultFillApproval(msg.id, true)}
             disabled={decided || expired}
-            className="ios-close-btn"
+            className="aether-solid-btn"
             style={{ background: 'var(--accent)', border: '1px solid var(--accent)', color: 'var(--accent-on)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
           >
             <KeyRound size={16} style={{ marginRight: '6px' }} />

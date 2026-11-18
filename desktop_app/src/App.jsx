@@ -2073,14 +2073,15 @@ function AppContent() {
           alignItems: 'center',
           transition: 'left 250ms cubic-bezier(0.23, 1, 0.32, 1)'
         }}>
-          <div className="ios-glass" style={{ width: '100%', height: '100%', padding: '32px', display: 'flex', flexDirection: 'column' }}>
+          <div className="aether-content-panel" style={{ width: '100%', height: '100%', padding: '32px', display: 'flex', flexDirection: 'column' }}>
             {activeTab === 'Settings' && (
                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
                    <h1 style={{ color: '#fff', fontSize: '28px', margin: 0 }}>Settings</h1>
-                   <button 
+                   <button
                      onClick={() => setActiveTab('Chat')}
-                     className="ios-close-btn"
+                     className="aether-solid-btn"
+                     style={{ borderRadius: '50%', padding: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                      aria-label="Close Settings"
                    >
                      <X size={20} />

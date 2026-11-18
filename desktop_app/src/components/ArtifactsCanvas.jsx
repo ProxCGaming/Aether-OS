@@ -320,7 +320,7 @@ export default function ArtifactsCanvas({
   return (
     <div
       data-testid="artifacts-canvas"
-      className="ios-glass"
+      className="aether-content-panel"
       style={{
         position: 'relative',
         width: '480px',
@@ -333,11 +333,7 @@ export default function ArtifactsCanvas({
         display: 'flex',
         flexDirection: 'column',
         borderRadius: 'var(--radius-lg)',
-        overflow: 'hidden',
-        border: '1px solid var(--glass-edge)',
-        background: 'rgba(16, 16, 18, 0.66)',
-        backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-        WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)'
+        overflow: 'hidden'
       }}
     >
       {/* Canvas Top Bar */}

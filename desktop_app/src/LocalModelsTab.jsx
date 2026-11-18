@@ -511,7 +511,7 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
             {variant.size_bytes ? formatBytes(variant.size_bytes) : 'Size not reported'}
           </span>
           {downloadable && (
-            <button onClick={() => handleDownload(row, variant)} className="ios-glass" style={{ ...downloadButtonStyle, padding: '6px 12px', fontSize: '12px' }}>
+            <button onClick={() => handleDownload(row, variant)} className="aether-solid-btn" style={{ ...downloadButtonStyle, padding: '6px 12px', fontSize: '12px' }}>
               <Download size={14} /> Download
             </button>
           )}
@@ -570,7 +570,7 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
       <div
         key={rowKey(row)}
         data-testid={`result-row-${rowKey(row)}`}
-        className="ios-glass"
+        className="aether-solid-card"
         style={{ padding: '20px', borderRadius: 'var(--radius-lg)', display: 'flex', flexDirection: 'column', transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)', position: 'relative', overflow: 'hidden' }}
       >
         {progress && (
@@ -628,7 +628,7 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
               Download queued — will start when the engine reconnects.
             </span>
           ) : wholeRepoDownloadable ? (
-            <button onClick={() => handleDownload(row)} className="ios-glass" style={{ ...downloadButtonStyle, flex: 1 }}>
+            <button onClick={() => handleDownload(row)} className="aether-solid-btn" style={{ ...downloadButtonStyle, flex: 1 }}>
               <Download size={16} /> Download
             </button>
           ) : row.runnability === 'ollama' && row.source === 'hf' && !alreadyDownloaded ? (
@@ -636,7 +636,7 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
           ) : <span />}
           <button
             onClick={() => toggleDetails(row)}
-            className="ios-glass"
+            className="aether-solid-btn"
             aria-expanded={expanded}
             style={{ padding: '8px 12px', borderRadius: '10px', color: 'var(--text-primary)', cursor: 'pointer', border: '1px solid var(--border-default)', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 500, flexShrink: 0 }}
           >

@@ -31,7 +31,7 @@ export function DownloadProgressRow({ progress, cancelQueued = false, onCancel }
           </span>
         )}
       </div>
-      <button onClick={() => onCancel(progress.key)} disabled={cancelQueued} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: 'var(--danger)', cursor: cancelQueued ? 'default' : 'pointer', opacity: cancelQueued ? 0.45 : 1, border: '1px solid rgba(201,42,42,0.3)' }} title={cancelQueued ? 'Cancel already queued — will apply when the engine reconnects' : 'Cancel Download'}>
+      <button onClick={() => onCancel(progress.key)} disabled={cancelQueued} className="aether-solid-btn" style={{ padding: '8px', borderRadius: '10px', color: 'var(--danger)', cursor: cancelQueued ? 'default' : 'pointer', opacity: cancelQueued ? 0.45 : 1, border: '1px solid rgba(201,42,42,0.3)' }} title={cancelQueued ? 'Cancel already queued — will apply when the engine reconnects' : 'Cancel Download'}>
         <X size={14} />
       </button>
     </>
@@ -85,38 +85,38 @@ export function DownloadedModelRow({
       </div>
       {canEmbed && (
         isEmbedder ? (
-          <button disabled data-testid={`embedder-active-${rowKey}`} title="Currently the embedding model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+          <button disabled data-testid={`embedder-active-${rowKey}`} title="Currently the embedding model" className="aether-solid-btn" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
             Embedder
           </button>
         ) : embedderQueued ? (
-          <button disabled data-testid={`embedder-queued-${rowKey}`} title="Embedder switch queued — will apply when the engine reconnects" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb), 0.12)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+          <button disabled data-testid={`embedder-queued-${rowKey}`} title="Embedder switch queued — will apply when the engine reconnects" className="aether-solid-btn" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb), 0.12)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
             Embedder Queued
           </button>
         ) : embedderPending ? (
-          <button disabled data-testid={`embedder-pending-${rowKey}`} title="Waiting for the engine to confirm the embedder switch" className="ios-glass" style={{ padding: '8px 16px', background: 'var(--bg-hover)', color: 'var(--text-secondary)', border: '1px solid var(--border-strong)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+          <button disabled data-testid={`embedder-pending-${rowKey}`} title="Waiting for the engine to confirm the embedder switch" className="aether-solid-btn" style={{ padding: '8px 16px', background: 'var(--bg-hover)', color: 'var(--text-secondary)', border: '1px solid var(--border-strong)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
             Setting…
           </button>
         ) : (
-          <button onClick={() => onUseAsEmbedder(row.id)} data-testid={`use-as-embedder-${rowKey}`} title="Use this model for memory + workspace embeddings" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.35)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+          <button onClick={() => onUseAsEmbedder(row.id)} data-testid={`use-as-embedder-${rowKey}`} title="Use this model for memory + workspace embeddings" className="aether-solid-btn" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.35)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
             Use as Embedder
           </button>
         )
       )}
       {row.source === 'ollama' && (
         isActive ? (
-          <button disabled title="Currently the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(76, 195, 138, 0.15)', color: 'var(--success)', border: '1px solid rgba(76, 195, 138, 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+          <button disabled title="Currently the active model" className="aether-solid-btn" style={{ padding: '8px 16px', background: 'rgba(76, 195, 138, 0.15)', color: 'var(--success)', border: '1px solid rgba(76, 195, 138, 0.3)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
             Active
           </button>
         ) : setActiveQueued ? (
-          <button disabled data-testid={`set-active-queued-${rowKey}`} title="Set-active queued — will apply when the engine reconnects" className="ios-glass" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb), 0.12)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+          <button disabled data-testid={`set-active-queued-${rowKey}`} title="Set-active queued — will apply when the engine reconnects" className="aether-solid-btn" style={{ padding: '8px 16px', background: 'rgba(var(--accent-rgb), 0.12)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.35)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
             Set Active Queued
           </button>
         ) : setActivePending === row.id ? (
-          <button disabled data-testid={`set-active-pending-${rowKey}`} title="Waiting for the engine to confirm the switch" className="ios-glass" style={{ padding: '8px 16px', background: 'var(--bg-hover)', color: 'var(--text-secondary)', border: '1px solid var(--border-strong)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
+          <button disabled data-testid={`set-active-pending-${rowKey}`} title="Waiting for the engine to confirm the switch" className="aether-solid-btn" style={{ padding: '8px 16px', background: 'var(--bg-hover)', color: 'var(--text-secondary)', border: '1px solid var(--border-strong)', borderRadius: '10px', cursor: 'default', fontWeight: 500, fontSize: '13px' }}>
             Setting…
           </button>
         ) : (
-          <button onClick={() => onSetActive(row.id)} title="Set as the active model" className="ios-glass" style={{ padding: '8px 16px', background: 'var(--accent)', color: 'var(--accent-on)', border: '1px solid var(--accent)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+          <button onClick={() => onSetActive(row.id)} title="Set as the active model" className="aether-solid-btn" style={{ padding: '8px 16px', background: 'var(--accent)', color: 'var(--accent-on)', border: '1px solid var(--accent)', borderRadius: '10px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
             Set Active
           </button>
         )
@@ -126,7 +126,7 @@ export function DownloadedModelRow({
           Delete queued
         </span>
       )}
-      <button onClick={() => onDeleteDownloaded(row)} disabled={deleteQueued} className="ios-glass" style={{ padding: '8px 10px', background: 'rgba(201,42,42,0.1)', color: 'var(--danger)', border: '1px solid rgba(201,42,42,0.2)', borderRadius: '10px', cursor: deleteQueued ? 'default' : 'pointer', opacity: deleteQueued ? 0.45 : 1 }} title={deleteQueued ? 'Delete already queued — will apply when the engine reconnects' : 'Delete Model'}>
+      <button onClick={() => onDeleteDownloaded(row)} disabled={deleteQueued} className="aether-solid-btn" style={{ padding: '8px 10px', background: 'rgba(201,42,42,0.1)', color: 'var(--danger)', border: '1px solid rgba(201,42,42,0.2)', borderRadius: '10px', cursor: deleteQueued ? 'default' : 'pointer', opacity: deleteQueued ? 0.45 : 1 }} title={deleteQueued ? 'Delete already queued — will apply when the engine reconnects' : 'Delete Model'}>
         <Trash2 size={16} />
       </button>
     </div>
@@ -152,7 +152,7 @@ export function DownloadedModelsSection({
     <div data-testid="downloaded-section">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
         <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0, color: 'var(--text-primary)' }}>Downloaded</h3>
-        <button onClick={onRefresh} className="ios-glass" style={{ padding: '8px', borderRadius: '10px', color: 'var(--text-secondary)', cursor: 'pointer', border: '1px solid var(--border-default)' }} title="Refresh downloaded models">
+        <button onClick={onRefresh} className="aether-solid-btn" style={{ padding: '8px', borderRadius: '10px', color: 'var(--text-secondary)', cursor: 'pointer', border: '1px solid var(--border-default)' }} title="Refresh downloaded models">
           <RefreshCw size={14} />
         </button>
       </div>

@@ -73,7 +73,7 @@ export default function OllamaModelList({ sendRequest, pendingDeleteFor }) {
         <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0, color: 'var(--text-primary)' }}>Ollama models (engine list)</h3>
         <button
           onClick={refresh}
-          className="ios-glass"
+          className="aether-solid-btn"
           style={{ padding: '6px 12px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', color: 'var(--text-primary)', border: '1px solid var(--border-default)', borderRadius: '10px' }}
         >
           <RefreshCw size={13} /> Refresh
@@ -133,7 +133,7 @@ export default function OllamaModelList({ sendRequest, pendingDeleteFor }) {
                     onClick={() => handleDelete(model)}
                     disabled={deleting}
                     data-testid={`ollama-delete-${model.name}`}
-                    className="ios-glass"
+                    className="aether-solid-btn"
                     title="Delete from Ollama"
                     style={{ padding: '8px 10px', background: 'rgba(201,42,42,0.1)', color: 'var(--danger)', border: '1px solid rgba(201,42,42,0.2)', borderRadius: '10px', cursor: deleting ? 'default' : 'pointer', opacity: deleting ? 0.45 : 1, display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', flexShrink: 0 }}
                   >
