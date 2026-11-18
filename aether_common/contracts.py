@@ -675,19 +675,25 @@ class TaskState(str, Enum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    # SPEC-6A: the engine process died (or was killed) while the
+    # task was executing. Written only by the startup orphan
+    # sweep, never by a live executor — a live task ends as
+    # SUCCEEDED / FAILED / CANCELLED.
+    INTERRUPTED = "INTERRUPTED"
 
 
-TERMINAL_STATES: set[TaskState] = {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED}
+TERMINAL_STATES: set[TaskState] = {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED, TaskState.INTERRUPTED}
 
 LEGAL_TRANSITIONS: dict[TaskState, set[TaskState]] = {
     TaskState.PENDING:   {TaskState.RUNNING, TaskState.PRE_FLIGHT_CHECK, TaskState.CANCELLED},
-    TaskState.PRE_FLIGHT_CHECK: {TaskState.RUNNING, TaskState.PENDING_APPROVAL, TaskState.FAILED, TaskState.CANCELLED},
+    TaskState.PRE_FLIGHT_CHECK: {TaskState.RUNNING, TaskState.PENDING_APPROVAL, TaskState.FAILED, TaskState.CANCELLED, TaskState.INTERRUPTED},
     TaskState.PENDING_APPROVAL: {TaskState.RUNNING, TaskState.EXECUTING_WORKER, TaskState.FAILED, TaskState.CANCELLED},
-    TaskState.EXECUTING_WORKER: {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED},
-    TaskState.RUNNING:   {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED, TaskState.PRE_FLIGHT_CHECK, TaskState.PENDING_APPROVAL, TaskState.EXECUTING_WORKER},
+    TaskState.EXECUTING_WORKER: {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED, TaskState.INTERRUPTED},
+    TaskState.RUNNING:   {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED, TaskState.PRE_FLIGHT_CHECK, TaskState.PENDING_APPROVAL, TaskState.EXECUTING_WORKER, TaskState.INTERRUPTED},
     TaskState.SUCCEEDED: set(),
     TaskState.FAILED:    set(),
     TaskState.CANCELLED: set(),
+    TaskState.INTERRUPTED: set(),
 }
 
 

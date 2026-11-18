@@ -191,6 +191,18 @@ async def lifespan(_app: FastAPI):
     except Exception as e:  # noqa: BLE001 — startup boundary: KG init is best-effort and must never block engine startup
         logger.warning(f"Startup knowledge-graph initialisation failed to start: {e}")
 
+    # SPEC-6A: close the tasks the previous process left Running.
+    # The orphan sweep runs before any new task can start (nothing
+    # executes during lifespan), is audit-only, and is best-effort:
+    # a sweep failure must never block engine startup — the orphans
+    # it missed are swept on the next launch instead.
+    try:
+        from aether_engine.langgraph.orphan_sweep import sweep_orphaned_tasks
+
+        await sweep_orphaned_tasks(audit_logger=engine_state.audit_logger)
+    except Exception as e:  # noqa: BLE001 — startup boundary: the sweep is best-effort and must never block engine startup
+        logger.warning(f"Startup orphan sweep failed: {e}")
+
     # Issue 004: auto-connect enabled MCP servers in the background.
     # start_auto_connect() returns immediately — it never blocks startup —
     # and each server connects in its own owner task, so one dead server
