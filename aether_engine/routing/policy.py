@@ -10,6 +10,7 @@ from aether_engine.routing.registry import (
     ModelRegistry,
     is_local_provider,
 )
+from aether_engine.routing.signals import text_signals
 
 
 @dataclass
@@ -34,17 +35,6 @@ class RoutingDecision:
     local_only: bool = False
 
 
-_CODE_KEYWORDS = {
-    "code", "sql", "html", "css", "function", "def ", "class ", "bug", "refactor",
-    "algorithm", "script", "regex", "api", "endpoint", "syntax", "compile", "traceback"
-}
-
-_REASONING_KEYWORDS = {
-    "step by step", "deep think", "reasoning", "prove", "math proof", "derivation",
-    "complex analysis", "solve riddle", "logic puzzle", "benchmark comparison"
-}
-
-
 def infer_task_requirements(
     prompt: str,
     images: list[Any] | None = None,
@@ -52,18 +42,14 @@ def infer_task_requirements(
 ) -> TaskRequirements:
     """Infer task requirements by inspecting prompt tokens and attached assets."""
     has_images = bool(images)
-    lower = prompt.lower()
-
-    wants_code = any(kw in lower for kw in _CODE_KEYWORDS) or ("```" in prompt)
-    wants_reasoning = any(kw in lower for kw in _REASONING_KEYWORDS)
-    low_latency = not wants_reasoning
+    sig = text_signals(prompt)
 
     return TaskRequirements(
-        wants_code=wants_code,
-        wants_reasoning=wants_reasoning,
+        wants_code=sig.wants_code,
+        wants_reasoning=sig.wants_reasoning,
         has_images=has_images,
         prefer_local=prefer_local,
-        low_latency=low_latency,
+        low_latency=not sig.wants_reasoning,
     )
 
 

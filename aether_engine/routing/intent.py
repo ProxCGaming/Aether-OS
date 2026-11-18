@@ -24,6 +24,8 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+from aether_engine.routing.signals import text_signals
+
 if TYPE_CHECKING:
     from aether_engine.providers.base import BaseProvider
 
@@ -84,11 +86,9 @@ _WORK_PHRASE_RES = [
     )
 ]
 
-_NUMBERED_STEP_RE = re.compile(r"(?m)^\s*\d{1,2}[.)]\s+\S")
-
-
 def work_heuristic_reason(prompt: str) -> str | None:
     """Return why *prompt* is definitely work, or None if not obvious."""
+    sig = text_signals(prompt)
     if "```" in prompt:
         return "contains a code block"
     if _FILE_REFERENCE_RE.search(prompt):
@@ -98,11 +98,11 @@ def work_heuristic_reason(prompt: str) -> str | None:
     for pattern in _WORK_PHRASE_RES:
         if pattern.search(prompt):
             return "asks for web or current information"
-    if len(_NUMBERED_STEP_RE.findall(prompt)) >= 2 or (
+    if sig.numbered_step_count >= 2 or (
         " and then " in prompt.lower() and _WORK_VERB_OBJECT_RE.search(prompt)
     ):
         return "multi-step request"
-    if len(prompt) > _LONG_PROMPT_CHARS:
+    if sig.char_length > _LONG_PROMPT_CHARS:
         return "long structured request"
     return None
 
@@ -124,9 +124,10 @@ _QUESTION_START_RE = re.compile(
 
 def fallback_chat_reason(prompt: str) -> str | None:
     """Return why *prompt* reads as plain conversation, or None."""
-    if len(prompt) <= _GREETING_MAX_CHARS and _GREETING_RE.search(prompt):
+    sig = text_signals(prompt)
+    if sig.char_length <= _GREETING_MAX_CHARS and _GREETING_RE.search(prompt):
         return "greeting or smalltalk"
-    if len(prompt) <= _FALLBACK_CHAT_MAX_CHARS:
+    if sig.char_length <= _FALLBACK_CHAT_MAX_CHARS:
         if prompt.rstrip().endswith("?"):
             return "plain question"
         if _QUESTION_START_RE.search(prompt):

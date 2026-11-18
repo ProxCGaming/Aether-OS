@@ -89,8 +89,11 @@ from typing import Any
 
 from aether_common.contracts import Event, EventType
 from aether_engine.event_bus import event_bus
-from aether_engine.routing.policy import _CODE_KEYWORDS, _REASONING_KEYWORDS
 from aether_engine.routing.registry import _infer_capabilities, is_local_provider
+from aether_engine.routing.signals import (
+    CODE_KEYWORDS,
+    text_signals,
+)
 
 logger = logging.getLogger("aether_engine.langgraph.model_routing")
 
@@ -424,9 +427,6 @@ def signals_for_state(agent: str, state: dict[str, Any]) -> TaskSignals:
                        has_images=_state_has_images(state))
 
 
-_STEP_MARKERS = re.compile(r"(?m)^\s*(?:\d+[.)]|step\s+\d+\b)", re.IGNORECASE)
-
-
 def _complexity_need(signals: TaskSignals, incumbent_tier: int) -> tuple[int, str]:
     """The tier this task warrants, and the plain-language why.
 
@@ -438,13 +438,14 @@ def _complexity_need(signals: TaskSignals, incumbent_tier: int) -> tuple[int, st
     is small-tier work.
     """
     text = signals.task_text or ""
-    lower = text.lower()
-    if any(kw in lower for kw in _REASONING_KEYWORDS):
+    sig = text_signals(text)
+    if sig.wants_reasoning:
         return TIER_STRONG, "the task calls for deep reasoning"
-    if len(text) > LONG_TASK_CHARS or len(_STEP_MARKERS.findall(text)) >= 3:
+    if sig.char_length > LONG_TASK_CHARS or sig.step_count >= 3:
         return min(TIER_STRONG, max(incumbent_tier, TIER_STANDARD) + 1), \
             "the brief is long or explicitly multi-step"
-    if len(text) < SHORT_TASK_CHARS and not any(kw in lower for kw in _CODE_KEYWORDS):
+    lower = text.lower()
+    if sig.char_length < SHORT_TASK_CHARS and not any(kw in lower for kw in CODE_KEYWORDS):
         return TIER_SMALL, "the sub-task is short and simple"
     return incumbent_tier, "a standard task"
 
@@ -452,7 +453,7 @@ def _complexity_need(signals: TaskSignals, incumbent_tier: int) -> tuple[int, st
 def _wanted_capability(signals: TaskSignals, need_tier: int) -> str | None:
     """A capability the task specifically wants, if any."""
     lower = (signals.task_text or "").lower()
-    if signals.agent == "coder" or any(kw in lower for kw in _CODE_KEYWORDS):
+    if signals.agent == "coder" or any(kw in lower for kw in CODE_KEYWORDS):
         return "code"
     if need_tier == TIER_STRONG:
         return "reasoning"
