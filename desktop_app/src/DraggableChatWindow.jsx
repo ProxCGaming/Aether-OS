@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 import { Globe, Play, Pause, Maximize2, Minimize2, X, GripHorizontal, Bot, User, ShieldAlert, Check, ChevronDown, ExternalLink, LogIn, Square, Layers, Edit2, RotateCcw, Download, CircleDollarSign, Mic, Monitor, Hand } from 'lucide-react';
-import Dropdown from './Dropdown';
+import ModelPicker from './components/ModelPicker';
 import UndoToast from './components/UndoToast';
 import SnipOverlay from './components/SnipOverlay';
 import CostHeaderPopover, { formatUsd } from './components/CostHeaderPopover';
@@ -1530,30 +1530,23 @@ export default function DraggableChatWindow({
                 flexShrink: 0
               }}></div>
               
-              <Dropdown 
-                value={
-                  (() => {
-                    const activeProvider = (Array.isArray(providers) ? providers : []).find(p => p.is_default);
-                    return activeProvider && activeProvider.default_model ? `${activeProvider.name}:::${activeProvider.default_model}` : '';
-                  })()
-                }
-                onChange={(val) => {
-                  const [provider, model] = val.split(':::');
-                  if (provider && model) {
-                    onChangeModel(provider, model);
-                  }
-                }}
-                options={
-                  (Array.isArray(providers) ? providers : [])
-                    .filter(p => p.has_key && p.models && p.models.length > 0)
-                    .map(p => ({
-                      group: p.display_name || p.name,
-                      items: p.models.map(m => ({ value: `${p.name}:::${m}`, label: m }))
-                    }))
-                }
-                placeholder="Select Model..."
-                style={{ maxWidth: '240px' }}
-                testId="chat-model-picker"
+              <ModelPicker
+                providers={providers}
+                value={
+                  (() => {
+                    const activeProvider = (Array.isArray(providers) ? providers : []).find(p => p.is_default);
+                    return activeProvider && activeProvider.default_model ? `${activeProvider.name}:::${activeProvider.default_model}` : '';
+                  })()
+                }
+                onChange={(val) => {
+                  const [provider, model] = val.split(':::');
+                  if (provider && model) {
+                    onChangeModel(provider, model);
+                  }
+                }}
+                placeholder="Select Model..."
+                style={{ maxWidth: '240px' }}
+                testId="chat-model-picker"
               />
 
             </div>

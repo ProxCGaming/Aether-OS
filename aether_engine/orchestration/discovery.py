@@ -22,6 +22,7 @@ Two disciplines carry over from the monolith:
 
 import logging
 import time
+from typing import Any
 
 from aether_engine.config import (
     CLOUD_PROVIDERS,
@@ -161,6 +162,63 @@ async def discover_pending_provider_models(store: SecretStore) -> bool:
     return changed
 
 
+def _provider_model_meta(models: list[str]) -> dict[str, dict[str, Any]]:
+    """Per-model picker metadata, exposed for the model pickers (FF3-07).
+
+    Every field already exists engine-side; this only carries it to
+    the provider list — no new computation and no invented values:
+
+    - ``capabilities`` / ``cost_input_1m`` / ``cost_output_1m`` /
+      ``tier`` come from the curated benchmark cache
+      (``capability/benchmark_cache.py``), the same source the
+      capability classifier reads.
+    - ``unusable`` is the engine's own learned-unusable verdict —
+      :func:`pin_targets_unusable_model`, the exact predicate the
+      provider resolvers consult before honouring a model pin — so
+      a picker badge can never disagree with a pin refusal.
+
+    Models with neither source are absent from the result: the UI
+    renders missing metadata as absent, never as a guess. Metadata
+    must never break the provider list, so lookup failures degrade
+    to whatever was gathered (or an empty dict).
+    """
+    meta: dict[str, dict[str, Any]] = {}
+    try:
+        from aether_engine.capability.benchmark_cache import (
+            get_benchmark_for_model,
+        )
+    except Exception:  # noqa: BLE001 — metadata is best-effort
+        get_benchmark_for_model = None
+    try:
+        from aether_engine.langgraph.model_routing import (
+            pin_targets_unusable_model,
+        )
+    except Exception:  # noqa: BLE001 — metadata is best-effort
+        pin_targets_unusable_model = None
+    for model in models:
+        entry: dict[str, Any] = {}
+        if get_benchmark_for_model is not None:
+            try:
+                bench = get_benchmark_for_model(model)
+            except Exception:  # noqa: BLE001 — metadata is best-effort
+                bench = None
+            if bench:
+                if bench.get("capabilities"):
+                    entry["capabilities"] = list(bench["capabilities"])
+                for key in ("cost_input_1m", "cost_output_1m", "tier"):
+                    if bench.get(key) is not None:
+                        entry[key] = bench[key]
+        if pin_targets_unusable_model is not None:
+            try:
+                if pin_targets_unusable_model(model):
+                    entry["unusable"] = True
+            except Exception:  # noqa: BLE001 — metadata is best-effort
+                pass
+        if entry:
+            meta[model] = entry
+    return meta
+
+
 async def _build_provider_list_async(store: SecretStore, discover: bool = True) -> list:
     """Build provider status list for PROVIDER_LIST_RESPONSE with auto-discovery.
 
@@ -189,6 +247,7 @@ async def _build_provider_list_async(store: SecretStore, discover: bool = True) 
             "supports_custom_url": getattr(p, "supports_custom_url", False),
             "base_url": base_url,
             "models": models,
+            "model_meta": _provider_model_meta(models),
             "excluded_models": cfg.provider_excluded_models.get(p.name, []),
             "has_key": p.name in stored,
             "is_default": cfg.default_provider == p.name,
@@ -219,6 +278,7 @@ async def _build_provider_list_async(store: SecretStore, discover: bool = True) 
             "supports_custom_url": True,
             "base_url": base_url,
             "models": models,
+            "model_meta": _provider_model_meta(models),
             "excluded_models": cfg.provider_excluded_models.get(pname, []),
             "has_key": pname in stored or provider_type == "openai_compatible",
             "is_default": cfg.default_provider == pname,

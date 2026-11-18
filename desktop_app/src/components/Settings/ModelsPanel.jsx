@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import Dropdown from '../../Dropdown';
+import ModelPicker from '../ModelPicker';
 import LocalModelsTab from '../../LocalModelsTab';
 import LoadStateRow from './LoadStateRow';
 import SpeechSettingsPanel from './SpeechSettingsPanel';
@@ -60,24 +61,17 @@ export default function ModelsPanel({ providers, wsRef, safeSend, pendingMessage
                <div style={{ flex: 1 }}>
                  <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Global Default Model</h3>
                  <div style={{ opacity: modelSwitchQueued ? 0.55 : 1, pointerEvents: modelSwitchQueued ? 'none' : 'auto' }}>
-                 <Dropdown
+                 <ModelPicker
+                   providers={providers}
                    value={
                      (Array.isArray(providers) ? providers : []).find(p => p.is_default)
                        ? `${(Array.isArray(providers) ? providers : []).find(p => p.is_default).name}:::${(Array.isArray(providers) ? providers : []).find(p => p.is_default).default_model}`
                        : ''
                    }
                    onChange={onModelDefaultChange}
-                   options={
-                     (Array.isArray(providers) ? providers : [])
-                       .filter(p => p.has_key && p.models && p.models.length > 0)
-                       .map(p => ({
-                         group: p.display_name || p.name,
-                         items: p.models.map(m => ({ value: `${p.name}:::${m}`, label: m }))
-                       }))
-                   }
                    placeholder="Select a default model..."
                    style={{ width: '100%' }}
-                 />
+                   />
                  </div>
                  {modelSwitchQueued && (
                    <div style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px' }}>
@@ -131,21 +125,14 @@ export default function ModelsPanel({ providers, wsRef, safeSend, pendingMessage
                     <p style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '4px', fontFamily: 'var(--font-mono)' }}>{auxModels[task.id] ? auxModels[task.id].split(':::')[1] || auxModels[task.id] : 'auto · use main model'}</p>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Dropdown 
-                      value={auxModels[task.id] || 'auto'}
-                      onChange={(val) => onAuxModelChange(task.id, val)}
-                      options={[
-                        { value: 'auto', label: 'Use main model' },
-                        ...(Array.isArray(providers) ? providers : [])
-                          .filter(p => p.has_key && p.models && p.models.length > 0)
-                          .map(p => ({
-                            group: p.display_name || p.name,
-                            items: p.models.map(m => ({ value: `${p.name}:::${m}`, label: m }))
-                          }))
-                      ]}
-                      style={{ width: '180px' }}
-                      align="right"
-                    />
+                    <ModelPicker
+                   providers={providers}
+                   value={auxModels[task.id] || 'auto'}
+                   onChange={(val) => onAuxModelChange(task.id, val)}
+                   leadingOptions={[{ value: 'auto', label: 'Use main model' }]}
+                   style={{ width: '180px' }}
+                   align="right"
+                   />
                   </div>
                </div>
              ))}

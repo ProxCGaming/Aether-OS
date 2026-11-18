@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Box } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
-import Dropdown from '../../Dropdown';
+import ModelPicker from '../ModelPicker';
 import LoadStateRow from './LoadStateRow';
 
 // Wave 5 (Annex C row 8): the Agents tab, extracted from
@@ -146,22 +146,16 @@ export default function AgentsPanel() {
                </div>
              </div>
              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
-               <Dropdown
+               <ModelPicker
+                 format="agent"
+                 providers={providers}
                  value={agent.model || 'inherit'}
                  onChange={(val) => {
                    rememberAgentSnapshot(agent, ['model']);
                    setAgents(prev => prev.map(a => a.id === agent.id ? { ...a, model: val } : a));
                    sendMessage('AGENT_UPDATE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { agent_id: agent.id, model: val } });
                  }}
-                 options={[
-                   { value: 'inherit', label: '[Use Global Default Model]' },
-                   ...(providers || []).flatMap(p =>
-                     (p.models || []).map(m => ({
-                       value: `${p.name}:${m}`,
-                       label: `${m} (${p.display_name})`
-                     }))
-                   )
-                 ]}
+                 leadingOptions={[{ value: 'inherit', label: '[Use Global Default Model]' }]}
                  style={{ width: '220px' }}
                  align="right"
                />
