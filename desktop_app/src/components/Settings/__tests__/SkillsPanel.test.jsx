@@ -56,4 +56,44 @@ describe('SkillsPanel', () => {
     expect(screen.getByText('Disable skill')).toBeDisabled();
     expect(screen.getByText(/Disable queued — will apply when the engine reconnects/)).toBeInTheDocument();
   });
+
+  test('a load_error skill renders as an Invalid row with its reason (D4-5 / FF4-07)', () => {
+    const BROKEN = {
+      name: 'broken-skill',
+      source: 'workspace',
+      description: '',
+      slash_commands: [],
+      required_tools: [],
+      enabled: false,
+      state: 'load_error',
+      error: 'No YAML frontmatter found in /ws/.agents/skills/broken-skill/SKILL.md',
+    };
+    render(<SkillsPanel {...baseProps({ skills: [BROKEN] })} />);
+    expect(screen.getByText('broken-skill')).toBeInTheDocument();
+    expect(screen.getByText('Invalid')).toBeInTheDocument();
+    expect(screen.getByText(/No YAML frontmatter found/)).toBeInTheDocument();
+    // Nothing to toggle: it never loaded.
+    expect(screen.queryByText('Enable skill')).not.toBeInTheDocument();
+    expect(screen.queryByText('Disable skill')).not.toBeInTheDocument();
+    // And it is a row, not an absence: the empty state stays away.
+    expect(screen.queryByText(/No skills found in workspace/)).not.toBeInTheDocument();
+  });
+
+  test('valid and invalid skills render side by side (D4-5)', () => {
+    const BROKEN = {
+      name: 'broken-skill',
+      source: 'global',
+      description: '',
+      slash_commands: [],
+      required_tools: [],
+      enabled: false,
+      state: 'load_error',
+      error: 'Expecting value: line 1 column 1 (char 0)',
+    };
+    render(<SkillsPanel {...baseProps({ skills: [SKILL, BROKEN] })} />);
+    expect(screen.getByText('code-review')).toBeInTheDocument();
+    expect(screen.getByText('Disable skill')).toBeInTheDocument();
+    expect(screen.getByText('broken-skill')).toBeInTheDocument();
+    expect(screen.getByText('Invalid')).toBeInTheDocument();
+  });
 });

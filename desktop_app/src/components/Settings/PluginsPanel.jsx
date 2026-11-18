@@ -19,6 +19,11 @@ export default function PluginsPanel() {
   // and offline were indistinguishable.
   const [pluginsLoad, setPluginsLoad] = useState('loading');
   const [plugins, setPlugins] = useState([]);
+  // D4-5 (FF4-07): the engine's registry load error, carried on
+  // the list reply. A corrupt registry file loads as an empty
+  // registry — without this the panel claimed "No plugins
+  // installed." for a registry it never managed to read.
+  const [registryLoadError, setRegistryLoadError] = useState(null);
   const [pluginActionResult, setPluginActionResult] = useState(null);
   const [newPluginSource, setNewPluginSource] = useState('');
 
@@ -33,6 +38,7 @@ export default function PluginsPanel() {
         if (data.type === 'PLUGIN_LIST_RESPONSE') {
           const p = data.payload.plugins;
           setPlugins(Array.isArray(p) ? p : Object.values(p || {}));
+          setRegistryLoadError(data.payload.registry_load_error || null);
           setPluginsLoad('ready');
         } else if (data.type === 'PLUGIN_INSTALL_RESPONSE' || data.type === 'PLUGIN_UNINSTALL_RESPONSE' || data.type === 'PLUGIN_TOGGLE_RESPONSE') {
           if (data.payload.success) {
@@ -103,6 +109,13 @@ export default function PluginsPanel() {
 
       <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Installed Plugins</h3>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        {registryLoadError && (
+          <LoadStateRow
+            loadState="error"
+            testId="plugins-registry-error"
+            errorText={registryLoadError}
+          />
+        )}
         {plugins.length === 0 && pluginsLoad !== 'ready' ? (
           <LoadStateRow
             loadState={pluginsLoad}
@@ -113,9 +126,14 @@ export default function PluginsPanel() {
             errorText="The plugin list could not be loaded."
           />
         ) : plugins.length === 0 ? (
-          <div style={{ color: 'var(--text-secondary)', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'var(--bg-base)', borderRadius: '12px' }}>
-            No plugins installed.
-          </div>
+          // A registry that failed to load is not an empty
+          // registry: the error row above is the state, and the
+          // "No plugins installed." claim stays suppressed.
+          registryLoadError ? null : (
+            <div style={{ color: 'var(--text-secondary)', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'var(--bg-base)', borderRadius: '12px' }}>
+              No plugins installed.
+            </div>
+          )
         ) : (
           plugins.map(plugin => (
             <div key={plugin.manifest?.name || plugin.name} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -136,7 +154,19 @@ export default function PluginsPanel() {
                   {plugin.enabled ? 'Enabled' : 'Disabled'}
                 </button>
                 <button
-                  onClick={() => sendMessage('PLUGIN_UNINSTALL_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: plugin.manifest?.name || plugin.name } })}
+                  onClick={() => {
+                    // D4-4 confirm half (FF4-10): uninstalling
+                    // deletes the plugin's files and removes the
+                    // MCP servers and skills it installed —
+                    // confirm first, naming what will be removed,
+                    // with the same window.confirm pattern as the
+                    // other Settings deletes (D2-28). Cancelling
+                    // sends nothing. This was the destructive
+                    // action that fired on click.
+                    const name = plugin.manifest?.name || plugin.name;
+                    if (!window.confirm(`Uninstall the plugin "${name}"? Its files will be deleted, along with any MCP servers and skills it installed.`)) return;
+                    sendMessage('PLUGIN_UNINSTALL_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } });
+                  }}
                   style={{ background: 'rgba(201, 42, 42, 0.15)', color: 'var(--danger)', border: '1px solid rgba(201, 42, 42, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
                 >
                   Uninstall

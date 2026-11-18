@@ -3187,7 +3187,18 @@ async def _handle_plugin_list_request(conn: WsConnection, msg: Event) -> None:
     await conn.ws.send_text(Event(
         type=EventType.PLUGIN_LIST_RESPONSE,
         request_id=req_id,
-        payload={"plugins": plugins_list},
+        payload={
+            "plugins": plugins_list,
+            # D4-5 (FF4-07, contract C7): a corrupt registry file
+            # loads as an empty registry, so the bare list cannot
+            # distinguish "nothing installed" from "the registry
+            # could not be read". The installer's load error is
+            # first-class reply data (None when the registry
+            # loaded) so the panel renders the error state instead
+            # of claiming "No plugins installed."
+            "registry_load_error": (
+                engine_state.plugin_installer.registry_load_error),
+        },
     ).to_json())
 
 async def _handle_plugin_install_request(conn: WsConnection, msg: Event) -> None:

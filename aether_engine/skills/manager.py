@@ -34,6 +34,15 @@ class SkillSummary:
     # Epic 7, E7-03: disabled skills remain visible in Settings (so
     # they can be re-enabled) but vanish from every agent-facing path.
     enabled: bool = True
+    # D4-5 (FF4-07, contract C7): load honesty. "ok" for a skill
+    # whose manifest parsed; "load_error" for a skill directory
+    # whose manifest failed to parse — the row is still listed
+    # (never dropped), carries the parse failure in ``error``, and
+    # is named by its directory, the only identity it has. Before
+    # this, a broken skill presented as nothing at all, while MCP
+    # showed its invalid servers with their errors.
+    state: str = "ok"
+    error: str | None = None
 
 
 class SkillManager:
@@ -45,6 +54,10 @@ class SkillManager:
         
         self.global_dir.mkdir(parents=True, exist_ok=True)
         self._disabled: set = self._load_disabled()
+        # D4-5 (FF4-07): skill directories whose manifest failed to
+        # parse, keyed by directory name — the equivalent of MCP's
+        # ``_invalid_servers``. Rebuilt by _rebuild_index().
+        self._invalid_skills: dict[str, dict[str, Any]] = {}
         self._index: dict[str, SkillManifest] = {}
         self._content_cache: dict[str, str] = {}
         self._slash_map: dict[str, str] = {}
@@ -220,6 +233,7 @@ class SkillManager:
         self._index.clear()
         self._slash_map.clear()
         self._skill_paths.clear()
+        self._invalid_skills = {}
         self._all_manifests: dict[str, SkillManifest] = {}
 
         # Priority: Global < Workspace 1 < Workspace 2 ...
@@ -252,6 +266,7 @@ class SkillManager:
                 ]
 
                 manifest = None
+                parse_errors: list[str] = []
                 for md_path in md_paths:
                     if md_path.exists():
                         try:
@@ -259,6 +274,7 @@ class SkillManager:
                             break
                         except Exception as e:  # noqa: BLE001 — one bad skill file must not break discovery; it is logged and skipped
                             logger.warning(f"Failed to parse SKILL.md at {md_path}: {e}")
+                            parse_errors.append(str(e))
 
                 if manifest and not manifest.trigger.keywords:
                     # E7-F10: the SKILL.md shadows the adjacent
@@ -288,8 +304,28 @@ class SkillManager:
                             manifest = SkillManifest.from_file(manifest_path)
                         except Exception as e:  # noqa: BLE001 — one bad manifest must not break discovery; it is logged and skipped
                             logger.warning(f"Failed to load manifest.json at {manifest_path}: {e}")
+                            parse_errors.append(str(e))
 
                 if not manifest:
+                    # D4-5 (FF4-07): a directory that HAS a manifest
+                    # file but none of them parsed is a broken skill,
+                    # not a non-skill — record it (the MCP
+                    # ``_invalid_servers`` pattern) so the listing
+                    # can show it with its reason instead of dropping
+                    # it silently. A directory with no manifest file
+                    # at all is not a skill and stays unrecorded. A
+                    # broken sibling manifest.json next to a SKILL.md
+                    # that DID parse never lands here: that skill
+                    # loaded, only its keyword inheritance failed.
+                    if parse_errors:
+                        self._invalid_skills[skill_dir.name] = {
+                            "path": str(skill_dir),
+                            "error": parse_errors[0],
+                            "source": (
+                                "global" if base_dir == self.global_dir
+                                else "workspace"
+                            ),
+                        }
                     continue
 
                 if manifest.name != skill_dir.name:
@@ -465,14 +501,33 @@ class SkillManager:
             return config.agent_skills[agent_id]
         return []
     
+    def invalid_skills(self) -> dict[str, dict[str, Any]]:
+        """Skill directories whose manifest failed to parse.
+
+        Keyed by directory name; each entry carries the directory
+        ``path``, the parse ``error`` and the scan-root ``source``
+        ("global" / "workspace") — the equivalent of MCP's
+        ``_invalid_servers`` snapshot (D4-5 / FF4-07).
+        """
+        return dict(self._invalid_skills)
+
     def list_all(self) -> list[SkillSummary]:
         """Return summaries of ALL skills (for UI listing).
 
         Includes disabled skills with ``enabled=False`` so Settings
         can offer re-enabling; agent-facing paths use the index,
         which already excludes them.
+
+        Also includes one ``state="load_error"`` row per broken
+        skill directory (D4-5 / FF4-07, contract C7): load errors
+        are first-class listing data, returned — never filtered
+        out — so Settings renders the truth instead of absence.
+        An invalid entry whose directory name matches a skill that
+        DID load (the same name parses under another root) is not
+        listed: that skill is not broken, and the conflict is
+        already logged by the E7-F08 resolution above.
         """
-        return [
+        summaries = [
             SkillSummary(
                 name=m.name,
                 description=m.description,
@@ -484,6 +539,22 @@ class SkillManager:
             )
             for m in getattr(self, "_all_manifests", self._index).values()
         ]
+        loaded_names = {s.name for s in summaries}
+        for dir_name, entry in getattr(self, "_invalid_skills", {}).items():
+            if dir_name in loaded_names:
+                continue
+            summaries.append(SkillSummary(
+                name=dir_name,
+                description="",
+                slash_commands=[],
+                required_tools=[],
+                auto_match=False,
+                source=entry["source"],
+                enabled=False,
+                state="load_error",
+                error=entry["error"],
+            ))
+        return summaries
     
     def list_skill_scripts(self, skill_name: str) -> list[Path]:
         """List executable scripts bundled with a skill (scripts/ directory)."""

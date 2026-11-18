@@ -25,7 +25,26 @@ export default function SkillsPanel({ skills, skillsAnswered, isConnected, pendi
             No skills found in workspace. Create a skill in <code>.agents/skills/</code>.
           </div>
         ) : (
-          skills.map(skill => (
+          skills.map(skill => skill.state === 'load_error' ? (
+            // D4-5 (FF4-07): a skill whose manifest failed to
+            // parse. The engine lists it as a load_error row
+            // (never dropped), so the panel renders exactly that:
+            // the directory name, an Invalid marker and the parse
+            // reason. There is nothing to toggle — it never
+            // loaded, so it is not available to agents.
+            <div key={skill.name} style={{ background: 'var(--bg-raised)', border: '1px solid rgba(201, 42, 42, 0.3)', borderRadius: '12px', padding: '16px' }}>
+              <h4 style={{ fontSize: '15px', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {skill.name}
+                <span style={{ fontSize: '11px', background: 'rgba(201, 42, 42, 0.15)', color: 'var(--danger)', padding: '2px 6px', borderRadius: '4px' }}>Invalid</span>
+              </h4>
+              <p style={{ fontSize: '13px', color: 'var(--danger)', marginTop: '4px' }}>
+                {skill.error}
+              </p>
+              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                This skill could not be loaded, so it is not available to agents.
+              </p>
+            </div>
+          ) : (
             <div key={skill.name} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '16px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
                 <div>
