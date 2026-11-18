@@ -183,9 +183,15 @@ def resolve_mcp_server_configs(source: Any, manifest: PluginManifest) -> list[tu
                 "inside the package."
             )
         raw_config = _read_mcp_config_file(src_path, mcp_def.file_path)
-        resolved.append(
-            (mcp_def.name, validate_mcp_server_config(mcp_def.name, raw_config))
-        )
+        config = validate_mcp_server_config(mcp_def.name, raw_config)
+        # A plugin's servers are confirmed by the plugin's own
+        # approval gate: the user approves the bundle — its MCP
+        # servers included — before install runs, so the resolved
+        # configs carry the marker the MCP auto-connect gate
+        # requires. (Prepare calls this too, but only to validate;
+        # nothing is persisted from a prepare.)
+        config["confirmed"] = True
+        resolved.append((mcp_def.name, config))
     return resolved
 
 
@@ -238,7 +244,14 @@ def _fingerprint_bytes(data: bytes) -> str:
 
 
 def _fingerprint_config(config: dict) -> str:
-    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    # ``confirmed`` is Aether-side trust metadata (whether the user
+    # confirmed the server's add), not part of what the server is or
+    # runs — two configs differing only in it are the same server,
+    # so the key is excluded from the content fingerprint. Without
+    # this, adding the marker would have invalidated every claim
+    # recorded before it existed.
+    content = {k: v for k, v in config.items() if k != "confirmed"}
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -523,6 +536,30 @@ class PluginInstaller:
         """
         self._audit("PLUGIN_INSTALL_REFUSED", plugin_name, reason, source)
         raise ValueError(f"Plugin install refused: {reason}")
+
+    def _refuse_declared_tools(self, manifest: PluginManifest,
+                               source: Any) -> None:
+        """Refuse a manifest that declares ``tools`` (ADR 0035).
+
+        A plugin is a bundle of skills + MCP servers (+ agents /
+        hooks) — never in-engine code — so a tool a plugin wants to
+        offer must arrive through an MCP server the plugin bundles,
+        declared under ``mcp_servers``. A manifest declaring tools
+        directly is refused here, at prepare time (and again in
+        install(), authoritatively), instead of the tools being
+        recorded and silently never callable.
+        """
+        if not manifest.tools:
+            return
+        names = ", ".join(tool.name for tool in manifest.tools)
+        self._refuse(
+            f"plugin '{manifest.name}' declares tool(s): {names}. "
+            "Plugins cannot contribute tools directly — a tool must "
+            "be exposed through an MCP server bundled with the "
+            "plugin (declared under mcp_servers), never as "
+            "in-engine code. Remove the tools declaration or ship "
+            "the tools as an MCP server instead.",
+            manifest.name, str(source))
 
     @staticmethod
     def _check_member_path(member: str) -> PurePosixPath:
@@ -835,6 +872,10 @@ class PluginInstaller:
         # Pydantic validators reject unsafe plugin/capability names and
         # file_paths here, before the approval card is ever shown.
         manifest = PluginManifest(**manifest_data)
+        # ADR 0035: a manifest declaring tools is refused here,
+        # before the approval card — tools arrive only via a bundled
+        # MCP server. install() re-checks authoritatively.
+        self._refuse_declared_tools(manifest, source)
         if src_path.is_file() and src_path.suffix == ".zip":
             # Fail fast: refuse a bad zip before the user is asked to
             # approve it. install() re-validates (authoritative, before
@@ -877,6 +918,10 @@ class PluginInstaller:
         # added. A bad manifest fails here with the named error and the
         # previous install (if any) is left untouched.
         try:
+            # ADR 0035, authoritatively: prepare data may be stale or
+            # tampered with, so the declared-tools refusal is repeated
+            # here, inside the same validation gate as the MCP configs.
+            self._refuse_declared_tools(manifest, source)
             mcp_configs = resolve_mcp_server_configs(source, manifest)
             # E7-F08: the authoritative conflict check — prepare data
             # may be stale or tampered with, and ownership may have
@@ -976,7 +1021,11 @@ class PluginInstaller:
                         shutil.copy2(src_skill, dest_skill_dir / "SKILL.md")
                         installed_skills.append(dest_skill_dir)
 
-            # 2. Record Tools (no global registry)
+            # 2. Record Tools — always empty here: a manifest
+            # declaring tools was refused in the validation gate
+            # above (tools arrive only via a bundled MCP server).
+            # The record field stays so the registry-entry shape is
+            # unchanged for entries written before the refusal.
             for tool_def in manifest.tools:
                 installed_tools.append(tool_def.name)
                 

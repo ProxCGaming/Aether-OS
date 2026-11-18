@@ -63,10 +63,14 @@ async def test_start_auto_connect_connects_eligible_skips_others_dead_does_not_b
     tmp_path, fake_url
 ):
     registry = _registry(tmp_path)
-    registry.add_server("live", _http_config(fake_url))
-    registry.add_server("dead", _http_config("http://127.0.0.1:1/mcp"))
-    registry.add_server("optout", _http_config(fake_url, auto_connect=False))
-    registry.add_server("off", _http_config(fake_url, enabled=False))
+    # All four model adds the user confirmed on the add card — the
+    # auto-connect gate skips unconfirmed servers (see
+    # test_mcp_confirmed_add.py), so eligibility here is decided by
+    # the auto_connect / enabled flags alone.
+    registry.add_server("live", _http_config(fake_url, confirmed=True))
+    registry.add_server("dead", _http_config("http://127.0.0.1:1/mcp", confirmed=True))
+    registry.add_server("optout", _http_config(fake_url, auto_connect=False, confirmed=True))
+    registry.add_server("off", _http_config(fake_url, enabled=False, confirmed=True))
 
     started = registry.start_auto_connect()
     assert "live" in started and "dead" in started
@@ -93,7 +97,7 @@ async def test_start_auto_connect_returns_immediately_with_dead_server(tmp_path)
     # (firewall DROP, proxy detour) fails this test spuriously. The
     # property under test — start_auto_connect itself never blocks —
     # is asserted separately (< 2s) and does not need a 30s timeout.
-    registry.add_server("dead", _http_config("http://127.0.0.1:1/mcp", timeout=5))
+    registry.add_server("dead", _http_config("http://127.0.0.1:1/mcp", timeout=5, confirmed=True))
     start = time.monotonic()
     registry.start_auto_connect()
     assert time.monotonic() - start < 2, "start_auto_connect blocked startup"
@@ -239,7 +243,8 @@ class TestMCPUpdateWebSocketHandlers:
         # lifespan auto-connect must have connected it by the time the
         # UI asks for the list — no manual Connect click.
         self.registry.add_server(
-            "fake", {"transport": "streamable_http", "url": fake_url, "timeout": 10}
+            "fake", {"transport": "streamable_http", "url": fake_url, "timeout": 10,
+                     "confirmed": True}
         )
         from starlette.testclient import TestClient
 

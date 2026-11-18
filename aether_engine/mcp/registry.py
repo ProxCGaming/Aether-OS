@@ -109,6 +109,10 @@ def validate_mcp_server_config(name: str, config: dict) -> dict:
     is inferred from the shape when omitted (standard ``mcpServers``
     format); ``headers``/``env`` are string dicts; timeout 1–300s,
     default 30; ``enabled``/``auto_connect`` default true.
+    ``confirmed`` defaults false: it records that the user confirmed
+    this server's add on the card naming what it runs, and only
+    confirmed servers may auto-connect (see ``start_auto_connect``).
+    A config written before the marker existed loads as unconfirmed.
     """
     if not isinstance(name, str) or len(name) > 100 or not _NAME_RE.match(name):
         raise MCPConfigError(
@@ -160,6 +164,7 @@ def validate_mcp_server_config(name: str, config: dict) -> dict:
     cfg["timeout"] = timeout
     cfg["enabled"] = bool(cfg.get("enabled", True))
     cfg["auto_connect"] = bool(cfg.get("auto_connect", True))
+    cfg["confirmed"] = bool(cfg.get("confirmed", False))
     return cfg
 
 
@@ -311,7 +316,7 @@ class MCPRegistry:
 
     async def update_server(
         self, name: str, *, auto_connect: bool | None = None,
-        enabled: bool | None = None,
+        enabled: bool | None = None, confirmed: bool | None = None,
     ) -> dict[str, Any]:
         """Toggle a server's ``auto_connect`` / ``enabled`` flags (issue 004).
 
@@ -319,9 +324,11 @@ class MCPRegistry:
         it; re-enabling does not reconnect — the user clicks Connect
         (or restarts the engine for auto-connect). Toggling
         ``auto_connect`` takes effect at the next engine start; it does
-        not connect or disconnect anything now. Returns the redacted
-        config. Raises MCPConfigError for an unknown server or a
-        non-boolean flag.
+        not connect or disconnect anything now. ``confirmed`` records
+        the user's confirmation of the add — the marker the
+        auto-connect gate reads; setting it connects nothing now.
+        Returns the redacted config. Raises MCPConfigError for an
+        unknown server or a non-boolean flag.
         """
         if name not in self.servers:
             raise MCPConfigError(f"Unknown MCP server '{name}'")
@@ -334,6 +341,10 @@ class MCPRegistry:
             if not isinstance(enabled, bool):
                 raise MCPConfigError(f"MCP server {name!r} 'enabled' must be true/false.")
             updates["enabled"] = enabled
+        if confirmed is not None:
+            if not isinstance(confirmed, bool):
+                raise MCPConfigError(f"MCP server {name!r} 'confirmed' must be true/false.")
+            updates["confirmed"] = confirmed
         if updates:
             snapshot = self._snapshot_servers()
             self.servers[name] = validate_mcp_server_config(
@@ -354,26 +365,43 @@ class MCPRegistry:
 
     # -- auto-connect (issue 004) ---------------------------------------
     def start_auto_connect(self) -> list[str]:
-        """Connect every enabled, auto-connect server in the background.
+        """Connect every enabled, auto-connect, confirmed server in
+        the background.
 
         Non-blocking: returns immediately with the names it attempted.
         One dead server cannot block startup or the others — each runs
         in its own owner task with its own timeout, and failures are
         isolated (see _auto_connect_one). Idempotent: a second call
         while already started returns [] until stop_auto_connect().
+
+        Confirmation gate: a server whose add was never confirmed
+        (``confirmed`` false — including configs written before the
+        marker existed) is skipped, never connected silently at
+        startup. The panel surfaces those as awaiting confirmation;
+        a manual Connect remains the user's explicit act and is not
+        gated here.
         """
         if self._auto_connect_started:
             return []
         self._auto_connect_started = True
         attempted: list[str] = []
+        skipped_unconfirmed: list[str] = []
         for name, config in self.servers.items():
             if not config.get("enabled", True):
                 continue
             if not config.get("auto_connect", True):
                 continue
+            if not config.get("confirmed", False):
+                skipped_unconfirmed.append(name)
+                continue
             attempted.append(name)
             task = asyncio.create_task(self._auto_connect_one(name))
             self._auto_connect_tasks.append(task)
+        if skipped_unconfirmed:
+            logger.info(
+                "MCP auto-connect skipped %d unconfirmed server(s): %s",
+                len(skipped_unconfirmed), ", ".join(skipped_unconfirmed),
+            )
         return attempted
 
     async def _auto_connect_one(self, name: str) -> None:

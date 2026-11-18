@@ -23,6 +23,29 @@ export default function McpPanel({ activeSession = null }) {
   const [mcpPromptArgs, setMcpPromptArgs] = useState({}); // issue 007: "server:prompt" -> {arg: value}
   const [newMcpServer, setNewMcpServer] = useState({ name: '', command: '', args: '', url: '', headerKey: '', headerValue: '', envKey: '', envValue: '', cwd: '' });
   const [mcpTestResult, setMcpTestResult] = useState(null);
+  // Trust step: a staged add ({name, config}) waiting on the
+  // confirmation card below. Nothing is sent to the engine — and so
+  // nothing is saved or connected — until the user confirms the
+  // card naming what the server will run. Cancelling drops the
+  // staged add and keeps the form for editing.
+  const [pendingMcpAdd, setPendingMcpAdd] = useState(null);
+
+  const confirmPendingMcpAdd = () => {
+    if (!pendingMcpAdd) return;
+    sendMessage('MCP_SERVER_ADD_REQUEST', {
+      schema_version: 1,
+      request_id: Date.now().toString(),
+      payload: {
+        name: pendingMcpAdd.name,
+        // `confirmed` is the marker the engine's auto-connect gate
+        // reads: this add was confirmed on the card, so the server
+        // may connect at startup.
+        config: { ...pendingMcpAdd.config, confirmed: true },
+      }
+    });
+    setPendingMcpAdd(null);
+    setNewMcpServer({ name: '', command: '', args: '', url: '', headerKey: '', headerValue: '', envKey: '', envValue: '', cwd: '' });
+  };
 
   useEffect(() => {
     sendMessage('MCP_SERVER_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
@@ -222,42 +245,34 @@ export default function McpPanel({ activeSession = null }) {
                 setMcpTestResult('Both a command and a URL are filled — pick one transport: a local command or a remote URL.');
                 return;
               }
-              const resetForm = { name: '', command: '', args: '', url: '', headerKey: '', headerValue: '', envKey: '', envValue: '', cwd: '' };
+              // Trust step: a valid form STAGES the add and shows
+              // the confirmation card — the ADD request is sent only
+              // from the card's Confirm (confirmPendingMcpAdd).
               if (newMcpServer.name && newMcpServer.url) {
                 const headers = newMcpServer.headerKey.trim()
                   ? { [newMcpServer.headerKey.trim()]: newMcpServer.headerValue }
                   : undefined;
-                sendMessage('MCP_SERVER_ADD_REQUEST', {
-                  schema_version: 1,
-                  request_id: Date.now().toString(),
-                  payload: {
-                    name: newMcpServer.name,
-                    config: {
-                      transport: 'streamable_http',
-                      url: newMcpServer.url.trim(),
-                      ...(headers ? { headers } : {}),
-                    }
+                setPendingMcpAdd({
+                  name: newMcpServer.name,
+                  config: {
+                    transport: 'streamable_http',
+                    url: newMcpServer.url.trim(),
+                    ...(headers ? { headers } : {}),
                   }
                 });
-                setNewMcpServer(resetForm);
               } else if (newMcpServer.name && newMcpServer.command) {
                 const env = newMcpServer.envKey.trim()
                   ? { [newMcpServer.envKey.trim()]: newMcpServer.envValue }
                   : undefined;
-                sendMessage('MCP_SERVER_ADD_REQUEST', {
-                  schema_version: 1,
-                  request_id: Date.now().toString(),
-                  payload: {
-                    name: newMcpServer.name,
-                    config: {
-                      command: newMcpServer.command,
-                      args: newMcpServer.args.split(',').map(s => s.trim()).filter(Boolean),
-                      ...(env ? { env } : {}),
-                      ...(newMcpServer.cwd.trim() ? { cwd: newMcpServer.cwd.trim() } : {}),
-                    }
+                setPendingMcpAdd({
+                  name: newMcpServer.name,
+                  config: {
+                    command: newMcpServer.command,
+                    args: newMcpServer.args.split(',').map(s => s.trim()).filter(Boolean),
+                    ...(env ? { env } : {}),
+                    ...(newMcpServer.cwd.trim() ? { cwd: newMcpServer.cwd.trim() } : {}),
                   }
                 });
-                setNewMcpServer(resetForm);
               } else {
                 // D2-18: the chain used to end here — a form
                 // with a name but neither transport (or no name
@@ -275,6 +290,48 @@ export default function McpPanel({ activeSession = null }) {
           </button>
         </div>
       </div>
+
+      {pendingMcpAdd && (
+        <div style={{ background: 'var(--bg-raised)', border: '1px solid rgba(var(--accent-rgb), 0.4)', borderRadius: 'var(--radius-lg)', padding: '20px', marginBottom: '24px' }}>
+          <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Before it runs</h3>
+          {pendingMcpAdd.config.command ? (
+            <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0 }}>
+              Adding <strong>{pendingMcpAdd.name}</strong> will run this command on this machine:
+              <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-primary)', margin: '8px 0', wordBreak: 'break-all' }}>
+                {pendingMcpAdd.config.command} {(pendingMcpAdd.config.args || []).join(' ')}
+              </span>
+              {pendingMcpAdd.config.cwd && (
+                <>It runs from the working directory <span style={{ fontFamily: 'var(--font-mono)' }}>{pendingMcpAdd.config.cwd}</span>. </>
+              )}
+              It runs when you connect the server — and automatically at startup while
+              &ldquo;Auto-connect on startup&rdquo; is on. Its tools will be available to the agent.
+            </p>
+          ) : (
+            <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0 }}>
+              Adding <strong>{pendingMcpAdd.name}</strong> will connect Aether to this remote server:
+              <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-primary)', margin: '8px 0', wordBreak: 'break-all' }}>
+                {pendingMcpAdd.config.url}
+              </span>
+              It connects when you connect the server — and automatically at startup while
+              &ldquo;Auto-connect on startup&rdquo; is on. Its tools will be available to the agent.
+            </p>
+          )}
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={() => setPendingMcpAdd(null)}
+              style={{ background: 'transparent', color: 'var(--text-secondary)', border: '1px solid var(--border-default)', padding: '10px 20px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500 }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmPendingMcpAdd}
+              style={{ background: 'var(--accent)', color: 'var(--accent-on)', border: 'none', padding: '10px 20px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500 }}
+            >
+              Confirm and add
+            </button>
+          </div>
+        </div>
+      )}
 
       {mcpTestResult && (
         <div style={{ color: 'var(--accent)', fontSize: '13px', marginBottom: '16px' }}>{mcpTestResult}</div>
@@ -306,6 +363,13 @@ export default function McpPanel({ activeSession = null }) {
                 <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
                   Status: {config.status || 'unknown'}{config.tool_count ? ` — ${config.tool_count} tool(s)` : ''}{config.error ? ` — ${config.error}` : ''}
                 </p>
+                {config.confirmed === false && (
+                  <p style={{ fontSize: '13px', color: 'var(--accent)', marginTop: '4px' }}>
+                    Awaiting confirmation — this server will not auto-connect at startup.
+                    To confirm it, remove it and add it again: the add flow shows the command
+                    it runs before anything is saved.
+                  </p>
+                )}
                 <div style={{ display: 'flex', gap: '16px', marginTop: '8px' }}>
                   <label style={{ fontSize: '13px', color: 'var(--text-secondary)', cursor: 'pointer' }}>
                     <input

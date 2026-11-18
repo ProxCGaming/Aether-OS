@@ -11,7 +11,7 @@ export default function PluginsNotice() {
       color: 'var(--accent)',
       fontSize: '13px'
     }}>
-      <strong>Notice:</strong> Plugin tools are displayed here to reflect what is declared in the plugin manifest. However, they are not yet callable by the agent.
+      <strong>Notice:</strong> Plugins add skills and MCP servers — a plugin can&rsquo;t contribute tools directly. Tools arrive only through an MCP server, so a plugin that needs tools bundles one; a manifest that declares tools is refused at install.
     </div>
   );
 }

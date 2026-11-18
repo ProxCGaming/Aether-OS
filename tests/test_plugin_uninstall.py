@@ -18,8 +18,11 @@ def test_uninstall_removes_everything(tmp_path: Path, temp_installer: PluginInst
     manifest = {
         "name": "GoodPlugin",
         "version": "1.0",
-        "skills": [{"name": "sk1", "file_path": "sk1.md"}],
-        "tools": [{"name": "tool1"}]
+        "skills": [{"name": "sk1", "file_path": "sk1.md"}]
+        # No "tools" entry: a manifest declaring tools is refused at
+        # prepare (ADR 0035 — tools arrive only via a bundled MCP
+        # server). The old fixture declared one and asserted nothing
+        # about it; uninstall completeness is what this test covers.
     }
     (source_dir / "manifest.json").write_text(json.dumps(manifest))
     (source_dir / "sk1.md").write_text("skill_content")
