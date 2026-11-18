@@ -8,7 +8,7 @@ import { useVoiceBridge } from './hooks/useVoiceBridge';
 // interactivity don't wait on it. The Suspense fallback paints the
 // same background colour, so the graph simply fades in when ready.
 const ForceGraph3D = React.lazy(() => import('react-force-graph-3d'));
-import { Settings, Trash2, X, Plus, MessageSquare, LayoutDashboard, Folder, FolderInput, Minus, Square, LogIn, Menu, Pencil, Upload, Layers } from 'lucide-react';
+import { Settings, Trash2, X, Plus, MessageSquare, LayoutDashboard, Folder, FolderInput, Minus, Square, LogIn, Menu, Pencil, Upload, Layers, Search } from 'lucide-react';
 import DraggableChatWindow from './DraggableChatWindow';
 import SettingsPanel from './SettingsPanel';
 import { resolveSnipHotkey } from './snipHotkey';
@@ -1632,6 +1632,31 @@ function AppContent() {
                 <h2 style={{ fontSize: '18px', margin: 0, color: 'var(--text-primary)' }}>AETHER-OS</h2>
                 <div style={{ fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px' }}>{status}</div>
               </div>
+            </div>
+
+            {/* Full Furnish S-3: the palette's visible trigger — a
+                search-field-styled button in the sidebar head with
+                the shortcut printed on it. Ctrl+K stays the keyboard
+                path; this is the discoverable one. */}
+            <div style={{ padding: '0 12px', marginTop: '-16px', marginBottom: '16px' }}>
+              <button
+                data-testid="palette-trigger"
+                onClick={() => setPaletteOpen(true)}
+                aria-label="Search commands (Ctrl+K)"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '8px', width: '100%',
+                  padding: '8px 12px', background: 'var(--bg-base)',
+                  border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)',
+                  color: 'var(--text-muted)', cursor: 'pointer', fontSize: '13px',
+                }}
+              >
+                <Search size={14} style={{ flexShrink: 0 }} />
+                <span style={{ flex: 1, textAlign: 'left' }}>Search or command…</span>
+                <span style={{
+                  fontSize: '11px', color: 'var(--text-muted)',
+                  border: '1px solid var(--border-default)', borderRadius: '4px', padding: '1px 5px',
+                }}>Ctrl+K</span>
+              </button>
             </div>
 
             <nav style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '0 12px' }}>

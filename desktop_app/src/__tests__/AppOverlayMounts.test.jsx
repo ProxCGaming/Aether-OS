@@ -162,6 +162,20 @@ describe('App shell overlays mount on every tab (E6-F01)', () => {
     expect(screen.getAllByTestId('command-palette')).toHaveLength(1);
   });
 
+  it('the sidebar head shows a search trigger with the shortcut printed on it (S-3)', async () => {
+    render(<App />);
+    await flushPromises();
+
+    const trigger = screen.getByTestId('palette-trigger');
+    expect(trigger).toHaveTextContent('Ctrl+K');
+    expect(screen.queryByTestId('command-palette')).not.toBeInTheDocument();
+
+    fireEvent.click(trigger);
+
+    expect(screen.getByTestId('command-palette')).toBeInTheDocument();
+    expect(screen.getAllByTestId('command-palette')).toHaveLength(1);
+  });
+
   it('keeps the already-open palette mounted when switching from Dashboard to Chat', async () => {
     render(<App />);
     await flushPromises();
