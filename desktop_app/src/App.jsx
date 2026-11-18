@@ -1063,9 +1063,15 @@ function AppContent() {
         request_id: Date.now().toString(),
         payload: { config: { onboarding_completed: true } },
       });
+      // Full Furnish S-5 (Batch 2 pairing): finishing onboarding
+      // starts a first session, so the user lands in a real chat —
+      // where the taught first-run landing's suggestions can send —
+      // not in a session-less void. Inside the first-completion
+      // guard: a stale re-fire must not spawn duplicate sessions.
+      handleNewChat();
     }
     setActiveTab('Chat');
-  }, [sendMessage]);
+  }, [sendMessage, handleNewChat]);
 
   // Epic 6, E6-03: palette items — only entries that really act.
   const paletteItems = useMemo(() => {
@@ -2130,7 +2136,7 @@ function AppContent() {
                  />
                </div>
             )}
-            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} providerHealth={providerHealth} providerHealthLoaded={providerHealthLoaded} wsRef={wsRef} reconnectCount={reconnectCount} onStartWorkflow={() => setActiveTab('Chat')} />}
+            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} providerHealth={providerHealth} providerHealthLoaded={providerHealthLoaded} wsRef={wsRef} reconnectCount={reconnectCount} onStartWorkflow={() => setActiveTab('Chat')} onNewChat={() => { handleNewChat(); setActiveTab('Chat'); }} onResumeSession={(id) => { handleSessionSwitch(id); setActiveTab('Chat'); }} recentSessions={sessions} recentArtifacts={canvasArtifacts} activeWorkspace={activeWorkspaceRow} />}
             {activeTab === 'Artifacts' && (
               <GlobalArtifactsView
                 wsRef={wsRef}
@@ -2143,7 +2149,7 @@ function AppContent() {
                 onNavigateToMedia={handleNavigateToMediaSession}
               />
             )}
-            {activeTab === 'Projects' && <Projects wsRef={wsRef} isConnected={isConnected} reconnectCount={reconnectCount} />}
+            {activeTab === 'Projects' && <Projects wsRef={wsRef} isConnected={isConnected} reconnectCount={reconnectCount} onGoToChat={() => setActiveTab('Chat')} />}
             {activeTab !== 'Settings' && activeTab !== 'Dashboard' && activeTab !== 'Artifacts' && activeTab !== 'Projects' && (
                <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
                  <h2>{activeTab} view coming soon.</h2>
