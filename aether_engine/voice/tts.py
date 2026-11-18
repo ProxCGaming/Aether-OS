@@ -61,6 +61,22 @@ def is_valid_kokoro_voice(value: object) -> bool:
         and KOKORO_VOICE_ID_RE.match(value.strip()) is not None)
 
 
+def lang_code_for_voice(voice: object) -> str:
+    """The Kokoro ``lang_code`` a voice id must be spoken with.
+
+    A voice id's first letter IS its language (see the prefix
+    table above): ``bf_emma`` is British English and needs
+    ``lang_code="b"``, ``hf_alpha`` is Hindi and needs ``"h"``.
+    Building the pipeline with the wrong code phonemises the
+    text with the wrong language's rules (FF3-01). Anything
+    that is not a valid voice id falls back to ``"a"`` — the
+    default voice's language — matching the historical default.
+    """
+    if is_valid_kokoro_voice(voice):
+        return voice.strip()[0]
+    return "a"
+
+
 class TtsEngine(Protocol):
     """Sentence-at-a-time speech synthesis."""
 
@@ -106,7 +122,13 @@ class KokoroTts:
 
     def __init__(self, lang_code: str = "a"):
         self._lang_code = lang_code
-        self._pipeline = None
+        # One pipeline per language, loaded lazily (FF3-01): a
+        # KPipeline phonemises with ONE language's rules, so a
+        # British or Hindi voice spoken through the default
+        # American pipeline comes out wrong. Pipelines are
+        # cached per lang_code — switching voices inside a
+        # language reuses the loaded pipeline.
+        self._pipelines: dict[str, object] = {}
 
     def unavailable_reason(self) -> str | None:
         if importlib.util.find_spec("kokoro") is None:
@@ -117,19 +139,37 @@ class KokoroTts:
         reason = self.unavailable_reason()
         if reason is not None:
             raise VoiceUnavailableError(reason)
-        self._pipeline = await asyncio.to_thread(self._load_pipeline)
+        await self._pipeline_for(self._lang_code)
 
-    def _load_pipeline(self):
+    def _load_pipeline(self, lang_code: str):
         from kokoro import KPipeline
 
-        return KPipeline(lang_code=self._lang_code)
+        return KPipeline(lang_code=lang_code)
+
+    async def _pipeline_for(self, lang_code: str):
+        pipeline = self._pipelines.get(lang_code)
+        if pipeline is None:
+            try:
+                pipeline = await asyncio.to_thread(
+                    self._load_pipeline, lang_code)
+            except Exception as exc:  # re-raised honestly below
+                raise VoiceUnavailableError(
+                    f"Kokoro voice pack for lang_code {lang_code!r} "
+                    f"could not be loaded: {exc}") from exc
+            self._pipelines[lang_code] = pipeline
+        return pipeline
 
     async def close(self) -> None:
-        self._pipeline = None
+        self._pipelines = {}
 
     async def synthesize(self, text: str, *, voice: str = DEFAULT_VOICE) -> AsyncIterator[bytes]:
-        if self._pipeline is None:
+        if not self._pipelines:
             raise VoiceUnavailableError("Kokoro TTS used before open()")
+        # The pipeline must match the VOICE, not the engine's
+        # default language (FF3-01): a voice whose pack cannot
+        # load fails honestly here instead of being spoken with
+        # the wrong language's phonemes.
+        pipeline = await self._pipeline_for(lang_code_for_voice(voice))
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue(maxsize=_TTS_QUEUE_MAXSIZE)
         # E7-13: cancelling the to_thread future cannot stop a
@@ -163,7 +203,7 @@ class KokoroTts:
 
         def _produce() -> None:
             try:
-                for _gs, _ps, audio in self._pipeline(text, voice=voice):
+                for _gs, _ps, audio in pipeline(text, voice=voice):
                     if not _deliver(float_pcm_to_wav(audio)):
                         return
             except Exception as e:  # noqa: BLE001 — surfaced to the consumer below, not swallowed
