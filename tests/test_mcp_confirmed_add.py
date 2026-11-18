@@ -107,3 +107,42 @@ async def test_update_server_records_confirmation(tmp_path):
         await registry.update_server("srv", confirmed="yes")
     with pytest.raises(MCPConfigError):
         await registry.update_server("ghost", confirmed=True)
+
+
+async def test_update_result_forwards_confirmed_to_the_registry(
+    tmp_path, monkeypatch
+):
+    """The websocket update path carries the panel's confirmation
+    to update_server — without this hop, confirming an existing
+    server in place would silently do nothing."""
+    import contextlib
+
+    import aether_engine.mcp.registry as registry_module
+    from aether_common.contracts import EventType
+    from aether_engine.routes.ws_mcp_plugins import (
+        send_mcp_server_update_result,
+    )
+
+    registry = _registry(tmp_path)
+    registry.add_server("srv", _http_config("http://a/b"))
+    monkeypatch.setattr(registry_module, "GLOBAL_MCP_REGISTRY", registry)
+
+    class FakeConn:
+        def __init__(self):
+            self.sent = []
+
+        @contextlib.asynccontextmanager
+        async def mcp_server_lock(self, name):
+            yield
+
+        async def send_event(self, req_id, type_, payload, failure_message):
+            self.sent.append((type_, payload))
+
+    conn = FakeConn()
+    await send_mcp_server_update_result(
+        conn, "req-1", "srv", None, None, confirmed_=True)
+    assert registry.list_servers()["srv"]["confirmed"] is True
+    type_, payload = conn.sent[-1]
+    assert type_ == EventType.MCP_SERVER_UPDATE_RESPONSE
+    assert payload["success"] is True
+    assert payload["config"]["confirmed"] is True

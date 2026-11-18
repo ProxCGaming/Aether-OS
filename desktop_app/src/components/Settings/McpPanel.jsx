@@ -8,6 +8,59 @@ import LoadStateRow from './LoadStateRow';
 // Plugins tabs in one component; each tab is now its own panel and
 // DiagnosticsPanel is only the dispatcher. Behaviour is unchanged:
 // same requests on mount, same response handling, same rendering.
+
+// D4-3: the ONE trust card for "this server will run". The add flow
+// shows it before anything is saved; confirming a server that was
+// added before confirmation existed shows the same card for that
+// server's stored config. Both name exactly what will run — the
+// command + args (and cwd) for a local server, the URL for a
+// remote one — before the user confirms.
+function McpRunCard({ name, config, mode, confirmLabel, onConfirm, onCancel }) {
+  return (
+    <div style={{ background: 'var(--bg-raised)', border: '1px solid rgba(var(--accent-rgb), 0.4)', borderRadius: 'var(--radius-lg)', padding: '20px', marginBottom: '24px' }}>
+      <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Before it runs</h3>
+      {config.command ? (
+        <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0 }}>
+          {mode === 'add' ? <>Adding <strong>{name}</strong> will run this command on this machine:</>
+            : <><strong>{name}</strong> will run this command on this machine:</>}
+          <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-primary)', margin: '8px 0', wordBreak: 'break-all' }}>
+            {config.command} {(config.args || []).join(' ')}
+          </span>
+          {config.cwd && (
+            <>It runs from the working directory <span style={{ fontFamily: 'var(--font-mono)' }}>{config.cwd}</span>. </>
+          )}
+          It runs when you connect the server — and automatically at startup while
+          &ldquo;Auto-connect on startup&rdquo; is on. Its tools will be available to the agent.
+        </p>
+      ) : (
+        <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0 }}>
+          {mode === 'add' ? <>Adding <strong>{name}</strong> will connect Aether to this remote server:</>
+            : <>Confirming <strong>{name}</strong> will connect Aether to this remote server:</>}
+          <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-primary)', margin: '8px 0', wordBreak: 'break-all' }}>
+            {config.url}
+          </span>
+          It connects when you connect the server — and automatically at startup while
+          &ldquo;Auto-connect on startup&rdquo; is on. Its tools will be available to the agent.
+        </p>
+      )}
+      <div style={{ display: 'flex', gap: '8px' }}>
+        <button
+          onClick={onCancel}
+          style={{ background: 'transparent', color: 'var(--text-secondary)', border: '1px solid var(--border-default)', padding: '10px 20px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500 }}
+        >
+          Cancel
+        </button>
+        <button
+          onClick={onConfirm}
+          style={{ background: 'var(--accent)', color: 'var(--accent-on)', border: 'none', padding: '10px 20px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500 }}
+        >
+          {confirmLabel}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function McpPanel({ activeSession = null }) {
   const { wsRef, sendMessage, isConnected } = useAetherSocket();
   // Wave 3 slice 1 (RUX-C-06, under the RUX-C-01 umbrella): the
@@ -29,6 +82,20 @@ export default function McpPanel({ activeSession = null }) {
   // card naming what the server will run. Cancelling drops the
   // staged add and keeps the form for editing.
   const [pendingMcpAdd, setPendingMcpAdd] = useState(null);
+  // The same trust step for a server that already exists but was
+  // added before confirmation existed: {name, config} staged from
+  // the server's row, confirmed through the same card.
+  const [pendingMcpConfirm, setPendingMcpConfirm] = useState(null);
+
+  const confirmPendingMcpConfirm = () => {
+    if (!pendingMcpConfirm) return;
+    sendMessage('MCP_SERVER_UPDATE_REQUEST', {
+      schema_version: 1,
+      request_id: Date.now().toString(),
+      payload: { name: pendingMcpConfirm.name, confirmed: true },
+    });
+    setPendingMcpConfirm(null);
+  };
 
   const confirmPendingMcpAdd = () => {
     if (!pendingMcpAdd) return;
@@ -292,45 +359,25 @@ export default function McpPanel({ activeSession = null }) {
       </div>
 
       {pendingMcpAdd && (
-        <div style={{ background: 'var(--bg-raised)', border: '1px solid rgba(var(--accent-rgb), 0.4)', borderRadius: 'var(--radius-lg)', padding: '20px', marginBottom: '24px' }}>
-          <h3 style={{ fontSize: '16px', marginBottom: '12px' }}>Before it runs</h3>
-          {pendingMcpAdd.config.command ? (
-            <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0 }}>
-              Adding <strong>{pendingMcpAdd.name}</strong> will run this command on this machine:
-              <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-primary)', margin: '8px 0', wordBreak: 'break-all' }}>
-                {pendingMcpAdd.config.command} {(pendingMcpAdd.config.args || []).join(' ')}
-              </span>
-              {pendingMcpAdd.config.cwd && (
-                <>It runs from the working directory <span style={{ fontFamily: 'var(--font-mono)' }}>{pendingMcpAdd.config.cwd}</span>. </>
-              )}
-              It runs when you connect the server — and automatically at startup while
-              &ldquo;Auto-connect on startup&rdquo; is on. Its tools will be available to the agent.
-            </p>
-          ) : (
-            <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0 }}>
-              Adding <strong>{pendingMcpAdd.name}</strong> will connect Aether to this remote server:
-              <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-primary)', margin: '8px 0', wordBreak: 'break-all' }}>
-                {pendingMcpAdd.config.url}
-              </span>
-              It connects when you connect the server — and automatically at startup while
-              &ldquo;Auto-connect on startup&rdquo; is on. Its tools will be available to the agent.
-            </p>
-          )}
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button
-              onClick={() => setPendingMcpAdd(null)}
-              style={{ background: 'transparent', color: 'var(--text-secondary)', border: '1px solid var(--border-default)', padding: '10px 20px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500 }}
-            >
-              Cancel
-            </button>
-            <button
-              onClick={confirmPendingMcpAdd}
-              style={{ background: 'var(--accent)', color: 'var(--accent-on)', border: 'none', padding: '10px 20px', borderRadius: '12px', cursor: 'pointer', fontWeight: 500 }}
-            >
-              Confirm and add
-            </button>
-          </div>
-        </div>
+        <McpRunCard
+          name={pendingMcpAdd.name}
+          config={pendingMcpAdd.config}
+          mode="add"
+          confirmLabel="Confirm and add"
+          onConfirm={confirmPendingMcpAdd}
+          onCancel={() => setPendingMcpAdd(null)}
+        />
+      )}
+
+      {pendingMcpConfirm && (
+        <McpRunCard
+          name={pendingMcpConfirm.name}
+          config={pendingMcpConfirm.config}
+          mode="confirm"
+          confirmLabel="Confirm server"
+          onConfirm={confirmPendingMcpConfirm}
+          onCancel={() => setPendingMcpConfirm(null)}
+        />
       )}
 
       {mcpTestResult && (
@@ -365,9 +412,13 @@ export default function McpPanel({ activeSession = null }) {
                 </p>
                 {config.confirmed === false && (
                   <p style={{ fontSize: '13px', color: 'var(--accent)', marginTop: '4px' }}>
-                    Awaiting confirmation — this server will not auto-connect at startup.
-                    To confirm it, remove it and add it again: the add flow shows the command
-                    it runs before anything is saved.
+                    Awaiting confirmation — this server will not auto-connect at startup.{' '}
+                    <button
+                      onClick={() => setPendingMcpConfirm({ name, config })}
+                      style={{ background: 'transparent', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.4)', padding: '2px 10px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                    >
+                      Review and confirm
+                    </button>
                   </p>
                 )}
                 <div style={{ display: 'flex', gap: '16px', marginTop: '8px' }}>

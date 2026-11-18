@@ -110,7 +110,7 @@ async def send_mcp_server_remove_result(conn, req_id_, name_):
         {"success": ok, "name": name_, "error": error},
         f"Could not send MCP server remove response for {name_}")
 
-async def send_mcp_server_update_result(conn, req_id_, name_, auto_connect_, enabled_):
+async def send_mcp_server_update_result(conn, req_id_, name_, auto_connect_, enabled_, confirmed_=None):
     """Answer an MCP_SERVER_UPDATE_REQUEST from a background task (RUX-B-04)."""
     from aether_engine.mcp.registry import (
         GLOBAL_MCP_REGISTRY,
@@ -126,6 +126,7 @@ async def send_mcp_server_update_result(conn, req_id_, name_, auto_connect_, ena
                     name_,
                     auto_connect=auto_connect_,
                     enabled=enabled_,
+                    confirmed=confirmed_,
                 )
         except (MCPConfigError, OSError) as e:
             # OSError: the config save's storage failure

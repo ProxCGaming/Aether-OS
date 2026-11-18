@@ -150,4 +150,49 @@ describe('McpPanel', () => {
     // Exactly one awaiting note — the confirmed server does not get one.
     expect(screen.getAllByText(/Awaiting confirmation/)).toHaveLength(1);
   });
+
+  test('confirming an existing server in place sends the update with the confirmed marker', () => {
+    const { sendMessage, simulateMessage } = makeHarness();
+    render(<McpPanel />);
+    simulateMessage({
+      type: 'MCP_SERVER_LIST_RESPONSE',
+      payload: {
+        servers: {
+          legacy: { command: 'python', args: ['-m', 'db'], status: 'disconnected', confirmed: false },
+        },
+      },
+    });
+    fireEvent.click(screen.getByText('Review and confirm'));
+    // The same trust card, naming the stored command before anything is sent
+    // (the command now appears twice: the server row and the card).
+    expect(screen.getByText('Before it runs')).toBeInTheDocument();
+    expect(screen.getAllByText(/python -m db/)).toHaveLength(2);
+    expect(sendMessage).not.toHaveBeenCalledWith('MCP_SERVER_UPDATE_REQUEST', expect.objectContaining({
+      payload: expect.objectContaining({ confirmed: true }),
+    }));
+    fireEvent.click(screen.getByText('Confirm server'));
+    expect(sendMessage).toHaveBeenCalledWith('MCP_SERVER_UPDATE_REQUEST', expect.objectContaining({
+      payload: { name: 'legacy', confirmed: true },
+    }));
+    expect(screen.queryByText('Before it runs')).not.toBeInTheDocument();
+  });
+
+  test('cancelling the in-place confirmation sends nothing', () => {
+    const { sendMessage, simulateMessage } = makeHarness();
+    render(<McpPanel />);
+    simulateMessage({
+      type: 'MCP_SERVER_LIST_RESPONSE',
+      payload: {
+        servers: {
+          legacy: { command: 'python', args: ['-m', 'db'], status: 'disconnected', confirmed: false },
+        },
+      },
+    });
+    fireEvent.click(screen.getByText('Review and confirm'));
+    fireEvent.click(screen.getByText('Cancel'));
+    expect(sendMessage).not.toHaveBeenCalledWith('MCP_SERVER_UPDATE_REQUEST', expect.objectContaining({
+      payload: expect.objectContaining({ confirmed: true }),
+    }));
+    expect(screen.queryByText('Before it runs')).not.toBeInTheDocument();
+  });
 });

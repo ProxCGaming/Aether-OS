@@ -3085,7 +3085,8 @@ async def _handle_mcp_server_update_request(conn: WsConnection, msg: Event) -> N
     # timeout and must not wedge the socket (RUX-B-04).
     conn.spawn_background(send_mcp_server_update_result(conn, 
         req_id, msg.payload.get("name"),
-        msg.payload.get("auto_connect"), msg.payload.get("enabled")))
+        msg.payload.get("auto_connect"), msg.payload.get("enabled"),
+        msg.payload.get("confirmed")))
 
 async def _handle_mcp_server_connect_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
