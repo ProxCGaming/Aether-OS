@@ -132,4 +132,26 @@ describe('OllamaModelList — Spec D fit and load state', () => {
     expect(screen.queryByTestId('ollama-fit-llama3.1:8b')).not.toBeInTheDocument();
     expect(screen.queryByTestId('ollama-load-state-llama3.1:8b')).not.toBeInTheDocument();
   });
+
+  test('unload is offered only on loaded rows and sends the residency request', async () => {
+    const models = [
+      { ...MODELS[0], loaded: true },
+      { ...MODELS[1], loaded: false },
+    ];
+    const sendRequest = makeSendRequest({
+      LOCAL_MODEL_LIST_REQUEST: { models },
+      LOCAL_MODEL_UNLOAD_REQUEST: { model: 'qwen3:8b', unloaded: true },
+    });
+    render(<OllamaModelList sendRequest={sendRequest} pendingDeleteFor={() => undefined} />);
+    await waitFor(() => {
+      expect(screen.getByTestId('ollama-unload-qwen3:8b')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('ollama-unload-llama3.1:8b')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('ollama-unload-qwen3:8b'));
+    expect(sendRequest).toHaveBeenCalledWith(
+      'LOCAL_MODEL_UNLOAD_REQUEST', { model: 'qwen3:8b' }, expect.any(Function));
+    await waitFor(() => {
+      expect(screen.getByTestId('ollama-unload-notice')).toHaveTextContent('unloaded');
+    });
+  });
 });

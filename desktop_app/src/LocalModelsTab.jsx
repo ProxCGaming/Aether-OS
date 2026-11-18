@@ -391,6 +391,21 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
     });
   };
 
+  // Spec D (FF3-08): unload a resident Ollama model from memory —
+  // the residency sibling of the hub delete above, riding the
+  // engine-list contract (the hub has no residency verb of its
+  // own). Only rows the payload reports as loaded offer it.
+  const handleUnloadDownloaded = (row) => {
+    setHubError(null);
+    sendRequest('LOCAL_MODEL_UNLOAD_REQUEST', { model: row.id }, (resp) => {
+      if (resp && resp.unloaded) {
+        refreshDownloaded();
+      } else {
+        setHubError((resp && resp.error) || 'The engine could not unload that model.');
+      }
+    });
+  };
+
   // Phase 10.3 C2 (preserved): set a downloaded Ollama model as the
   // engine's default via MODEL_SET_DEFAULT (provider 'ollama').
   // RUX-A-19: through safeSend this QUEUES while the engine is
@@ -797,6 +812,7 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
         onSetActive={handleSetActive}
         onUseAsEmbedder={handleUseAsEmbedder}
         onDeleteDownloaded={handleDeleteDownloaded}
+        onUnloadDownloaded={handleUnloadDownloaded}
       />
 
       {/* S21 (R17): the engine's own Ollama list + its delete —

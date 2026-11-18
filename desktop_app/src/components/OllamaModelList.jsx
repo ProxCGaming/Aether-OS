@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, Trash2 } from 'lucide-react';
+import { RefreshCw, Trash2, Eject } from 'lucide-react';
 import FitBadge, { LoadStateBadge } from './FitBadge';
 
 // Master build S21 (R17 wiring): the engine's own Ollama list —
@@ -23,6 +23,9 @@ export default function OllamaModelList({ sendRequest, pendingDeleteFor }) {
   const [deletingName, setDeletingName] = useState('');
   const [deleteError, setDeleteError] = useState('');
   const [deleteNotice, setDeleteNotice] = useState('');
+  const [unloadingName, setUnloadingName] = useState('');
+  const [unloadError, setUnloadError] = useState('');
+  const [unloadNotice, setUnloadNotice] = useState('');
 
   const refresh = useCallback(() => {
     sendRequest('LOCAL_MODEL_LIST_REQUEST', {}, (payload) => {
@@ -65,6 +68,28 @@ export default function OllamaModelList({ sendRequest, pendingDeleteFor }) {
     }
   };
 
+  const handleUnload = (model) => {
+    // Residency only (Spec D): the files stay on disk, so unlike
+    // delete this needs no confirm — the model reloads on next use.
+    setUnloadError('');
+    setUnloadNotice('');
+    const disposition = sendRequest('LOCAL_MODEL_UNLOAD_REQUEST', { model: model.name }, (payload) => {
+      setUnloadingName('');
+      if (payload && payload.unloaded) {
+        setUnloadNotice(`${model.name} unloaded — it will reload the next time it is used.`);
+        refresh();
+      } else {
+        setUnloadError(
+          (payload && payload.error)
+          || `The engine reports ${model.name} was not unloaded — Ollama may not be running.`
+        );
+      }
+    });
+    if (disposition !== 'queued') {
+      setUnloadingName(model.name);
+    }
+  };
+
   const downloaded = (models || []).filter((m) => m.downloaded);
   const catalogueCount = (models || []).length - downloaded.length;
 
@@ -95,6 +120,16 @@ export default function OllamaModelList({ sendRequest, pendingDeleteFor }) {
           {deleteError}
         </div>
       )}
+      {unloadNotice && (
+        <div data-testid="ollama-unload-notice" style={{ fontSize: '13px', color: 'var(--success)', marginBottom: '12px' }}>
+          {unloadNotice}
+        </div>
+      )}
+      {unloadError && (
+        <div data-testid="ollama-unload-error" role="alert" style={{ fontSize: '13px', color: 'var(--danger)', marginBottom: '12px' }}>
+          {unloadError}
+        </div>
+      )}
 
       {models === null && !loadError ? (
         <div style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>Loading the engine&apos;s Ollama list…</div>
@@ -111,6 +146,7 @@ export default function OllamaModelList({ sendRequest, pendingDeleteFor }) {
           {downloaded.map((model) => {
             const deleteQueued = Boolean(pendingDeleteFor && pendingDeleteFor(model.name));
             const deleting = deletingName === model.name;
+            const unloading = unloadingName === model.name;
             return (
               <div
                 key={model.name}
@@ -135,6 +171,19 @@ export default function OllamaModelList({ sendRequest, pendingDeleteFor }) {
                     </div>
                   )}
                 </div>
+                <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+                {model.loaded === true && (
+                  <button
+                    onClick={() => handleUnload(model)}
+                    disabled={unloading}
+                    data-testid={`ollama-unload-${model.name}`}
+                    className="aether-solid-btn"
+                    title="Unload from memory (the files stay on disk)"
+                    style={{ padding: '8px 10px', borderRadius: '10px', cursor: unloading ? 'default' : 'pointer', opacity: unloading ? 0.45 : 1, display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px' }}
+                  >
+                    <Eject size={14} /> {unloading ? 'Unloading…' : 'Unload'}
+                  </button>
+                )}
                 {deleteQueued ? (
                   <span data-testid={`ollama-delete-queued-${model.name}`} style={{ fontSize: '12px', color: 'var(--accent)', fontWeight: 500, flexShrink: 0 }}>
                     Delete queued
@@ -151,6 +200,7 @@ export default function OllamaModelList({ sendRequest, pendingDeleteFor }) {
                     <Trash2 size={14} /> {deleting ? 'Deleting…' : 'Delete'}
                   </button>
                 )}
+                </div>
               </div>
             );
           })}

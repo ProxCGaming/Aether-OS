@@ -113,6 +113,24 @@ async def send_local_model_delete_result(conn, req_id_, model_name_):
         warn=lambda e: f"Local model delete for {model_name_} raised: {e}")
 
 
+async def send_local_model_unload_result(conn, req_id_, model_name_):
+    """Answer a LOCAL_MODEL_UNLOAD_REQUEST from a background task (RUX-B-08)."""
+
+    async def _build_payload():
+        return {
+            "model": model_name_,
+            "unloaded": await engine_state.ollama_manager.unload_model(model_name_),
+        }
+
+    # E1-03: answer with unloaded=False + the error instead of
+    # leaving the requester waiting on a reply that never comes.
+    await conn.reply(
+        req_id_, EventType.LOCAL_MODEL_UNLOAD_RESPONSE, _build_payload,
+        error_payload=lambda e: {"model": model_name_, "unloaded": False, "error": str(e)},
+        send_failure_message="Could not send local model unload response",
+        warn=lambda e: f"Local model unload for {model_name_} raised: {e}")
+
+
 async def send_model_hub_search_result(conn, req_id_, source_, query_, family_):
     """Answer a MODEL_HUB_SEARCH_REQUEST from a background task (RUX-B-08)."""
 

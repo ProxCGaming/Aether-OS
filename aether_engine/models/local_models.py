@@ -134,6 +134,56 @@ class OllamaManager:
         except Exception:  # noqa: BLE001 — reachability probe: any failure means Ollama is not running
             return False
 
+    async def _running_model_names(
+        self, client: httpx.AsyncClient,
+    ) -> set[str] | None:
+        """Names of models resident in the daemon's memory (/api/ps).
+
+        Returns None when residency cannot be determined (daemon
+        error, malformed body) — callers then OMIT the loaded field
+        rather than claiming every model is unloaded (Spec D,
+        FF3-08: an unreported state is not a reported false).
+        """
+        try:
+            res = await client.get(f"{self.base_url}/api/ps")
+            if res.status_code != 200:
+                return None
+            return {
+                str(m.get("name", ""))
+                for m in res.json().get("models", [])
+            }
+        except Exception as e:  # noqa: BLE001 — residency is advisory: an unanswerable probe means "unknown", never a broken list
+            logger.debug(f"/api/ps failed: {e}")
+            return None
+
+    async def unload_model(self, model_name: str) -> bool:
+        """Evict a model from the daemon's memory (keep_alive: 0).
+
+        The files stay on disk — this is the residency sibling of
+        delete_model, with the same honesty contract: True only
+        when the daemon confirms (HTTP 200); offline, non-200 and
+        exception paths return False.
+        """
+        if not await self.is_ollama_running():
+            logger.error(f"Cannot unload {model_name}: Ollama is not running")
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.post(
+                    f"{self.base_url}/api/generate",
+                    json={"model": model_name, "keep_alive": 0},
+                )
+                if res.status_code == 200:
+                    return True
+                logger.error(
+                    f"Failed to unload model {model_name}: "
+                    f"Ollama returned HTTP {res.status_code}"
+                )
+                return False
+        except Exception as e:  # noqa: BLE001 — unload failure is reported as False, never raised (delete_model's contract)
+            logger.error(f"Error unloading model {model_name}: {e}")
+            return False
+
     async def list_models(self) -> list[dict[str, Any]]:
         """List local models, placing downloaded models sorted at the top.
 
@@ -164,6 +214,10 @@ class OllamaManager:
                     res = await client.get(f"{self.base_url}/api/tags")
                     if res.status_code == 200:
                         data = res.json()
+                        # Spec D (FF3-08): residency from /api/ps —
+                        # present on a row only when the daemon
+                        # actually answered (None = unreported).
+                        running = await self._running_model_names(client)
                         for m in data.get("models", []):
                             name = m.get("name", "")
                             size_bytes = m.get("size", 0)
@@ -172,7 +226,7 @@ class OllamaManager:
                             downloaded_names.add(name)
                             meta = await self._show_metadata(
                                 client, name, str(m.get("modified_at") or ""))
-                            models_result.append({
+                            row: dict[str, Any] = {
                                 "name": name,
                                 "size": f"~{size_gb}GB",
                                 "size_bytes": size_bytes,
@@ -183,7 +237,10 @@ class OllamaManager:
                                 "family": meta["family"],
                                 "parameter_size": meta["parameter_size"],
                                 "quantization": meta["quantization"],
-                            })
+                            }
+                            if running is not None:
+                                row["loaded"] = name in running
+                            models_result.append(row)
             except Exception as e:  # noqa: BLE001 — best-effort delete: any failure reports False  # noqa: BLE001 — download failure is reported as a TASK_FAILED event, never raised  # noqa: BLE001 — best-effort model listing: a dead Ollama yields an empty list
                 logger.warning(f"Error fetching Ollama tags: {e}")
 
@@ -226,6 +283,10 @@ class OllamaManager:
                 if res.status_code != 200:
                     return []
                 data = res.json()
+                # Spec D (FF3-08): residency rides this inventory
+                # too, under the same rule — present only when the
+                # daemon answered /api/ps.
+                running = await self._running_model_names(client)
                 models: list[dict[str, Any]] = []
                 for m in data.get("models", []):
                     name = m.get("name", "")
@@ -236,7 +297,7 @@ class OllamaManager:
                     # embedding model must not surface as a "brain".
                     meta = await self._show_metadata(
                         client, name, str(m.get("modified_at") or ""))
-                    models.append({
+                    row: dict[str, Any] = {
                         "name": name,
                         "size_bytes": m.get("size", 0) or 0,
                         "path": self._downloaded_paths.get(
@@ -245,7 +306,10 @@ class OllamaManager:
                         "family": meta["family"],
                         "parameter_size": meta["parameter_size"],
                         "quantization": meta["quantization"],
-                    })
+                    }
+                    if running is not None:
+                        row["loaded"] = name in running
+                    models.append(row)
         except Exception as e:  # noqa: BLE001 — inventory is best-effort: an unreadable daemon response means "unknown", reported as empty
             logger.warning(f"Error fetching Ollama tags for inventory: {e}")
             return []

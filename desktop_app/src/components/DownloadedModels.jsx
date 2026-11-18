@@ -1,5 +1,5 @@
 import React from 'react';
-import { Trash2, RefreshCw, X, FolderOpen } from 'lucide-react';
+import { Trash2, RefreshCw, X, FolderOpen, Eject } from 'lucide-react';
 import { formatBytes } from '../formatBytes';
 import FitBadge, { LoadStateBadge } from './FitBadge';
 import {
@@ -52,6 +52,7 @@ export function DownloadedModelRow({
   onSetActive,
   onUseAsEmbedder,
   onDeleteDownloaded,
+  onUnloadDownloaded,
 }) {
   const sizeText = row.size_bytes ? formatBytes(row.size_bytes) : null;
   // Embedder eligibility: the daemon said this model can embed
@@ -132,6 +133,11 @@ export function DownloadedModelRow({
           Delete queued
         </span>
       )}
+      {row.loaded === true && onUnloadDownloaded && (
+        <button onClick={() => onUnloadDownloaded(row)} data-testid={`hub-unload-${rowKey}`} className="aether-solid-btn" style={{ padding: '8px 10px', borderRadius: '10px', cursor: 'pointer' }} title="Unload from memory (the files stay on this machine)">
+          <Eject size={16} />
+        </button>
+      )}
       <button onClick={() => onDeleteDownloaded(row)} disabled={deleteQueued} className="aether-solid-btn" style={{ padding: '8px 10px', background: 'rgba(201,42,42,0.1)', color: 'var(--danger)', border: '1px solid rgba(201,42,42,0.2)', borderRadius: '10px', cursor: deleteQueued ? 'default' : 'pointer', opacity: deleteQueued ? 0.45 : 1 }} title={deleteQueued ? 'Delete already queued — will apply when the engine reconnects' : 'Delete Model'}>
         <Trash2 size={16} />
       </button>
@@ -154,6 +160,7 @@ export function DownloadedModelsSection({
   onSetActive,
   onUseAsEmbedder,
   onDeleteDownloaded,
+  onUnloadDownloaded,
 }) {
   // Spec D: the header states where the downloaded models
   // physically live (the backend's own store path, carried on
@@ -236,6 +243,7 @@ export function DownloadedModelsSection({
                 onSetActive={onSetActive}
                 onUseAsEmbedder={onUseAsEmbedder}
                 onDeleteDownloaded={onDeleteDownloaded}
+                onUnloadDownloaded={onUnloadDownloaded}
               />
             );
           })}

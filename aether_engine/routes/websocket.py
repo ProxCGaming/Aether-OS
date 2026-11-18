@@ -71,6 +71,7 @@ from aether_engine.routes.ws_memory_media import (
     send_diagnostics_export_result,
     send_local_model_delete_result,
     send_local_model_list_result,
+    send_local_model_unload_result,
     send_media_search_result,
     send_memory_episodes_result,
     send_memory_export_result,
@@ -2335,6 +2336,13 @@ async def _handle_local_model_delete_request(conn: WsConnection, msg: Event) -> 
     conn.spawn_background(send_local_model_delete_result(conn, 
         req_id, msg.payload.get("model", "")))
 
+async def _handle_local_model_unload_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_local_model_unload_result):
+    # the daemon call can take seconds (RUX-B-08).
+    conn.spawn_background(send_local_model_unload_result(conn,
+        req_id, msg.payload.get("model", "")))
+
 # -----------------------------------------------------------
 # Model Hub catalogue layer (H1, read-only)
 # -----------------------------------------------------------
@@ -4385,6 +4393,7 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.LOCAL_MODEL_DOWNLOAD_START: _handle_local_model_download_start,
     EventType.LOCAL_MODEL_DOWNLOAD_CANCEL: _handle_local_model_download_cancel,
     EventType.LOCAL_MODEL_DELETE_REQUEST: _handle_local_model_delete_request,
+    EventType.LOCAL_MODEL_UNLOAD_REQUEST: _handle_local_model_unload_request,
     EventType.MODEL_HUB_SEARCH_REQUEST: _handle_model_hub_search_request,
     EventType.MODEL_HUB_DETAIL_REQUEST: _handle_model_hub_detail_request,
     EventType.MODEL_HUB_DOWNLOAD_REQUEST: _handle_model_hub_download_request,

@@ -557,6 +557,10 @@ class ModelHubDownloads:
                 "size_bytes": model.get("size_bytes"),
                 "downloaded": True,
                 "path": model.get("path"),
+                # Spec D (FF3-08): residency when the manager
+                # reported it; None (unreported) otherwise — the
+                # badge renders nothing for None.
+                "loaded": model.get("loaded"),
             })
         # N-13: the HF cache scan is a synchronous recursive disk
         # walk (a stat per file) — off the event loop; the delete
