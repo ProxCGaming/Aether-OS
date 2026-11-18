@@ -707,6 +707,63 @@ def _desktop_control(machine: dict[str, Any]) -> dict[str, Any]:
         "desktop-control platform support is unjudged.")
 
 
+# ---------------------------------------------------------------------------
+# Per-model fit — a PURE function of one model's size and the
+# probe dict, for the model hub / downloaded inventory (Full
+# Furnish Spec D, FF3-08). The hub rows carry the verdict so a
+# user sees "Tight" BEFORE downloading, not after a failed load.
+#
+# The budget is the memory the serving backend must hold the
+# weights in: the GPU's measured memory when a GPU was detected
+# with one (that is where the backend puts the weights), else
+# total RAM. The comfortable line is a HEURISTIC in this
+# module's standing sense (see the thresholds comment above):
+# weights at or under 80% of the budget leave room for the KV
+# cache and the runtime; between there and the budget the model
+# fits but leaves little headroom ("tight"); past the budget it
+# cannot be held at all. Every reason names its numbers, so a
+# wrong line is visible in the UI, not hidden in code.
+# ---------------------------------------------------------------------------
+LOCAL_MODEL_FIT_COMFORTABLE_FRACTION = 0.8
+
+
+def local_model_fit(
+        size_bytes: int | None, machine: dict[str, Any]) -> dict[str, Any] | None:
+    """Judge one local model's footprint against this machine.
+
+    Returns ``{"tier": "comfortable" | "tight" | "too_large",
+    "reason": str}``, or None when the model's size or the
+    machine's memory budget is unknown — an unjudged model is
+    an honest answer; a guessed tier is not.
+    """
+    if not size_bytes or size_bytes <= 0:
+        return None
+    gpu = machine.get("gpu") or {}
+    budget = gpu.get("memory_bytes")
+    budget_source = "GPU"
+    if not budget:
+        budget = (machine.get("ram") or {}).get("total_bytes")
+        budget_source = "RAM"
+    if not budget:
+        return None
+    if size_bytes > budget:
+        return {
+            "tier": "too_large",
+            "reason": (f"Exceeds this machine's ≈{_gb(budget)} GB "
+                       f"{budget_source} budget."),
+        }
+    if size_bytes > LOCAL_MODEL_FIT_COMFORTABLE_FRACTION * budget:
+        return {
+            "tier": "tight",
+            "reason": "Fits — but leaves little headroom on this machine.",
+        }
+    return {
+        "tier": "comfortable",
+        "reason": (f"Fits comfortably within this machine's "
+                   f"≈{_gb(budget)} GB {budget_source} budget."),
+    }
+
+
 def capability_matrix(machine: dict[str, Any]) -> list[dict[str, Any]]:
     """PURE: probe dict -> per-feature verdicts. No I/O, no
     clock, no randomness — the same machine always yields the

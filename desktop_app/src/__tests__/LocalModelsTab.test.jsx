@@ -656,3 +656,59 @@ describe('Model Hub Set Active confirmation (D2-14)', () => {
     }
   });
 });
+
+describe('Spec D — fit badges, blocked downloads, models location', () => {
+  const TOO_LARGE_ROW = {
+    ...OLLAMA_ROW, id: 'huge:70b', name: 'huge:70b', size_bytes: 40 * 1024 * 1024 * 1024,
+    fit: { tier: 'too_large', reason: "Exceeds this machine's ≈16 GB RAM budget." },
+  };
+
+  it('a too-large row shows the badge and the reason, and offers no download', async () => {
+    const ctx = await renderTab();
+    respond(ctx.getHandler, ctx.wsRef, 'MODEL_HUB_SEARCH_REQUEST', 'MODEL_HUB_SEARCH_RESPONSE', { models: [TOO_LARGE_ROW], error: null });
+    const card = await screen.findByTestId('result-row-ollama:huge:70b');
+    expect(within(card).getByTestId('result-fit-ollama:huge:70b')).toHaveTextContent('Too large');
+    expect(within(card).getByTestId('result-fit-reason-ollama:huge:70b')).toHaveTextContent('≈16 GB RAM budget');
+    expect(within(card).queryByRole('button', { name: /^download$/i })).not.toBeInTheDocument();
+    expect(within(card).getByText(/download unavailable/i)).toBeInTheDocument();
+  });
+
+  it('a comfortable row keeps its download button and shows the badge', async () => {
+    const fitted = { ...OLLAMA_ROW, fit: { tier: 'comfortable', reason: 'Fits comfortably.' } };
+    const ctx = await renderTab();
+    respond(ctx.getHandler, ctx.wsRef, 'MODEL_HUB_SEARCH_REQUEST', 'MODEL_HUB_SEARCH_RESPONSE', { models: [fitted], error: null });
+    const card = await screen.findByTestId('result-row-ollama:qwen3:8b');
+    expect(within(card).getByTestId('result-fit-ollama:qwen3:8b')).toHaveTextContent('Comfortable');
+    expect(within(card).getByRole('button', { name: /^download$/i })).toBeInTheDocument();
+  });
+
+  it('a too-large variant is blocked while a fitting variant stays downloadable', async () => {
+    const detail = {
+      ...GGUF_DETAIL,
+      variants: [
+        { kind: 'gguf', file: 'Qwen3-8B-Q4_K_M.gguf', size_bytes: 5000000000, quant: 'Q4_K_M', fit: { tier: 'comfortable', reason: 'Fits.' } },
+        { kind: 'gguf', file: 'Qwen3-8B-Q8_0.gguf', size_bytes: 40000000000, quant: 'Q8_0', fit: { tier: 'too_large', reason: 'Too big.' } },
+      ],
+    };
+    const ctx = await renderTab();
+    respond(ctx.getHandler, ctx.wsRef, 'MODEL_HUB_SEARCH_REQUEST', 'MODEL_HUB_SEARCH_RESPONSE', { models: [HF_GGUF_ROW], error: null });
+    const card = await screen.findByTestId('result-row-hf:bartowski/Qwen3-8B-GGUF');
+    fireEvent.click(within(card).getByRole('button', { name: /details/i }));
+    respond(ctx.getHandler, ctx.wsRef, 'MODEL_HUB_DETAIL_REQUEST', 'MODEL_HUB_DETAIL_RESPONSE', { detail, error: null });
+    const small = await within(card).findByTestId('variant-Q4_K_M');
+    expect(within(small).getByRole('button', { name: /download/i })).toBeInTheDocument();
+    const big = within(card).getByTestId('variant-Q8_0');
+    expect(within(big).queryByRole('button', { name: /download/i })).not.toBeInTheDocument();
+    expect(within(big).getByText('Too large for this machine')).toBeInTheDocument();
+  });
+
+  it('the Downloaded header shows the models location the payload names', async () => {
+    const ctx = await renderTab();
+    respond(ctx.getHandler, ctx.wsRef, 'MODEL_HUB_DOWNLOADED_REQUEST', 'MODEL_HUB_DOWNLOADED_RESPONSE', {
+      models: [DL_OLLAMA], error: null, models_location: '/home/user/.ollama/models',
+    });
+    const section = await screen.findByTestId('downloaded-section');
+    expect(within(section).getByTestId('downloaded-models-location')).toHaveTextContent('/home/user/.ollama/models');
+    expect(within(section).getByTestId('downloaded-models-location')).toHaveTextContent('1 model');
+  });
+});

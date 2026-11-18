@@ -549,7 +549,40 @@ async def test_downloaded_inventory_merges_ollama_and_hf(tmp_path):
 async def test_downloaded_inventory_empty_is_not_an_error(tmp_path):
     mgr = _downloads(tmp_path)
     result = await mgr.downloaded()
-    assert result == {"models": [], "error": None}
+    # Spec D: the payload also names the on-disk models location;
+    # the fake manager cannot name one, so it is honestly None.
+    assert result == {"models": [], "error": None, "models_location": None}
+
+
+async def test_downloaded_payload_names_the_models_location(tmp_path):
+    ollama = _FakeOllama()
+    ollama.models_dir = "/models/store"
+    mgr = _downloads(tmp_path, ollama=ollama)
+    result = await mgr.downloaded()
+    assert result["models_location"] == "/models/store"
+
+
+async def test_downloaded_rows_carry_fit_for_this_machine(tmp_path, monkeypatch):
+    # Spec D (FF3-08): fit is judged engine-side from the
+    # capability probe — a 20 GiB model on a 16 GiB machine is
+    # too large; a 102-byte speech model is comfortable.
+    import aether_engine.models.hub_downloads as hub_downloads
+
+    monkeypatch.setattr(
+        hub_downloads, "machine_capability_report",
+        lambda: {"machine": {"ram": {"total_bytes": 16 * 1024 ** 3},
+                             "gpu": None}})
+    _seed_hf_cache(tmp_path / "hf-cache", "Systran/faster-whisper-small",
+                   {"model.bin": b"x" * 100, "config.json": b"{}"})
+    ollama = _FakeOllama()
+    ollama.downloaded_models = [
+        {"name": "huge:32b", "size_bytes": 20 * 1024 ** 3, "path": "/models/huge"},
+    ]
+    mgr = _downloads(tmp_path, ollama=ollama)
+    result = await mgr.downloaded()
+    rows = {(r["source"], r["id"]): r for r in result["models"]}
+    assert rows[("ollama", "huge:32b")]["fit"]["tier"] == "too_large"
+    assert rows[("hf", "Systran/faster-whisper-small")]["fit"]["tier"] == "comfortable"
 
 
 # ---------------------------------------------------------------------------

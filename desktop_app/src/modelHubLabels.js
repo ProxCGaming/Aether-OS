@@ -24,6 +24,16 @@ export const TYPE_LABELS = {
   unknown: 'Type unknown',
 };
 
+// Fit verdicts (Spec D): judged ENGINE-side from the machine
+// capability probe (machine_capability.local_model_fit) and
+// carried on the payload as row.fit — this map is only the
+// display vocabulary for the three tiers, never a threshold.
+export const FIT_BADGES = {
+  comfortable: { label: 'Comfortable', color: 'var(--success)', bg: 'rgba(76, 195, 138, 0.15)', border: 'rgba(76, 195, 138, 0.3)' },
+  tight: { label: 'Tight', color: 'var(--accent)', bg: 'rgba(var(--accent-rgb), 0.12)', border: 'rgba(var(--accent-rgb), 0.35)' },
+  too_large: { label: 'Too large', color: 'var(--danger)', bg: 'rgba(201,42,42, 0.12)', border: 'rgba(201,42,42, 0.3)' },
+};
+
 export const RUNNABILITY_BADGES = {
   'in-app': { label: 'In-app', color: 'var(--success)', bg: 'rgba(76, 195, 138, 0.15)', border: 'rgba(76, 195, 138, 0.3)' },
   ollama: { label: 'Via Ollama', color: 'var(--accent)', bg: 'rgba(var(--accent-rgb), 0.12)', border: 'rgba(var(--accent-rgb), 0.35)' },

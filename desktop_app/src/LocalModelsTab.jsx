@@ -10,6 +10,7 @@ import {
   downloadButtonStyle,
 } from './modelHubLabels';
 import { DownloadProgressRow, DownloadedModelsSection } from './components/DownloadedModels';
+import FitBadge from './components/FitBadge';
 import OllamaModelList from './components/OllamaModelList';
 
 // Model Hub (H4): this tab is the renderer's window onto the hub
@@ -76,6 +77,10 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
   // answered-empty inventory. 'ready' is only ever set by a real
   // answer carrying the model list.
   const [inventoryLoad, setInventoryLoad] = useState('loading'); // loading | queued | ready | error
+  // Spec D: the on-disk store path the inventory payload names
+  // (the serving backend's own models directory) — shown in the
+  // Downloaded header. Null until a payload reports one.
+  const [modelsLocation, setModelsLocation] = useState(null);
   const [downloadProgress, setDownloadProgress] = useState({}); // engine key -> { percent, status }
   const [hubError, setHubError] = useState(null);
 
@@ -207,6 +212,7 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
     const disposition = sendRequest('MODEL_HUB_DOWNLOADED_REQUEST', {}, (payload) => {
       if (payload && Array.isArray(payload.models)) {
         setDownloaded(payload.models);
+        setModelsLocation(payload.models_location || null);
         setInventoryLoad('ready');
       }
       if (payload && payload.error) {
@@ -486,7 +492,11 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
 
   const renderVariant = (row, variant) => {
     const label = variant.quant || (variant.kind === 'gguf' ? 'GGUF' : variant.kind);
+    // Spec D: a variant judged too large for this machine is
+    // not downloadable — the engine's fit verdict blocks the
+    // button, with the reason shown in place of it.
     const downloadable = row.runnability === 'ollama' && variant.kind === 'gguf'
+      && variant.fit?.tier !== 'too_large'
       && !isDownloaded(row) && !progressForRow(row) && !pendingDownloadFor(row);
     return (
       <div
@@ -510,11 +520,14 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
           <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
             {variant.size_bytes ? formatBytes(variant.size_bytes) : 'Size not reported'}
           </span>
-          {downloadable && (
+          <FitBadge fit={variant.fit} />
+          {downloadable ? (
             <button onClick={() => handleDownload(row, variant)} className="aether-solid-btn" style={{ ...downloadButtonStyle, padding: '6px 12px', fontSize: '12px' }}>
               <Download size={14} /> Download
             </button>
-          )}
+          ) : variant.fit?.tier === 'too_large' ? (
+            <span style={{ fontSize: '12px', color: 'var(--danger)' }} title={variant.fit.reason || ''}>Too large for this machine</span>
+          ) : null}
         </div>
       </div>
     );
@@ -562,7 +575,11 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
     const downloadsText = formatDownloads(row.downloads);
     // Whole-repo downloads: Ollama library rows and in-app speech
     // repos. HF GGUF repos download per variant from the detail.
-    const wholeRepoDownloadable = !alreadyDownloaded && !progress && (
+    // Spec D: a model judged too large for this machine is not
+    // downloadable at all — the engine's fit verdict blocks it,
+    // with the reason rendered under the badges below.
+    const wholeRepoDownloadable = !alreadyDownloaded && !progress
+      && row.fit?.tier !== 'too_large' && (
       row.source === 'ollama' || row.runnability === 'in-app'
     );
 
@@ -610,6 +627,7 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
           <span title={row.runnability_reason || ''} style={{ background: badge.bg, color: badge.color, border: `1px solid ${badge.border}`, padding: '4px 8px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, letterSpacing: '0.03em' }}>
             {badge.label}
           </span>
+          <FitBadge fit={row.fit} testId={`result-fit-${rowKey(row)}`} />
           <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
             {row.licence ? `Licence: ${row.licence}` : 'Licence unknown'}
           </span>
@@ -620,6 +638,9 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
         )}
         {row.runnability === 'unknown' && row.runnability_reason && (
           <p style={{ color: 'var(--text-secondary)', fontSize: '12px', lineHeight: '1.5', margin: '0 0 16px 0' }}>{row.runnability_reason}</p>
+        )}
+        {row.fit?.tier === 'too_large' && row.fit.reason && (
+          <p data-testid={`result-fit-reason-${rowKey(row)}`} style={{ color: 'var(--danger)', fontSize: '12px', lineHeight: '1.5', margin: '0 0 16px 0' }}>{row.fit.reason}</p>
         )}
 
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center', justifyContent: 'space-between', marginTop: 'auto' }}>
@@ -633,6 +654,8 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
             </button>
           ) : row.runnability === 'ollama' && row.source === 'hf' && !alreadyDownloaded ? (
             <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Pick a variant below to download via Ollama.</span>
+          ) : row.fit?.tier === 'too_large' && !alreadyDownloaded ? (
+            <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Too large for this machine — download unavailable.</span>
           ) : <span />}
           <button
             onClick={() => toggleDetails(row)}
@@ -762,6 +785,7 @@ export default function LocalModelsTab({ wsRef, safeSend = null, pendingMessages
       <DownloadedModelsSection
         downloaded={downloaded}
         inventoryLoad={inventoryLoad}
+        modelsLocation={modelsLocation}
         activeDefault={activeDefault}
         activeEmbedder={activeEmbedder}
         embedderSwitchPending={embedderSwitchPending}

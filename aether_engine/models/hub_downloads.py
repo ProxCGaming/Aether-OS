@@ -47,6 +47,10 @@ from pathlib import Path
 from typing import Any
 
 from aether_common.contracts import Event, EventType, TaskState
+from aether_engine.machine_capability import (
+    local_model_fit,
+    machine_capability_report,
+)
 from aether_engine.models.local_models import OllamaManager
 from aether_engine.models.model_hub import (
     ModelHub,
@@ -559,8 +563,31 @@ class ModelHubDownloads:
         # path in this file was already offloaded, this sibling was
         # missed.
         rows.extend(await asyncio.to_thread(self._scan_hf_speech_cache))
+        # Spec D (FF3-08): each row carries its fit verdict for
+        # THIS machine (machine_capability's probe + budgets), and
+        # the payload names the on-disk models location the
+        # Downloaded header shows. Fit is advisory: any failure
+        # judging it leaves every verdict None (unjudged) rather
+        # than breaking the inventory answer.
+        machine: dict[str, Any] = {}
+        try:
+            report = await asyncio.to_thread(machine_capability_report)
+            machine = report.get("machine") or {}
+        except Exception:  # noqa: BLE001 — advisory only, see above
+            machine = {}
+        for row in rows:
+            row["fit"] = local_model_fit(row.get("size_bytes"), machine)
         rows.sort(key=lambda r: (r["source"], r["name"]))
-        return {"models": rows, "error": None}
+        # The daemon store's directory — where the downloaded
+        # Ollama models physically live. A manager that cannot
+        # name it (a test double, a future backend) yields None
+        # and the header simply omits the location.
+        models_dir = getattr(self._ollama, "models_dir", None)
+        return {
+            "models": rows,
+            "error": None,
+            "models_location": str(models_dir) if models_dir else None,
+        }
 
     # -- Delete --------------------------------------------------------------
 

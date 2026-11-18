@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { RefreshCw, Trash2 } from 'lucide-react';
+import FitBadge, { LoadStateBadge } from './FitBadge';
 
 // Master build S21 (R17 wiring): the engine's own Ollama list —
 // LOCAL_MODEL_LIST_REQUEST's inventory (the daemon's models with
@@ -123,6 +124,16 @@ export default function OllamaModelList({ sendRequest, pendingDeleteFor }) {
                   <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                     {[model.size, model.type, model.parameter_size, model.quantization].filter(Boolean).join(' · ') || 'Downloaded'}
                   </div>
+                  {/* Spec D: the engine-judged fit verdict and the
+                      backend's residency report ride the same
+                      shared badges as the hub surfaces; both omit
+                      while unjudged/unreported. */}
+                  {(model.fit || model.loaded !== undefined) && (
+                    <div style={{ display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap' }}>
+                      <FitBadge fit={model.fit} testId={`ollama-fit-${model.name}`} />
+                      <LoadStateBadge loaded={model.loaded} testId={`ollama-load-state-${model.name}`} />
+                    </div>
+                  )}
                 </div>
                 {deleteQueued ? (
                   <span data-testid={`ollama-delete-queued-${model.name}`} style={{ fontSize: '12px', color: 'var(--accent)', fontWeight: 500, flexShrink: 0 }}>

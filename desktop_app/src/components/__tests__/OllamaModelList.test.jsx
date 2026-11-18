@@ -113,3 +113,23 @@ describe('OllamaModelList', () => {
     expect(screen.getByTestId('ollama-delete-llama3.1:8b')).toBeInTheDocument();
   });
 });
+
+describe('OllamaModelList — Spec D fit and load state', () => {
+  test('renders the fit badge and Loaded from the payload; unreported rows get neither', async () => {
+    const models = [
+      { ...MODELS[0], fit: { tier: 'comfortable', reason: 'Fits.' }, loaded: true },
+      MODELS[1],
+    ];
+    const sendRequest = makeSendRequest({ LOCAL_MODEL_LIST_REQUEST: { models } });
+    render(<OllamaModelList sendRequest={sendRequest} pendingDeleteFor={() => undefined} />);
+    await waitFor(() => {
+      expect(screen.getByTestId('ollama-model-qwen3:8b')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('ollama-fit-qwen3:8b')).toHaveTextContent('Comfortable');
+    expect(screen.getByTestId('ollama-load-state-qwen3:8b')).toHaveTextContent('Loaded');
+    // The second row's payload carries neither field — honest
+    // absence: no fit badge, no load-state badge.
+    expect(screen.queryByTestId('ollama-fit-llama3.1:8b')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('ollama-load-state-llama3.1:8b')).not.toBeInTheDocument();
+  });
+});

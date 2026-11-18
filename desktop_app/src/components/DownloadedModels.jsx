@@ -1,6 +1,7 @@
 import React from 'react';
-import { Trash2, RefreshCw, X } from 'lucide-react';
+import { Trash2, RefreshCw, X, FolderOpen } from 'lucide-react';
 import { formatBytes } from '../formatBytes';
+import FitBadge, { LoadStateBadge } from './FitBadge';
 import {
   FAMILY_LABELS,
   SOURCE_LABELS,
@@ -78,6 +79,11 @@ export function DownloadedModelRow({
           {row.params && <span style={chipStyle}>{row.params} Params</span>}
           {row.quant && <span style={chipStyle}>{row.quant}</span>}
           {sizeText && <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{sizeText}</span>}
+          {/* Spec D: the engine-judged fit for this machine, and
+              the backend's residency report when it carries one —
+              both render nothing while unjudged/unreported. */}
+          <FitBadge fit={row.fit} testId={`downloaded-fit-${rowKey}`} />
+          <LoadStateBadge loaded={row.loaded} testId={`downloaded-load-state-${rowKey}`} />
         </div>
         {row.path && (
           <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '4px' }} title={row.path}>{row.path}</div>
@@ -136,6 +142,7 @@ export function DownloadedModelRow({
 export function DownloadedModelsSection({
   downloaded = [],
   inventoryLoad = 'ready',
+  modelsLocation = null,
   activeDefault = { provider: '', model: '' },
   activeEmbedder = '',
   embedderSwitchPending = '',
@@ -148,6 +155,19 @@ export function DownloadedModelsSection({
   onUseAsEmbedder,
   onDeleteDownloaded,
 }) {
+  // Spec D: the header states where the downloaded models
+  // physically live (the backend's own store path, carried on
+  // the payload — never a hard-coded guess) and the total disk
+  // they occupy. A payload that cannot name its store omits the
+  // location rather than inventing one.
+  const totalBytes = downloaded.reduce(
+    (sum, row) => sum + (typeof row.size_bytes === 'number' ? row.size_bytes : 0), 0
+  );
+  const canOpenFolder = typeof window !== 'undefined' && !!window.electronAPI?.openPath;
+  const handleOpenFolder = async () => {
+    if (!modelsLocation || !canOpenFolder) return;
+    await window.electronAPI.openPath(modelsLocation);
+  };
   return (
     <div data-testid="downloaded-section">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
@@ -156,6 +176,29 @@ export function DownloadedModelsSection({
           <RefreshCw size={14} />
         </button>
       </div>
+      {downloaded.length > 0 && (
+        <div
+          data-testid="downloaded-models-location"
+          style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '-4px', marginBottom: '12px', fontSize: '12px', color: 'var(--text-muted)' }}
+        >
+          <span>
+            {downloaded.length} {downloaded.length === 1 ? 'model' : 'models'}
+            {totalBytes > 0 ? ` · ${formatBytes(totalBytes)} total` : ''}
+            {modelsLocation ? ` · ${modelsLocation}` : ''}
+          </span>
+          {modelsLocation && canOpenFolder && (
+            <button
+              type="button"
+              onClick={handleOpenFolder}
+              data-testid="downloaded-open-folder"
+              className="aether-solid-btn"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '4px 10px', borderRadius: '8px', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', cursor: 'pointer', border: '1px solid var(--border-default)' }}
+            >
+              <FolderOpen size={13} /> Open folder
+            </button>
+          )}
+        </div>
+      )}
       {inventoryLoad === 'loading' ? (
         <div data-testid="downloaded-loading" style={{ color: 'var(--text-secondary)', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <RefreshCw size={14} className="spin-animation" /> Loading downloaded models…

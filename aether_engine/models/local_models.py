@@ -11,6 +11,10 @@ from typing import Any
 import httpx
 
 from aether_common.contracts import Event, EventType, TaskState
+from aether_engine.machine_capability import (
+    local_model_fit,
+    machine_capability_report,
+)
 
 logger = logging.getLogger("aether_engine.models.local_models")
 
@@ -143,6 +147,17 @@ class OllamaManager:
         downloaded_names = set()
         models_result: list[dict[str, Any]] = []
 
+        # Spec D (FF3-08): downloaded rows also carry their exact
+        # size and fit verdict for this machine, judged from the
+        # capability probe. Advisory only — a probe failure leaves
+        # every verdict unjudged (None), never breaks the list.
+        fit_machine: dict[str, Any] = {}
+        try:
+            report = await asyncio.to_thread(machine_capability_report)
+            fit_machine = report.get("machine") or {}
+        except Exception:  # noqa: BLE001 — advisory only, see above
+            fit_machine = {}
+
         if await self.is_ollama_running():
             try:
                 async with httpx.AsyncClient(timeout=3.0) as client:
@@ -160,6 +175,8 @@ class OllamaManager:
                             models_result.append({
                                 "name": name,
                                 "size": f"~{size_gb}GB",
+                                "size_bytes": size_bytes,
+                                "fit": local_model_fit(size_bytes, fit_machine),
                                 "downloaded": True,
                                 "path": path,
                                 "type": meta["type"],
@@ -176,6 +193,10 @@ class OllamaManager:
                 models_result.append({
                     "name": item["name"],
                     "size": item["size"],
+                    # The catalogue's sizes are display strings, not
+                    # measurements — no exact bytes, no fit verdict.
+                    "size_bytes": None,
+                    "fit": None,
                     "downloaded": False,
                     "path": self._downloaded_paths.get(item["name"], ""),
                     "type": item.get("type", "unknown"),

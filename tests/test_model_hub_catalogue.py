@@ -623,3 +623,40 @@ def test_ws_hub_detail_ollama(ws_env):
         ev = _recv_until(ws, EventType.MODEL_HUB_DETAIL_RESPONSE)
     assert ev.payload["error"] is None
     assert ev.payload["detail"]["id"] == "llama3:8b"
+
+
+async def test_hub_search_ollama_rows_carry_fit(monkeypatch):
+    """Spec D (FF3-08): hub rows carry the fit verdict for THIS
+    machine, judged engine-side from the capability probe — the
+    UI never computes tiers from hard-coded thresholds. On a
+    100 MiB machine every shipped catalogue model (the smallest
+    is ≈274 MB) is too large; the catalogue rows themselves are
+    never mutated (they are cached and shared)."""
+    monkeypatch.setattr(
+        model_hub, "machine_capability_report",
+        lambda: {"machine": {"ram": {"total_bytes": 100 * 1024 ** 2},
+                             "gpu": None}})
+    hub = ModelHub()
+    result = await hub.search("ollama")
+    assert result["error"] is None
+    assert result["models"]
+    for row in result["models"]:
+        assert row["fit"]["tier"] == "too_large"
+    # The cached catalogue rows were not mutated by the widening.
+    for row in model_hub.ollama_catalogue_rows():
+        assert "fit" not in row
+
+
+async def test_hub_detail_variants_carry_fit(monkeypatch):
+    """Spec D: detail variants are judged individually — a Q4
+    variant can fit where the repo's largest variant cannot."""
+    monkeypatch.setattr(
+        model_hub, "machine_capability_report",
+        lambda: {"machine": {"ram": {"total_bytes": 64 * 1024 ** 3},
+                             "gpu": None}})
+    hub = ModelHub()
+    result = await hub.detail("ollama", hub._ollama()[0]["id"])
+    assert result["error"] is None
+    detail = result["detail"]
+    assert detail["fit"]["tier"] == "comfortable"
+    assert detail["variants"][0]["fit"]["tier"] == "comfortable"

@@ -20,6 +20,7 @@ HF failures (offline, timeout, HTTP error) surface as an honest
 error payload — ``{"models": [], "error": ...}`` — never as an
 exception and never as fabricated rows.
 """
+import asyncio
 import json
 import logging
 import re
@@ -29,6 +30,11 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+
+from aether_engine.machine_capability import (
+    local_model_fit,
+    machine_capability_report,
+)
 
 logger = logging.getLogger("aether_engine.models.model_hub")
 
@@ -453,6 +459,53 @@ class ModelHub:
             raise _HfHttpError(resp.status_code)
         return resp.json()
 
+    # -- machine fit (Spec D) ------------------------------------------
+
+    async def _fit_machine(self) -> dict[str, Any]:
+        """The capability probe dict fit verdicts are judged
+        against. The report is TTL-cached engine-side, so this
+        costs a dict copy once warm. Fit is advisory: ANY failure
+        here yields {} — every verdict then honestly comes back
+        unjudged (None) instead of breaking a catalogue answer."""
+        try:
+            report = await asyncio.to_thread(machine_capability_report)
+            return report.get("machine") or {}
+        except Exception:  # noqa: BLE001 — advisory only, see docstring
+            return {}
+
+    async def _with_fit(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Attach each row's fit verdict as a NEW dict per row
+        (the shipped Ollama catalogue rows are cached and shared
+        — never mutated). Rows are returned untouched when no
+        row reports a size: there is nothing to judge."""
+        if not any(r.get("size_bytes") for r in rows):
+            return rows
+        machine = await self._fit_machine()
+        return [
+            {**r, "fit": local_model_fit(r.get("size_bytes"), machine)}
+            for r in rows
+        ]
+
+    async def _detail_with_fit(self, detail: dict[str, Any]) -> dict[str, Any]:
+        """Attach fit verdicts to a detail dict and its variants
+        (same rule as search rows), as copies — the detail cache
+        keeps the raw detail."""
+        if not detail.get("size_bytes") and not any(
+                isinstance(v, dict) and v.get("size_bytes")
+                for v in detail.get("variants") or []):
+            return detail
+        machine = await self._fit_machine()
+        out = {**detail,
+               "fit": local_model_fit(detail.get("size_bytes"), machine)}
+        variants = detail.get("variants")
+        if isinstance(variants, list):
+            out["variants"] = [
+                {**v, "fit": local_model_fit(v.get("size_bytes"), machine)}
+                if isinstance(v, dict) else v
+                for v in variants
+            ]
+        return out
+
     # -- search ---------------------------------------------------------
 
     async def search(
@@ -470,7 +523,7 @@ class ModelHub:
                 rows = [r for r in rows if needle in r["name"].lower()]
             if family:
                 rows = [r for r in rows if r["family"] == family]
-            return {"models": rows, "error": None}
+            return {"models": await self._with_fit(rows), "error": None}
         if source != "hf":
             return {
                 "models": [],
@@ -541,7 +594,7 @@ class ModelHub:
             # The API filter is the primary cut; normalisation is the
             # authority (e.g. sentence-similarity → embedding).
             rows = [r for r in rows if r["family"] == family]
-        return {"models": rows, "error": None}
+        return {"models": await self._with_fit(rows), "error": None}
 
     # -- detail ---------------------------------------------------------
 
@@ -550,7 +603,8 @@ class ModelHub:
         if source == "ollama":
             for row in self._ollama():
                 if row["id"] == repo_id:
-                    return {"detail": _ollama_detail(row), "error": None}
+                    return {"detail": await self._detail_with_fit(
+                        _ollama_detail(row)), "error": None}
             return {
                 "detail": None,
                 "error": f"'{repo_id}' is not in the shipped Ollama catalogue.",
@@ -565,7 +619,8 @@ class ModelHub:
         key = (source, repo_id)
         cached = self._detail_cache.get(key)
         if cached and time.monotonic() - cached[0] < self._cache_ttl:
-            return {"detail": cached[1], "error": None}
+            return {"detail": await self._detail_with_fit(cached[1]),
+                    "error": None}
         try:
             data = await self._hf_get(
                 f"/api/models/{quote(repo_id, safe='/')}",
@@ -612,7 +667,7 @@ class ModelHub:
             }
         detail = normalise_hf_detail(data)
         self._cache_detail(key, detail)
-        return {"detail": detail, "error": None}
+        return {"detail": await self._detail_with_fit(detail), "error": None}
 
     def _cache_detail(
         self, key: tuple[str, str], detail: dict[str, Any],

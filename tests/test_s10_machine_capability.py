@@ -376,3 +376,54 @@ class TestHandler:
     def test_request_type_is_dispatched(self):
         assert websocket._DISPATCH[EventType.MACHINE_CAPABILITY_REQUEST] is \
             websocket._handle_machine_capability_request
+
+
+class TestLocalModelFit:
+    """Spec D (FF3-08): the per-model fit verdict the hub rows
+    carry — a pure function of the model's size and the probe
+    dict, judged against the GPU budget when one was measured,
+    else RAM. Unknown size or unknown budget is unjudged (None),
+    never a guessed tier."""
+
+    def test_small_model_on_roomy_machine_is_comfortable(self):
+        fit = mc.local_model_fit(4 * _GIB, _machine())
+        assert fit["tier"] == "comfortable"
+
+    def test_model_near_the_budget_is_tight(self):
+        # 14 GiB of weights in a 16 GiB budget: fits, no headroom.
+        fit = mc.local_model_fit(14 * _GIB, _machine())
+        assert fit["tier"] == "tight"
+        assert "headroom" in fit["reason"]
+
+    def test_model_past_the_budget_is_too_large_and_names_it(self):
+        fit = mc.local_model_fit(20 * _GIB, _machine())
+        assert fit["tier"] == "too_large"
+        assert "16 GB" in fit["reason"]
+        assert "RAM" in fit["reason"]
+
+    def test_gpu_budget_governs_when_measured(self):
+        # The Penpot Batch 3 board's machine: a ≈11 GB GPU budget.
+        # Its three example rows must land on the board's tiers.
+        machine = _machine(gpu={"name": "Synthetic GPU",
+                                "vendor": "nvidia",
+                                "memory_bytes": 11 * _GIB})
+        assert mc.local_model_fit(int(8.4 * _GIB), machine)["tier"] == "comfortable"
+        assert mc.local_model_fit(int(10.4 * _GIB), machine)["tier"] == "tight"
+        too_large = mc.local_model_fit(int(19.8 * _GIB), machine)
+        assert too_large["tier"] == "too_large"
+        assert "GPU" in too_large["reason"]
+
+    def test_gpu_without_measured_memory_falls_back_to_ram(self):
+        machine = _machine(gpu={"name": "Synthetic GPU",
+                                "vendor": None, "memory_bytes": None})
+        fit = mc.local_model_fit(20 * _GIB, machine)
+        assert fit["tier"] == "too_large"
+        assert "RAM" in fit["reason"]
+
+    def test_unknown_size_is_unjudged(self):
+        assert mc.local_model_fit(None, _machine()) is None
+        assert mc.local_model_fit(0, _machine()) is None
+
+    def test_unknown_budget_is_unjudged(self):
+        machine = _machine(ram={"total_bytes": None}, gpu=None)
+        assert mc.local_model_fit(4 * _GIB, machine) is None

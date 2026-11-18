@@ -167,5 +167,7 @@ async def test_hub_downloaded_scan_off_loop():
 
     manager._scan_hf_speech_cache = slow_scan
     delay, result = await _probe_delay(manager.downloaded())
-    assert result == {"models": [], "error": None}
+    # Spec D widened the envelope with the store location; the
+    # stub manager cannot name one, so it is honestly None.
+    assert result == {"models": [], "error": None, "models_location": None}
     assert delay < 0.25, f"event loop stalled {delay:.2f}s by HF cache scan"

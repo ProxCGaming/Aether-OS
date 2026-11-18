@@ -162,3 +162,63 @@ describe('DownloadProgressRow — RUX-A-19 cancel marking', () => {
     expect(screen.getByTitle('Cancel already queued — will apply when the engine reconnects')).toBeDisabled();
   });
 });
+
+describe('DownloadedModelsSection — Spec D header and row state', () => {
+  it('shows the count, total size and on-disk location from the payload', () => {
+    render(<DownloadedModelsSection {...sectionProps({
+      downloaded: [OLLAMA_MODEL, EMBED_MODEL],
+      modelsLocation: '/home/user/.ollama/models',
+    })} />);
+    const line = screen.getByTestId('downloaded-models-location');
+    expect(line).toHaveTextContent('2 models');
+    // 5 GiB + 274 MiB = 5.27 GiB → formatBytes renders "5.3 GB".
+    expect(line).toHaveTextContent('5.3 GB total');
+    expect(line).toHaveTextContent('/home/user/.ollama/models');
+  });
+
+  it('omits the location when the payload cannot name the store', () => {
+    render(<DownloadedModelsSection {...sectionProps({
+      downloaded: [OLLAMA_MODEL],
+      modelsLocation: null,
+    })} />);
+    const line = screen.getByTestId('downloaded-models-location');
+    expect(line).toHaveTextContent('1 model');
+    expect(line).not.toHaveTextContent('.ollama');
+    expect(screen.queryByTestId('downloaded-open-folder')).not.toBeInTheDocument();
+  });
+
+  it('renders the fit badge from the row payload, and nothing when unjudged', () => {
+    const fitted = {
+      ...OLLAMA_MODEL,
+      fit: { tier: 'tight', reason: 'Fits — but leaves little headroom on this machine.' },
+    };
+    const { rerender } = render(
+      <DownloadedModelsSection {...sectionProps({ downloaded: [fitted] })} />
+    );
+    expect(screen.getByTestId('downloaded-fit-ollama:qwen3:8b')).toHaveTextContent('Tight');
+    rerender(<DownloadedModelsSection {...sectionProps({ downloaded: [OLLAMA_MODEL] })} />);
+    expect(screen.queryByTestId('downloaded-fit-ollama:qwen3:8b')).not.toBeInTheDocument();
+  });
+
+  it('renders Loaded distinctly from Active when the payload reports residency', () => {
+    // The row is BOTH the configured default (Active) and resident
+    // (Loaded) — two different facts, two different badges.
+    const resident = { ...OLLAMA_MODEL, loaded: true };
+    render(<DownloadedModelsSection {...sectionProps({
+      downloaded: [resident],
+      activeDefault: { provider: 'ollama', model: 'qwen3:8b' },
+    })} />);
+    expect(screen.getByTestId('downloaded-load-state-ollama:qwen3:8b')).toHaveTextContent('Loaded');
+    expect(screen.getByText('Active')).toBeInTheDocument();
+  });
+
+  it('shows On disk for a reported-not-loaded row, and no badge when unreported', () => {
+    const onDisk = { ...OLLAMA_MODEL, loaded: false };
+    const { rerender } = render(
+      <DownloadedModelsSection {...sectionProps({ downloaded: [onDisk] })} />
+    );
+    expect(screen.getByTestId('downloaded-load-state-ollama:qwen3:8b')).toHaveTextContent('On disk');
+    rerender(<DownloadedModelsSection {...sectionProps({ downloaded: [OLLAMA_MODEL] })} />);
+    expect(screen.queryByTestId('downloaded-load-state-ollama:qwen3:8b')).not.toBeInTheDocument();
+  });
+});
