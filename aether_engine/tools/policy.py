@@ -43,6 +43,17 @@ KNOWN_NON_REGISTRY_TOOLS: dict[str, ToolRisk] = {
 _VERDICT_MAP = {"Always Allow": "allow", "Require Approval": "ask", "Deny": "deny"}
 
 
+def is_tool_disabled(tool_name: str, disabled_tools) -> bool:
+    """True when ``tool_name`` is in the user's Disabled set (D4-8).
+
+    Disable is a state of its own, distinct from approval policy:
+    the tool is hidden from the model (build_tool_registry omits
+    it) and any call that still arrives resolves to "deny" here,
+    whatever its approval setting says — including "Always Allow".
+    """
+    return bool(disabled_tools) and tool_name in disabled_tools
+
+
 def _floor_prefixes() -> list[Path]:
     """Sensitive prefixes whose calls can never be auto-allowed (E2-06).
 
@@ -218,6 +229,7 @@ def resolve_tool_policy(
     path_rules: list | None = None,
     shell_extras: dict | None = None,
     approval_mode: str = "ask",
+    disabled_tools=None,
 ) -> str:
     """
     Resolves the effective policy for a tool based on user settings and its risk.
@@ -236,7 +248,17 @@ def resolve_tool_policy(
     Epic 2, E2-07: shell commands carry segment-wise safety rules on
     top of everything else — a deny rule denies outright (no config
     relaxes a fork bomb), an ask rule raises any allow to ask.
+
+    D4-8: a Disabled tool resolves to "deny" before anything else
+    is consulted — disable is not an approval setting, so no
+    approval setting (not even "Always Allow") and no path rule
+    can soften it. The tool is normally absent from the registry
+    entirely; this verdict is the fail-closed answer for a call
+    that arrives anyway.
     """
+    if is_tool_disabled(tool.name, disabled_tools):
+        return "deny"
+
     shell_verdict = _shell_verdict(tool, args, shell_extras)
     if shell_verdict is not None and shell_verdict.verdict == "deny":
         return "deny"
@@ -356,11 +378,11 @@ def tool_risk_by_name(tool_name: str, registry=None) -> ToolRisk:
     return risk
 
 
-def resolve_policy_by_name(tool_name: str, user_policies: dict[str, str], registry=None, *, args: dict | None = None, path_rules: list | None = None, shell_extras: dict | None = None, approval_mode: str = "ask") -> str:
+def resolve_policy_by_name(tool_name: str, user_policies: dict[str, str], registry=None, *, args: dict | None = None, path_rules: list | None = None, shell_extras: dict | None = None, approval_mode: str = "ask", disabled_tools=None) -> str:
     """
     Helper to resolve policy given just a tool name, looking up in registry or fallbacks.
     """
     from aether_engine.tools.registry import Tool
 
     dummy_tool = Tool(name=tool_name, description="", risk=tool_risk_by_name(tool_name, registry))
-    return resolve_tool_policy(dummy_tool, user_policies, args=args, path_rules=path_rules, shell_extras=shell_extras, approval_mode=approval_mode)
+    return resolve_tool_policy(dummy_tool, user_policies, args=args, path_rules=path_rules, shell_extras=shell_extras, approval_mode=approval_mode, disabled_tools=disabled_tools)

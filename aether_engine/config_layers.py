@@ -61,7 +61,9 @@ logger = logging.getLogger("aether_engine.config_layers")
 PROJECT_CONFIG_RELPATH = Path(".aether") / "config.json"
 PROJECT_FORBIDDEN_KEYS = frozenset({
     # Approval policy and containment (the original strip list).
-    "tool_policies", "path_rules", "workspace_roots",
+    # D4-8: disabled_tools rides with tool_policies — a project file
+    # must not silently change which of the user's tools exist.
+    "tool_policies", "disabled_tools", "path_rules", "workspace_roots",
     "mcp_tool_risk_overrides", "onboarding_completed", "ttsr_rules",
     "memory_backend",
     # F-01 (EGM C-B12): approval mode — a project must never turn

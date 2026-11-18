@@ -7,6 +7,7 @@ import EmptyState from '../EmptyState';
 import CapabilityFilterBar from './CapabilityFilterBar';
 import CapabilityItem from './CapabilityItem';
 import { capabilityFilterCounts, filterCapabilityItems } from './capabilityFilter';
+import { queuedEnableVerb } from './capabilityEnable';
 
 // Wave 5 (Annex C row 7): the Tools tab, extracted from
 // SettingsPanel.jsx — approval mode and binding, remembered
@@ -15,17 +16,23 @@ import { capabilityFilterCounts, filterCapabilityItems } from './capabilityFilte
 //
 // D4-1: the tool list runs through the shared capability pattern
 // (CapabilityFilterBar + capabilityFilter + CapabilityItem rows).
-// A tool's enabled/disabled state for the chips is its effective
-// policy: a tool the engine resolves to 'deny' cannot run at all
-// (disabled); every other tool is available (enabled). The real
-// per-tool Disable control is D4-8's slice, not this one.
-export default function ToolsPanel({ approvalMode, handleApprovalModeChange, controlRefusal, approvalBindingMode, handleApprovalBindingChange, approvalGrants, grantsAnswered, isConnected, pendingGrantRevokeFor, handleRevokeGrant, configAnswered, engineConfig, configUpdateError, onConfigUpdate, tools, toolsAnswered, pendingToolPolicyFor, onToolPolicyChange }) {
+//
+// D4-8: a tool's enabled/disabled state for the chips is now its
+// REAL Disable state — the `enabled` fact on the engine's list
+// payload — not its effective policy. Disable ≠ policy: a denied
+// tool is still enabled (it exists, policy refuses its calls),
+// and a disabled tool is hidden from the model entirely while
+// keeping its approval policy untouched, so re-enabling restores
+// the exact prior behaviour. The Disable control below rides the
+// one enable mechanism (capabilityEnable.js): the shell's queued
+// send, with the queued state derived from the real queue.
+export default function ToolsPanel({ approvalMode, handleApprovalModeChange, controlRefusal, approvalBindingMode, handleApprovalBindingChange, approvalGrants, grantsAnswered, isConnected, pendingGrantRevokeFor, handleRevokeGrant, configAnswered, engineConfig, configUpdateError, onConfigUpdate, tools, toolsAnswered, pendingToolPolicyFor, onToolPolicyChange, pendingToolEnabledFor = () => undefined, onToolEnabledChange = () => {} }) {
   const [capQuery, setCapQuery] = useState('');
   const [capFilter, setCapFilter] = useState('all');
   const toolEntries = tools.map((tool) => ({
     item: tool,
     name: tool.function.name,
-    state: tool.effective_policy === 'deny' ? 'disabled' : 'enabled',
+    state: tool.enabled === false ? 'disabled' : 'enabled',
     hasUpdate: false,
   }));
   const toolCounts = capabilityFilterCounts(toolEntries);
@@ -215,6 +222,29 @@ export default function ToolsPanel({ approvalMode, handleApprovalModeChange, con
               badge = <span style={{ fontSize: '11px', background: 'rgba(201,42,42, 0.2)', color: 'var(--danger)', padding: '2px 6px', borderRadius: '4px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><Lock size={10} /> Risky</span>;
             }
 
+            // D4-2 (Tools side): an MCP-provided tool carries its
+            // origin as a source badge — the engine's Tool.source
+            // ("mcp:<server>") rides the list payload, so the row
+            // names the server that added it instead of merging
+            // invisibly with the built-ins (FF4-06). Built-ins
+            // (source "builtin") get no badge.
+            const sourceBadge = typeof tool.source === 'string' && tool.source.startsWith('mcp:')
+              ? (
+                <span
+                  data-testid={`tool-source-${tool.function.name}`}
+                  style={{ fontSize: '11px', background: 'var(--bg-hover)', color: 'var(--text-secondary)', padding: '2px 6px', borderRadius: '4px', fontFamily: 'var(--font-mono)' }}
+                >
+                  {tool.source}
+                </span>
+              )
+              : null;
+            const badges = (
+              <>
+                {badge}
+                {sourceBadge}
+              </>
+            );
+
             // Phase 10.3 C2: the old 'default' option is gone. It was
             // un-sendable — the handler returned early on it, and no
             // engine message exists to clear a stored override (TOOL_POLICY_SET_REQUEST only stores;
@@ -239,7 +269,7 @@ export default function ToolsPanel({ approvalMode, handleApprovalModeChange, con
               <CapabilityItem
                 key={tool.function.name}
                 name={tool.function.name}
-                badges={badge}
+                badges={badges}
                 description={(
                   <>
                     {tool.function.description}
@@ -278,6 +308,43 @@ export default function ToolsPanel({ approvalMode, handleApprovalModeChange, con
                         {pendingPolicy && (
                           <div style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px', width: '220px' }}>
                             Policy change to {pendingPolicy.payload.policy} queued — will apply when the engine reconnects.
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                  {/* D4-8: the real Disable — a control of its own,
+                      distinct from the approval policy above. The
+                      label stays driven by the engine's list (the
+                      `enabled` fact), the click rides the shell's
+                      queued send, and while the change sits in the
+                      offline queue the button is inert and the
+                      queued note names the pending action — the
+                      one enable mechanism (capabilityEnable.js),
+                      exactly as the Skills toggle behaves. */}
+                  {(() => {
+                    const pendingEnabled = pendingToolEnabledFor(tool.function.name);
+                    const isDisabled = tool.enabled === false;
+                    return (
+                      <>
+                        <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <button
+                            onClick={() => onToolEnabledChange(tool.function.name, isDisabled)}
+                            disabled={Boolean(pendingEnabled)}
+                            data-testid={`tool-enabled-toggle-${tool.function.name}`}
+                            style={{ background: isDisabled ? 'rgba(76, 195, 138,0.15)' : 'rgba(201,42,42,0.12)', color: isDisabled ? 'var(--success)' : 'var(--danger)', border: '1px solid var(--border-default)', padding: '6px 14px', borderRadius: '8px', cursor: pendingEnabled ? 'default' : 'pointer', fontSize: '12px', opacity: pendingEnabled ? 0.55 : 1 }}
+                          >
+                            {isDisabled ? 'Enable tool' : 'Disable tool'}
+                          </button>
+                          {pendingEnabled && (
+                            <span style={{ fontSize: '12px', color: 'var(--accent)' }}>
+                              {queuedEnableVerb(pendingEnabled)} queued — will apply when the engine reconnects
+                            </span>
+                          )}
+                        </div>
+                        {isDisabled && !pendingEnabled && (
+                          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px', width: '220px' }}>
+                            Disabled — hidden from the model. Its approval policy is unchanged.
                           </div>
                         )}
                       </>

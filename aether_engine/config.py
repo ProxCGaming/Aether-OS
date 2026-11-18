@@ -139,6 +139,16 @@ class UserConfig:
         "custom": {"time_cap_seconds": 3600, "memory_cap_mb": 2048},
     })
     tool_policies: dict[str, str] = field(default_factory=dict)
+    # Full Furnish D4-8: tools the user has Disabled — hidden from
+    # the model entirely, DISTINCT from their approval policy (a
+    # disabled tool keeps its tool_policies entry untouched, so
+    # re-enabling restores the exact prior behaviour). Honoured by
+    # build_tool_registry (the tool is absent from the registry the
+    # model sees) and by policy resolution (the name resolves to
+    # "deny" regardless of its approval setting). Project-layer
+    # config may NOT set this (config_layers strips it with
+    # tool_policies).
+    disabled_tools: list[str] = field(default_factory=list)
     # Epic 2, E2-06: ordered per-path policy rules refining tool_policies
     # for specific calls. Shape per rule: {"prefix": str, "verdict":
     # "Always Allow" | "Require Approval" | "Deny", "tools": [...]?,
@@ -493,6 +503,7 @@ class UserConfig:
             "custom_provider_types": self.custom_provider_types,
             "task_classes": self.task_classes,
             "tool_policies": self.tool_policies,
+            "disabled_tools": list(self.disabled_tools),
             "path_rules": self.path_rules,
             "mcp_tool_risk_overrides": dict(self.mcp_tool_risk_overrides),
             "ttsr_rules": list(self.ttsr_rules),
@@ -641,6 +652,7 @@ class UserConfig:
                 "custom": {"time_cap_seconds": 3600, "memory_cap_mb": 2048},
             }),
             tool_policies=_as_dict(d.get("tool_policies")),
+            disabled_tools=_clean_disabled_tools(d.get("disabled_tools")),
             path_rules=[r for r in d.get("path_rules", []) if isinstance(r, dict)] if isinstance(d.get("path_rules"), list) else [],
             mcp_tool_risk_overrides=_clean_mcp_risk_overrides(d.get("mcp_tool_risk_overrides")),
             ttsr_rules=_clean_ttsr_rules(d.get("ttsr_rules")),
@@ -826,6 +838,23 @@ def _clean_browser_category_modes(value) -> dict[str, str]:
     from aether_engine.browser.policy import clean_category_modes
 
     return clean_category_modes(value)
+
+
+def _clean_disabled_tools(value) -> list[str]:
+    """D4-8: keep only tool-name strings, de-duplicated, order kept.
+
+    Anything else (missing, null, a corrupt non-list) means "no
+    tools disabled" rather than a crash or a phantom disable.
+    """
+    if not isinstance(value, list):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for entry in value:
+        if isinstance(entry, str) and entry and entry not in seen:
+            seen.add(entry)
+            out.append(entry)
+    return out
 
 
 def _clean_mcp_risk_overrides(value) -> dict[str, str]:

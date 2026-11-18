@@ -669,6 +669,9 @@ async def start_task_message(conn: WsConnection, msg, req_id, previous_start):
             # task-level tightening or loosening.
             mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=task_user_config.mcp_tool_risk_overrides),
             include_file_tools=reqs.wants_code or (requested_model is not None),
+            # D4-8: task start is the registry the model sees —
+            # Disabled tools are absent from it entirely.
+            disabled_tools=task_user_config.disabled_tools,
         )
 
         # Config layers were resolved above for both paths

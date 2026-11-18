@@ -700,6 +700,9 @@ async def run_voice_background_task(conn, text: str, session_id: str, provider) 
             mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(
                 risk_overrides=cfg.mcp_tool_risk_overrides),
             include_file_tools=reqs.wants_code,
+            # D4-8: voice tasks see the same Disabled set as
+            # every other model-facing registry build.
+            disabled_tools=cfg.disabled_tools,
         )
         generator = _websocket.run_langgraph_task(
             prompt=text,

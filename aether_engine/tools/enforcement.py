@@ -56,6 +56,7 @@ class EnforcementPipeline:
         registry: ToolRegistry,
         audit_logger: Any,
         policies: dict[str, str] | None = None,
+        disabled_tools: Any = None,
         path_rules: list | None = None,
         shell_extras: dict | None = None,
         approval_mode: str = "ask",
@@ -68,6 +69,7 @@ class EnforcementPipeline:
         self.registry = registry
         self.log = audit_logger
         self.policies = policies
+        self.disabled_tools = disabled_tools
         self.path_rules = path_rules
         self.shell_extras = shell_extras
         self.approval_mode = approval_mode
@@ -112,7 +114,7 @@ class EnforcementPipeline:
         # in both binding modes, unchanged.
         effective_approved = self.approved and honor_approval
         try:
-            policy = resolve_policy_by_name(name, self.policies or {}, self.registry, args=check_args, path_rules=self.path_rules, shell_extras=self.shell_extras, approval_mode=self.approval_mode)
+            policy = resolve_policy_by_name(name, self.policies or {}, self.registry, args=check_args, path_rules=self.path_rules, shell_extras=self.shell_extras, approval_mode=self.approval_mode, disabled_tools=self.disabled_tools)
         except Exception as e:
             try:
                 log.log_event("TOOL_VALIDATION_FAILED", {"tool_name": name, "error": f"policy check failed internally: {e}", "via": "registry.execute"})

@@ -1,5 +1,6 @@
 import React from 'react';
 import LogsPanel from './LogsPanel';
+import CapabilityIssuesCard from './CapabilityIssuesCard';
 import MachineCapabilityCard from './MachineCapabilityCard';
 import CapabilityCheckCard from './CapabilityCheckCard';
 import FeatureStateCard from './FeatureStateCard';
@@ -10,7 +11,7 @@ import FeatureStateCard from './FeatureStateCard';
 // resolves the run); this panel renders the status card and the
 // Logs panel and fires the run/export through the handlers it
 // is given.
-export default function CapabilitiesPanel({ capabilityStatus, capabilityHistory, isDiagnosticsRunning, diagnosticsQueued, diagnosticsError, onRunDiagnostics, isConnected, sendSettingsAction, onExportBundle, engineConfig = null }) {
+export default function CapabilitiesPanel({ capabilityStatus, capabilityHistory, isDiagnosticsRunning, diagnosticsQueued, diagnosticsError, onRunDiagnostics, isConnected, sendSettingsAction, onExportBundle, engineConfig = null, onOpenCapabilityTab = null }) {
   return (
     <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Engine Capabilities</h2>
@@ -77,6 +78,15 @@ export default function CapabilitiesPanel({ capabilityStatus, capabilityHistory,
           )}
         </div>
       </div>
+
+      {/* D4-9: the capability-issues roll-up — MCP failures,
+          the plugin registry error and skill parse failures,
+          counted from the same lists their owning tabs show,
+          each with a jump to that tab. The diagnostics card
+          above is the environment-check run; this is the
+          capability surfaces' health, and the two are kept
+          visibly separate so neither count borrows the other. */}
+      <CapabilityIssuesCard onOpenCapabilityTab={onOpenCapabilityTab} />
 
       {/* Master build S10: the "This machine" card — the
           hardware probe + capability matrix. Self-contained

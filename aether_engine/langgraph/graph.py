@@ -118,6 +118,7 @@ def tool_router(state: AetherState, config=None) -> str:
             if user_config else None
         ),
         approval_mode=user_config.approval_mode if user_config else "ask",
+        disabled_tools=user_config.disabled_tools if user_config else None,
     )
     # Epic 8, E8-6.2: browser writes always meet the confirmation
     # gate in the pause node — the per-category browser policy

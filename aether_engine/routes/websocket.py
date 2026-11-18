@@ -876,6 +876,9 @@ async def _handle_tool_approval_decision(conn: WsConnection, msg: Event) -> None
 
     tools = build_tool_registry(
         mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=resume_user_config.mcp_tool_risk_overrides),
+        # D4-8: the resumed task's registry is one the model sees —
+        # its Disabled set applies exactly as at task start.
+        disabled_tools=resume_user_config.disabled_tools,
     )
 
     # Epic 2, E2-09: a scoped approval ("this file" / "this
@@ -2515,10 +2518,17 @@ async def _handle_tool_list_request(conn: WsConnection, msg: Event) -> None:
     from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
     from aether_engine.tools.policy import (
         KNOWN_NON_REGISTRY_TOOLS,
+        is_tool_disabled,
         resolve_policy_by_name,
     )
     from aether_engine.tools.registry import ToolRisk
-                
+
+    # D4-8: this build is for DISPLAY (and the enrichment below),
+    # so it deliberately does NOT pass disabled_tools — a disabled
+    # tool must stay listed in Settings, marked enabled=False, or
+    # the user could never re-enable it. The registries the model
+    # sees (task start, approval resume, voice) are built WITH
+    # the Disabled set and never contain the tool at all.
     tool_registry = build_tool_registry(
         mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
     )
@@ -2530,23 +2540,37 @@ async def _handle_tool_list_request(conn: WsConnection, msg: Event) -> None:
         # risk, not the EXECUTE fallback, drives the verdict)
         # and the live approval mode. Without them the list
         # reported "ask" for tools that actually run "allow".
+        # D4-8: the Disabled set is one of those inputs — a
+        # disabled tool's effective policy is "deny" here exactly
+        # as it is at enforcement time.
         effective = resolve_policy_by_name(
             name,
             engine_state.user_config.tool_policies,
             _registry,
             approval_mode=engine_state.user_config.approval_mode,
+            disabled_tools=engine_state.user_config.disabled_tools,
         )
         d["risk"] = risk.value if isinstance(risk, ToolRisk) else risk
         d["effective_policy"] = effective
         d["policy_is_default"] = user_val is None
         d["always_allow_permitted"] = (risk == ToolRisk.READ_ONLY)
         d["policy"] = user_val or "Require Approval" # UI currently expects the raw setting in 'policy' too
+        # D4-8: enabled is its OWN fact, not a policy verdict —
+        # the panel's Disable control and Disabled chip key off
+        # it, and the stored approval policy above is untouched
+        # by it (re-enabling restores the prior behaviour).
+        d["enabled"] = not is_tool_disabled(name, engine_state.user_config.disabled_tools)
         return d
 
     all_tools = tool_registry.get_tools()
     defs = []
     for t in all_tools:
         d = t.to_definition()
+        # D4-2 (Tools side): the tool's origin rides the payload —
+        # "builtin" or "mcp:<server>" (Tool.source) — so the
+        # panel can badge MCP tools instead of merging them
+        # invisibly with the built-ins (FF4-06).
+        d["source"] = t.source
         defs.append(enrich_tool(d, t.name, t.risk))
 
     # Add Supervisor Memory Tools — and (S19) the supervisor's
@@ -2707,6 +2731,45 @@ async def _handle_tool_policy_set_request(conn: WsConnection, msg: Event) -> Non
 
     await conn.ws.send_text(Event(
         type=EventType.TOOL_POLICY_SET_RESPONSE,
+        request_id=req_id,
+        payload=response_payload,
+    ).to_json())
+
+async def _handle_tool_enabled_set_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    tool_name = msg.payload.get("tool_name")
+    enabled = msg.payload.get("enabled")
+    response_payload = {"success": True, "tool_name": tool_name, "enabled": enabled}
+
+    if tool_name and isinstance(enabled, bool):
+        # D4-8: Disable is its own state, stored apart from
+        # tool_policies — disabling never rewrites the tool's
+        # approval policy, and re-enabling removes the name so
+        # the prior policy behaviour returns exactly.
+        disabled = list(engine_state.user_config.disabled_tools)
+        if enabled and tool_name in disabled:
+            disabled.remove(tool_name)
+        elif not enabled and tool_name not in disabled:
+            disabled.append(tool_name)
+        engine_state.user_config.disabled_tools = disabled
+        # E1-10: a save failure flips the verdict rather
+        # than raising out of the handler.
+        save_err = _try_save_config()
+        if save_err is not None:
+            response_payload["success"] = False
+            response_payload["error"] = f"Tool enabled state could not be saved: {save_err}"
+        else:
+            engine_state.audit_logger.log_event(
+                "TOOL_ENABLED_SET", {"tool_name": tool_name, "enabled": enabled})
+    else:
+        # E1-12: nothing was (or could be) saved, so the
+        # pre-built success:true above was a lie — the
+        # refusal is reported honestly instead.
+        response_payload["success"] = False
+        response_payload["error"] = "tool_name and a boolean enabled are required"
+
+    await conn.ws.send_text(Event(
+        type=EventType.TOOL_ENABLED_SET_RESPONSE,
         request_id=req_id,
         payload=response_payload,
     ).to_json())
@@ -4418,6 +4481,7 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.AGENT_LIST_REQUEST: _handle_agent_list_request,
     EventType.AGENT_UPDATE_REQUEST: _handle_agent_update_request,
     EventType.TOOL_POLICY_SET_REQUEST: _handle_tool_policy_set_request,
+    EventType.TOOL_ENABLED_SET_REQUEST: _handle_tool_enabled_set_request,
     EventType.APPROVAL_MODE_SET_REQUEST: _handle_approval_mode_set_request,
     EventType.MCP_SERVER_LIST_REQUEST: _handle_mcp_server_list_request,
     EventType.CONFIG_GET_REQUEST: _handle_config_get_request,

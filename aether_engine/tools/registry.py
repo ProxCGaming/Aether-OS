@@ -95,6 +95,7 @@ def build_tool_registry(
     *,
     include_file_tools: bool = True,
     include_web_tools: bool = True,
+    disabled_tools: Any = None,
 ) -> "ToolRegistry":
     """One place that builds the full registry (PRD Q3).
 
@@ -105,47 +106,63 @@ def build_tool_registry(
     (PRD Q10), so per-agent filtering would be a dead parameter.
     ``include_file_tools`` exists because task start only offers file
     tools for coding tasks.
+
+    ``disabled_tools`` (D4-8) is the user's Disabled set — plain
+    names, not the config object, keeping the no-``user_config``
+    rule. A disabled tool is never registered: it is absent from
+    the registry the model sees, which is what "hidden from the
+    model" means. Callers that build a registry for DISPLAY or
+    risk lookup (the Settings tool list, the policy setter) omit
+    it — a disabled tool must stay visible and manageable there.
     """
     from aether_engine.tools.current_time import create_current_time_tool
     from aether_engine.tools.filesystem_write import create_file_tools
     from aether_engine.tools.web_search import create_web_tools
 
+    disabled = set(disabled_tools or ())
     registry = ToolRegistry()
-    registry.register(create_current_time_tool())
+
+    def _add(tool: Tool) -> None:
+        if tool.name in disabled:
+            logger.debug("Tool %r not registered: disabled by the user", tool.name)
+            return
+        registry.register(tool)
+
+    _add(create_current_time_tool())
     from aether_engine.tools.codebase import codebase_tools
     from aether_engine.tools.filesystem import filesystem_read_tools
     from aether_engine.tools.scratchpad import create_scratchpad_tool
 
-    registry.register(create_scratchpad_tool())
+    _add(create_scratchpad_tool())
     for tool in filesystem_read_tools():
-        registry.register(tool)
+        _add(tool)
     # Epic 8, E8-3.2: deliberate prose retrieval over the workspace
     # index (rag/). READ_ONLY and self-limiting — with no index it
     # answers "nothing indexed" instead of failing.
     from aether_engine.tools.workspace_search import create_workspace_search_tool
 
-    registry.register(create_workspace_search_tool())
+    _add(create_workspace_search_tool())
     # Epic 8, E8-4.3: content-based recall over the media index
     # (media/). READ_ONLY and self-limiting — with no analysed
     # media it answers "no matches" instead of failing.
     from aether_engine.tools.media_recall import create_media_recall_tool
 
-    registry.register(create_media_recall_tool())
+    _add(create_media_recall_tool())
     # Calendar layer (14 Nov 2026): the schedule tools — add / list /
     # cancel over ~/.aether/calendar.db. WRITE tools ride the same
     # policy + approval pipeline as every other built-in.
     from aether_engine.tools.calendar_tools import create_calendar_tools
 
     for tool in create_calendar_tools():
-        registry.register(tool)
+        _add(tool)
     if include_file_tools:
         for tool in create_file_tools():
-            registry.register(tool)
+            _add(tool)
         for tool in codebase_tools():
-            registry.register(tool)
+            _add(tool)
     if include_web_tools:
         for tool in create_web_tools():
-            registry.register(tool)
+            _add(tool)
     # Epic 8, E8-6.1: agent-browser tools. Registered like every
     # other built-in — risk levels attached, the policy pipeline
     # applies unchanged; the tools themselves fail closed when
@@ -153,7 +170,7 @@ def build_tool_registry(
     from aether_engine.browser.tools import create_browser_tools
 
     for tool in create_browser_tools():
-        registry.register(tool)
+        _add(tool)
     # Master build S20: the desktop actuation tool. Registered
     # unconditionally like the browser tools — OFFERING is the
     # runner's job (it filters desktop_act out unless Computer
@@ -163,9 +180,9 @@ def build_tool_registry(
     from aether_engine.desktop.tools import create_desktop_tools
 
     for tool in create_desktop_tools():
-        registry.register(tool)
+        _add(tool)
     for tool in mcp_tools or []:
-        registry.register(tool)
+        _add(tool)
     return registry
 
 
@@ -293,6 +310,7 @@ class ToolRegistry:
         task_class: str = "standard",
         task_classes: dict[str, dict[str, int]] | None = None,
         policies: dict[str, str] | None = None,
+        disabled_tools: Any = None,
         approved: bool = False,
         audit_logger: Any = None,
         path_rules: list | None = None,
@@ -352,6 +370,7 @@ class ToolRegistry:
             registry=self,
             audit_logger=log,
             policies=policies,
+            disabled_tools=disabled_tools,
             path_rules=path_rules,
             shell_extras=shell_extras,
             approval_mode=approval_mode,

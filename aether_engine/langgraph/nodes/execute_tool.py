@@ -410,6 +410,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                 # built-in defaults instead of the selected profile.
                 task_classes=user_config.task_classes if user_config else None,
                 policies=user_config.tool_policies if user_config else {},
+                disabled_tools=user_config.disabled_tools if user_config else None,
                 path_rules=user_config.path_rules if user_config else None,
                 shell_extras=(
                     {"deny": user_config.extra_shell_deny_patterns, "ask": user_config.extra_shell_ask_patterns}

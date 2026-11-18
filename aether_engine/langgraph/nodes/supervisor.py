@@ -622,7 +622,13 @@ def _memory_tool_gate(tool_name: str, config: RunnableConfig | None) -> str | No
     configurable = (config or {}).get("configurable", {}) if config else {}
     user_config = configurable.get("user_config")
     if user_config:
-        policy = resolve_policy_by_name(tool_name, user_config.tool_policies)
+        # D4-8: the user's Disabled set gates here too — these
+        # tools never enter a registry, so this gate is their
+        # policy-resolution surface (a disabled name resolves to
+        # "deny" regardless of its approval setting).
+        policy = resolve_policy_by_name(
+            tool_name, user_config.tool_policies,
+            disabled_tools=user_config.disabled_tools)
         if policy == "deny":
             return f"Error: Tool '{tool_name}' is blocked by user policy (Deny)."
     agent_tools = configurable.get("agent_tools", {})

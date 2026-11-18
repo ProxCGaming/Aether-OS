@@ -14,6 +14,7 @@ import LoadStateRow from './components/Settings/LoadStateRow';
 import ModelsPanel from './components/Settings/ModelsPanel';
 import CapabilitiesPanel from './components/Settings/CapabilitiesPanel';
 import ToolsPanel from './components/Settings/ToolsPanel';
+import { ENABLE_TOGGLE_TYPES, pendingEnableChange } from './components/Settings/capabilityEnable';
 import SkillsPanel from './components/Settings/SkillsPanel';
 import AdvancedPanel from './components/Settings/AdvancedPanel';
 import AboutPanel from './components/Settings/AboutPanel';
@@ -340,6 +341,12 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   );
   const pendingToolPolicyFor = (toolName) => pendingOfType('TOOL_POLICY_SET_REQUEST')
     .find((m) => m.payload && m.payload.tool_name === toolName);
+  // D4-8: the tool Disable's queued state, derived from the real
+  // queue through the one enable mechanism's shared derivation
+  // (capabilityEnable.js) — the same helper every capability
+  // surface's toggle reads.
+  const pendingToolEnabledFor = (toolName) => pendingEnableChange(
+    pendingMessages, ENABLE_TOGGLE_TYPES.tool, 'tool_name', toolName);
   const pendingGrantRevokeFor = (id) => pendingOfType('APPROVAL_GRANT_REVOKE_REQUEST')
     .some((m) => m.payload && m.payload.id === id);
   const pendingSkillToggleFor = (name) => pendingOfType('SKILL_TOGGLE_REQUEST')
@@ -475,6 +482,15 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
 
   const handleToolPolicyChange = (toolName, policy) => {
     sendSettingsAction('TOOL_POLICY_SET_REQUEST', { tool_name: toolName, policy });
+  };
+
+  const handleToolEnabledChange = (toolName, enabled) => {
+    // D4-8: through sendSettingsAction the Disable QUEUES while
+    // the engine is unreachable, like every other capability
+    // toggle; the row's button derives its queued state from the
+    // real queue (pendingToolEnabledFor) and the engine's reply
+    // updates the row's `enabled` fact when it lands.
+    sendSettingsAction('TOOL_ENABLED_SET_REQUEST', { tool_name: toolName, enabled });
   };
 
   const handleSkillToggle = (skill) => {
@@ -835,6 +851,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         } else if (data.type === 'TOOL_POLICY_SET_RESPONSE') {
           if (data.payload.success) {
             setTools(prev => prev.map(t => t.function.name === data.payload.tool_name ? { ...t, policy: data.payload.policy } : t));
+          }
+        } else if (data.type === 'TOOL_ENABLED_SET_RESPONSE') {
+          if (data.payload.success) {
+            setTools(prev => prev.map(t => t.function.name === data.payload.tool_name ? { ...t, enabled: data.payload.enabled } : t));
           }
         // D2-04: the AGENT_LIST / AGENT_UPDATE / MCP list +
         // add-remove / PLUGIN_LIST branches that used to sit here
@@ -1420,6 +1440,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             sendSettingsAction={sendSettingsAction}
             onExportBundle={handleLogsExportBundle}
             engineConfig={engineConfig}
+            onOpenCapabilityTab={(menu) => setActiveMenu(menu)}
           />
         )}
 
@@ -1443,6 +1464,8 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             toolsAnswered={!!answered.tools}
             pendingToolPolicyFor={pendingToolPolicyFor}
             onToolPolicyChange={handleToolPolicyChange}
+            pendingToolEnabledFor={pendingToolEnabledFor}
+            onToolEnabledChange={handleToolEnabledChange}
           />
         )}
 
