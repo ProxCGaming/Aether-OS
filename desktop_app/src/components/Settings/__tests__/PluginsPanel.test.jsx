@@ -23,9 +23,12 @@ function makeHarness({ isConnected = true } = {}) {
     }),
   };
   const sendMessage = jest.fn();
+  const safeSend = jest.fn(() => 'sent');
   useAetherSocket.mockReturnValue({
     wsRef: { current: mockWs },
     sendMessage,
+    safeSend,
+    pendingMessages: [],
     isConnected,
   });
   const simulateMessage = (data) => {
@@ -33,7 +36,7 @@ function makeHarness({ isConnected = true } = {}) {
       messageListeners.forEach((cb) => cb({ data: JSON.stringify(data) }));
     });
   };
-  return { simulateMessage, sendMessage };
+  return { simulateMessage, sendMessage, safeSend };
 }
 
 describe('PluginsPanel', () => {
@@ -49,7 +52,10 @@ describe('PluginsPanel', () => {
   });
 
   test('a listed plugin renders and its toggle sends PLUGIN_TOGGLE_REQUEST', () => {
-    const { simulateMessage, sendMessage } = makeHarness();
+    // D4-8: the toggle rides the one enable mechanism — safeSend
+    // with a bare payload (the envelope is the socket layer's job),
+    // so an offline toggle queues instead of vanishing.
+    const { simulateMessage, safeSend } = makeHarness();
     render(<PluginsPanel />);
     simulateMessage({
       type: 'PLUGIN_LIST_RESPONSE',
@@ -57,9 +63,9 @@ describe('PluginsPanel', () => {
     });
     expect(screen.getByText('weather')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Enabled'));
-    expect(sendMessage).toHaveBeenCalledWith(
+    expect(safeSend).toHaveBeenCalledWith(
       'PLUGIN_TOGGLE_REQUEST',
-      expect.objectContaining({ payload: { name: 'weather', enabled: false } })
+      { name: 'weather', enabled: false }
     );
   });
 

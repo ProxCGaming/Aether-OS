@@ -917,6 +917,14 @@ export function useEngineMessages(deps) {
             setChatMessages(prev => [...prev, approvalMsg]);
           }
         } else if (data.type === 'PLUGIN_APPROVAL_REQUEST') {
+          // D4-4: an install started from the Plugins panel mints a
+          // `settings-install-…` request id and the panel claims the
+          // approval itself, rendering the shared trust card there.
+          // Minting a chat card too would put two live approve
+          // surfaces on one decision — the panel owns this one.
+          if (typeof data.request_id === 'string' && data.request_id.startsWith('settings-install-')) {
+            return;
+          }
           setIsThinking(false);
           // E6-F13: track for the approve/reject shortcuts.
           pendingApprovalsRef.current = [
@@ -925,7 +933,7 @@ export function useEngineMessages(deps) {
           ];
           setChatMessages(prev => [...prev, {
             id: data.request_id || Date.now().toString(),
-            role: 'plugin_approval', 
+            role: 'plugin_approval',
             plugin_name: data.payload.plugin_name,
             plugin_details: data.payload.plugin_details,
             isFinal: true

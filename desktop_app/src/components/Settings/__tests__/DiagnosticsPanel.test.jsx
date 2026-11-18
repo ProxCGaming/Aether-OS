@@ -10,12 +10,16 @@ jest.mock('../../../contexts/SocketContext', () => ({
 
 describe('DiagnosticsPanel', () => {
   let mockSendMessage;
+  let mockSafeSend;
 
   beforeEach(() => {
     mockSendMessage = jest.fn();
+    mockSafeSend = jest.fn(() => 'sent');
     useAetherSocket.mockReturnValue({
       wsRef: { current: null },
       sendMessage: mockSendMessage,
+      safeSend: mockSafeSend,
+      pendingMessages: [],
     });
   });
 
@@ -508,6 +512,8 @@ describe('DiagnosticsPanel', () => {
     useAetherSocket.mockReturnValue({
       wsRef: { current: mockWs },
       sendMessage: mockSendMessage,
+      safeSend: mockSafeSend,
+      pendingMessages: [],
     });
     render(<DiagnosticsPanel activeMenu="Plugins" />);
     act(() => {
@@ -536,11 +542,12 @@ describe('DiagnosticsPanel', () => {
     expect(screen.getByText('CoolPlugin')).toBeInTheDocument();
 
     fireEvent.click(screen.getByText('Enabled'));
-    expect(mockSendMessage).toHaveBeenCalledWith(
+    // D4-8: the toggle rides the shared queued enable mechanism
+    // (safeSend, bare payload) — the manifest-name identity the
+    // E7-F05 fix established is unchanged.
+    expect(mockSafeSend).toHaveBeenCalledWith(
       'PLUGIN_TOGGLE_REQUEST',
-      expect.objectContaining({
-        payload: { name: 'CoolPlugin', enabled: false },
-      })
+      { name: 'CoolPlugin', enabled: false }
     );
 
     fireEvent.click(screen.getByText('Uninstall'));

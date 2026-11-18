@@ -8,6 +8,7 @@ import CapabilityFilterBar from './CapabilityFilterBar';
 import CapabilityItem from './CapabilityItem';
 import { capabilityFilterCounts, filterCapabilityItems } from './capabilityFilter';
 import PluginTrustCard from '../PluginTrustCard';
+import { ENABLE_TOGGLE_TYPES, pendingEnableChange, queuedEnableVerb } from './capabilityEnable';
 
 // Wave 5 (FF4-04 / PC-13): plain-language summary of what an
 // update check found changed between the installed record and a
@@ -35,7 +36,7 @@ function describeUpdateChanges(check) {
 // DiagnosticsPanel is only the dispatcher. Behaviour is unchanged:
 // same request on mount, same response handling, same rendering.
 export default function PluginsPanel() {
-  const { wsRef, sendMessage, isConnected } = useAetherSocket();
+  const { wsRef, sendMessage, isConnected, safeSend, pendingMessages } = useAetherSocket();
   // Wave 3 slice 1 (RUX-C-06, under the RUX-C-01 umbrella): the
   // plugin list tracks whether its engine answer has arrived.
   // Until then the section renders a load state (loading / offline
@@ -343,6 +344,11 @@ export default function PluginsPanel() {
             }
             const update = updateChecks[name];
             const changes = update?.checked ? describeUpdateChanges(update) : '';
+            // D4-8: the toggle rides the one enable mechanism —
+            // a change queued offline is derived from the real
+            // queue (capabilityEnable.js), never a local flag.
+            const pendingEnabled = pendingEnableChange(
+              pendingMessages, ENABLE_TOGGLE_TYPES.plugin, 'name', name);
             return (
               <CapabilityItem
                 key={name}
@@ -359,11 +365,18 @@ export default function PluginsPanel() {
                 actions={(
                   <>
                     <button
-                      onClick={() => sendMessage('PLUGIN_TOGGLE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, enabled: !plugin.enabled } })}
-                      style={{ background: plugin.enabled ? 'rgba(76, 195, 138, 0.15)' : 'rgba(255, 255, 255, 0.1)', color: plugin.enabled ? 'var(--success)' : 'var(--text-primary)', border: `1px solid ${plugin.enabled ? 'rgba(76, 195, 138, 0.3)' : 'rgba(255, 255, 255, 0.2)'}`, padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', width: '80px' }}
+                      onClick={() => safeSend('PLUGIN_TOGGLE_REQUEST', { name, enabled: !plugin.enabled })}
+                      disabled={Boolean(pendingEnabled)}
+                      data-testid={`plugin-toggle-${name}`}
+                      style={{ background: plugin.enabled ? 'rgba(76, 195, 138, 0.15)' : 'rgba(255, 255, 255, 0.1)', color: plugin.enabled ? 'var(--success)' : 'var(--text-primary)', border: `1px solid ${plugin.enabled ? 'rgba(76, 195, 138, 0.3)' : 'rgba(255, 255, 255, 0.2)'}`, padding: '6px 16px', borderRadius: '8px', cursor: pendingEnabled ? 'default' : 'pointer', fontSize: '13px', width: '80px', opacity: pendingEnabled ? 0.55 : 1 }}
                     >
                       {plugin.enabled ? 'Enabled' : 'Disabled'}
                     </button>
+                    {pendingEnabled && (
+                      <span style={{ fontSize: '12px', color: 'var(--accent)' }}>
+                        {queuedEnableVerb(pendingEnabled)} queued — will apply when the engine reconnects
+                      </span>
+                    )}
                     <button
                       onClick={() => sendMessage('PLUGIN_UPDATE_CHECK_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
                       style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-strong)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-primary)' }}
