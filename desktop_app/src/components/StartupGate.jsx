@@ -17,9 +17,12 @@ import React, { useEffect, useState } from 'react';
  * lifecycle reported failure. "failed" comes only from main's
  * engine-state channel — the lifecycle's terminal 'none' after its
  * spawn retry — never from elapsed time: a cold start may
- * legitimately take the full 120s health budget. Once ready has been
- * reached the gate never returns; mid-session drops belong to the
- * shell's existing offline handling.
+ * legitimately take the full 120s health budget. Elapsed time past
+ * that budget escalates the starting screen to a recovery view
+ * (S-10): Retry + Open engine log are offered while the engine may
+ * still come up — the phase stays 'starting' and nothing declares
+ * failure. Once ready has been reached the gate never returns;
+ * mid-session drops belong to the shell's existing offline handling.
  *
  * Styling reuses the app's own idioms: the shell's var(--bg-base)
  * ground, Onboarding's panel + buttons, the .aether-spinner from
@@ -30,6 +33,13 @@ import React, { useEffect, useState } from 'react';
 // After this long in 'starting', add the reassurance line. Deliberately
 // far below the 120s health budget: it calms, it never declares failure.
 export const STARTUP_SLOW_NOTICE_MS = 20000;
+
+// After the FULL health budget in 'starting' (S-10), escalate to the
+// recovery view: the same Retry / Open-log actions the failed screen
+// offers, while the phase stays 'starting' — an engine that started
+// but wedged before answering must not leave the user on an endless
+// spinner with no way out but killing the app (FF1-16).
+export const STARTUP_ESCALATION_MS = 120000;
 
 // The gate's phase from App's signals. Pure, so the state machine is
 // unit-testable without rendering App.
@@ -57,14 +67,18 @@ const ghostBtn = {
 
 export default function StartupGate({ phase, onRetry, onOpenLog }) {
   const [slowNotice, setSlowNotice] = useState(false);
+  const [escalated, setEscalated] = useState(false);
 
-  // The slow-start reassurance is a function of THIS starting spell:
-  // entering 'starting' (first mount, or back from a Retry) resets it.
+  // The slow-start reassurance and the S-10 escalation are functions
+  // of THIS starting spell: entering 'starting' (first mount, or back
+  // from a Retry) resets both.
   useEffect(() => {
     if (phase !== 'starting') return undefined;
     setSlowNotice(false);
-    const timer = setTimeout(() => setSlowNotice(true), STARTUP_SLOW_NOTICE_MS);
-    return () => clearTimeout(timer);
+    setEscalated(false);
+    const slowTimer = setTimeout(() => setSlowNotice(true), STARTUP_SLOW_NOTICE_MS);
+    const escalationTimer = setTimeout(() => setEscalated(true), STARTUP_ESCALATION_MS);
+    return () => { clearTimeout(slowTimer); clearTimeout(escalationTimer); };
   }, [phase]);
 
   const failed = phase === 'failed';
@@ -109,10 +123,23 @@ export default function StartupGate({ phase, onRetry, onOpenLog }) {
             <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: 0 }}>
               Aether is getting everything ready. This screen moves on by itself once the engine is healthy.
             </p>
-            {slowNotice && (
+            {slowNotice && !escalated && (
               <p style={{ color: 'var(--accent)', fontSize: '13px', marginBottom: 0 }}>
                 Cold starts can take a while — the engine is given up to two minutes to come up.
               </p>
+            )}
+            {escalated && (
+              <>
+                <p style={{ color: 'var(--accent)', fontSize: '13px', marginBottom: 0 }}>
+                  This is taking longer than the engine&rsquo;s full two-minute health budget.
+                  It may still come up on its own — or you can retry the start, or open the
+                  engine log to see what&rsquo;s happening.
+                </p>
+                <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', marginTop: '20px' }}>
+                  <button type="button" style={ghostBtn} onClick={onOpenLog}>Open engine log</button>
+                  <button type="button" style={primaryBtn} onClick={onRetry}>Retry</button>
+                </div>
+              </>
             )}
           </>
         )}

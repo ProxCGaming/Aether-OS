@@ -1,7 +1,7 @@
 import React from 'react';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import StartupGate, { deriveStartupPhase, STARTUP_SLOW_NOTICE_MS } from '../components/StartupGate';
+import StartupGate, { deriveStartupPhase, STARTUP_SLOW_NOTICE_MS, STARTUP_ESCALATION_MS } from '../components/StartupGate';
 
 // Wave 1 slice 4: the startup gate's state machine and screen.
 // App-level behaviour (gate replacing the shell, onboarding after the
@@ -53,11 +53,48 @@ describe('StartupGate screen', () => {
   it('elapsed time alone NEVER turns starting into failed', () => {
     jest.useFakeTimers();
     render(<StartupGate phase="starting" onRetry={jest.fn()} onOpenLog={jest.fn()} />);
-    // Well past the 120s health budget: slowness is not failure.
+    // Well past the 120s health budget: slowness is not failure — the
+    // heading and phase stay 'starting', no failure copy appears.
     act(() => { jest.advanceTimersByTime(300000); });
     expect(screen.getByText('Starting the engine…')).toBeInTheDocument();
-    expect(screen.queryByText('Retry')).not.toBeInTheDocument();
     expect(screen.queryByText(/couldn’t start/)).not.toBeInTheDocument();
+  });
+
+  it('escalates to recovery actions only after the full health budget (S-10)', () => {
+    jest.useFakeTimers();
+    render(<StartupGate phase="starting" onRetry={jest.fn()} onOpenLog={jest.fn()} />);
+    act(() => { jest.advanceTimersByTime(STARTUP_ESCALATION_MS - 1); });
+    expect(screen.queryByText('Retry')).not.toBeInTheDocument();
+    act(() => { jest.advanceTimersByTime(1); });
+    expect(screen.getByText(/longer than the engine’s full two-minute health budget/)).toBeInTheDocument();
+    expect(screen.getByText('Retry')).toBeInTheDocument();
+    expect(screen.getByText('Open engine log')).toBeInTheDocument();
+    // Still the starting screen underneath: the engine is not dead.
+    expect(screen.getByText('Starting the engine…')).toBeInTheDocument();
+  });
+
+  it('the escalated Retry and Open engine log actions are wired up', () => {
+    jest.useFakeTimers();
+    const onRetry = jest.fn();
+    const onOpenLog = jest.fn();
+    render(<StartupGate phase="starting" onRetry={onRetry} onOpenLog={onOpenLog} />);
+    act(() => { jest.advanceTimersByTime(STARTUP_ESCALATION_MS); });
+    fireEvent.click(screen.getByText('Retry'));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByText('Open engine log'));
+    expect(onOpenLog).toHaveBeenCalledTimes(1);
+  });
+
+  it('returning to starting after a retry restarts the escalation clock', () => {
+    jest.useFakeTimers();
+    const { rerender } = render(<StartupGate phase="starting" onRetry={jest.fn()} onOpenLog={jest.fn()} />);
+    act(() => { jest.advanceTimersByTime(STARTUP_ESCALATION_MS); });
+    expect(screen.getByText('Retry')).toBeInTheDocument();
+    rerender(<StartupGate phase="failed" onRetry={jest.fn()} onOpenLog={jest.fn()} />);
+    rerender(<StartupGate phase="starting" onRetry={jest.fn()} onOpenLog={jest.fn()} />);
+    expect(screen.queryByText('Retry')).not.toBeInTheDocument();
+    act(() => { jest.advanceTimersByTime(STARTUP_ESCALATION_MS); });
+    expect(screen.getByText('Retry')).toBeInTheDocument();
   });
 
   it('shows the failed state with Retry and Open engine log actions wired up', () => {
