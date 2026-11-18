@@ -44,9 +44,37 @@
   --space-4: 16px;
   --space-5: 24px;
 
+  /* Type scale (Full Furnish S-2 — values from the approved
+     Penpot Batch 1 token scales; leading is specified in the
+     Penpot token descriptions) */
+  --text-display: 600 28px var(--font-sans);
+  --text-title: 500 15px var(--font-sans);
+  --text-body: 400 13px var(--font-sans);
+  --text-caption: 400 11px var(--font-sans);
+  --text-mono: 400 12px var(--font-mono);
+
+  /* Elevation (Full Furnish S-2) */
+  --elevation-resting: none;
+  --elevation-raised: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --elevation-floating: 0 12px 32px rgba(0, 0, 0, 0.5);
+
+  /* Z-order (Full Furnish S-2 — palette deliberately sits
+     above modal; it replaces the hard-coded 210 in
+     CommandPalette when that surface migrates) */
+  --z-sidebar: 10;
+  --z-panel: 40;
+  --z-overlay: 200;
+  --z-modal: 1000;
+  --z-palette: 1100;
+  --z-top: 10000;
+
   /* Motion */
   --motion-fast: 120ms;
   --motion-base: 180ms;
+  /* The easing the shell already hard-codes in App.jsx and
+     DraggableChatWindow.jsx (FF1-15); tokenised by S-2 so
+     surfaces can adopt it without another literal. */
+  --motion-easing: cubic-bezier(0.23, 1, 0.32, 1);
 
   /* Fonts */
   --font-sans: 'Inter', sans-serif;
