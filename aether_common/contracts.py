@@ -455,6 +455,12 @@ class EventType(str, Enum):
     PLUGIN_TOGGLE_RESPONSE = "PLUGIN_TOGGLE_RESPONSE"
     PLUGIN_APPROVAL_GRANTED = "PLUGIN_APPROVAL_GRANTED"
     PLUGIN_APPROVAL_REJECTED = "PLUGIN_APPROVAL_REJECTED"
+    # Wave 5 (FF4-04 plugins half): re-check one installed plugin
+    # against its recorded install source via a fresh prepare; the
+    # reply carries the version/drift comparison (a view only —
+    # nothing is updated by the check itself).
+    PLUGIN_UPDATE_CHECK_REQUEST = "PLUGIN_UPDATE_CHECK_REQUEST"
+    PLUGIN_UPDATE_CHECK_RESPONSE = "PLUGIN_UPDATE_CHECK_RESPONSE"
 
     # Skills & Slash Commands
     SLASH_COMMAND_LIST_REQUEST = "SLASH_COMMAND_LIST_REQUEST"
@@ -463,6 +469,18 @@ class EventType(str, Enum):
     SKILL_LIST_RESPONSE = "SKILL_LIST_RESPONSE"
     SKILL_TOGGLE_REQUEST = "SKILL_TOGGLE_REQUEST"
     SKILL_TOGGLE_RESPONSE = "SKILL_TOGGLE_RESPONSE"
+    # Wave 5 (D4-6): the skills registry workflow (Epic 7's CLI
+    # engine) over the socket — search a NAMED source (there is no
+    # default registry), prepare one skill (fetch + hash, nothing
+    # written) so the install card can show the pin, then install
+    # against that reviewed hash. A fresh install lands disabled;
+    # enabling stays the separate SKILL_TOGGLE act.
+    SKILL_SEARCH_REQUEST = "SKILL_SEARCH_REQUEST"
+    SKILL_SEARCH_RESPONSE = "SKILL_SEARCH_RESPONSE"
+    SKILL_INSTALL_PREPARE_REQUEST = "SKILL_INSTALL_PREPARE_REQUEST"
+    SKILL_INSTALL_PREPARE_RESPONSE = "SKILL_INSTALL_PREPARE_RESPONSE"
+    SKILL_INSTALL_REQUEST = "SKILL_INSTALL_REQUEST"
+    SKILL_INSTALL_RESPONSE = "SKILL_INSTALL_RESPONSE"
 
     # Memory Management
     MEMORY_EPISODES_REQUEST = "MEMORY_EPISODES_REQUEST"

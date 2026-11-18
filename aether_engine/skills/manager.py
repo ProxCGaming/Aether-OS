@@ -62,6 +62,12 @@ class SkillManager:
         self._content_cache: dict[str, str] = {}
         self._slash_map: dict[str, str] = {}
         self._skill_paths: dict[str, Path] = {} # Maps skill name to the directory it was loaded from
+        # Wave 5 (D4-6): every discovered skill's directory,
+        # disabled ones included — _skill_paths above only holds
+        # enabled skills (it feeds agent-facing loads), while the
+        # registry's pin annotation needs the root of any listed
+        # skill, and a fresh registry install lands disabled.
+        self._all_skill_paths: dict[str, Path] = {}
         self._rebuild_index()
     
     # -- Epic 7, E7-03: enable / disable ----------------------------
@@ -233,6 +239,7 @@ class SkillManager:
         self._index.clear()
         self._slash_map.clear()
         self._skill_paths.clear()
+        self._all_skill_paths = {}
         self._invalid_skills = {}
         self._all_manifests: dict[str, SkillManifest] = {}
 
@@ -360,6 +367,7 @@ class SkillManager:
 
         for name, (manifest, skill_dir) in winners.items():
             self._all_manifests[name] = manifest
+            self._all_skill_paths[name] = skill_dir
             if name in self._disabled:
                 continue  # E7-03: disabled = invisible to agents
             self._index[name] = manifest
@@ -556,6 +564,18 @@ class SkillManager:
             ))
         return summaries
     
+    def skill_dir(self, skill_name: str) -> Path | None:
+        """The directory a discovered skill was read from, or None.
+
+        Wave 5 (D4-6): the registry's pin annotation needs to know
+        which scan root a listed skill lives under (user scope vs a
+        project's) to find the lockfile that pins it. Reads the
+        all-skills path map, not the enabled-only one: a disabled
+        skill (a fresh registry install, for one) is still listed
+        and still pinned.
+        """
+        return self._all_skill_paths.get(skill_name)
+
     def list_skill_scripts(self, skill_name: str) -> list[Path]:
         """List executable scripts bundled with a skill (scripts/ directory)."""
         skill_dir = self._skill_paths.get(skill_name)

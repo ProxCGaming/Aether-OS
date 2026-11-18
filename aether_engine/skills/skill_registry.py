@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from aether_engine.skills.lockfile import (
+    LOCKFILE_NAME,
+    SkillLockError,
     SkillPin,
     hash_skill_dir,
     is_safe_skill_name,
@@ -219,12 +221,18 @@ def install_named(
     skills_root: Path,
     ref: str | None = None,
     skill_path: str | None = None,
+    expected_hash: str | None = None,
 ) -> InstallOutcome:
     """Resolve ``name`` from ``source``, pin it, and materialise it.
 
     The pin is written only AFTER the content is in place (or proven
     already in place), so the lockfile never claims content the disk
     does not hold.
+
+    ``expected_hash`` (Wave 5, D4-6): the content hash the user
+    reviewed on the install card. When given and the source now
+    hashes to something else, the install is refused — what gets
+    installed is never different from what was approved.
     """
     if not is_safe_skill_name(name):
         return _unsafe_name_outcome(name)
@@ -233,6 +241,13 @@ def install_named(
     except SkillSourceError as exc:
         return InstallOutcome(name, False, "failed", str(exc))
     content_hash = hash_skill_dir(source_dir)
+    if expected_hash is not None and content_hash != expected_hash:
+        return InstallOutcome(
+            name, False, "refused",
+            f"the source content for skill {name!r} changed since "
+            f"it was reviewed (reviewed pin {expected_hash}, source "
+            f"now hashes to {content_hash}); search and review it "
+            "again before installing")
     try:
         action = _materialise(name, source_dir, content_hash, skills_root)
     except SkillSourceError as exc:
@@ -250,3 +265,135 @@ def install_named(
     pins[name] = pin
     save_lockfile(lockfile_path, pins)
     return InstallOutcome(name, True, action, f"pinned at hash {content_hash}")
+
+
+# ---------------------------------------------------------------------------
+# Wave 5 (D4-6) — the Settings UI's view of this same workflow.
+#
+# The panel is a second front-end over the CLI engine above, never a
+# second installer: search reads a source's catalogue, prepare
+# fetches + hashes WITHOUT writing anything (the pin summary the
+# install card shows), and install goes through install_named with
+# the reviewed hash. There is deliberately no default source: a
+# search without a named source is the CLI's error, preserved.
+
+def search_catalogue(
+    source_type: str,
+    locator: str,
+    query: str,
+    *,
+    base_dir: Path | None = None,
+) -> list[dict]:
+    """Catalogue entries of one named source, as plain dicts.
+
+    Raises SkillSourceError with the source's own honest reason
+    (a github source in this build, a missing directory) — the
+    caller surfaces it verbatim, never as an empty result.
+    """
+    source = open_source(source_type, locator, base_dir=base_dir)
+    return [
+        {"name": e.name, "description": e.description, "version": e.version}
+        for e in search_source(source, query)
+    ]
+
+
+def prepare_named(
+    name: str,
+    source_type: str,
+    locator: str,
+    *,
+    base_dir: Path | None = None,
+    skill_path: str | None = None,
+) -> dict:
+    """Fetch + hash one skill WITHOUT installing it (the pin card).
+
+    Returns the summary the install card renders: identity, the
+    source it will be pinned from, and the content hash the
+    eventual install is checked against. Raises SkillSourceError
+    when the source cannot produce the skill.
+    """
+    if not is_safe_skill_name(name):
+        raise SkillSourceError(
+            f"refusing skill name {name!r}: a skill name must be a "
+            "single path segment (letters, digits, '.', '_' or '-', "
+            "not starting with '.')")
+    source = open_source(source_type, locator, base_dir=base_dir)
+    source_dir = source.fetch(name, skill_path)
+    manifest = manifest_for(source_dir)
+    return {
+        "name": name,
+        "description": manifest.description if manifest else "",
+        "version": manifest.version if manifest else None,
+        "source_type": source_type,
+        "source": locator,
+        "hash": hash_skill_dir(source_dir),
+    }
+
+
+def _lockfile_scopes(manager) -> list[tuple[Path, Path]]:
+    """(skills root, lockfile) pairs for every root a manager scans.
+
+    Mirrors the CLI's scope resolution: the user scope's lockfile
+    sits beside the global skills root; a workspace root
+    (``<project>/.agents/skills``) is pinned by the project's own
+    lockfile at ``<project>/skills.lock.json``.
+    """
+    scopes: list[tuple[Path, Path]] = []
+    global_dir = Path(manager.global_dir)
+    scopes.append((global_dir, global_dir.parent / LOCKFILE_NAME))
+    for workspace_dir in manager.workspace_dirs or []:
+        root = Path(workspace_dir)
+        scopes.append((root, root.parent.parent / LOCKFILE_NAME))
+    return scopes
+
+
+def pin_states(manager) -> dict[str, dict]:
+    """{skill name: pin summary + status} for the manager's skills.
+
+    A skill is annotated only when a lockfile for ITS root pins it
+    — a pin is a fact about one root's lockfile, so the lookup goes
+    through the directory the skill actually loaded from. Status
+    is the registry's own vocabulary (installed / missing /
+    drifted); "drifted" is the panel's "modified vs pin". A scope
+    whose lockfile cannot be read contributes no pins (the CLI
+    stays the loud surface for a corrupt lockfile; the list itself
+    must not break over an annotation).
+    """
+    pins_by_root: dict[Path, dict[str, tuple[SkillPin, str]]] = {}
+    for root, lockfile_path in _lockfile_scopes(manager):
+        try:
+            pins_by_root[root] = {
+                pin.name: (pin, status)
+                for pin, status in list_pins(lockfile_path, root)
+            }
+        except SkillLockError:
+            pins_by_root[root] = {}
+    states: dict[str, dict] = {}
+    for root, pin_map in pins_by_root.items():
+        for name, (pin, status) in pin_map.items():
+            skill_dir = manager.skill_dir(name)
+            if skill_dir is None or Path(skill_dir).parent != root:
+                continue
+            states[name] = {
+                "status": status,
+                "source_type": pin.source_type,
+                "source": pin.source,
+                "ref": pin.ref,
+                "hash": pin.computed_hash,
+            }
+    return states
+
+
+def annotated_skill_dicts(manager) -> list[dict]:
+    """``list_all()`` summaries as dicts, each with its ``pin``.
+
+    The list payload's per-skill pin annotation (D4-6): the pin
+    dict from :func:`pin_states`, or None for an unpinned skill —
+    unpinned is a normal state (hand-placed skills, plugin-bundled
+    skills), rendered as absence, never as an error.
+    """
+    pins = pin_states(manager)
+    return [
+        {**summary.__dict__, "pin": pins.get(summary.name)}
+        for summary in manager.list_all()
+    ]

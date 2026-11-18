@@ -162,6 +162,36 @@ def _read_mcp_config_file(source: Path, file_path: str) -> dict:
     return data
 
 
+def mcp_server_summary(name: str, config: dict) -> dict:
+    """The approval-card summary of one resolved MCP server config.
+
+    What the trust card may show (PC-11): the command line the
+    server runs (or the URL it connects to), its working folder,
+    and the NAMES of the environment variables / headers it is
+    given. Values of env vars and headers are never included —
+    they are the secret carriers (PC-12: secrets live in the
+    vault, never in a rendered card or a plugin payload the UI
+    displays back).
+    """
+    summary: dict[str, Any] = {"name": name}
+    command = config.get("command")
+    if command:
+        args = [str(a) for a in (config.get("args") or [])]
+        summary["runs"] = " ".join([str(command), *args])
+    url = config.get("url")
+    if url:
+        summary["url"] = str(url)
+    if config.get("cwd"):
+        summary["cwd"] = str(config["cwd"])
+    env = config.get("env") or {}
+    if isinstance(env, dict) and env:
+        summary["env_keys"] = sorted(str(k) for k in env.keys())
+    headers = config.get("headers") or {}
+    if isinstance(headers, dict) and headers:
+        summary["header_keys"] = sorted(str(k) for k in headers.keys())
+    return summary
+
+
 def resolve_mcp_server_configs(source: Any, manifest: PluginManifest) -> list[tuple[str, dict]]:
     """Load + validate every MCP server a manifest declares.
 
@@ -895,7 +925,16 @@ class PluginInstaller:
         self._check_capability_conflicts(src_path, manifest, mcp_configs)
         return {
             "source": source,
-            "manifest": manifest.model_dump()
+            "manifest": manifest.model_dump(),
+            # Wave 5 (D4-4): the approval card's per-server summary
+            # (what each bundled server runs / connects to / is
+            # given, names only — see mcp_server_summary). Additive:
+            # install() re-resolves the configs itself and ignores
+            # this key.
+            "mcp_server_summaries": [
+                mcp_server_summary(name, config)
+                for name, config in mcp_configs
+            ],
         }
 
     def install(self, prepare_data: dict):
@@ -1114,6 +1153,12 @@ class PluginInstaller:
             installed_dir_names = {p.name for p in installed_skills}
             self._registry[plugin_name] = {
                 "manifest": manifest.model_dump(),
+                # Wave 5 (FF4-04): where this install came from, so
+                # the version state can later be re-checked against
+                # the source via a fresh prepare. Entries written
+                # before this field existed simply have no recorded
+                # source and report exactly that at check time.
+                "source": str(source),
                 "enabled": True,
                 "installed_skills": [str(p) for p in installed_skills],
                 "installed_tools": installed_tools,
@@ -1536,3 +1581,149 @@ class PluginInstaller:
         # the change would silently reach disk on the next save.
         # Callers only read (iteration, .get, spreads).
         return copy.deepcopy(self._registry)
+
+    # -- Wave 5: per-plugin load honesty (D4-4 remainder) --------------
+    # The registry-level load error (above) covers a corrupt
+    # registry FILE. A single ENTRY can also fail to load — its
+    # stored manifest no longer validates (hand-edited registry, a
+    # record written by a build with different manifest rules) —
+    # and until now that plugin rendered in Settings as if it were
+    # fine, with a fallback name and version. This is the plugin
+    # equivalent of MCP's invalid servers and skills' load_error
+    # rows (contract C7): the failure is first-class data, carried
+    # on the list reply as {state: "load_error", error}.
+
+    @staticmethod
+    def load_error_for(record: Any) -> str | None:
+        """Why this registry record cannot load, or None if it can."""
+        if not isinstance(record, dict):
+            return "The saved record for this plugin is not readable."
+        manifest_data = record.get("manifest")
+        if not isinstance(manifest_data, dict) or not manifest_data:
+            return (
+                "The saved manifest for this plugin is missing, so "
+                "the plugin cannot be loaded."
+            )
+        try:
+            PluginManifest(**manifest_data)
+        except Exception as e:  # noqa: BLE001 — the validation failure IS the load error being reported
+            return (
+                "The saved manifest for this plugin could not be "
+                f"read: {e}"
+            )
+        return None
+
+    def load_errors(self) -> dict[str, str]:
+        """{plugin name: load error} for every record that fails."""
+        errors: dict[str, str] = {}
+        for name, record in self._registry.items():
+            error = self.load_error_for(record)
+            if error is not None:
+                errors[name] = error
+        return errors
+
+    # -- Wave 5: update check (FF4-04 plugins half, PC-13) -------------
+
+    def check_for_update(self, plugin_name: str) -> dict[str, Any]:
+        """Re-check one installed plugin against its install source.
+
+        Runs a fresh ``prepare_install`` on the source recorded at
+        install time and compares what it declares now against the
+        installed record: versions, the component name sets, and —
+        via the E7-F08 claim fingerprints recorded at install — the
+        content of claimed skills and the configs of claimed MCP
+        servers. The check is a VIEW: nothing is installed, moved
+        or re-approved by it. ``permissions_grew`` follows PC-13:
+        the update needs fresh approval when it adds components or
+        changes what a bundled MCP server runs/connects to (its
+        declared reach), which is exactly what the result names.
+        """
+        result: dict[str, Any] = {
+            "name": plugin_name,
+            "checked": False,
+            "error": None,
+            "installed_version": None,
+            "latest_version": None,
+            "has_update": False,
+            "permissions_grew": False,
+            "added_skills": [],
+            "removed_skills": [],
+            "changed_skills": [],
+            "added_mcp_servers": [],
+            "removed_mcp_servers": [],
+            "changed_mcp_servers": [],
+        }
+        entry = self._registry.get(plugin_name)
+        if entry is None:
+            result["error"] = f"Plugin not found: {plugin_name}"
+            return result
+        installed_manifest = entry.get("manifest") or {}
+        result["installed_version"] = installed_manifest.get("version")
+        source = entry.get("source")
+        if not source:
+            result["error"] = (
+                "No install source was recorded for this plugin, "
+                "so its version cannot be re-checked. Reinstall it "
+                "from its source to record one."
+            )
+            return result
+        try:
+            prepared = self.prepare_install(source)
+        except Exception as e:  # noqa: BLE001 — a source that no longer prepares (moved, changed, now refused) is the check's honest answer, not a crash
+            result["error"] = f"The install source could not be re-checked: {e}"
+            return result
+        result["checked"] = True
+        new_manifest = prepared["manifest"]
+        result["latest_version"] = new_manifest.get("version")
+
+        old_skills = {s.get("name") for s in installed_manifest.get("skills") or []}
+        new_skills = {s.get("name") for s in new_manifest.get("skills") or []}
+        old_mcp = {s.get("name") for s in installed_manifest.get("mcp_servers") or []}
+        new_mcp = {s.get("name") for s in new_manifest.get("mcp_servers") or []}
+        result["added_skills"] = sorted(new_skills - old_skills)
+        result["removed_skills"] = sorted(old_skills - new_skills)
+        result["added_mcp_servers"] = sorted(new_mcp - old_mcp)
+        result["removed_mcp_servers"] = sorted(old_mcp - new_mcp)
+
+        # Content drift on components present in both, judged
+        # against the fingerprints recorded at install. Legacy
+        # entries (no claims) simply have nothing to compare —
+        # their changed lists stay empty rather than guessed.
+        src_path = Path(source)
+        new_skill_defs = {
+            s.get("name"): s for s in new_manifest.get("skills") or []}
+        for name in sorted(old_skills & new_skills):
+            claim = self._entry_claim(entry, "skill", name)
+            if claim is None:
+                continue
+            file_path = (new_skill_defs.get(name) or {}).get("file_path")
+            if not file_path:
+                continue
+            raw = self._read_package_bytes(src_path, file_path)
+            if raw is not None and _fingerprint_bytes(raw) != claim["sha256"]:
+                result["changed_skills"].append(name)
+        try:
+            new_configs = dict(resolve_mcp_server_configs(
+                src_path, PluginManifest(**new_manifest)))
+        except Exception:  # noqa: BLE001 — prepare already resolved these; a re-resolve failure leaves config drift unjudged, never fabricated
+            new_configs = {}
+        for name in sorted(old_mcp & new_mcp):
+            claim = self._entry_claim(entry, "mcp", name)
+            if claim is None or name not in new_configs:
+                continue
+            if _fingerprint_config(new_configs[name]) != claim["sha256"]:
+                result["changed_mcp_servers"].append(name)
+
+        result["permissions_grew"] = bool(
+            result["added_skills"]
+            or result["added_mcp_servers"]
+            or result["changed_mcp_servers"]
+        )
+        result["has_update"] = bool(
+            result["latest_version"] != result["installed_version"]
+            or result["added_skills"] or result["removed_skills"]
+            or result["changed_skills"]
+            or result["added_mcp_servers"] or result["removed_mcp_servers"]
+            or result["changed_mcp_servers"]
+        )
+        return result

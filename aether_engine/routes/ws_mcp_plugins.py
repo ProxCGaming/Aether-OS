@@ -402,3 +402,27 @@ async def send_plugin_toggle_result(conn, req_id_, name_, enabled_):
         req_id_, EventType.PLUGIN_TOGGLE_RESPONSE, _build_payload,
         error_payload=lambda e: {"success": False, "error": str(e)},
         send_failure_message="Could not send plugin toggle response")
+
+async def send_plugin_update_check_result(conn, req_id_, name_):
+    """Answer a PLUGIN_UPDATE_CHECK_REQUEST from a background task.
+
+    Wave 5 (FF4-04 plugins half): the check re-prepares the
+    plugin's recorded install source on a worker thread (it reads
+    the whole package) and answers with the comparison dict —
+    ``checked`` says whether a comparison actually ran and
+    ``error`` why not when it didn't; the check itself never
+    raises by design, so the error_payload below is only the
+    last-resort net.
+    """
+
+    async def _build_payload():
+        check = await asyncio.to_thread(
+            engine_state.plugin_installer.check_for_update, name_)
+        return {"success": True, **check}
+
+    await conn.reply(
+        req_id_, EventType.PLUGIN_UPDATE_CHECK_RESPONSE, _build_payload,
+        error_payload=lambda e: {
+            "success": False, "name": name_, "checked": False,
+            "error": str(e)},
+        send_failure_message="Could not send plugin update check response")

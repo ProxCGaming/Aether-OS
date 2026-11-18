@@ -162,4 +162,167 @@ describe('PluginsPanel', () => {
       expect(screen.getByText('stocks')).toBeInTheDocument();
     });
   });
+
+  describe('in-panel install approval (D4-4)', () => {
+    const DETAILS = {
+      source: '/tmp/weather.zip',
+      manifest: {
+        name: 'weather',
+        version: '2.0',
+        description: 'Weather tools',
+        skills: [{ name: 'forecast' }],
+        tools: [],
+        mcp_servers: [{ name: 'weather-api' }],
+        files: { 'skill.md': 'a'.repeat(64) },
+      },
+      mcp_server_summaries: [{ name: 'weather-api', runs: 'npx -y weather-mcp', env_keys: ['WEATHER_API_KEY'] }],
+    };
+
+    function startPanelInstall(simulateMessage, sendMessage) {
+      fireEvent.change(screen.getByPlaceholderText('GitHub URL or local path'), { target: { value: '/tmp/weather.zip' } });
+      fireEvent.click(screen.getByText('Install'));
+      const call = sendMessage.mock.calls.find(([type]) => type === 'PLUGIN_INSTALL_REQUEST');
+      expect(call).toBeTruthy();
+      return call[1].request_id;
+    }
+
+    test('an install started here renders the trust card in the panel and approves under the same id', () => {
+      const { simulateMessage, sendMessage } = makeHarness();
+      render(<PluginsPanel />);
+      const requestId = startPanelInstall(simulateMessage, sendMessage);
+      simulateMessage({
+        type: 'PLUGIN_APPROVAL_REQUEST',
+        request_id: requestId,
+        payload: { plugin_name: 'weather', plugin_details: DETAILS },
+      });
+      expect(screen.getByTestId('plugin-install-approval')).toBeInTheDocument();
+      expect(screen.getByText('Adds 1 skill: forecast')).toBeInTheDocument();
+      expect(screen.getByText('Adds MCP server `weather-api` (runs `npx -y weather-mcp`)')).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Approve install'));
+      expect(sendMessage).toHaveBeenCalledWith(
+        'PLUGIN_APPROVAL_GRANTED',
+        expect.objectContaining({ request_id: requestId, payload: {} }),
+      );
+      expect(screen.queryByTestId('plugin-install-approval')).not.toBeInTheDocument();
+    });
+
+    test('rejecting sends PLUGIN_APPROVAL_REJECTED under the approval id', () => {
+      const { simulateMessage, sendMessage } = makeHarness();
+      render(<PluginsPanel />);
+      const requestId = startPanelInstall(simulateMessage, sendMessage);
+      simulateMessage({
+        type: 'PLUGIN_APPROVAL_REQUEST',
+        request_id: requestId,
+        payload: { plugin_name: 'weather', plugin_details: DETAILS },
+      });
+      fireEvent.click(screen.getByText('Reject'));
+      expect(sendMessage).toHaveBeenCalledWith(
+        'PLUGIN_APPROVAL_REJECTED',
+        expect.objectContaining({ request_id: requestId }),
+      );
+    });
+
+    test('an approval for an install started elsewhere is NOT claimed by the panel', () => {
+      const { simulateMessage } = makeHarness();
+      render(<PluginsPanel />);
+      simulateMessage({
+        type: 'PLUGIN_APPROVAL_REQUEST',
+        request_id: 'chat-started-1',
+        payload: { plugin_name: 'weather', plugin_details: DETAILS },
+      });
+      expect(screen.queryByTestId('plugin-install-approval')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('per-plugin load error row (D4-5 remainder)', () => {
+    test('a broken plugin renders its error state with no toggle, uninstall only', () => {
+      const { simulateMessage } = makeHarness();
+      render(<PluginsPanel />);
+      simulateMessage({
+        type: 'PLUGIN_LIST_RESPONSE',
+        payload: {
+          plugins: [
+            { name: 'broken', enabled: false, state: 'load_error', error: "stored manifest failed validation: name missing", manifest: null },
+          ],
+        },
+      });
+      expect(screen.getByText('Load error')).toBeInTheDocument();
+      expect(screen.getByText(/stored manifest failed validation/)).toBeInTheDocument();
+      expect(screen.getByText(/None of this plugin's skills or MCP servers are active/)).toBeInTheDocument();
+      expect(screen.queryByText('Disabled')).not.toBeInTheDocument();
+      expect(screen.getByText('Uninstall')).toBeInTheDocument();
+    });
+  });
+
+  describe('update checks (FF4-04 / PC-13)', () => {
+    const PLUGIN_ROW = {
+      name: 'weather',
+      enabled: true,
+      source: '/tmp/weather-src',
+      manifest: { name: 'weather', version: '1.0', description: 'Weather tools' },
+    };
+
+    test('a check that finds a grown update surfaces it on the row and feeds the Updates chip', () => {
+      const { simulateMessage, sendMessage } = makeHarness();
+      render(<PluginsPanel />);
+      simulateMessage({ type: 'PLUGIN_LIST_RESPONSE', payload: { plugins: [PLUGIN_ROW] } });
+      fireEvent.click(screen.getByText('Check for updates'));
+      expect(sendMessage).toHaveBeenCalledWith(
+        'PLUGIN_UPDATE_CHECK_REQUEST',
+        expect.objectContaining({ payload: { name: 'weather' } }),
+      );
+      simulateMessage({
+        type: 'PLUGIN_UPDATE_CHECK_RESPONSE',
+        payload: {
+          success: true, name: 'weather', checked: true, error: null,
+          installed_version: '1.0', latest_version: '2.0', has_update: true,
+          permissions_grew: true,
+          added_skills: ['alerts'], removed_skills: [], changed_skills: [],
+          added_mcp_servers: [], removed_mcp_servers: [], changed_mcp_servers: [],
+        },
+      });
+      expect(screen.getByText('Update available')).toBeInTheDocument();
+      expect(screen.getByText(/Version 2.0 is available \(you have 1.0\)/)).toBeInTheDocument();
+      expect(screen.getByText(/adds skill\(s\): alerts/)).toBeInTheDocument();
+      expect(screen.getByText(/can do more than the version you approved/)).toBeInTheDocument();
+      expect(screen.getByText('Updates · 1')).toBeInTheDocument();
+    });
+
+    test('Review update pre-fills the install source so the approval flow re-runs', () => {
+      const { simulateMessage } = makeHarness();
+      render(<PluginsPanel />);
+      simulateMessage({ type: 'PLUGIN_LIST_RESPONSE', payload: { plugins: [PLUGIN_ROW] } });
+      simulateMessage({
+        type: 'PLUGIN_UPDATE_CHECK_RESPONSE',
+        payload: {
+          success: true, name: 'weather', checked: true, error: null,
+          installed_version: '1.0', latest_version: '2.0', has_update: true,
+          permissions_grew: false,
+          added_skills: [], removed_skills: [], changed_skills: ['forecast'],
+          added_mcp_servers: [], removed_mcp_servers: [], changed_mcp_servers: [],
+        },
+      });
+      fireEvent.click(screen.getByText('Review update'));
+      expect(screen.getByPlaceholderText('GitHub URL or local path')).toHaveValue('/tmp/weather-src');
+    });
+
+    test('a check that cannot run shows the engine reason on the row', () => {
+      const { simulateMessage } = makeHarness();
+      render(<PluginsPanel />);
+      simulateMessage({ type: 'PLUGIN_LIST_RESPONSE', payload: { plugins: [PLUGIN_ROW] } });
+      simulateMessage({
+        type: 'PLUGIN_UPDATE_CHECK_RESPONSE',
+        payload: {
+          success: true, name: 'weather', checked: false,
+          error: 'no install source was recorded for this plugin, so it cannot be checked for updates',
+          installed_version: '1.0', latest_version: null, has_update: false,
+          permissions_grew: false,
+          added_skills: [], removed_skills: [], changed_skills: [],
+          added_mcp_servers: [], removed_mcp_servers: [], changed_mcp_servers: [],
+        },
+      });
+      expect(screen.getByText(/no install source was recorded/)).toBeInTheDocument();
+      expect(screen.queryByText('Update available')).not.toBeInTheDocument();
+    });
+  });
 });

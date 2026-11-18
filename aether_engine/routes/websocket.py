@@ -66,6 +66,12 @@ from aether_engine.routes.ws_mcp_plugins import (
     send_plugin_install_result,
     send_plugin_toggle_result,
     send_plugin_uninstall_result,
+    send_plugin_update_check_result,
+)
+from aether_engine.routes.ws_skills_registry import (
+    send_skill_install_prepare_result,
+    send_skill_install_result,
+    send_skill_search_result,
 )
 from aether_engine.routes.ws_memory_media import (
     send_diagnostics_export_result,
@@ -3253,10 +3259,22 @@ async def _handle_plugin_list_request(conn: WsConnection, msg: Event) -> None:
     # both actions then missed the plugin entirely.
     # Additive: existing consumers read only the array and
     # each record's "enabled"/"manifest".
-    plugins_list = [
-        {**record, "name": key}
-        for key, record in plugins_dict.items()
-    ] if plugins_dict else []
+    # Wave 5 (D4-4 remainder, contract C7): a record whose stored
+    # manifest no longer validates is a per-plugin load error —
+    # first-class reply data ({state: "load_error", error}) on the
+    # record itself, exactly as broken skills ride the skill list,
+    # so the panel renders the failed row instead of a plugin that
+    # looks fine and is not.
+    load_errors = engine_state.plugin_installer.load_errors()
+    plugins_list = []
+    for key, record in plugins_dict.items():
+        # A non-dict record cannot even be spread — it is exactly
+        # the load_error case above, rendered from its key alone.
+        item = {**(record if isinstance(record, dict) else {}), "name": key}
+        if key in load_errors:
+            item["state"] = "load_error"
+            item["error"] = load_errors[key]
+        plugins_list.append(item)
     await conn.ws.send_text(Event(
         type=EventType.PLUGIN_LIST_RESPONSE,
         request_id=req_id,
@@ -3359,6 +3377,14 @@ async def _handle_plugin_toggle_request(conn: WsConnection, msg: Event) -> None:
     # work (RUX-B-10).
     conn.spawn_background(send_plugin_toggle_result(conn, 
         req_id, msg.payload.get("name"), msg.payload.get("enabled", True)))
+
+async def _handle_plugin_update_check_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_plugin_update_check_
+    # result): the check re-reads the plugin's whole source
+    # package to re-prepare it (Wave 5, FF4-04).
+    conn.spawn_background(send_plugin_update_check_result(conn,
+        req_id, msg.payload.get("name")))
 
 async def _handle_memory_episodes_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
@@ -3693,8 +3719,12 @@ async def _handle_version_check_request(conn: WsConnection, msg: Event) -> None:
 
 async def _handle_skill_list_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
+    from aether_engine.skills import skill_registry
     from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
-    skills = [s.__dict__ for s in GLOBAL_SKILL_MANAGER.list_all()]
+    # Wave 5 (D4-6): each row carries its lockfile pin (or None) —
+    # the panel's "modified vs pin" state rides the same payload
+    # as the list itself.
+    skills = skill_registry.annotated_skill_dicts(GLOBAL_SKILL_MANAGER)
     await conn.ws.send_text(Event(
         type=EventType.SKILL_LIST_RESPONSE,
         request_id=req_id,
@@ -3708,6 +3738,7 @@ async def _handle_skill_toggle_request(conn: WsConnection, msg: Event) -> None:
     # agent's available set (list/match/slash/load) no
     # longer contains them; Settings still lists them
     # with enabled=False so they can be re-enabled.
+    from aether_engine.skills import skill_registry
     from aether_engine.skills.manager import GLOBAL_SKILL_MANAGER
 
     skill_name = (msg.payload.get("name") or "").strip()
@@ -3734,7 +3765,7 @@ async def _handle_skill_toggle_request(conn: WsConnection, msg: Event) -> None:
             GLOBAL_SKILL_MANAGER.is_enabled(skill_name)
             if known else False
         ),
-        "skills": [s.__dict__ for s in GLOBAL_SKILL_MANAGER.list_all()],
+        "skills": skill_registry.annotated_skill_dicts(GLOBAL_SKILL_MANAGER),
     }
     if save_error is not None:
         payload["error"] = save_error
@@ -3743,6 +3774,40 @@ async def _handle_skill_toggle_request(conn: WsConnection, msg: Event) -> None:
         request_id=req_id,
         payload=payload,
     ).to_json())
+
+async def _handle_skill_search_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Wave 5 (D4-6): search one NAMED source over the CLI
+    # engine — there is no default registry, so a missing
+    # source is the engine's error, answered like every
+    # other family (see send_skill_search_result).
+    conn.spawn_background(send_skill_search_result(conn,
+        req_id,
+        msg.payload.get("source_type") or "local",
+        msg.payload.get("source") or "",
+        msg.payload.get("query") or ""))
+
+async def _handle_skill_install_prepare_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Wave 5 (D4-6): fetch + hash only — the pin summary the
+    # install card shows; nothing is written by a prepare.
+    conn.spawn_background(send_skill_install_prepare_result(conn,
+        req_id,
+        msg.payload.get("source_type") or "local",
+        msg.payload.get("source") or "",
+        (msg.payload.get("name") or "").strip()))
+
+async def _handle_skill_install_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Wave 5 (D4-6): install against the reviewed hash; a
+    # fresh install lands disabled (see
+    # send_skill_install_result).
+    conn.spawn_background(send_skill_install_result(conn,
+        req_id,
+        msg.payload.get("source_type") or "local",
+        msg.payload.get("source") or "",
+        (msg.payload.get("name") or "").strip(),
+        msg.payload.get("expected_hash")))
 
 async def _handle_slash_command_list_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
@@ -4505,6 +4570,7 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.PLUGIN_APPROVAL_REJECTED: _handle_plugin_approval_rejected,
     EventType.PLUGIN_UNINSTALL_REQUEST: _handle_plugin_uninstall_request,
     EventType.PLUGIN_TOGGLE_REQUEST: _handle_plugin_toggle_request,
+    EventType.PLUGIN_UPDATE_CHECK_REQUEST: _handle_plugin_update_check_request,
     EventType.CALENDAR_LIST_REQUEST: handle_calendar_list_request,
     EventType.MEMORY_EPISODES_REQUEST: _handle_memory_episodes_request,
     EventType.MEMORY_EPISODE_DELETE_REQUEST: _handle_memory_episode_delete_request,
@@ -4524,6 +4590,9 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.VERSION_CHECK_REQUEST: _handle_version_check_request,
     EventType.SKILL_LIST_REQUEST: _handle_skill_list_request,
     EventType.SKILL_TOGGLE_REQUEST: _handle_skill_toggle_request,
+    EventType.SKILL_SEARCH_REQUEST: _handle_skill_search_request,
+    EventType.SKILL_INSTALL_PREPARE_REQUEST: _handle_skill_install_prepare_request,
+    EventType.SKILL_INSTALL_REQUEST: _handle_skill_install_request,
     EventType.SLASH_COMMAND_LIST_REQUEST: _handle_slash_command_list_request,
     EventType.WORKSPACE_LIST_REQUEST: _handle_workspace_list_request,
     EventType.WORKSPACE_ADD_REQUEST: _handle_workspace_add_request,

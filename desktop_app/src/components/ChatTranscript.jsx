@@ -11,6 +11,7 @@ import {
 } from './ChatCards';
 import { DEFAULT_SLOW_TEXT } from './Settings/LoadStateRow';
 import EmptyState from './EmptyState';
+import PluginTrustCard from './PluginTrustCard';
 
 // Full Furnish S-5: the taught first-run landing's suggested first
 // tasks. Each chip IS the prompt it sends — the label and the task
@@ -201,8 +202,13 @@ function PluginApprovalMessage({ msg, onApprovePlugin }) {
         <p style={{ margin: '0 0 16px 0', fontSize: '14px', color: 'var(--text-primary)', lineHeight: 1.5 }}>
           The agent has requested permission to install plugin <strong>{msg.plugin_name}</strong>.
         </p>
-        <div style={{ background: 'var(--bg-base)', padding: '12px', borderRadius: '8px', fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '20px', overflowX: 'auto' }}>
-          {JSON.stringify(msg.plugin_details, null, 2)}
+        {/* Wave 5 (D4-4): the shared trust card renders the
+            prepare payload as a plain-language summary — the
+            same component the Settings panel's in-panel approval
+            uses. The decision wiring is unchanged: the answer
+            still travels under this message's own id. */}
+        <div style={{ marginBottom: '20px' }}>
+          <PluginTrustCard details={msg.plugin_details} />
         </div>
         {msg.decisionQueued && (
           <div data-testid="approval-decision-queued" style={{ marginBottom: '16px', padding: '8px 12px', borderRadius: '8px', background: 'rgba(var(--accent-rgb), 0.15)', border: '1px solid rgba(var(--accent-rgb), 0.35)', color: 'var(--accent)', fontSize: '12px' }}>
