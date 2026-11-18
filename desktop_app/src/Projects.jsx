@@ -1,9 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { FolderPlus, Folder, Trash2, Search } from 'lucide-react';
 import './chat.css';
 import LoadStateRow from './components/Settings/LoadStateRow';
+import EmptyState from './components/EmptyState';
 
-export default function Projects({ wsRef, isConnected = null, reconnectCount = 0 }) {
+// Full Furnish S-7: Projects is a doorway, not just a registry —
+// every workspace row offers its chats and a new chat bound to it.
+// The engine half is all here (set-active re-files the shell's
+// session list; SESSION_CREATE binds the named root), but the tab
+// switch itself belongs to the shell: `onGoToChat` is the optional
+// hand-off the shell wires to its Chat tab. Without it the actions
+// still take effect engine-side; the user just stays on Projects.
+export default function Projects({ wsRef, isConnected = null, reconnectCount = 0, onGoToChat }) {
   const [workspaces, setWorkspaces] = useState([]);
   // RUX-C-08: the workspace list is a load state until the first
   // WORKSPACE_LIST_RESPONSE lands — "No workspaces added" before
@@ -20,6 +28,15 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
   // (the Q7 confirmation shows before any REMOVE is sent).
   const [unboundSessionCount, setUnboundSessionCount] = useState(null);
   const [confirmRemovePath, setConfirmRemovePath] = useState(null);
+  // S-7: the row whose set-active just landed — it gains the
+  // inline jump ("Open its chats") until the user does something
+  // else. In-flight doorway requests are matched by request_id:
+  // every socket listener hears every reply, so a create/set-active
+  // initiated elsewhere must never trigger this panel's navigation
+  // or its jump offer.
+  const [justActivatedPath, setJustActivatedPath] = useState(null);
+  const pendingSetActiveRef = useRef(null); // { path, offerJump }
+  const pendingCreateRequestRef = useRef(null); // request_id string
 
   // Fetch workspace list from engine on mount
   useEffect(() => {
@@ -42,15 +59,36 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
             setActionError(data.payload.error || 'The workspace could not be added.');
           }
         } else if (data.type === 'WORKSPACE_SET_ACTIVE_RESPONSE') {
+          const pending = pendingSetActiveRef.current;
+          pendingSetActiveRef.current = null;
           if (data.payload.success === false) {
             setActionError(data.payload.error || 'That workspace could not be made active.');
           } else if (data.payload.success && wsRef.current) {
+            // S-7: a set-active the user asked for on the row
+            // itself earns the inline jump offer; a set-active
+            // sent as the first half of "open its chats" does not
+            // (the jump is already happening).
+            if (pending && pending.offerJump) {
+              setJustActivatedPath(pending.path);
+            }
             wsRef.current.send(JSON.stringify({
               type: 'WORKSPACE_LIST_REQUEST',
               schema_version: 1,
               request_id: Date.now().toString(),
               payload: {}
             }));
+          }
+        } else if (data.type === 'SESSION_CREATE_RESPONSE') {
+          // S-7: only a create THIS panel sent (matched by
+          // request_id) navigates or reports here — the shell's
+          // own handler performs the session switch either way.
+          if (pendingCreateRequestRef.current && data.request_id === pendingCreateRequestRef.current) {
+            pendingCreateRequestRef.current = null;
+            if (data.payload.success === false || !data.payload.session_id) {
+              setActionError(data.payload.error || 'That chat could not be created.');
+            } else if (typeof onGoToChat === 'function') {
+              onGoToChat();
+            }
           }
         } else if (data.type === 'WORKSPACE_REMOVE_RESPONSE') {
           if (data.payload.success === false) {
@@ -133,6 +171,8 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
 
   const handleSetActive = (path) => {
     setActionError(null);
+    setJustActivatedPath(null);
+    pendingSetActiveRef.current = { path, offerJump: true };
     if (wsRef?.current) {
       wsRef.current.send(JSON.stringify({
         type: 'WORKSPACE_SET_ACTIVE_REQUEST',
@@ -141,6 +181,47 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
         payload: { path }
       }));
     }
+  };
+
+  // S-7 doorway: "open its chats". The shell's session list files
+  // itself under the ACTIVE workspace, so a non-active workspace is
+  // made active first (the engine re-files the list when the reply
+  // lands); then the shell is handed the jump to Chat. An already
+  // active workspace needs no engine round-trip.
+  const handleOpenChats = (ws) => {
+    setActionError(null);
+    setJustActivatedPath(null);
+    if (!ws.is_active && wsRef?.current) {
+      pendingSetActiveRef.current = { path: ws.path, offerJump: false };
+      wsRef.current.send(JSON.stringify({
+        type: 'WORKSPACE_SET_ACTIVE_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { path: ws.path }
+      }));
+    }
+    if (typeof onGoToChat === 'function') onGoToChat();
+  };
+
+  // S-7 doorway: "new chat in this workspace". The create names
+  // the workspace explicitly, so the engine binds the new session
+  // to this root (its SESSION_CREATE binding rule) — not to
+  // whichever root happens to be active. The shell's own create
+  // handler performs the switch; this panel only navigates once
+  // its own request is answered, and surfaces a refusal instead
+  // of navigating on failure.
+  const handleNewChatInWorkspace = (ws) => {
+    setActionError(null);
+    setJustActivatedPath(null);
+    if (!wsRef?.current) return;
+    const requestId = `projects_new_chat_${Date.now()}`;
+    pendingCreateRequestRef.current = requestId;
+    wsRef.current.send(JSON.stringify({
+      type: 'SESSION_CREATE_REQUEST',
+      schema_version: 1,
+      request_id: requestId,
+      payload: { title: 'New Conversation', workspace: ws.path }
+    }));
   };
 
   const handleRemoveWorkspace = (path) => {
@@ -200,7 +281,21 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
                 <h3 style={{ fontSize: '16px', margin: '0 0 4px 0', color: 'var(--text-primary)' }}>{ws.name}</h3>
                 <p style={{ color: 'var(--text-muted)', margin: 0, fontSize: '13px', fontFamily: 'var(--font-mono)' }}>{ws.path}</p>
                 {typeof ws.session_count === 'number' && (
-                  <p style={{ color: 'var(--text-secondary)', margin: '4px 0 0 0', fontSize: '12px' }}>{ws.session_count} session{ws.session_count === 1 ? '' : 's'}</p>
+                  <button
+                    onClick={() => handleOpenChats(ws)}
+                    title={`Open chats in ${ws.name}`}
+                    style={{ background: 'none', border: 'none', padding: 0, margin: '4px 0 0 0', color: 'var(--text-secondary)', fontSize: '12px', cursor: 'pointer', textDecoration: 'underline', display: 'block' }}
+                  >
+                    {ws.session_count} session{ws.session_count === 1 ? '' : 's'}
+                  </button>
+                )}
+                {justActivatedPath === ws.path && (
+                  <button
+                    onClick={() => handleOpenChats(ws)}
+                    style={{ background: 'none', border: '1px solid rgba(245, 185, 66, 0.5)', color: 'var(--accent)', padding: '3px 10px', borderRadius: 'var(--radius-md)', margin: '8px 0 0 0', fontSize: '12px', cursor: 'pointer', display: 'block' }}
+                  >
+                    Open its chats
+                  </button>
                 )}
               </div>
             </div>
@@ -237,6 +332,20 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
               {ws.exists === false && (
                 <div style={{ color: 'var(--accent)', fontSize: '12px' }}>Folder missing</div>
               )}
+              <button
+                onClick={() => handleOpenChats(ws)}
+                style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '6px 12px', borderRadius: 'var(--radius-md)', cursor: 'pointer', fontSize: '12px' }}
+              >
+                Open chats
+              </button>
+              {ws.exists !== false && (
+                <button
+                  onClick={() => handleNewChatInWorkspace(ws)}
+                  style={{ background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', padding: '6px 12px', borderRadius: 'var(--radius-md)', cursor: 'pointer', fontSize: '12px' }}
+                >
+                  New chat
+                </button>
+              )}
               {!ws.is_active && ws.exists !== false && (
                 <button
                   onClick={() => handleSetActive(ws.path)}
@@ -252,7 +361,7 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
                 </div>
               )}
               <button 
-                onClick={() => setConfirmRemovePath(ws.path)}
+                onClick={() => { setJustActivatedPath(null); setConfirmRemovePath(ws.path); }}
                 title="Remove workspace"
                 aria-label={`Remove workspace ${ws.path}`}
                 style={{ background: 'rgba(201, 42, 42, 0.12)', color: 'var(--danger)', border: 'none', padding: '8px', borderRadius: 'var(--radius-md)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
@@ -274,9 +383,14 @@ export default function Projects({ wsRef, isConnected = null, reconnectCount = 0
           </div>
         )}
         {listLoad === 'ready' && workspaces.length === 0 && (
-          <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '40px', background: 'var(--bg-raised)', borderRadius: 'var(--radius-lg)' }}>
-            No workspaces added. Add a local folder to get started.
-          </div>
+          <EmptyState
+            icon={<FolderPlus size={26} color="var(--text-muted)" />}
+            title="No workspaces added"
+            description="Add a local folder to get started."
+            actionLabel="Add Folder"
+            onAction={handleAddWorkspace}
+            testId="projects-empty-state"
+          />
         )}
       </div>
     </div>

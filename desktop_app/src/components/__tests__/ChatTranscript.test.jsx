@@ -53,13 +53,35 @@ function makeProps(overrides = {}) {
 }
 
 describe('ChatTranscript', () => {
-  test('empty feed shows the no-session notice; a pending switch shows loading', () => {
+  test('empty feed shows the taught landing; a pending switch shows loading instead (RUX-C-13)', () => {
     const { rerender } = render(<ChatTranscript {...makeProps()} />);
-    expect(screen.getByText(/No active session/)).toBeInTheDocument();
+    // S-5: the genuine empty state is the taught landing — the
+    // shared EmptyState plus clickable suggested first tasks.
+    expect(screen.getByTestId('chat-empty-landing')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-empty-state')).toBeInTheDocument();
+    expect(screen.getAllByTestId('suggested-task-chip')).toHaveLength(4);
     rerender(<ChatTranscript {...makeProps({ sessionSwitchPending: true })} />);
     expect(screen.getByTestId('session-switch-loading')).toHaveTextContent('Loading session…');
+    expect(screen.queryByTestId('chat-empty-landing')).not.toBeInTheDocument();
     rerender(<ChatTranscript {...makeProps({ sessionSwitchPending: true, chatOffline: true })} />);
     expect(screen.getByTestId('session-switch-loading')).toHaveTextContent('Waiting for the engine');
+  });
+
+  test('a suggestion chip sends its exact text through the send path', () => {
+    const onSuggestedTask = jest.fn();
+    render(<ChatTranscript {...makeProps({ onSuggestedTask })} />);
+    const chip = screen.getAllByTestId('suggested-task-chip')[0];
+    fireEvent.click(chip);
+    expect(onSuggestedTask).toHaveBeenCalledTimes(1);
+    expect(onSuggestedTask).toHaveBeenCalledWith(chip.textContent);
+  });
+
+  test('without a wired send, a suggestion chip fills the composer instead of dropping the task', () => {
+    const setInput = jest.fn();
+    render(<ChatTranscript {...makeProps({ setInput })} />);
+    const chip = screen.getAllByTestId('suggested-task-chip')[1];
+    fireEvent.click(chip);
+    expect(setInput).toHaveBeenCalledWith(chip.textContent);
   });
 
   test('system, user and agent messages render in order with their content', () => {

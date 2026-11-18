@@ -29,10 +29,10 @@ const baseProps = {
 };
 
 describe('session switching state (RUX-C-13)', () => {
-  it('a pending switch renders the loading state, not "No active session"', () => {
+  it('a pending switch renders the loading state, not the empty landing', () => {
     render(<DraggableChatWindow {...baseProps} status="Online" sessionSwitchPending />);
     expect(screen.getByTestId('session-switch-loading')).toHaveTextContent('Loading session…');
-    expect(screen.queryByText(/No active session/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('chat-empty-landing')).not.toBeInTheDocument();
   });
 
   it('a pending switch while offline reads as waiting for the engine', () => {
@@ -40,13 +40,13 @@ describe('session switching state (RUX-C-13)', () => {
       <DraggableChatWindow {...baseProps} status="Offline / Engine Disconnected" sessionSwitchPending />,
     );
     expect(screen.getByTestId('session-switch-loading')).toHaveTextContent(/Waiting for the engine/);
-    expect(screen.queryByText(/No active session/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('chat-empty-landing')).not.toBeInTheDocument();
   });
 
   it('an answered session (no longer pending) with no messages shows the genuine empty state', () => {
     render(<DraggableChatWindow {...baseProps} status="Online" sessionSwitchPending={false} />);
     expect(screen.queryByTestId('session-switch-loading')).not.toBeInTheDocument();
-    expect(screen.getByText(/No active session/)).toBeInTheDocument();
+    expect(screen.getByTestId('chat-empty-landing')).toBeInTheDocument();
   });
 
   it('a switch that outlasts the slow interval gains the taking-longer line', () => {

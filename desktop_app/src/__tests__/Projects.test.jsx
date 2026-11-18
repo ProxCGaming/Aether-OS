@@ -360,3 +360,168 @@ describe('Projects load states (RUX-C-08)', () => {
     expect(sentTypes(wsRef)).not.toContain('WORKSPACE_ADD_REQUEST');
   });
 });
+
+describe('Projects doorway (Full Furnish S-7)', () => {
+  const seedList = (getHandler, workspaces, extra = {}) => {
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_LIST_RESPONSE',
+          payload: { workspaces, ...extra },
+        }),
+      });
+    });
+  };
+  const sentMessages = (wsRef) => wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
+  const twoRows = [
+    { path: '/home/user/main', name: 'main', is_indexed: false, is_active: true, exists: true, session_count: 2 },
+    { path: '/home/user/side', name: 'side', is_indexed: false, is_active: false, exists: true, session_count: 3 },
+  ];
+
+  it('the session count is a link: opening a non-active workspace sets it active, then jumps', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    const onGoToChat = jest.fn();
+    render(<Projects wsRef={wsRef} onGoToChat={onGoToChat} />);
+    seedList(getHandler, twoRows);
+    wsRef.current.send.mockClear();
+
+    fireEvent.click(screen.getByText('3 sessions'));
+    const setActive = sentMessages(wsRef).find((m) => m.type === 'WORKSPACE_SET_ACTIVE_REQUEST');
+    expect(setActive.payload.path).toBe('/home/user/side');
+    expect(onGoToChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('opening the already-active workspace jumps without an engine round-trip', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    const onGoToChat = jest.fn();
+    render(<Projects wsRef={wsRef} onGoToChat={onGoToChat} />);
+    seedList(getHandler, twoRows);
+    wsRef.current.send.mockClear();
+
+    fireEvent.click(screen.getByText('2 sessions'));
+    expect(sentTypes(wsRef)).not.toContain('WORKSPACE_SET_ACTIVE_REQUEST');
+    expect(onGoToChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('New chat creates a session bound to that workspace and jumps when its own reply lands', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    const onGoToChat = jest.fn();
+    render(<Projects wsRef={wsRef} onGoToChat={onGoToChat} />);
+    seedList(getHandler, twoRows);
+    wsRef.current.send.mockClear();
+
+    // Two "New chat" buttons (one per row); the second row is /side.
+    fireEvent.click(screen.getAllByText('New chat')[1]);
+    const creates = sentMessages(wsRef).filter((m) => m.type === 'SESSION_CREATE_REQUEST');
+    expect(creates).toHaveLength(1);
+    expect(creates[0].payload).toEqual({ title: 'New Conversation', workspace: '/home/user/side' });
+
+    // A create reply for some other request must not navigate.
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'SESSION_CREATE_RESPONSE',
+          request_id: 'someone_elses_create',
+          payload: { session_id: 'sx', workspace: '/home/user/side' },
+        }),
+      });
+    });
+    expect(onGoToChat).not.toHaveBeenCalled();
+
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'SESSION_CREATE_RESPONSE',
+          request_id: creates[0].request_id,
+          payload: { session_id: 's9', workspace: '/home/user/side' },
+        }),
+      });
+    });
+    expect(onGoToChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refused workspace-bound create surfaces the error and does not jump', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    const onGoToChat = jest.fn();
+    render(<Projects wsRef={wsRef} onGoToChat={onGoToChat} />);
+    seedList(getHandler, twoRows);
+    fireEvent.click(screen.getAllByText('New chat')[0]);
+    const create = sentMessages(wsRef).find((m) => m.type === 'SESSION_CREATE_REQUEST');
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'SESSION_CREATE_RESPONSE',
+          request_id: create.request_id,
+          payload: { session_id: null, workspace: null, success: false, error: 'That folder is not a configured workspace.' },
+        }),
+      });
+    });
+    expect(screen.getByTestId('projects-action-error').textContent).toMatch(/not a configured workspace/);
+    expect(onGoToChat).not.toHaveBeenCalled();
+  });
+
+  it('set-active offers the jump inline once it lands', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    const onGoToChat = jest.fn();
+    render(<Projects wsRef={wsRef} onGoToChat={onGoToChat} />);
+    seedList(getHandler, twoRows);
+    expect(screen.queryByText('Open its chats')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Set active'));
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_SET_ACTIVE_RESPONSE',
+          payload: { success: true },
+        }),
+      });
+    });
+    // The refetch the reply triggers re-files the rows as active.
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_LIST_RESPONSE',
+          payload: {
+            workspaces: [
+              { ...twoRows[0], is_active: false },
+              { ...twoRows[1], is_active: true },
+            ],
+          },
+        }),
+      });
+    });
+    fireEvent.click(screen.getByText('Open its chats'));
+    expect(onGoToChat).toHaveBeenCalledTimes(1);
+    // The offer is spent once used.
+    expect(screen.queryByText('Open its chats')).not.toBeInTheDocument();
+  });
+
+  it('a set-active sent as part of Open chats does not leave a stale jump offer behind', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    const onGoToChat = jest.fn();
+    render(<Projects wsRef={wsRef} onGoToChat={onGoToChat} />);
+    seedList(getHandler, twoRows);
+    fireEvent.click(screen.getByText('3 sessions'));
+    expect(onGoToChat).toHaveBeenCalledTimes(1);
+    act(() => {
+      getHandler()({
+        data: JSON.stringify({
+          type: 'WORKSPACE_SET_ACTIVE_RESPONSE',
+          payload: { success: true },
+        }),
+      });
+    });
+    expect(screen.queryByText('Open its chats')).not.toBeInTheDocument();
+  });
+
+  it('the answered-empty list renders the shared EmptyState with its Add Folder action', () => {
+    const { wsRef, getHandler } = makeWsRef();
+    render(<Projects wsRef={wsRef} />);
+    seedList(getHandler, []);
+    expect(screen.getByTestId('projects-empty-state')).toBeInTheDocument();
+    expect(screen.getByText('No workspaces added')).toBeInTheDocument();
+    // Two Add Folder affordances now: the header button and the
+    // empty state's single CTA — both wired to the same picker.
+    expect(screen.getAllByText('Add Folder')).toHaveLength(2);
+  });
+});

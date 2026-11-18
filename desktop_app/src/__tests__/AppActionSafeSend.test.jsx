@@ -251,10 +251,10 @@ describe('App user actions via safeSend (Wave 2 slice 2)', () => {
       fireEvent.click(screen.getByText('Second Chat'));
 
       // s2 has no cached copy: while its SESSION_GET is in flight
-      // the pane must say it is loading — "No active session"
-      // would claim the session does not exist.
+      // the pane must say it is loading — the empty landing would
+      // claim the session does not exist.
       expect(screen.getByTestId('session-switch-loading')).toBeInTheDocument();
-      expect(screen.queryByText(/No active session/)).not.toBeInTheDocument();
+      expect(screen.queryByTestId('chat-empty-landing')).not.toBeInTheDocument();
 
       respondToLastGet({
         id: 's2', title: 'Second Chat',
@@ -275,7 +275,7 @@ describe('App user actions via safeSend (Wave 2 slice 2)', () => {
       respondToLastGet({ id: 's2', title: 'Second Chat', messages: [] });
       await flushPromises();
       expect(screen.queryByTestId('session-switch-loading')).not.toBeInTheDocument();
-      expect(screen.getByText(/No active session/)).toBeInTheDocument();
+      expect(screen.getByTestId('chat-empty-landing')).toBeInTheDocument();
     });
 
     it('the chat shows the offline banner while disconnected and clears it on reconnect', async () => {

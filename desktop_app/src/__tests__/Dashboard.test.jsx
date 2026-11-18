@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import Dashboard from '../Dashboard';
 
 describe('Dashboard Component', () => {
@@ -166,5 +166,109 @@ describe('Dashboard metric honesty (RUX-C-14)', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('Dashboard home (Full Furnish S-4)', () => {
+  const sessions = [
+    { id: 's2', title: 'Second Chat', updated_at: 1760000000, workspace: '/home/user/proj' },
+    { id: 's1', title: 'First Chat', updated_at: 1750000000, workspace: null },
+  ];
+
+  it('renders recent sessions above the health cards and resumes in one click', () => {
+    const onResumeSession = jest.fn();
+    render(
+      <Dashboard
+        status="Online"
+        providerHealth={{}}
+        providerHealthLoaded
+        recentSessions={sessions}
+        onResumeSession={onResumeSession}
+      />,
+    );
+    const sessionsHeading = screen.getByText('Recent sessions');
+    const healthHeading = screen.getByText('Provider Health');
+    // Recents sit above the demoted health cards in document order.
+    expect(
+      sessionsHeading.compareDocumentPosition(healthHeading) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    fireEvent.click(screen.getByText('Second Chat'));
+    expect(onResumeSession).toHaveBeenCalledWith('s2');
+  });
+
+  it('an answered-empty session feed shows the shared empty state, not a bare line', () => {
+    render(<Dashboard status="Online" recentSessions={[]} onResumeSession={jest.fn()} />);
+    expect(screen.getByTestId('dashboard-recents-sessions-empty')).toBeInTheDocument();
+    expect(screen.getByText('No sessions yet')).toBeInTheDocument();
+  });
+
+  it('without a wired session feed the card stays out instead of claiming emptiness', () => {
+    render(<Dashboard status="Online" />);
+    expect(screen.queryByText('Recent sessions')).not.toBeInTheDocument();
+    expect(screen.queryByText('No sessions yet')).not.toBeInTheDocument();
+  });
+
+  it('New chat fires the shell create callback; Start New Workflow keeps its existing wiring', () => {
+    const onNewChat = jest.fn();
+    const onStartWorkflow = jest.fn();
+    render(<Dashboard status="Online" onNewChat={onNewChat} onStartWorkflow={onStartWorkflow} />);
+    fireEvent.click(screen.getByText('New chat'));
+    expect(onNewChat).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByText('Start New Workflow'));
+    expect(onStartWorkflow).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the active workspace from the prop; explicit null is a real "none"', () => {
+    const { rerender } = render(
+      <Dashboard status="Online" activeWorkspace={{ name: 'proj', path: '/home/user/proj' }} />,
+    );
+    expect(screen.getByText('proj')).toBeInTheDocument();
+    expect(screen.getByText('/home/user/proj')).toBeInTheDocument();
+    rerender(<Dashboard status="Online" activeWorkspace={null} />);
+    expect(screen.getByTestId('dashboard-workspace-empty')).toBeInTheDocument();
+    expect(screen.getByText('No active workspace')).toBeInTheDocument();
+  });
+
+  it('fetches the active workspace over the shared list feed when no prop is wired', () => {
+    let handler = null;
+    const wsRef = {
+      current: {
+        readyState: 1,
+        send: jest.fn(),
+        addEventListener: jest.fn((ev, cb) => { handler = cb; }),
+        removeEventListener: jest.fn(),
+      },
+    };
+    render(<Dashboard status="Online" wsRef={wsRef} />);
+    const sent = wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw).type);
+    expect(sent).toContain('WORKSPACE_LIST_REQUEST');
+    // eslint-disable-next-line testing-library/no-unnecessary-act
+    const { act } = require('@testing-library/react');
+    act(() => {
+      handler({
+        data: JSON.stringify({
+          type: 'WORKSPACE_LIST_RESPONSE',
+          payload: {
+            workspaces: [
+              { path: '/home/user/side', name: 'side', is_active: false },
+              { path: '/home/user/main', name: 'main', is_active: true },
+            ],
+          },
+        }),
+      });
+    });
+    expect(screen.getByText('main')).toBeInTheDocument();
+    expect(screen.getByText('/home/user/main')).toBeInTheDocument();
+  });
+
+  it('renders recent artifacts from the prop, with the shared empty state when none', () => {
+    const { rerender } = render(
+      <Dashboard status="Online" recentArtifacts={[{ id: 'a1', title: 'report.md', created_at: '2026-11-18T10:00:00Z' }]} />,
+    );
+    expect(screen.getByText('Recent artifacts')).toBeInTheDocument();
+    expect(screen.getByText('report.md')).toBeInTheDocument();
+    rerender(<Dashboard status="Online" recentArtifacts={[]} />);
+    expect(screen.getByTestId('dashboard-recents-artifacts-empty')).toBeInTheDocument();
+    expect(screen.getByText('No artifacts yet')).toBeInTheDocument();
   });
 });

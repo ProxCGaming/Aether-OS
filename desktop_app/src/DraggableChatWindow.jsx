@@ -2010,6 +2010,7 @@ export default function DraggableChatWindow({
               readAloudError={readAloudError}
               onToggleReadAloud={handleToggleReadAloud}
               onRegenerate={onRegenerate}
+              onSuggestedTask={(text) => { stickToBottomRef.current = true; onSendMessage(text); }}
             />
 
             {/* Agent browser task card (Epic 8, E8-6.1) */}

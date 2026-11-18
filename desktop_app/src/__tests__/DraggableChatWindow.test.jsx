@@ -316,11 +316,10 @@ function renderChat(props = {}) {
 }
 
 describe('DraggableChatWindow (default export)', () => {
-  it('renders the empty-session placeholder and the composer', () => {
+  it('renders the empty-session landing and the composer', () => {
     renderChat();
-    expect(
-      screen.getByText('No active session. Open a project or start a new chat.')
-    ).toBeInTheDocument();
+    expect(screen.getByTestId('chat-empty-landing')).toBeInTheDocument();
+    expect(screen.getAllByTestId('suggested-task-chip')).toHaveLength(4);
     expect(screen.getByPlaceholderText('Message Aether...')).toBeInTheDocument();
     expect(screen.getByText('Select Model...')).toBeInTheDocument();
   });
@@ -328,9 +327,7 @@ describe('DraggableChatWindow (default export)', () => {
   it('renders a user message', () => {
     renderChat({ messages: [{ role: 'user', content: 'Hello Aether' }] });
     expect(screen.getByText('Hello Aether')).toBeInTheDocument();
-    expect(
-      screen.queryByText('No active session. Open a project or start a new chat.')
-    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId('chat-empty-landing')).not.toBeInTheDocument();
   });
 
   it('renders an assistant message through the markdown renderer', () => {

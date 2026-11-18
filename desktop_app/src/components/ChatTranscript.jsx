@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
-import { AlertCircle, ShieldAlert, X, TerminalSquare, User, Bot, Edit2, MoreHorizontal, RotateCcw, Volume2, VolumeX, KeyRound } from 'lucide-react';
+import { AlertCircle, ShieldAlert, X, TerminalSquare, User, Bot, Edit2, MoreHorizontal, RotateCcw, Volume2, VolumeX, KeyRound, Sparkles } from 'lucide-react';
 import {
   ThinkingAccordion,
   ApprovalPreview,
@@ -10,6 +10,17 @@ import {
   getRewindPointForMessage,
 } from './ChatCards';
 import { DEFAULT_SLOW_TEXT } from './Settings/LoadStateRow';
+import EmptyState from './EmptyState';
+
+// Full Furnish S-5: the taught first-run landing's suggested first
+// tasks. Each chip IS the prompt it sends — the label and the task
+// are the same words, so what the user reads is exactly what runs.
+const SUGGESTED_FIRST_TASKS = [
+  'Introduce yourself — what can you help me with?',
+  'Write a 30-day plan for learning a new skill.',
+  'Draft a professional email asking for a project update.',
+  'Explain what you remember about me, and how your memory works.',
+];
 
 // Wave 5 (Annex C row 6, transcript seam): the message-list
 // rendering — the feed, its per-role rows (system notices, the
@@ -605,8 +616,23 @@ export default function ChatTranscript({
   readAloudError,
   onToggleReadAloud,
   onRegenerate,
+  onSuggestedTask,
 }) {
   const pendingApprovals = messages.filter((m) => m.role === 'tool_approval');
+
+  // S-5: a suggestion chip sends through the window's existing
+  // send path (the same one the composer submits through). In a
+  // mount where no send is wired, the chip fills the composer
+  // instead — the task is in front of the user, ready to send,
+  // never silently dropped.
+  const handleSuggestedTask = (text) => {
+    if (typeof onSuggestedTask === 'function') {
+      onSuggestedTask(text);
+      return;
+    }
+    if (typeof setInput === 'function') setInput(text);
+    if (textareaRef && textareaRef.current) textareaRef.current.focus();
+  };
 
   // Epic 1 UI batch (E1-08): regenerate is offered on the last final
   // agent bubble only (error bubbles included), and never mid-task.
@@ -630,8 +656,34 @@ export default function ChatTranscript({
             {switchSlow && <p style={{ margin: 0, fontSize: '12.5px' }}>{DEFAULT_SLOW_TEXT}</p>}
           </div>
         ) : (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', textAlign: 'center' }}>
-          <p>No active session. Open a project or start a new chat.</p>
+        // S-5: the genuine empty state — an answered session with
+        // no messages, or no session yet — is a taught landing,
+        // not a dead-end notice. It renders ONLY here: while a
+        // switch is in flight the loading state above owns the
+        // pane (RUX-C-13), so "no session yet" and "session
+        // loading" never share a face.
+        <div data-testid="chat-empty-landing" style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '20px 0' }}>
+          <EmptyState
+            icon={<Sparkles size={26} color="var(--text-muted)" />}
+            title="What should we do first?"
+            description="Pick a starting point below, or type your own task in the composer."
+            testId="chat-empty-state"
+          />
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', justifyContent: 'center', maxWidth: '580px', padding: '0 12px' }}>
+            {SUGGESTED_FIRST_TASKS.map((task) => (
+              <button
+                key={task}
+                data-testid="suggested-task-chip"
+                onClick={() => handleSuggestedTask(task)}
+                style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', padding: '8px 14px', borderRadius: '999px', cursor: 'pointer', fontSize: '13px' }}
+              >
+                {task}
+              </button>
+            ))}
+          </div>
+          <p style={{ color: 'var(--text-muted)', fontSize: '12px', margin: '16px 0 0 0', textAlign: 'center' }}>
+            Working with a folder? Add it under Projects so its files can be used as context.
+          </p>
         </div>
         )
       )}

@@ -54,7 +54,7 @@ describe('DraggableChatWindow minimise toggle (Phase 10.3 C2)', () => {
     // Minimised: feed + input are gone, only the header bar remains, and
     // the toggle now offers to restore.
     expect(screen.queryByPlaceholderText('Message Aether...')).not.toBeInTheDocument();
-    expect(screen.queryByText('No active session. Open a project or start a new chat.')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('chat-empty-landing')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Minimise chat' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Restore chat' })).toBeInTheDocument();
 
