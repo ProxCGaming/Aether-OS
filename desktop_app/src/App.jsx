@@ -14,6 +14,7 @@ import SettingsPanel from './SettingsPanel';
 import { resolveSnipHotkey } from './snipHotkey';
 import Dashboard from './Dashboard';
 import Projects from './Projects';
+import DetachedChatPanel from './components/DetachedChatPanel';
 import Onboarding from './components/Onboarding';
 import StartupGate, { deriveStartupPhase } from './components/StartupGate';
 import CommandPalette from './components/CommandPalette';
@@ -75,22 +76,31 @@ async function writeFloatingTransferState(state) {
 // can jump straight to. Ids and labels mirror SettingsPanel's own menu
 // items (SettingsPanel.jsx `menuItems`); the palette entries run
 // through App's tab state + the panel's initial-section prop.
-// 'About' is last, matching its place at the end of the panel nav.
+// S-6: the mirror is now complete (all 19 sections — Calendar,
+// Conversation and Computer Use were missing) and the order
+// follows the panel's grouped nav (Personal / Connect / System),
+// 'About' last, matching its place at the end of the panel nav.
 const SETTINGS_SECTIONS = [
-  { id: 'Providers', label: 'API Providers' },
-  { id: 'Models', label: 'Models & Tasks' },
-  { id: 'Agents', label: 'Agents' },
-  { id: 'Tools', label: 'Tools' },
-  { id: 'MCP', label: 'MCP Servers' },
-  { id: 'Plugins', label: 'Plugins' },
-  { id: 'Skills', label: 'Skills' },
-  { id: 'WorkspaceIndexing', label: 'Workspace Indexing' },
-  { id: 'BrowserPolicy', label: 'Browser Agent' },
+  // Personal
+  { id: 'Memory', label: 'Memory & Storage' },
+  { id: 'Voice', label: 'Voice Tuning' },
   { id: 'Usage', label: 'Usage' },
   { id: 'PasswordVault', label: 'Password Vault' },
-  { id: 'Memory', label: 'Memory & Storage' },
+  { id: 'Calendar', label: 'Calendar & Reminders' },
+  { id: 'Conversation', label: 'Conversation' },
+  // Connect
+  { id: 'Models', label: 'Models & Tasks' },
+  { id: 'Providers', label: 'API Providers' },
+  { id: 'MCP', label: 'MCP Servers' },
+  // System
+  { id: 'Agents', label: 'Agents' },
+  { id: 'Tools', label: 'Tools' },
+  { id: 'Skills', label: 'Skills' },
+  { id: 'Plugins', label: 'Plugins' },
+  { id: 'WorkspaceIndexing', label: 'Workspace Indexing' },
+  { id: 'BrowserPolicy', label: 'Browser Agent' },
+  { id: 'ComputerUse', label: 'Computer Use' },
   { id: 'Capabilities', label: 'Capabilities' },
-  { id: 'Voice', label: 'Voice Tuning' },
   { id: 'Advanced', label: 'Advanced' },
   { id: 'About', label: 'About' },
 ];
@@ -408,6 +418,20 @@ function AppContent() {
   });
 
   const [activeTab, setActiveTab] = useState('Chat'); // 'Chat', 'Dashboard', 'Artifacts', 'Projects', 'Settings'
+  // S-6 (FF1-08): return-to-origin — the tab the user was on when
+  // they entered Settings, so the Settings close button returns
+  // there instead of always dumping them on Chat. Recorded on
+  // every transition INTO Settings from a different tab, however
+  // Settings was opened (sidebar, palette, Ctrl+,); navigating
+  // between tabs without entering Settings never touches it.
+  const settingsOriginRef = useRef('Chat');
+  const prevTabRef = useRef(activeTab);
+  useEffect(() => {
+    if (activeTab === 'Settings' && prevTabRef.current !== 'Settings') {
+      settingsOriginRef.current = prevTabRef.current;
+    }
+    prevTabRef.current = activeTab;
+  }, [activeTab]);
   const [initialInput, setInitialInput] = useState('');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [slashCommands, setSlashCommands] = useState([]);
@@ -2067,6 +2091,15 @@ function AppContent() {
         />
       )}
 
+      {/* S-8 (FF1-10): while the chat is detached, the Chat tab's
+          content area carries the designed detached panel
+          (explanation + running status + Re-attach) instead of
+          rendering nothing. Display only — re-attach is the
+          existing handleReattachChat. */}
+      {activeTab === 'Chat' && isChatDetached && !isFloating && (
+        <DetachedChatPanel isThinking={isThinking} onReattach={handleReattachChat} />
+      )}
+
       {rewindConfirm && (
         <RewindConfirmModal
           entry={rewindConfirm.entry}
@@ -2110,7 +2143,7 @@ function AppContent() {
                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
                    <h1 style={{ color: '#fff', fontSize: '28px', margin: 0 }}>Settings</h1>
                    <button
-                     onClick={() => setActiveTab('Chat')}
+                     onClick={() => setActiveTab(settingsOriginRef.current)}
                      className="aether-solid-btn"
                      style={{ borderRadius: '50%', padding: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                      aria-label="Close Settings"

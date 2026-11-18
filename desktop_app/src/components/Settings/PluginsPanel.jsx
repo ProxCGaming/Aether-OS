@@ -1,8 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Download } from 'lucide-react';
+import { Download, Search } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 import PluginsNotice from './PluginsNotice';
 import LoadStateRow from './LoadStateRow';
+import EmptyState from '../EmptyState';
+import CapabilityFilterBar from './CapabilityFilterBar';
+import CapabilityItem from './CapabilityItem';
+import { capabilityFilterCounts, filterCapabilityItems } from './capabilityFilter';
 
 // Wave 5 (Annex C row 8): the Plugins tab, extracted from
 // DiagnosticsPanel.jsx — that file owned the Agents, MCP and
@@ -26,6 +30,20 @@ export default function PluginsPanel() {
   const [registryLoadError, setRegistryLoadError] = useState(null);
   const [pluginActionResult, setPluginActionResult] = useState(null);
   const [newPluginSource, setNewPluginSource] = useState('');
+  // D4-1: the installed list runs through the shared capability
+  // pattern (CapabilityFilterBar + capabilityFilter + CapabilityItem
+  // rows) — same search and chips as the other capability panels.
+  const [capQuery, setCapQuery] = useState('');
+  const [capFilter, setCapFilter] = useState('all');
+  const pluginEntries = plugins.map((plugin) => ({
+    item: plugin,
+    name: plugin.manifest?.name || plugin.name,
+    state: plugin.enabled ? 'enabled' : 'disabled',
+    hasUpdate: false,
+  }));
+  const pluginCounts = capabilityFilterCounts(pluginEntries);
+  const visiblePluginEntries = filterCapabilityItems(pluginEntries, capQuery, capFilter);
+  const clearCapabilityFilter = () => { setCapQuery(''); setCapFilter('all'); };
 
   useEffect(() => {
     sendMessage('PLUGIN_LIST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
@@ -108,6 +126,19 @@ export default function PluginsPanel() {
       )}
 
       <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Installed Plugins</h3>
+      {plugins.length > 0 && (
+        <CapabilityFilterBar
+          query={capQuery}
+          onQueryChange={setCapQuery}
+          filter={capFilter}
+          onFilterChange={setCapFilter}
+          counts={pluginCounts}
+          resultCount={visiblePluginEntries.length}
+          totalCount={pluginEntries.length}
+          searchPlaceholder="Search plugins by name…"
+          testId="plugins-filter-bar"
+        />
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
         {registryLoadError && (
           <LoadStateRow
@@ -134,45 +165,52 @@ export default function PluginsPanel() {
               No plugins installed.
             </div>
           )
+        ) : visiblePluginEntries.length === 0 ? (
+          <EmptyState
+            variant="no-results"
+            icon={<Search size={26} color="var(--text-muted)" />}
+            title="No matching plugins"
+            description="Nothing matches the current search and filters."
+            actionLabel="Show all plugins"
+            onAction={clearCapabilityFilter}
+            testId="plugins-no-results"
+          />
         ) : (
-          plugins.map(plugin => (
-            <div key={plugin.manifest?.name || plugin.name} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <h4 style={{ fontSize: '15px', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  {plugin.manifest?.name || plugin.name}
-                  <span style={{ fontSize: '11px', background: 'var(--bg-hover)', padding: '2px 6px', borderRadius: '4px' }}>v{plugin.manifest?.version || '1.0'}</span>
-                </h4>
-                <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                  {plugin.manifest?.description || 'No description available.'}
-                </p>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <button
-                  onClick={() => sendMessage('PLUGIN_TOGGLE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: plugin.manifest?.name || plugin.name, enabled: !plugin.enabled } })}
-                  style={{ background: plugin.enabled ? 'rgba(76, 195, 138, 0.15)' : 'rgba(255, 255, 255, 0.1)', color: plugin.enabled ? 'var(--success)' : 'var(--text-primary)', border: `1px solid ${plugin.enabled ? 'rgba(76, 195, 138, 0.3)' : 'rgba(255, 255, 255, 0.2)'}`, padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', width: '80px' }}
-                >
-                  {plugin.enabled ? 'Enabled' : 'Disabled'}
-                </button>
-                <button
-                  onClick={() => {
-                    // D4-4 confirm half (FF4-10): uninstalling
-                    // deletes the plugin's files and removes the
-                    // MCP servers and skills it installed —
-                    // confirm first, naming what will be removed,
-                    // with the same window.confirm pattern as the
-                    // other Settings deletes (D2-28). Cancelling
-                    // sends nothing. This was the destructive
-                    // action that fired on click.
-                    const name = plugin.manifest?.name || plugin.name;
-                    if (!window.confirm(`Uninstall the plugin "${name}"? Its files will be deleted, along with any MCP servers and skills it installed.`)) return;
-                    sendMessage('PLUGIN_UNINSTALL_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } });
-                  }}
-                  style={{ background: 'rgba(201, 42, 42, 0.15)', color: 'var(--danger)', border: '1px solid rgba(201, 42, 42, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
-                >
-                  Uninstall
-                </button>
-              </div>
-            </div>
+          visiblePluginEntries.map(({ item: plugin }) => (
+            <CapabilityItem
+              key={plugin.manifest?.name || plugin.name}
+              name={plugin.manifest?.name || plugin.name}
+              badges={<span style={{ fontSize: '11px', background: 'var(--bg-hover)', padding: '2px 6px', borderRadius: '4px' }}>v{plugin.manifest?.version || '1.0'}</span>}
+              description={plugin.manifest?.description || 'No description available.'}
+              actions={(
+                <>
+                  <button
+                    onClick={() => sendMessage('PLUGIN_TOGGLE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name: plugin.manifest?.name || plugin.name, enabled: !plugin.enabled } })}
+                    style={{ background: plugin.enabled ? 'rgba(76, 195, 138, 0.15)' : 'rgba(255, 255, 255, 0.1)', color: plugin.enabled ? 'var(--success)' : 'var(--text-primary)', border: `1px solid ${plugin.enabled ? 'rgba(76, 195, 138, 0.3)' : 'rgba(255, 255, 255, 0.2)'}`, padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', width: '80px' }}
+                  >
+                    {plugin.enabled ? 'Enabled' : 'Disabled'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      // D4-4 confirm half (FF4-10): uninstalling
+                      // deletes the plugin's files and removes the
+                      // MCP servers and skills it installed —
+                      // confirm first, naming what will be removed,
+                      // with the same window.confirm pattern as the
+                      // other Settings deletes (D2-28). Cancelling
+                      // sends nothing. This was the destructive
+                      // action that fired on click.
+                      const name = plugin.manifest?.name || plugin.name;
+                      if (!window.confirm(`Uninstall the plugin "${name}"? Its files will be deleted, along with any MCP servers and skills it installed.`)) return;
+                      sendMessage('PLUGIN_UNINSTALL_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } });
+                    }}
+                    style={{ background: 'rgba(201, 42, 42, 0.15)', color: 'var(--danger)', border: '1px solid rgba(201, 42, 42, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                  >
+                    Uninstall
+                  </button>
+                </>
+              )}
+            />
           ))
         )}
       </div>

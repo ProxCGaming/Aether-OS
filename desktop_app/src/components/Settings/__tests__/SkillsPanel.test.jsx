@@ -96,4 +96,45 @@ describe('SkillsPanel', () => {
     expect(screen.getByText('broken-skill')).toBeInTheDocument();
     expect(screen.getByText('Invalid')).toBeInTheDocument();
   });
+
+  describe('shared capability search/filter (D4-1)', () => {
+    const DISABLED = { ...SKILL, name: 'muted-skill', enabled: false, slash_commands: [], required_tools: [] };
+    const BROKEN = {
+      name: 'broken-skill', source: 'global', description: '', slash_commands: [],
+      required_tools: [], enabled: false, state: 'load_error', error: 'bad manifest',
+    };
+    const ALL = [SKILL, DISABLED, BROKEN];
+
+    test('a name fragment narrows the list', () => {
+      render(<SkillsPanel {...baseProps({ skills: ALL })} />);
+      fireEvent.change(screen.getByPlaceholderText('Search skills by name…'), { target: { value: 'muted' } });
+      expect(screen.getByText('muted-skill')).toBeInTheDocument();
+      expect(screen.queryByText('code-review')).not.toBeInTheDocument();
+      expect(screen.queryByText('broken-skill')).not.toBeInTheDocument();
+      expect(screen.getByText('Showing 1 of 3')).toBeInTheDocument();
+    });
+
+    test('the Disabled chip shows only disabled skills; the Error chip only the invalid row', () => {
+      render(<SkillsPanel {...baseProps({ skills: ALL })} />);
+      fireEvent.click(screen.getByText('Disabled · 1'));
+      expect(screen.getByText('muted-skill')).toBeInTheDocument();
+      expect(screen.queryByText('code-review')).not.toBeInTheDocument();
+      // A load_error skill is an error, not a disabled skill.
+      expect(screen.queryByText('broken-skill')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByText('Error · 1'));
+      expect(screen.getByText('broken-skill')).toBeInTheDocument();
+      expect(screen.queryByText('muted-skill')).not.toBeInTheDocument();
+    });
+
+    test('the Updates chip honestly matches nothing yet and offers the clear action', () => {
+      render(<SkillsPanel {...baseProps({ skills: ALL })} />);
+      fireEvent.click(screen.getByText('Updates · 0'));
+      expect(screen.getByTestId('skills-no-results')).toBeInTheDocument();
+      expect(screen.getByText('No matching skills')).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Show all skills'));
+      expect(screen.getByText('code-review')).toBeInTheDocument();
+      expect(screen.getByText('muted-skill')).toBeInTheDocument();
+      expect(screen.getByText('broken-skill')).toBeInTheDocument();
+    });
+  });
 });

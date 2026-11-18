@@ -1,14 +1,36 @@
-import React from 'react';
-import { Lock } from 'lucide-react';
+import React, { useState } from 'react';
+import { Lock, Search } from 'lucide-react';
 import Dropdown from '../../Dropdown';
 import LoadStateRow from './LoadStateRow';
 import PathRulesPanel from './PathRulesPanel';
+import EmptyState from '../EmptyState';
+import CapabilityFilterBar from './CapabilityFilterBar';
+import CapabilityItem from './CapabilityItem';
+import { capabilityFilterCounts, filterCapabilityItems } from './capabilityFilter';
 
 // Wave 5 (Annex C row 7): the Tools tab, extracted from
 // SettingsPanel.jsx — approval mode and binding, remembered
 // grants, path rules and per-tool policies. The shell keeps the
 // state and the sends; this panel is the controlled rendering.
+//
+// D4-1: the tool list runs through the shared capability pattern
+// (CapabilityFilterBar + capabilityFilter + CapabilityItem rows).
+// A tool's enabled/disabled state for the chips is its effective
+// policy: a tool the engine resolves to 'deny' cannot run at all
+// (disabled); every other tool is available (enabled). The real
+// per-tool Disable control is D4-8's slice, not this one.
 export default function ToolsPanel({ approvalMode, handleApprovalModeChange, controlRefusal, approvalBindingMode, handleApprovalBindingChange, approvalGrants, grantsAnswered, isConnected, pendingGrantRevokeFor, handleRevokeGrant, configAnswered, engineConfig, configUpdateError, onConfigUpdate, tools, toolsAnswered, pendingToolPolicyFor, onToolPolicyChange }) {
+  const [capQuery, setCapQuery] = useState('');
+  const [capFilter, setCapFilter] = useState('all');
+  const toolEntries = tools.map((tool) => ({
+    item: tool,
+    name: tool.function.name,
+    state: tool.effective_policy === 'deny' ? 'disabled' : 'enabled',
+    hasUpdate: false,
+  }));
+  const toolCounts = capabilityFilterCounts(toolEntries);
+  const visibleToolEntries = filterCapabilityItems(toolEntries, capQuery, capFilter);
+  const clearCapabilityFilter = () => { setCapQuery(''); setCapFilter('all'); };
   return (
     <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Tools Sandbox</h2>
@@ -144,6 +166,19 @@ export default function ToolsPanel({ approvalMode, handleApprovalModeChange, con
         <PathRulesPanel rules={engineConfig ? engineConfig.path_rules : undefined} configError={configUpdateError} onConfigUpdate={onConfigUpdate} />
       )}
 
+      {tools.length > 0 && (
+        <CapabilityFilterBar
+          query={capQuery}
+          onQueryChange={setCapQuery}
+          filter={capFilter}
+          onFilterChange={setCapFilter}
+          counts={toolCounts}
+          resultCount={visibleToolEntries.length}
+          totalCount={toolEntries.length}
+          searchPlaceholder="Search tools by name…"
+          testId="tools-filter-bar"
+        />
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
         {!toolsAnswered && tools.length === 0 ? (
           <LoadStateRow
@@ -157,17 +192,27 @@ export default function ToolsPanel({ approvalMode, handleApprovalModeChange, con
           <div style={{ color: 'var(--text-secondary)', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'var(--bg-base)', borderRadius: '12px' }}>
             No tools registered.
           </div>
+        ) : visibleToolEntries.length === 0 ? (
+          <EmptyState
+            variant="no-results"
+            icon={<Search size={26} color="var(--text-muted)" />}
+            title="No matching tools"
+            description="Nothing matches the current search and filters."
+            actionLabel="Show all tools"
+            onAction={clearCapabilityFilter}
+            testId="tools-no-results"
+          />
         ) : (
-          tools.map(tool => {
+          visibleToolEntries.map(({ item: tool }) => {
             const isWrite = tool.risk === 'write';
             const isDestructive = tool.risk === 'destructive';
             const isExecute = tool.risk === 'execute';
                   
             let badge = null;
             if (isWrite) {
-              badge = <span style={{ fontSize: '11px', background: 'rgba(var(--accent-rgb), 0.2)', color: 'var(--accent)', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px' }}>Write</span>;
+              badge = <span style={{ fontSize: '11px', background: 'rgba(var(--accent-rgb), 0.2)', color: 'var(--accent)', padding: '2px 6px', borderRadius: '4px' }}>Write</span>;
             } else if (isDestructive || isExecute) {
-              badge = <span style={{ fontSize: '11px', background: 'rgba(201,42,42, 0.2)', color: 'var(--danger)', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><Lock size={10} /> Risky</span>;
+              badge = <span style={{ fontSize: '11px', background: 'rgba(201,42,42, 0.2)', color: 'var(--danger)', padding: '2px 6px', borderRadius: '4px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><Lock size={10} /> Risky</span>;
             }
 
             // Phase 10.3 C2: the old 'default' option is gone. It was
@@ -191,21 +236,23 @@ export default function ToolsPanel({ approvalMode, handleApprovalModeChange, con
             ];
 
             return (
-              <div key={tool.function.name} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <h4 style={{ fontSize: '15px', fontWeight: 500, display: 'flex', alignItems: 'center' }}>
-                    {tool.function.name}
-                    {badge}
-                  </h4>
-                  <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>{tool.function.description}</p>
-                  {tool.policy_is_default && (
-                     <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>Default policy — no override set. Pick one to override it.</p>
-                  )}
-                  {!tool.always_allow_permitted && (
-                     <p style={{ fontSize: '11px', color: 'var(--accent)', marginTop: '4px' }}>Always Allow is disabled for risky tools.</p>
-                  )}
-                </div>
-                <div>
+              <CapabilityItem
+                key={tool.function.name}
+                name={tool.function.name}
+                badges={badge}
+                description={(
+                  <>
+                    {tool.function.description}
+                    {tool.policy_is_default && (
+                       <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>Default policy — no override set. Pick one to override it.</p>
+                    )}
+                    {!tool.always_allow_permitted && (
+                       <p style={{ fontSize: '11px', color: 'var(--accent)', marginTop: '4px' }}>Always Allow is disabled for risky tools.</p>
+                    )}
+                  </>
+                )}
+                actions={(
+                  <div>
                   {(() => {
                     // RUX-A-10: the dropdown is controlled from
                     // the engine's tool list, so a discarded
@@ -236,8 +283,9 @@ export default function ToolsPanel({ approvalMode, handleApprovalModeChange, con
                       </>
                     );
                   })()}
-                </div>
-              </div>
+                  </div>
+                )}
+              />
             );
           })
         )}

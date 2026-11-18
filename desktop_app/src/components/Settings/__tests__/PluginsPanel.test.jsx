@@ -131,4 +131,35 @@ describe('PluginsPanel', () => {
       );
     });
   });
+
+  describe('shared capability search/filter (D4-1)', () => {
+    const PLUGINS = [
+      { name: 'weather', enabled: true, manifest: { name: 'weather', version: '2.0', description: 'Weather tools' } },
+      { name: 'stocks', enabled: false, manifest: { name: 'stocks', version: '1.0', description: 'Stock quotes' } },
+    ];
+
+    test('search narrows by name and the Disabled chip shows only disabled plugins', () => {
+      const { simulateMessage } = makeHarness();
+      render(<PluginsPanel />);
+      simulateMessage({ type: 'PLUGIN_LIST_RESPONSE', payload: { plugins: PLUGINS } });
+      fireEvent.change(screen.getByPlaceholderText('Search plugins by name…'), { target: { value: 'wea' } });
+      expect(screen.getByText('weather')).toBeInTheDocument();
+      expect(screen.queryByText('stocks')).not.toBeInTheDocument();
+      fireEvent.change(screen.getByPlaceholderText('Search plugins by name…'), { target: { value: '' } });
+      fireEvent.click(screen.getByText('Disabled · 1'));
+      expect(screen.getByText('stocks')).toBeInTheDocument();
+      expect(screen.queryByText('weather')).not.toBeInTheDocument();
+    });
+
+    test('the Updates chip honestly matches nothing yet and the no-results state clears back', () => {
+      const { simulateMessage } = makeHarness();
+      render(<PluginsPanel />);
+      simulateMessage({ type: 'PLUGIN_LIST_RESPONSE', payload: { plugins: PLUGINS } });
+      fireEvent.click(screen.getByText('Updates · 0'));
+      expect(screen.getByTestId('plugins-no-results')).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Show all plugins'));
+      expect(screen.getByText('weather')).toBeInTheDocument();
+      expect(screen.getByText('stocks')).toBeInTheDocument();
+    });
+  });
 });

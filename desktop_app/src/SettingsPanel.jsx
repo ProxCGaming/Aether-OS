@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info, CalendarDays, MessagesSquare, Monitor } from 'lucide-react';
+import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info, CalendarDays, MessagesSquare, Monitor, Search } from 'lucide-react';
 import './chat.css';
 import { resolveSnipHotkey, defaultSnipHotkey } from './snipHotkey';
 import ProviderSettings from './components/Settings/ProviderSettings';
@@ -21,6 +21,7 @@ import VoicePanel from './components/Settings/VoicePanel';
 import CalendarPanel from './components/Settings/CalendarPanel';
 import ConversationPanel from './components/Settings/ConversationPanel';
 import ComputerUsePanel from './components/Settings/ComputerUsePanel';
+import EmptyState from './components/EmptyState';
 
 // Wave 5 (Annex C row 7): this file is the Settings shell —
 // sidebar navigation, the one socket message handler, the
@@ -30,6 +31,11 @@ import ComputerUsePanel from './components/Settings/ComputerUsePanel';
 // AboutPanel, VoicePanel, alongside the panels extracted
 // earlier); the Agents menu stays a composition of
 // DiagnosticsPanel + OrchestrationPanel here.
+
+// S-6: the nav group order (Batch 2 Settings shell). Every
+// menuItem carries one of these as its `group`; the nav renders
+// a header row per group that has visible items.
+const SETTINGS_NAV_GROUPS = ['Personal', 'Connect', 'System'];
 
 export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages = [], reconnectCount = 0, providers = [], providersLoaded = false, isConnected = null, providerHealth = {}, activeSession = null, dailyBudget = null, budgetAlert = null, initialMenu = null, onInitialMenuConsumed = null }) {
   const [activeMenu, setActiveMenu] = useState('Providers');
@@ -1166,26 +1172,42 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   // model downloads are handled for real by LocalModelsTab.jsx, which sends
   // LOCAL_MODEL_DOWNLOAD_START with destination_dir.
 
+  // S-6 (FF1-08): the nav is grouped per the owner-approved
+  // Batch 2 Settings shell — Personal / Connect / System. The
+  // board names Personal [Profile, Memory, Voice], Connect
+  // [Models & Tasks, Providers, MCP] and System [Agents, Tools,
+  // Skills, Plugins, General]; Profile is built as its own section
+  // in Wave 6 and 'General' has no section today (its Appearance
+  // half was removed in Phase 10.3 C2), so both are absent here
+  // rather than faked. The sections the board does not name are
+  // placed by function: Personal takes the user's own data and
+  // habits (Usage, Password Vault, Calendar, Conversation),
+  // System takes machine and capability machinery (Workspace
+  // Indexing, Browser Agent, Computer Use, Capabilities,
+  // Advanced, About — About stays last, as it always has been).
+  // Ids and labels are unchanged: App's palette mirror
+  // (SETTINGS_SECTIONS, E6-F08) carries the same ids/labels in
+  // this same order.
   const menuItems = [
-    { keywords: 'api key provider connect model list', id: 'Providers', icon: <Key size={18} />, label: 'API Providers' },
-    { keywords: 'default model local ollama tasks auxiliary vision', id: 'Models', icon: <Cpu size={18} />, label: 'Models & Tasks' },
-    { keywords: 'agent models supervisor planner researcher coder spawn policy prewalk output schemas compaction delegation', id: 'Agents', icon: <Network size={18} />, label: 'Agents' },
-    { keywords: 'tools approval grants policy risk path rules', id: 'Tools', icon: <Wrench size={18} />, label: 'Tools' },
-    { keywords: 'mcp servers tools resources prompts', id: 'MCP', icon: <Server size={18} />, label: 'MCP Servers' },
-    { keywords: 'plugins install enable disable', id: 'Plugins', icon: <Plug size={18} />, label: 'Plugins' },
-    { keywords: 'skills slash commands enable disable', id: 'Skills', icon: <Box size={18} />, label: 'Skills' },
-    { keywords: 'workspace indexing rag prose embedder files pause resume search watcher exclusions', id: 'WorkspaceIndexing', icon: <Layers size={18} />, label: 'Workspace Indexing' },
-    { keywords: 'browser agent policy payments envelopes confirmation autofill categories', id: 'BrowserPolicy', icon: <Globe size={18} />, label: 'Browser Agent' },
-    { keywords: 'usage cost budget tokens spend ledger models agents daily alert', id: 'Usage', icon: <CircleDollarSign size={18} />, label: 'Usage' },
-    { keywords: 'password vault credentials logins totp ask every time autofill', id: 'PasswordVault', icon: <Lock size={18} />, label: 'Password Vault' },
-    { keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
-    { keywords: 'calendar events reminders schedule itinerary upcoming', id: 'Calendar', icon: <CalendarDays size={18} />, label: 'Calendar & Reminders' },
-    { keywords: 'conversation adaptive replies tone pace eq signals chat behaviour', id: 'Conversation', icon: <MessagesSquare size={18} />, label: 'Conversation' },
-    { keywords: 'computer use desktop observe screen accessibility windows uia control vision capture', id: 'ComputerUse', icon: <Monitor size={18} />, label: 'Computer Use' },
-    { keywords: 'capabilities diagnostics environment scheduler machine hardware cpu ram gpu disk this machine', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
-    { keywords: 'voice tuning audio vad endpointing silence threshold mic speech', id: 'Voice', icon: <Mic size={18} />, label: 'Voice Tuning' },
-    { keywords: 'advanced routing fallbacks reset defaults developer project config layer overlay', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' },
-    { keywords: 'about version guide documentation help', id: 'About', icon: <Info size={18} />, label: 'About' }
+    { group: 'Personal', keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
+    { group: 'Personal', keywords: 'voice tuning audio vad endpointing silence threshold mic speech', id: 'Voice', icon: <Mic size={18} />, label: 'Voice Tuning' },
+    { group: 'Personal', keywords: 'usage cost budget tokens spend ledger models agents daily alert', id: 'Usage', icon: <CircleDollarSign size={18} />, label: 'Usage' },
+    { group: 'Personal', keywords: 'password vault credentials logins totp ask every time autofill', id: 'PasswordVault', icon: <Lock size={18} />, label: 'Password Vault' },
+    { group: 'Personal', keywords: 'calendar events reminders schedule itinerary upcoming', id: 'Calendar', icon: <CalendarDays size={18} />, label: 'Calendar & Reminders' },
+    { group: 'Personal', keywords: 'conversation adaptive replies tone pace eq signals chat behaviour', id: 'Conversation', icon: <MessagesSquare size={18} />, label: 'Conversation' },
+    { group: 'Connect', keywords: 'default model local ollama tasks auxiliary vision', id: 'Models', icon: <Cpu size={18} />, label: 'Models & Tasks' },
+    { group: 'Connect', keywords: 'api key provider connect model list', id: 'Providers', icon: <Key size={18} />, label: 'API Providers' },
+    { group: 'Connect', keywords: 'mcp servers tools resources prompts', id: 'MCP', icon: <Server size={18} />, label: 'MCP Servers' },
+    { group: 'System', keywords: 'agent models supervisor planner researcher coder spawn policy prewalk output schemas compaction delegation', id: 'Agents', icon: <Network size={18} />, label: 'Agents' },
+    { group: 'System', keywords: 'tools approval grants policy risk path rules', id: 'Tools', icon: <Wrench size={18} />, label: 'Tools' },
+    { group: 'System', keywords: 'skills slash commands enable disable', id: 'Skills', icon: <Box size={18} />, label: 'Skills' },
+    { group: 'System', keywords: 'plugins install enable disable', id: 'Plugins', icon: <Plug size={18} />, label: 'Plugins' },
+    { group: 'System', keywords: 'workspace indexing rag prose embedder files pause resume search watcher exclusions', id: 'WorkspaceIndexing', icon: <Layers size={18} />, label: 'Workspace Indexing' },
+    { group: 'System', keywords: 'browser agent policy payments envelopes confirmation autofill categories', id: 'BrowserPolicy', icon: <Globe size={18} />, label: 'Browser Agent' },
+    { group: 'System', keywords: 'computer use desktop observe screen accessibility windows uia control vision capture', id: 'ComputerUse', icon: <Monitor size={18} />, label: 'Computer Use' },
+    { group: 'System', keywords: 'capabilities diagnostics environment scheduler machine hardware cpu ram gpu disk this machine', id: 'Capabilities', icon: <Activity size={18} />, label: 'Capabilities' },
+    { group: 'System', keywords: 'advanced routing fallbacks reset defaults developer project config layer overlay', id: 'Advanced', icon: <Sliders size={18} />, label: 'Advanced' },
+    { group: 'System', keywords: 'about version guide documentation help', id: 'About', icon: <Info size={18} />, label: 'About' }
   ];
 
   // The sections surviving the search filter, in nav order. The list
@@ -1235,7 +1257,22 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
           }}
           style={{ padding: '10px 14px', borderRadius: 'var(--radius-md)', background: 'var(--bg-base)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', fontSize: '13px', marginBottom: '4px', flexShrink: 0 }}
         />
-        {visibleMenuItems.map(item => (
+        {/* S-6: group headers interleave the flat item list (no
+            wrapper elements — the items stay direct children of
+            the scrolling nav column, the shape the 13 Nov scroll
+            fix and its test pin). A group with no visible items
+            (under search) renders no header. */}
+        {SETTINGS_NAV_GROUPS.map(group => {
+          const groupItems = visibleMenuItems.filter(item => item.group === group);
+          if (groupItems.length === 0) return null;
+          return (
+            <React.Fragment key={group}>
+              <div
+                style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--text-muted)', padding: '10px 16px 2px', flexShrink: 0 }}
+              >
+                {group}
+              </div>
+              {groupItems.map(item => (
           <div
             key={item.id}
             role="button"
@@ -1279,7 +1316,25 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             {item.icon}
             {item.label}
           </div>
-        ))}
+              ))}
+            </React.Fragment>
+          );
+        })}
+        {visibleMenuItems.length === 0 && (
+          // S-6 (FF1-08): a search that matches nothing explains
+          // itself and offers the way back — the shared EmptyState
+          // no-results variant — instead of a silently blank nav.
+          <EmptyState
+            variant="no-results"
+            compact
+            icon={<Search size={22} color="var(--text-muted)" />}
+            title="No sections match"
+            description="Try different words, or clear the search to see every section."
+            actionLabel="Clear search"
+            onAction={() => setSettingsQuery('')}
+            testId="settings-search-no-results"
+          />
+        )}
       </div>
 
       {/* Settings Content Area */}

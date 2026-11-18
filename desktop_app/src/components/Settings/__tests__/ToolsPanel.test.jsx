@@ -74,4 +74,29 @@ describe('ToolsPanel', () => {
     expect(screen.getByText('Reads a file')).toBeInTheDocument();
     expect(screen.getByText(/Default policy — no override set/)).toBeInTheDocument();
   });
+
+  describe('shared capability search/filter (D4-1)', () => {
+    const READ = { function: { name: 'read_file', description: 'Reads a file' }, risk: 'read', policy: 'Require Approval', policy_is_default: true, effective_policy: 'ask', always_allow_permitted: true };
+    const DENIED = { function: { name: 'wipe_disk', description: 'Erases a disk' }, risk: 'destructive', policy: 'Deny', policy_is_default: false, effective_policy: 'deny', always_allow_permitted: false };
+
+    test('a name fragment narrows the list (the spec demo)', () => {
+      render(<ToolsPanel {...baseProps({ tools: [READ, DENIED] })} />);
+      fireEvent.change(screen.getByPlaceholderText('Search tools by name…'), { target: { value: 'wipe' } });
+      expect(screen.getByText('wipe_disk')).toBeInTheDocument();
+      expect(screen.queryByText('read_file')).not.toBeInTheDocument();
+      expect(screen.getByText('Showing 1 of 2')).toBeInTheDocument();
+    });
+
+    test('the Disabled chip shows only deny-policy tools; Error and Updates honestly match nothing', () => {
+      render(<ToolsPanel {...baseProps({ tools: [READ, DENIED] })} />);
+      fireEvent.click(screen.getByText('Disabled · 1'));
+      expect(screen.getByText('wipe_disk')).toBeInTheDocument();
+      expect(screen.queryByText('read_file')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByText('Error · 0'));
+      expect(screen.getByTestId('tools-no-results')).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Show all tools'));
+      expect(screen.getByText('read_file')).toBeInTheDocument();
+      expect(screen.getByText('wipe_disk')).toBeInTheDocument();
+    });
+  });
 });

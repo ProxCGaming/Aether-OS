@@ -195,4 +195,41 @@ describe('McpPanel', () => {
     }));
     expect(screen.queryByText('Before it runs')).not.toBeInTheDocument();
   });
+
+  describe('shared capability search/filter (D4-1)', () => {
+    const SERVERS = {
+      localdb: { command: 'python', args: ['-m', 'db'], status: 'connected', confirmed: true },
+      brokensrv: { command: 'nope', args: [], status: 'failed', error: 'spawn failed', confirmed: true },
+      offsrv: { url: 'http://127.0.0.1:9/mcp', status: 'disconnected', enabled: false, confirmed: true },
+    };
+
+    test('search narrows by name; Error and Disabled chips classify by server state', () => {
+      const { simulateMessage } = makeHarness();
+      render(<McpPanel />);
+      simulateMessage({ type: 'MCP_SERVER_LIST_RESPONSE', payload: { servers: SERVERS } });
+      fireEvent.change(screen.getByPlaceholderText('Search servers by name…'), { target: { value: 'local' } });
+      expect(screen.getByText('localdb')).toBeInTheDocument();
+      expect(screen.queryByText('brokensrv')).not.toBeInTheDocument();
+      expect(screen.queryByText('offsrv')).not.toBeInTheDocument();
+      fireEvent.change(screen.getByPlaceholderText('Search servers by name…'), { target: { value: '' } });
+      fireEvent.click(screen.getByText('Error · 1'));
+      expect(screen.getByText('brokensrv')).toBeInTheDocument();
+      expect(screen.queryByText('localdb')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByText('Disabled · 1'));
+      expect(screen.getByText('offsrv')).toBeInTheDocument();
+      expect(screen.queryByText('brokensrv')).not.toBeInTheDocument();
+    });
+
+    test('the Updates chip honestly matches nothing yet and clears back to the full list', () => {
+      const { simulateMessage } = makeHarness();
+      render(<McpPanel />);
+      simulateMessage({ type: 'MCP_SERVER_LIST_RESPONSE', payload: { servers: SERVERS } });
+      fireEvent.click(screen.getByText('Updates · 0'));
+      expect(screen.getByTestId('mcp-no-results')).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Show all servers'));
+      expect(screen.getByText('localdb')).toBeInTheDocument();
+      expect(screen.getByText('brokensrv')).toBeInTheDocument();
+      expect(screen.getByText('offsrv')).toBeInTheDocument();
+    });
+  });
 });

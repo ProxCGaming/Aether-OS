@@ -1,7 +1,12 @@
 import React, { useState, useEffect } from 'react';
+import { Search } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 import MCPNotice from './MCPNotice';
 import LoadStateRow from './LoadStateRow';
+import EmptyState from '../EmptyState';
+import CapabilityFilterBar from './CapabilityFilterBar';
+import CapabilityItem from './CapabilityItem';
+import { capabilityFilterCounts, filterCapabilityItems } from './capabilityFilter';
 
 // Wave 5 (Annex C row 8): the MCP Servers tab, extracted from
 // DiagnosticsPanel.jsx — that file owned the Agents, MCP and
@@ -86,6 +91,22 @@ export default function McpPanel({ activeSession = null }) {
   // added before confirmation existed: {name, config} staged from
   // the server's row, confirmed through the same card.
   const [pendingMcpConfirm, setPendingMcpConfirm] = useState(null);
+  // D4-1: the server list runs through the shared capability
+  // pattern (CapabilityFilterBar + capabilityFilter + CapabilityItem
+  // rows). A server classifies as 'error' when it is in a failed
+  // state or carries an error, 'disabled' when its enabled flag is
+  // off, 'enabled' otherwise.
+  const [capQuery, setCapQuery] = useState('');
+  const [capFilter, setCapFilter] = useState('all');
+  const serverEntries = Object.entries(mcpServers).map(([name, config]) => ({
+    item: { name, config },
+    name,
+    state: (config.status === 'failed' || config.error) ? 'error' : (config.enabled === false ? 'disabled' : 'enabled'),
+    hasUpdate: false,
+  }));
+  const serverCounts = capabilityFilterCounts(serverEntries);
+  const visibleServerEntries = filterCapabilityItems(serverEntries, capQuery, capFilter);
+  const clearCapabilityFilter = () => { setCapQuery(''); setCapFilter('all'); };
 
   const confirmPendingMcpConfirm = () => {
     if (!pendingMcpConfirm) return;
@@ -385,6 +406,19 @@ export default function McpPanel({ activeSession = null }) {
       )}
 
       <h3 style={{ fontSize: '16px', marginBottom: '16px' }}>Configured Servers</h3>
+      {Object.keys(mcpServers).length > 0 && (
+        <CapabilityFilterBar
+          query={capQuery}
+          onQueryChange={setCapQuery}
+          filter={capFilter}
+          onFilterChange={setCapFilter}
+          counts={serverCounts}
+          resultCount={visibleServerEntries.length}
+          totalCount={serverEntries.length}
+          searchPlaceholder="Search servers by name…"
+          testId="mcp-filter-bar"
+        />
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
         {Object.keys(mcpServers).length === 0 && mcpLoad !== 'ready' ? (
           <LoadStateRow
@@ -399,14 +433,64 @@ export default function McpPanel({ activeSession = null }) {
           <div style={{ color: 'var(--text-secondary)', fontSize: '14px', padding: '24px', textAlign: 'center', background: 'var(--bg-base)', borderRadius: '12px' }}>
             No MCP servers configured.
           </div>
+        ) : visibleServerEntries.length === 0 ? (
+          <EmptyState
+            variant="no-results"
+            icon={<Search size={26} color="var(--text-muted)" />}
+            title="No matching servers"
+            description="Nothing matches the current search and filters."
+            actionLabel="Show all servers"
+            onAction={clearCapabilityFilter}
+            testId="mcp-no-results"
+          />
         ) : (
-          Object.entries(mcpServers).map(([name, config]) => (
-            <div key={name} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <h4 style={{ fontSize: '15px', fontWeight: 500 }}>{name}</h4>
-                <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px', fontFamily: 'var(--font-mono)' }}>
+          visibleServerEntries.map(({ item: { name, config } }) => (
+            <CapabilityItem
+              key={name}
+              name={name}
+              description={(
+                <span style={{ fontFamily: 'var(--font-mono)' }}>
                   {config.url ? config.url : `${config.command || ''} ${config.args?.join(' ') || ''}`}
-                </p>
+                </span>
+              )}
+              actions={(
+                <>
+                  <button
+                    onClick={() => sendMessage('MCP_SERVER_TEST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
+                    style={{ background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                  >
+                    Test
+                  </button>
+                  <button
+                    onClick={() => sendMessage('MCP_SERVER_CONNECT_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
+                    style={{ background: 'rgba(76, 195, 138, 0.15)', color: 'var(--success)', border: '1px solid rgba(76, 195, 138, 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                  >
+                    Connect
+                  </button>
+                  <button
+                    onClick={() => sendMessage('MCP_SERVER_DISCONNECT_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
+                    style={{ background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                  >
+                    Disconnect
+                  </button>
+                  <button
+                    onClick={() => {
+                      // D2-28: removing a server deletes its
+                      // configuration — confirm first, with the
+                      // same window.confirm pattern as the other
+                      // Settings deletes (MemoryManagement);
+                      // Projects confirms removals too. This was
+                      // the one that fired immediately.
+                      if (!window.confirm(`Remove the MCP server "${name}"? Its configuration will be deleted.`)) return;
+                      sendMessage('MCP_SERVER_REMOVE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } });
+                    }}
+                    style={{ background: 'rgba(201, 42, 42, 0.15)', color: 'var(--danger)', border: '1px solid rgba(201, 42, 42, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+                  >
+                    Remove
+                  </button>
+                </>
+              )}
+            >
                 <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
                   Status: {config.status || 'unknown'}{config.tool_count ? ` — ${config.tool_count} tool(s)` : ''}{config.error ? ` — ${config.error}` : ''}
                 </p>
@@ -501,43 +585,7 @@ export default function McpPanel({ activeSession = null }) {
                     ))}
                   </div>
                 )}
-              </div>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <button
-                  onClick={() => sendMessage('MCP_SERVER_TEST_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
-                  style={{ background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
-                >
-                  Test
-                </button>
-                <button
-                  onClick={() => sendMessage('MCP_SERVER_CONNECT_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
-                  style={{ background: 'rgba(76, 195, 138, 0.15)', color: 'var(--success)', border: '1px solid rgba(76, 195, 138, 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
-                >
-                  Connect
-                </button>
-                <button
-                  onClick={() => sendMessage('MCP_SERVER_DISCONNECT_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } })}
-                  style={{ background: 'rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.4)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
-                >
-                  Disconnect
-                </button>
-                <button
-                  onClick={() => {
-                    // D2-28: removing a server deletes its
-                    // configuration — confirm first, with the
-                    // same window.confirm pattern as the other
-                    // Settings deletes (MemoryManagement);
-                    // Projects confirms removals too. This was
-                    // the one that fired immediately.
-                    if (!window.confirm(`Remove the MCP server "${name}"? Its configuration will be deleted.`)) return;
-                    sendMessage('MCP_SERVER_REMOVE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name } });
-                  }}
-                  style={{ background: 'rgba(201, 42, 42, 0.15)', color: 'var(--danger)', border: '1px solid rgba(201, 42, 42, 0.28)', padding: '6px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
-                >
-                  Remove
-                </button>
-              </div>
-            </div>
+            </CapabilityItem>
           ))
         )}
       </div>
