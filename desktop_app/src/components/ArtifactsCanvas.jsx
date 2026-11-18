@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { X, Copy, Check, Download, ExternalLink, FileCode, FileText, GitCommit, Image, Database, AlertCircle, Eye, Loader2 } from 'lucide-react';
+import EmptyState from './EmptyState';
 import CodeRenderer from './renderers/CodeRenderer';
 import MarkdownRenderer from './renderers/MarkdownRenderer';
 import DiffRenderer from './renderers/DiffRenderer';
@@ -403,9 +404,13 @@ export default function ArtifactsCanvas({
           }}
         >
           {taskGroups.length === 0 ? (
-            <div style={{ fontSize: '12px', color: 'var(--text-muted)', padding: '8px 0', textAlign: 'center' }}>
-              No artifacts recorded yet.
-            </div>
+            <EmptyState
+              compact
+              icon={<FileText size={20} color="var(--text-muted)" />}
+              title="No artifacts recorded yet"
+              description="Files and outputs from tasks will appear here."
+              testId="artifacts-empty"
+            />
           ) : (
             taskGroups.map((grp) => (
               <div key={grp.taskId} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
