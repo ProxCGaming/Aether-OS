@@ -45,6 +45,30 @@ WHISPER_MODEL_SIZES = frozenset({
     "distil-large-v2", "distil-large-v3", "distil-large-v3.5",
 })
 
+# The speech-language vocabulary the config validates against:
+# 'auto' (Whisper detects per utterance) or one of these ISO
+# codes — the languages the Settings picker offers. Whisper
+# itself knows more; the picker stays a curated list so the
+# setting can never name a language the UI didn't offer.
+STT_LANGUAGE_AUTO = "auto"
+STT_LANGUAGES = frozenset({
+    "auto",
+    "en", "hi", "bn", "es", "fr", "de", "it", "pt",
+    "ja", "ko", "zh", "ru", "ar",
+})
+
+
+def stt_language_or_none(value: object) -> str | None:
+    """The FasterWhisper ``language`` argument for a config
+    value: None for 'auto' (and for anything unknown — config
+    validation refuses unknown values at write time; this is
+    the lenient read)."""
+    if isinstance(value, str) and value in STT_LANGUAGES \
+            and value != STT_LANGUAGE_AUTO:
+        return value
+    return None
+
+
 # An HF repo id is exactly ``owner/name`` — no whitespace, no
 # extra path segments.
 _HF_REPO_ID_RE = re.compile(r"^[^/\s]+/[^/\s]+$")

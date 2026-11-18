@@ -11,6 +11,7 @@ import { sanitizeSvg } from './sanitizeSvg';
 import { useSlowLoad } from './components/Settings/LoadStateRow';
 import ChatComposer from './components/ChatComposer';
 import { startDictationCapture } from './dictationCapture';
+import { audioConstraintForDevice } from './micDevices';
 import ContextMenu from './components/ContextMenu';
 import { buildContextMenuState } from './components/contextMenuState';
 import ChatTranscript from './components/ChatTranscript';
@@ -770,6 +771,14 @@ export default function DraggableChatWindow({
   onDictationStart = null,
   onDictationChunk = null,
   onDictationStop = null,
+  // Wave 4: the selected microphone (engine config
+  // speech_input_device_id; '' = system default) and the
+  // dictation button behaviour (dictation_mode: 'hold' |
+  // 'toggle'). App wires both from the applied config; the
+  // defaults keep the historical behaviour for any host that
+  // doesn't pass them.
+  inputDeviceId = '',
+  dictationMode = 'hold',
   onReadAloudStart = null,
   onReadAloudStop = null
 }) {
@@ -877,6 +886,14 @@ export default function DraggableChatWindow({
   // D1-C11: whether a mic press is currently active (see
   // handleMicStart / handleMicEnd).
   const micPressActiveRef = useRef(false);
+  // The selected microphone, read through a ref: capture opens
+  // the device selected when dictation starts; a mid-dictation
+  // Settings change applies to the next dictation, never yanks
+  // the microphone mid-sentence.
+  const inputDeviceIdRef = useRef(inputDeviceId);
+  useEffect(() => {
+    inputDeviceIdRef.current = inputDeviceId;
+  }, [inputDeviceId]);
   // D1-C7: this component's old private read-aloud refs
   // (AudioContext / sources / play-head) are gone — its sources
   // set was never populated; playback lives in App.
@@ -897,7 +914,9 @@ export default function DraggableChatWindow({
           return;
         }
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: audioConstraintForDevice(inputDeviceIdRef.current),
+          });
           // The press may have ended while permission was in
           // flight — then the STOP already went out without
           // audio and this stream must not start (or leak).
@@ -946,11 +965,11 @@ export default function DraggableChatWindow({
     }
   }, [readAloudState]);
 
-  const handleMicStart = async (e) => {
-    if (e) {
-      if (typeof e.preventDefault === 'function') e.preventDefault();
-      if (typeof e.stopPropagation === 'function') e.stopPropagation();
-    }
+  // The ONE dictation start/stop path. Both button behaviours
+  // (dictation_mode: 'hold' and 'toggle') run through these two
+  // functions and the same capture (dictationCapture.js) — the
+  // mode only changes WHICH button events call them.
+  const beginDictation = async () => {
     if (isDictating) return;
     micPressActiveRef.current = true;
     setDictationError(null);
@@ -967,7 +986,9 @@ export default function DraggableChatWindow({
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: audioConstraintForDevice(inputDeviceIdRef.current),
+      });
       // As in the engine-answered path: a press that already
       // ended must not start (or leak) a capture.
       if (!micPressActiveRef.current) {
@@ -980,11 +1001,7 @@ export default function DraggableChatWindow({
     }
   };
 
-  const handleMicEnd = (e) => {
-    if (e) {
-      if (typeof e.preventDefault === 'function') e.preventDefault();
-      if (typeof e.stopPropagation === 'function') e.stopPropagation();
-    }
+  const finishDictation = () => {
     // D1-C11: one press ends dictation once. The button binds
     // mouseUp AND mouseLeave AND touchEnd, so a press ending
     // with the pointer sliding off the button fired the stop
@@ -1000,17 +1017,58 @@ export default function DraggableChatWindow({
     }
   };
 
+  const swallowEvent = (e) => {
+    if (e) {
+      if (typeof e.preventDefault === 'function') e.preventDefault();
+      if (typeof e.stopPropagation === 'function') e.stopPropagation();
+    }
+  };
+
+  // Hold-to-talk (the historical behaviour): press starts,
+  // release ends. In toggle mode press/release mean nothing —
+  // the click handler below owns the button.
+  const handleMicStart = async (e) => {
+    swallowEvent(e);
+    if (dictationMode === 'toggle') return;
+    await beginDictation();
+  };
+
+  const handleMicEnd = (e) => {
+    swallowEvent(e);
+    if (dictationMode === 'toggle') return;
+    finishDictation();
+  };
+
+  // Click-toggle: one click starts, the next stops. A click
+  // that lands while a start is still in flight (permission
+  // pending, engine answering) cancels it — the press ref is
+  // the source of truth for "a start was begun", exactly as in
+  // hold mode.
+  const handleMicToggle = () => {
+    if (micPressActiveRef.current || isDictating) {
+      finishDictation();
+    } else {
+      beginDictation();
+    }
+  };
+
   const handleMicKeyDown = (e) => {
     if (e.key === ' ' || e.key === 'Enter') {
       e.preventDefault();
-      handleMicStart(e);
+      if (dictationMode === 'toggle') {
+        if (!e.repeat) handleMicToggle();
+      } else {
+        handleMicStart(e);
+      }
     }
   };
 
   const handleMicKeyUp = (e) => {
     if (e.key === ' ' || e.key === 'Enter') {
       e.preventDefault();
-      handleMicEnd(e);
+      if (dictationMode !== 'toggle') {
+        handleMicEnd(e);
+      }
     }
   };
 
@@ -2049,6 +2107,8 @@ export default function DraggableChatWindow({
               onMicEnd={handleMicEnd}
               onMicKeyDown={handleMicKeyDown}
               onMicKeyUp={handleMicKeyUp}
+              onMicClick={dictationMode === 'toggle' ? handleMicToggle : undefined}
+              dictationMode={dictationMode}
               onStopTask={onStopTask}
               onDismissDictationError={() => setDictationError(null)}
             />
@@ -2084,6 +2144,10 @@ export default function DraggableChatWindow({
             assistantText={voiceState.assistantText || voiceState.announcementText || ''}
             notice={voiceState.notice || null}
             error={voiceState.error || null}
+            inputDeviceId={inputDeviceId}
+            ttsVoice={voiceState.ttsVoice || null}
+            sttModel={voiceState.sttModel || null}
+            sttConfiguredModel={voiceState.sttConfiguredModel || null}
             webrtcConfig={voiceState.webrtcConfig || null}
             audioChunk={voiceAudioChunk}
             playbackCut={voicePlaybackCut}

@@ -285,11 +285,13 @@ class VoicePipeline:
         PROSODY NO-OP, stated plainly: this records the read and
         applies NOTHING. The current TTS stage synthesises from
         text + voice id only (``TtsEngine.synthesize(text, *,
-        voice)``) — it has no rate, pitch or SSML control — so
-        there is no honest way to make the voice sound slower,
-        calmer or more careful today, and this hook does not
-        pretend otherwise. When a TTS with prosody controls
-        lands, it consumes ``current_affect`` here.
+        voice)``) — it takes no per-sentence rate, pitch or SSML
+        control (the configured speed preset is fixed when the
+        engine is built) — so there is no honest way to make the
+        voice sound calmer or more careful for one reply today,
+        and this hook does not pretend otherwise. When a TTS
+        with prosody controls lands, it consumes
+        ``current_affect`` here.
         """
         self._latest_affect_read = read
 
@@ -339,6 +341,19 @@ class VoicePipeline:
         if self._degradation is None:
             return ()
         return self._degradation.notices
+
+    @property
+    def effective_stt_model(self) -> str | None:
+        """The STT model actually in effect (Wave 4): the
+        degradation tracker's model — which the ladder's
+        step-downs, failure swaps and the load-failure retry
+        all keep current — or, for a pipeline built without a
+        ladder, the STT stage's own model name. The start
+        response reports this so the overlay can name the model
+        in effect instead of the merely-configured one."""
+        if self._degradation is not None:
+            return self._degradation.stt_model
+        return getattr(self._stt, "model_name", None)
 
     @property
     def fatal_reason(self) -> str | None:
@@ -681,6 +696,8 @@ def create_voice_pipeline(
     speculation=None,
     stt_model: str | None = None,
     tts_voice: str = DEFAULT_VOICE,
+    stt_language: str | None = None,
+    tts_speed: float = 1.0,
     capability_report: dict | None = None,
     latency_store=None,
 ) -> tuple[VoicePipeline | None, str | None]:
@@ -702,7 +719,10 @@ def create_voice_pipeline(
     injected ``stt`` wins over ``stt_model`` (and, being
     un-rebuildable, disables the swap seams). The voice, by
     contrast, reaches the TTS stage as a per-sentence parameter
-    from ``tts_voice``.
+    from ``tts_voice``. ``stt_language`` / ``tts_speed`` (Wave 4)
+    follow the model rule: read at start, built into the stages
+    (and into the swap factory, so a step-down keeps the
+    language), applied from the next session after a change.
 
     ``capability_report`` / ``latency_store`` are the planner's
     S10-matrix and measured-latency inputs, injectable for
@@ -711,9 +731,10 @@ def create_voice_pipeline(
     """
     vad_stage = vad if vad is not None else SileroVad()
     stt_stage = stt if stt is not None else (
-        FasterWhisperStt(model=stt_model) if stt_model
-        else FasterWhisperStt())
-    tts_stage = tts if tts is not None else KokoroTts()
+        FasterWhisperStt(model=stt_model, language=stt_language)
+        if stt_model
+        else FasterWhisperStt(language=stt_language))
+    tts_stage = tts if tts is not None else KokoroTts(speed=tts_speed)
     transport_stage = (
         transport if transport is not None else WebRtcVoiceTransport())
     configured_model = (
@@ -764,7 +785,8 @@ def create_voice_pipeline(
         escalation_ack=escalation_ack,
         degradation=degradation,
         stt_factory=(
-            (lambda model: FasterWhisperStt(model=model))
+            (lambda model: FasterWhisperStt(
+                model=model, language=stt_language))
             if stt is None else None),
         speculation=speculation,
     )

@@ -40,7 +40,7 @@ def fake_kokoro(monkeypatch):
             self.lang_code = lang_code
             built.append(lang_code)
 
-        def __call__(self, text, voice=None):
+        def __call__(self, text, voice=None, speed=1.0):
             yield ("g", "p", [0.0, 0.05, -0.05])
 
     module = types.ModuleType("kokoro")

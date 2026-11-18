@@ -298,8 +298,13 @@ class VoiceDelivery:
     ) -> None:
         """Push the session's degradation state (VOICE_SESSION_STATUS):
         the current profile plus, on a transition, the notice or
-        the ending reason. Fire-and-forget like every voice push."""
+        the ending reason. Fire-and-forget like every voice push.
+        The payload also names the STT model in effect after the
+        transition (Wave 4), so the overlay's effective-profile
+        line tracks a step-down the moment it lands."""
         payload: dict = {"session_id": self.session_id, "profile": profile}
+        if self._degradation is not None:
+            payload["stt_model"] = self._degradation.stt_model
         if notice is not None:
             payload["notice"] = notice
         if reason is not None:

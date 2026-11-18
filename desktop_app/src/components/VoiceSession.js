@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { audioConstraintForDevice } from '../micDevices';
 
 // Wave 5 (Annex C row 11): the voice session seam, split out of
 // VoiceOverlay.jsx. This hook is the session engine — microphone
@@ -14,6 +15,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 export function useVoiceSession({
   open = false,
   active = false,
+  inputDeviceId = '',
   webrtcConfig = null,
   audioChunk = null,
   playbackCut = 0,
@@ -38,6 +40,15 @@ export function useVoiceSession({
   useEffect(() => {
     webrtcConfigRef.current = webrtcConfig;
   }, [webrtcConfig]);
+  // The selected microphone, read through a ref like the WebRTC
+  // config: capture uses the device selected when the session
+  // went live — a mid-session Settings change never re-opens
+  // the microphone under a talking session; it applies to the
+  // next session, the same rule as the speech model.
+  const inputDeviceIdRef = useRef(inputDeviceId);
+  useEffect(() => {
+    inputDeviceIdRef.current = inputDeviceId;
+  }, [inputDeviceId]);
   // Signalling callbacks live in refs so a re-render with fresh
   // prop identities never restarts capture or negotiation.
   const onRtcOfferRef = useRef(onRtcOffer);
@@ -125,7 +136,9 @@ export function useVoiceSession({
         return;
       }
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: audioConstraintForDevice(inputDeviceIdRef.current),
+        });
         if (cancelled) {
           stream.getTracks().forEach((track) => track.stop());
           return;

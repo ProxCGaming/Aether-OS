@@ -464,6 +464,21 @@ class UserConfig:
     speech_stt_model: str = "small"
     transcription_stt_model: str = "small"
     speech_tts_voice: str = "af_heart"
+    # Voice home (Wave 4): speech_tts_speed is a preset NAME
+    # ('slow' | 'normal' | 'fast' — voice/tts.py TTS_SPEED_PRESETS);
+    # speech_stt_language is 'auto' or an ISO code from
+    # voice/stt.py STT_LANGUAGES, shared by dictation and voice
+    # mode like the model; speech_input_device_id is the
+    # browser microphone deviceId the renderer captures from
+    # ('' = the system default — the id is opaque and minted by
+    # the browser, so it is only shape-checked); dictation_mode
+    # is 'hold' | 'toggle' — how the composer's mic button
+    # behaves. Same contract as the three fields above: strict
+    # validation on the write path, cleaning on load.
+    speech_tts_speed: str = "normal"
+    speech_stt_language: str = "auto"
+    speech_input_device_id: str = ""
+    dictation_mode: str = "hold"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -552,6 +567,10 @@ class UserConfig:
             "speech_stt_model": self.speech_stt_model,
             "transcription_stt_model": self.transcription_stt_model,
             "speech_tts_voice": self.speech_tts_voice,
+            "speech_tts_speed": self.speech_tts_speed,
+            "speech_stt_language": self.speech_stt_language,
+            "speech_input_device_id": self.speech_input_device_id,
+            "dictation_mode": self.dictation_mode,
         }
 
     @classmethod
@@ -718,6 +737,12 @@ class UserConfig:
             transcription_stt_model=_clean_speech_stt_model(
                 d.get("transcription_stt_model")),
             speech_tts_voice=_clean_speech_tts_voice(d.get("speech_tts_voice")),
+            speech_tts_speed=_clean_speech_tts_speed(d.get("speech_tts_speed")),
+            speech_stt_language=_clean_speech_stt_language(
+                d.get("speech_stt_language")),
+            speech_input_device_id=_clean_speech_input_device_id(
+                d.get("speech_input_device_id")),
+            dictation_mode=_clean_dictation_mode(d.get("dictation_mode")),
         )
 
 
@@ -760,6 +785,39 @@ def _clean_speech_tts_voice(value) -> str:
     from aether_engine.voice.tts import is_valid_kokoro_voice
 
     return value.strip() if is_valid_kokoro_voice(value) else "af_heart"
+
+
+def _clean_speech_tts_speed(value) -> str:
+    """Delegate to the TTS speed-preset vocabulary — an unknown
+    preset falls back to 'normal'."""
+    from aether_engine.voice.tts import TTS_SPEED_PRESETS
+
+    return value if isinstance(value, str) and value in TTS_SPEED_PRESETS \
+        else "normal"
+
+
+def _clean_speech_stt_language(value) -> str:
+    """Delegate to the STT language vocabulary — an unknown
+    language falls back to 'auto' (Whisper detects)."""
+    from aether_engine.voice.stt import STT_LANGUAGES
+
+    return value if isinstance(value, str) and value in STT_LANGUAGES \
+        else "auto"
+
+
+def _clean_speech_input_device_id(value) -> str:
+    """The microphone deviceId is an opaque browser-minted
+    string; cleaning only guarantees a bounded string ('' = the
+    system default)."""
+    from aether_engine.config_updates import MAX_INPUT_DEVICE_ID_LEN
+
+    return value[:MAX_INPUT_DEVICE_ID_LEN] if isinstance(value, str) else ""
+
+
+def _clean_dictation_mode(value) -> str:
+    """'toggle' survives; anything else reads as the historical
+    'hold' behaviour."""
+    return value if value == "toggle" else "hold"
 
 
 def _clean_browser_category_modes(value) -> dict[str, str]:

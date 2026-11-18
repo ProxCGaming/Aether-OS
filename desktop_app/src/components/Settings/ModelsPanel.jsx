@@ -3,7 +3,6 @@ import Dropdown from '../../Dropdown';
 import ModelPicker from '../ModelPicker';
 import LocalModelsTab from '../../LocalModelsTab';
 import LoadStateRow from './LoadStateRow';
-import SpeechSettingsPanel from './SpeechSettingsPanel';
 
 // Wave 5 (Annex C row 7): the Models & Tasks tab, extracted from
 // SettingsPanel.jsx — the shell keeps the config state, the one
@@ -11,7 +10,7 @@ import SpeechSettingsPanel from './SpeechSettingsPanel';
 // rendering (the SpeechSettingsPanel convention: state and named
 // handlers arrive as props). The cloud/local toggle is this
 // tab's own state and lives here.
-export default function ModelsPanel({ providers, wsRef, safeSend, pendingMessages, reconnectCount, isConnected, configAnswered, configLoadError, onRetryConfigLoad, modelSwitchQueued, pendingModelSwitch, onModelDefaultChange, reasoningEffort, onReasoningEffortChange, controlRefusal, auxModels, onAuxModelChange, onAuxResetAll, engineConfig, configUpdateError, onConfigUpdate }) {
+export default function ModelsPanel({ providers, wsRef, safeSend, pendingMessages, reconnectCount, isConnected, configAnswered, configLoadError, onRetryConfigLoad, modelSwitchQueued, pendingModelSwitch, onModelDefaultChange, reasoningEffort, onReasoningEffortChange, controlRefusal, auxModels, onAuxModelChange, onAuxResetAll, engineConfig, configUpdateError, onConfigUpdate, onOpenVoiceSettings }) {
   const [modelTab, setModelTab] = useState('cloud'); // 'cloud' or 'local'
   return (
     <div style={{ color: 'var(--text-primary)' }}>
@@ -138,19 +137,27 @@ export default function ModelsPanel({ providers, wsRef, safeSend, pendingMessage
              ))}
            </div>
 
-           {/* Model Hub H5: the Speech card — speech model,
-               voice and transcription model, controlled from
-               the applied config like every handed-off surface
-               (E6-F05) and written through sendConfigUpdate. */}
-           <SpeechSettingsPanel
-             config={engineConfig}
-             configError={configUpdateError}
-             onConfigUpdate={onConfigUpdate}
-             pendingMessages={pendingMessages}
-             reconnectCount={reconnectCount}
-             configReady={configAnswered}
-             wsRef={wsRef}
-           />
+           {/* The Speech card moved to the Voice section (the
+               one voice home: Speech beside Tuning & Input);
+               this cross-link stands where it used to live so
+               anyone looking for it here lands in the right
+               place. */}
+           <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: '12px', padding: '16px 20px', marginTop: '32px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px' }}>
+             <div>
+               <div style={{ fontSize: '14px', fontWeight: 600 }}>Speech lives in Voice settings</div>
+               <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                 The speech-to-text model, the voice, its speed and the transcription model moved to the Voice section, next to the microphone and tuning controls.
+               </div>
+             </div>
+             <button
+               type="button"
+               data-testid="models-open-voice-settings"
+               onClick={() => { if (onOpenVoiceSettings) onOpenVoiceSettings(); }}
+               style={{ background: 'transparent', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb),0.4)', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', whiteSpace: 'nowrap' }}
+             >
+               Open Voice settings
+             </button>
+           </div>
          </>
       )}
 

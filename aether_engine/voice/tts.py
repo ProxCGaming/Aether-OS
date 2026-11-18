@@ -61,6 +61,35 @@ def is_valid_kokoro_voice(value: object) -> bool:
         and KOKORO_VOICE_ID_RE.match(value.strip()) is not None)
 
 
+# Speech-speed presets: the config stores the preset NAME
+# ('slow' | 'normal' | 'fast'); the factor is what Kokoro's
+# pipeline call takes (1.0 = the voice's natural pace). Speed is
+# engine-construction config, not a per-sentence parameter —
+# nothing ever varies it mid-utterance.
+TTS_SPEED_PRESETS: dict[str, float] = {
+    "slow": 0.85,
+    "normal": 1.0,
+    "fast": 1.25,
+}
+DEFAULT_TTS_SPEED = "normal"
+
+
+def tts_speed_factor(preset: object) -> float:
+    """The Kokoro speed factor for a config preset name. An
+    unknown value reads as normal — config validation refuses
+    unknown presets at write time; this is the lenient read."""
+    if isinstance(preset, str):
+        return TTS_SPEED_PRESETS.get(preset, 1.0)
+    return 1.0
+
+
+# The one fixed sentence the Settings voice preview speaks. It
+# lives engine-side so no client can turn the preview into a
+# general text-to-speech endpoint: a preview request names a
+# voice, never text.
+VOICE_PREVIEW_TEXT = "This is Aether, ready when you are."
+
+
 def lang_code_for_voice(voice: object) -> str:
     """The Kokoro ``lang_code`` a voice id must be spoken with.
 
@@ -120,8 +149,11 @@ def float_pcm_to_wav(samples, sample_rate: int = KOKORO_SAMPLE_RATE) -> bytes:
 class KokoroTts:
     """Kokoro TTS runner; fails closed when unavailable."""
 
-    def __init__(self, lang_code: str = "a"):
+    def __init__(self, lang_code: str = "a", *, speed: float = 1.0):
         self._lang_code = lang_code
+        # The configured speech-speed factor, applied to every
+        # pipeline call this engine makes (see TTS_SPEED_PRESETS).
+        self._speed = speed
         # One pipeline per language, loaded lazily (FF3-01): a
         # KPipeline phonemises with ONE language's rules, so a
         # British or Hindi voice spoken through the default
@@ -203,7 +235,8 @@ class KokoroTts:
 
         def _produce() -> None:
             try:
-                for _gs, _ps, audio in pipeline(text, voice=voice):
+                for _gs, _ps, audio in pipeline(
+                        text, voice=voice, speed=self._speed):
                     if not _deliver(float_pcm_to_wav(audio)):
                         return
             except Exception as e:  # noqa: BLE001 — surfaced to the consumer below, not swallowed

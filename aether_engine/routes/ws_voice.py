@@ -52,16 +52,31 @@ def create_stt_engine():
     Model hub, H3: the engine is built with the configured speech
     STT model (``speech_stt_model``), read fresh at construction —
     the per-connection cache below keys on the same value, so a
-    Settings change rebuilds on next use.
+    Settings change rebuilds on next use. Wave 4: the configured
+    speech language (``speech_stt_language``) is built in the
+    same way — 'auto' becomes None (Whisper detects).
     """
-    from aether_engine.voice.stt import FasterWhisperStt
-    return FasterWhisperStt(model=engine_state.user_config.speech_stt_model)
+    from aether_engine.voice.stt import (
+        FasterWhisperStt,
+        stt_language_or_none,
+    )
+    cfg = engine_state.user_config
+    return FasterWhisperStt(
+        model=cfg.speech_stt_model,
+        language=stt_language_or_none(cfg.speech_stt_language))
 
 
 def create_tts_engine():
-    """Factory for local TTS engine (E8-5.3 assistant read-aloud)."""
-    from aether_engine.voice.tts import KokoroTts
-    return KokoroTts()
+    """Factory for local TTS engine (E8-5.3 assistant read-aloud).
+
+    Wave 4: the engine is built with the configured speech-speed
+    factor (``speech_tts_speed`` preset → factor), read fresh at
+    construction — the per-connection cache below keys on the
+    preset, so a Settings change rebuilds on next use.
+    """
+    from aether_engine.voice.tts import KokoroTts, tts_speed_factor
+    return KokoroTts(
+        speed=tts_speed_factor(engine_state.user_config.speech_tts_speed))
 
 
 
@@ -111,6 +126,8 @@ async def send_voice_session_start_result(conn, req_id_, payload_):
                 create_voice_pipeline,
                 fast_chat_talker,
             )
+            from aether_engine.voice.stt import stt_language_or_none
+            from aether_engine.voice.tts import tts_speed_factor
             from aether_engine.voice.vad import EndpointerConfig
 
             async def _persist_voice_user(text: str, _sid: str = voice_session_id) -> None:
@@ -206,8 +223,11 @@ async def send_voice_session_start_result(conn, req_id_, payload_):
                 # H3: the speech config is read HERE, at
                 # session start — a mid-session change is
                 # picked up by the NEXT session only (P3(a)).
+                # Wave 4: language + speed follow the same rule.
                 stt_model=cfg.speech_stt_model,
                 tts_voice=cfg.speech_tts_voice,
+                stt_language=stt_language_or_none(cfg.speech_stt_language),
+                tts_speed=tts_speed_factor(cfg.speech_tts_speed),
                 endpointer_config=EndpointerConfig(
                     speech_threshold=cfg.vad_threshold,
                     silence_duration_ms=cfg.silence_duration_ms,
@@ -261,6 +281,22 @@ async def send_voice_session_start_result(conn, req_id_, payload_):
                 "notices": (
                     list(getattr(voice_pipeline, "start_notices", ()))
                     if voice_pipeline is not None else []),
+                # Wave 4: the EFFECTIVE speech profile, so the
+                # overlay can name what the session is actually
+                # running — the TTS voice, the STT model in
+                # effect after any ladder step-down or
+                # load-fallback, and the configured model it
+                # may have stepped down FROM. Same defensive
+                # read as the profile above.
+                "tts_voice": (
+                    cfg.speech_tts_voice
+                    if voice_pipeline is not None else None),
+                "stt_model": (
+                    getattr(voice_pipeline, "effective_stt_model", None)
+                    if voice_pipeline is not None else None),
+                "stt_configured_model": (
+                    cfg.speech_stt_model
+                    if voice_pipeline is not None else None),
             },
             "Could not send voice session start response")
 
@@ -296,6 +332,56 @@ async def send_dictation_stop_result(conn, req_id_, raw_b64_, sample_rate_):
         req_id_, EventType.DICTATION_STOP_RESPONSE,
         {"ok": stop_error is None, "text": text if stop_error is None else "", "error": stop_error},
         "Could not send dictation stop response")
+
+async def send_voice_preview_result(conn, req_id_, payload_):
+    """Answer a VOICE_PREVIEW_REQUEST from a background task.
+
+    The preview speaks ONE fixed sentence (voice/tts.py
+    VOICE_PREVIEW_TEXT): the request names a voice, never text,
+    so this route cannot be turned into a general speech
+    endpoint. Two shapes: ``{probe: true}`` answers availability
+    only, synthesising nothing — the Settings panel asks on open
+    so an uninstalled speech engine shows as an honest note
+    instead of a dead Preview button; ``{voice}`` synthesises
+    and returns the WAV chunks base64-encoded, in play order.
+    The engine is the connection's cached read-aloud TTS, so the
+    preview sounds at the configured speed through the same
+    engine read-aloud uses.
+    """
+    from aether_engine.voice.tts import (
+        VOICE_PREVIEW_TEXT,
+        is_valid_kokoro_voice,
+    )
+
+    payload: dict = {
+        "ok": False, "voice": None, "audio_chunks": [], "error": None}
+    tts = read_aloud_tts(conn)
+    reason = tts.unavailable_reason()
+    if payload_.get("probe"):
+        payload["ok"] = reason is None
+        payload["error"] = (
+            f"voice unavailable: {reason}" if reason is not None else None)
+    elif not is_valid_kokoro_voice(payload_.get("voice")):
+        payload["error"] = (
+            f"unknown Kokoro voice {payload_.get('voice')!r}")
+    elif reason is not None:
+        payload["voice"] = payload_.get("voice")
+        payload["error"] = f"voice unavailable: {reason}"
+    else:
+        payload["voice"] = payload_.get("voice")
+        try:
+            tts = await open_read_aloud_tts(conn)
+            chunks = []
+            async for chunk in tts.synthesize(
+                    VOICE_PREVIEW_TEXT, voice=payload["voice"]):
+                chunks.append(base64.b64encode(chunk).decode("ascii"))
+            payload["ok"] = True
+            payload["audio_chunks"] = chunks
+        except Exception as e:  # noqa: BLE001 — answered honestly, like every voice route
+            payload["error"] = str(e)
+    await conn.send_event(
+        req_id_, EventType.VOICE_PREVIEW_RESPONSE, payload,
+        "Could not send voice preview response")
 
 async def send_voice_session_stop_result(conn, req_id_):
     """Answer a VOICE_SESSION_STOP_REQUEST (RUX-B-09, chained by enqueue_voice_op)."""
@@ -413,6 +499,10 @@ async def stop_read_aloud(conn) -> None:
 # or push-to-talk would reload the model on every utterance.
 # H3 exception: the dictation STT slot is keyed by the configured
 # speech model — a model change (not a stop) swaps the engine.
+# Wave 4: the key grows the configured speech language, and the
+# read-aloud TTS slot is keyed the same way by the configured
+# speed preset — a language or speed change rebuilds on next
+# use instead of silently serving the old setting.
 
 def dictation_stt(conn) -> Any:
     """The connection's cached dictation STT engine.
@@ -424,16 +514,22 @@ def dictation_stt(conn) -> Any:
     the reference IS the release — its close() only drops the
     loaded model). The pre-H3 cache never re-read config, so a
     Settings change silently left dictation on the old model
-    until the socket reconnected: a placebo control.
+    until the socket reconnected: a placebo control. Wave 4:
+    the configured speech language joins the key on the same
+    rule — a language change is not a placebo either.
     """
     from aether_engine.routes import websocket as _websocket
 
     model = engine_state.user_config.speech_stt_model
+    language = engine_state.user_config.speech_stt_language
     engine = conn.voice_state.get("dictation_stt")
-    if engine is None or conn.voice_state.get("dictation_stt_model") != model:
+    if engine is None \
+            or conn.voice_state.get("dictation_stt_model") != model \
+            or conn.voice_state.get("dictation_stt_language") != language:
         engine = _websocket.create_stt_engine()
         conn.voice_state["dictation_stt"] = engine
         conn.voice_state["dictation_stt_model"] = model
+        conn.voice_state["dictation_stt_language"] = language
         conn.voice_state["dictation_stt_opened"] = False
     return engine
 
@@ -455,13 +551,25 @@ async def open_dictation_stt(conn) -> Any:
     return engine
 
 def read_aloud_tts(conn) -> Any:
-    """The connection's cached read-aloud TTS engine, built once."""
+    """The connection's cached read-aloud TTS engine.
+
+    Speed-aware (Wave 4, the dictation cache's H3 rule): the
+    slot is keyed by the configured speed preset — a preset
+    change builds a new engine on next use and drops the old
+    one, instead of speaking at the old pace until reconnect.
+    The Settings voice preview shares this engine, so a preview
+    sounds at exactly the pace read-aloud and voice mode use.
+    """
     from aether_engine.routes import websocket as _websocket
 
+    speed = engine_state.user_config.speech_tts_speed
     engine = conn.voice_state.get("read_aloud_tts")
-    if engine is None:
+    if engine is None \
+            or conn.voice_state.get("read_aloud_tts_speed") != speed:
         engine = _websocket.create_tts_engine()
         conn.voice_state["read_aloud_tts"] = engine
+        conn.voice_state["read_aloud_tts_speed"] = speed
+        conn.voice_state["read_aloud_tts_opened"] = False
     return engine
 
 async def open_read_aloud_tts(conn) -> Any:
@@ -484,6 +592,8 @@ async def close_speech_engines(conn) -> None:
     Guarded and best-effort: a failing close never wedges the
     disconnect path, and the slots are cleared regardless."""
     conn.voice_state["dictation_stt_model"] = None
+    conn.voice_state["dictation_stt_language"] = None
+    conn.voice_state["read_aloud_tts_speed"] = None
     for engine_key, opened_key in (
         ("dictation_stt", "dictation_stt_opened"),
         ("read_aloud_tts", "read_aloud_tts_opened"),

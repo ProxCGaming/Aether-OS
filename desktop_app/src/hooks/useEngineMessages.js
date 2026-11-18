@@ -1189,6 +1189,14 @@ export function useEngineMessages(deps) {
                 notice: (Array.isArray(p.notices) && p.notices.length)
                   ? p.notices[p.notices.length - 1]
                   : null,
+                // Wave 4: the EFFECTIVE speech profile — the
+                // voice speaking, the STT model in effect after
+                // any start-time ladder decision, and the
+                // configured model it may have stepped down
+                // from — for the overlay's profile line.
+                ttsVoice: p.tts_voice || null,
+                sttModel: p.stt_model || null,
+                sttConfiguredModel: p.stt_configured_model || null,
               });
               if (p.session_id && p.session_id !== activeSessionRef.current) {
                 setActiveSession(p.session_id);
@@ -1304,6 +1312,10 @@ export function useEngineMessages(deps) {
                 ...current,
                 profile: p.profile || current.profile || 'full',
                 notice: p.notice || current.notice || null,
+                // Wave 4: a step-down names its new model here —
+                // the overlay's effective-profile line follows
+                // it the moment the transition lands.
+                sttModel: p.stt_model || current.sttModel || null,
               });
             }
           }

@@ -32,6 +32,12 @@ export default function ChatComposer({
   onMicEnd,
   onMicKeyDown,
   onMicKeyUp,
+  onMicClick,
+  // Wave 4: the dictation button behaviour ('hold' |
+  // 'toggle') — only the label and the click wiring differ;
+  // the press handlers above are inert in toggle mode (the
+  // host decides), so this component stays a dumb button.
+  dictationMode = 'hold',
   onStopTask,
   onDismissDictationError,
 }) {
@@ -194,9 +200,14 @@ export default function ChatComposer({
           type="button"
           data-testid="composer-mic-btn"
           className={`composer-mic-btn ${isDictating ? 'recording' : ''}`}
-          title={dictationError || (isDictating ? 'Release to finish dictation' : 'Hold to dictate')}
-          aria-label={dictationError || (isDictating ? 'Release to finish dictation' : 'Hold to dictate')}
+          title={dictationError || (dictationMode === 'toggle'
+            ? (isDictating ? 'Click to finish dictation' : 'Click to dictate')
+            : (isDictating ? 'Release to finish dictation' : 'Hold to dictate'))}
+          aria-label={dictationError || (dictationMode === 'toggle'
+            ? (isDictating ? 'Click to finish dictation' : 'Click to dictate')
+            : (isDictating ? 'Release to finish dictation' : 'Hold to dictate'))}
           aria-pressed={isDictating ? 'true' : 'false'}
+          onClick={onMicClick}
           onMouseDown={onMicStart}
           onMouseUp={onMicEnd}
           onMouseLeave={onMicEnd}

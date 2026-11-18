@@ -4,7 +4,7 @@
  * tests pin the load gating, the drag/commit wiring and the
  * queued-value notes. */
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import VoicePanel from '../VoicePanel';
 
@@ -93,5 +93,83 @@ describe('VoicePanel', () => {
   test('a queued Smart Turn value is named under its slider (RUX-A-15)', () => {
     render(<VoicePanel {...baseProps({ pendingSmartTurnValue: 0.25 })} />);
     expect(screen.getByTestId('smart-turn-sensitivity-queued')).toHaveTextContent('Smart Turn sensitivity change to 0.25 queued');
+  });
+});
+
+describe('VoicePanel Input card (Wave 4)', () => {
+  const DEVICES = [
+    { kind: 'audioinput', deviceId: 'mic-usb', label: 'USB Headset Mic' },
+    { kind: 'audioinput', deviceId: 'mic-2', label: '' },
+    { kind: 'videoinput', deviceId: 'cam-1', label: 'Webcam' },
+  ];
+
+  beforeEach(() => {
+    Object.defineProperty(window.navigator, 'mediaDevices', {
+      configurable: true,
+      value: {
+        enumerateDevices: jest.fn(() => Promise.resolve(DEVICES)),
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
+        // No getUserMedia: the Test button must fail honestly.
+      },
+    });
+  });
+
+  afterEach(() => {
+    delete window.navigator.mediaDevices;
+  });
+
+  function openMicSelect() {
+    const wrapper = screen.getByTestId('input-device-select');
+    fireEvent.click(wrapper.querySelector('button'));
+    return wrapper;
+  }
+
+  test('lists System default first, then the microphones (unnamed ones numbered, cameras excluded)', async () => {
+    render(<VoicePanel {...baseProps()} />);
+    const wrapper = openMicSelect();
+    // The selected label shows in the trigger AND the option list.
+    expect((await within(wrapper).findAllByText('System default')).length).toBeGreaterThan(0);
+    expect(within(wrapper).getByText('USB Headset Mic')).toBeInTheDocument();
+    expect(within(wrapper).getByText('Microphone 2')).toBeInTheDocument();
+    expect(within(wrapper).queryByText('Webcam')).not.toBeInTheDocument();
+  });
+
+  test('picking a microphone commits speech_input_device_id through the shell callback', async () => {
+    const onInputDeviceChange = jest.fn();
+    render(<VoicePanel {...baseProps({ onInputDeviceChange })} />);
+    const wrapper = openMicSelect();
+    fireEvent.click(await within(wrapper).findByText('USB Headset Mic'));
+    expect(onInputDeviceChange).toHaveBeenCalledWith('mic-usb');
+  });
+
+  test('a saved microphone that is not connected stays selectable, labelled as such', async () => {
+    render(<VoicePanel {...baseProps({ inputDeviceId: 'gone-1' })} />);
+    const wrapper = openMicSelect();
+    expect((await within(wrapper).findAllByText('Saved microphone (not connected)')).length).toBeGreaterThan(0);
+  });
+
+  test('the dictation mode cards reflect the config and commit dictation_mode', () => {
+    const onDictationModeChange = jest.fn();
+    render(<VoicePanel {...baseProps({ dictationMode: 'hold', onDictationModeChange })} />);
+    expect(screen.getByTestId('dictation-mode-hold')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('dictation-mode-toggle')).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(screen.getByTestId('dictation-mode-toggle'));
+    expect(onDictationModeChange).toHaveBeenCalledWith('toggle');
+  });
+
+  test('queued input changes show their notes', () => {
+    render(<VoicePanel {...baseProps({
+      pendingInputDeviceValue: 'mic-usb',
+      pendingDictationModeValue: 'toggle',
+    })} />);
+    expect(screen.getByTestId('input-device-queued')).toBeInTheDocument();
+    expect(screen.getByTestId('dictation-mode-queued')).toHaveTextContent('Click to start & stop');
+  });
+
+  test('Test microphone fails honestly when capture is unavailable', async () => {
+    render(<VoicePanel {...baseProps()} />);
+    fireEvent.click(screen.getByTestId('mic-test-toggle'));
+    expect(await screen.findByTestId('mic-test-error')).toHaveTextContent('blocked');
   });
 });

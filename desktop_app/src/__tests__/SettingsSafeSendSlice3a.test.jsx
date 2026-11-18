@@ -286,15 +286,17 @@ describe('Settings safeSend conversions (Wave 2 slice 3a)', () => {
     renderSettings();
     await flushPromises();
 
-    fireEvent.click(screen.getByText('Models & Tasks'));
+    // The Speech card lives in the Voice section (the one
+    // voice home); Models & Tasks cross-links to it.
+    fireEvent.click(screen.getByText('Voice Tuning'));
     feed('CONFIG_GET_RESPONSE', {
       config: { speech_stt_model: 'medium', transcription_stt_model: 'base', speech_tts_voice: 'bm_george' },
     });
 
     const wrapper = screen.getByTestId('speech-stt-select');
-    expect(within(wrapper).getByText('medium')).toBeInTheDocument();
+    expect(within(wrapper).getByText(/medium —/)).toBeInTheDocument();
     fireEvent.click(wrapper.querySelector('button'));
-    fireEvent.click(within(wrapper).getByText('large-v3'));
+    fireEvent.click(within(wrapper).getByText(/large-v3 —/));
 
     // The send queued through the facade; the controlled select
     // still shows the value actually in force, and the queued hint
@@ -302,7 +304,7 @@ describe('Settings safeSend conversions (Wave 2 slice 3a)', () => {
     expect(queuedOfType('CONFIG_UPDATE_REQUEST')).toEqual([
       { type: 'CONFIG_UPDATE_REQUEST', payload: { config: { speech_stt_model: 'large-v3' } } },
     ]);
-    expect(within(wrapper).getByText('medium')).toBeInTheDocument();
+    expect(within(wrapper).getByText(/medium —/)).toBeInTheDocument();
     expect(screen.getByTestId('speech-stt-queued')).toHaveTextContent(
       /Speech-to-text change to large-v3 queued — will apply when the engine reconnects/,
     );
@@ -314,13 +316,13 @@ describe('Settings safeSend conversions (Wave 2 slice 3a)', () => {
     // no longer a ghost because it was announced while pending, and
     // it only displays once the config reply lands.
     expect(screen.queryByTestId('speech-stt-queued')).not.toBeInTheDocument();
-    expect(within(wrapper).getByText('medium')).toBeInTheDocument();
+    expect(within(wrapper).getByText(/medium —/)).toBeInTheDocument();
 
     feed('CONFIG_UPDATE_RESPONSE', {
       success: true,
       config: { speech_stt_model: 'large-v3', transcription_stt_model: 'base', speech_tts_voice: 'bm_george' },
     });
-    expect(within(wrapper).getByText('large-v3')).toBeInTheDocument();
+    expect(within(wrapper).getByText(/large-v3 —/)).toBeInTheDocument();
   });
 
   it('A-20: an offline budget save queues with no false Saved state, and the response confirms it', async () => {

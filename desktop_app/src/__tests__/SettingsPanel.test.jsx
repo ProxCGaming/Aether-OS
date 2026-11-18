@@ -11,16 +11,24 @@ jest.mock('../contexts/SocketContext', () => ({
 }));
 
 function makeWsRef() {
-  let messageHandler = null;
+  // A real WebSocket fans every message out to EVERY registered
+  // listener (SettingsPanel's handler and the panels it renders
+  // each subscribe); getHandler returns a dispatcher over all
+  // of them so a feed reaches the same listeners a real socket
+  // would deliver to.
+  const handlers = new Set();
   const wsRef = {
     current: {
       readyState: 1,
       send: jest.fn(),
-      addEventListener: jest.fn((event, handler) => { messageHandler = handler; }),
-      removeEventListener: jest.fn(),
+      addEventListener: jest.fn((event, handler) => { handlers.add(handler); }),
+      removeEventListener: jest.fn((event, handler) => { handlers.delete(handler); }),
     },
   };
-  return { wsRef, getHandler: () => messageHandler };
+  return {
+    wsRef,
+    getHandler: () => (event) => { handlers.forEach((h) => h(event)); },
+  };
 }
 
 function feedTools(getHandler, tools) {
@@ -242,16 +250,21 @@ describe('SettingsPanel tool policy dropdown (Phase 10.3 C2)', () => {
 
 describe('SettingsPanel Voice Tuning (E8-5.2)', () => {
   function makeWsRef() {
-    let messageHandler = null;
+    // Fan-out dispatcher, as in the top-level makeWsRef: a
+    // real socket delivers to every registered listener.
+    const handlers = new Set();
     const wsRef = {
       current: {
         readyState: 1,
         send: jest.fn(),
-        addEventListener: jest.fn((event, handler) => { messageHandler = handler; }),
-        removeEventListener: jest.fn(),
+        addEventListener: jest.fn((event, handler) => { handlers.add(handler); }),
+        removeEventListener: jest.fn((event, handler) => { handlers.delete(handler); }),
       },
     };
-    return { wsRef, getHandler: () => messageHandler };
+    return {
+      wsRef,
+      getHandler: () => (event) => { handlers.forEach((h) => h(event)); },
+    };
   }
 
   it('switches to Voice Tuning tab and renders endpointing sliders', () => {

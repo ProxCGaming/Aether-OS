@@ -1,5 +1,6 @@
 import React from 'react';
 import { useVoiceSession } from './VoiceSession';
+import { kokoroVoiceDisplayName } from '../speechCatalog';
 
 // Epic 8, E8-5.1a: the active voice interface.
 //
@@ -61,6 +62,10 @@ export default function VoiceOverlay({
   assistantText = '',
   notice = null,
   error = null,
+  inputDeviceId = '',
+  ttsVoice = null,
+  sttModel = null,
+  sttConfiguredModel = null,
   webrtcConfig = null,
   audioChunk = null,
   playbackCut = 0,
@@ -75,6 +80,7 @@ export default function VoiceOverlay({
   const { micLive, micError, rtcState, rtcError, teardownCapture } = useVoiceSession({
     open,
     active,
+    inputDeviceId,
     webrtcConfig,
     audioChunk,
     playbackCut,
@@ -155,6 +161,32 @@ export default function VoiceOverlay({
             </span>
           </div>
 
+          {/* The EFFECTIVE speech profile: the voice speaking
+              and the STT model actually in effect — after a
+              degradation step-down that is the smaller model,
+              named, with the configured model it stepped down
+              from shown as a chip. Never the merely-configured
+              values dressed up as the live ones. */}
+          {(ttsVoice || sttModel) && (
+            <div
+              data-testid="voice-effective-profile"
+              style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)', fontSize: '12px', marginBottom: '8px' }}
+            >
+              <span>
+                {ttsVoice && `Voice: ${kokoroVoiceDisplayName(ttsVoice)}`}
+                {ttsVoice && sttModel && ' · '}
+                {sttModel && `Listening: ${sttModel}`}
+              </span>
+              {sttModel && sttConfiguredModel && sttModel !== sttConfiguredModel && (
+                <span
+                  data-testid="voice-stepped-down"
+                  style={{ fontSize: '10px', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb), 0.45)', borderRadius: '999px', padding: '1px 7px', whiteSpace: 'nowrap' }}
+                >
+                  Stepped down from {sttConfiguredModel}
+                </span>
+              )}
+            </div>
+          )}
           {rtcState && RTC_STATE_LABELS[rtcState] && (
             <div
               data-testid="voice-rtc-state"

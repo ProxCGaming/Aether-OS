@@ -147,7 +147,7 @@ class CountingPipeline:
         self.error = error
         self.produced = 0
 
-    def __call__(self, text, voice=None):
+    def __call__(self, text, voice=None, speed=1.0):
         def gen():
             if self.error is not None:
                 raise self.error
@@ -160,7 +160,9 @@ class CountingPipeline:
 
 def _tts_with(pipeline) -> KokoroTts:
     tts = KokoroTts()
-    tts._pipeline = pipeline
+    # FF3-01 made the engine hold one pipeline PER LANGUAGE;
+    # seed the dict the way open() + a first synthesize would.
+    tts._pipelines = {"a": pipeline}
     return tts
 
 

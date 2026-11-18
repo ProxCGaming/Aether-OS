@@ -118,6 +118,7 @@ from aether_engine.routes.ws_voice import (
     read_aloud_tts,
     send_dictation_chunk_result,
     send_dictation_stop_result,
+    send_voice_preview_result,
     send_voice_session_start_result,
     send_voice_session_stop_result,
     stop_read_aloud,
@@ -4325,6 +4326,15 @@ async def _handle_read_aloud_start_request(conn: WsConnection, msg: Event) -> No
             _run_read_aloud(msg_id, text_to_speak, voice_name, tts, conn.ws)
         )
 
+async def _handle_voice_preview_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the receive loop (RUX-B-09 pattern): synthesising the
+    # preview loads the speech engine on first use and takes
+    # real time. Not chained with the session ops — a preview
+    # touches no session state.
+    conn.spawn_background(send_voice_preview_result(conn,
+        req_id, dict(msg.payload)))
+
 async def _handle_read_aloud_stop_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
     msg_id = msg.payload.get("message_id")
@@ -4471,6 +4481,7 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.DICTATION_STOP_REQUEST: _handle_dictation_stop_request,
     EventType.READ_ALOUD_START_REQUEST: _handle_read_aloud_start_request,
     EventType.READ_ALOUD_STOP_REQUEST: _handle_read_aloud_stop_request,
+    EventType.VOICE_PREVIEW_REQUEST: _handle_voice_preview_request,
 }
 
 # --- Legacy unauthenticated HTTP management routes: REMOVED (Phase 9, A1) ---

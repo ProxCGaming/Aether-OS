@@ -237,4 +237,47 @@ describe('VoiceOverlay (E8-5.1a)', () => {
       expect(onPlaybackProgress).toHaveBeenCalledWith(-1);
     });
   });
+
+  describe('effective speech profile (Wave 4)', () => {
+    it('names the voice and the STT model in effect', async () => {
+      render(<VoiceOverlay
+        {...baseProps}
+        ttsVoice="bm_george"
+        sttModel="small"
+        sttConfiguredModel="small"
+      />);
+      await flush();
+      const line = screen.getByTestId('voice-effective-profile');
+      expect(line).toHaveTextContent('Voice: George');
+      expect(line).toHaveTextContent('Listening: small');
+      // No step-down happened: no chip.
+      expect(screen.queryByTestId('voice-stepped-down')).not.toBeInTheDocument();
+    });
+
+    it('shows the stepped-down chip naming the configured model', async () => {
+      render(<VoiceOverlay
+        {...baseProps}
+        ttsVoice="af_heart"
+        sttModel="base"
+        sttConfiguredModel="small"
+      />);
+      await flush();
+      expect(screen.getByTestId('voice-effective-profile')).toHaveTextContent('Listening: base');
+      expect(screen.getByTestId('voice-stepped-down')).toHaveTextContent('Stepped down from small');
+    });
+
+    it('renders no profile line before the engine reports one', async () => {
+      render(<VoiceOverlay {...baseProps} />);
+      await flush();
+      expect(screen.queryByTestId('voice-effective-profile')).not.toBeInTheDocument();
+    });
+
+    it('captures from the selected microphone device', async () => {
+      render(<VoiceOverlay {...baseProps} inputDeviceId="mic-42" />);
+      await flush();
+      expect(window.navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith({
+        audio: { deviceId: { exact: 'mic-42' } },
+      });
+    });
+  });
 });

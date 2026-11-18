@@ -289,6 +289,15 @@ class EventType(str, Enum):
     # "unavailable" — the session has ended, with the specific
     # stage + error as the reason)}. A session only ever steps
     # DOWN the ladder mid-flight, never back up.
+    # Wave 4: the START_RESPONSE additionally carries the
+    # EFFECTIVE speech profile — "tts_voice" (the voice the
+    # session speaks with), "stt_model" (the STT model in effect
+    # after any start-time ladder decision) and
+    # "stt_configured_model" (the configured model it may have
+    # stepped down from); all three are null on a refused start.
+    # VOICE_SESSION_STATUS payloads likewise carry "stt_model"
+    # (the model in effect after the transition) whenever the
+    # session has a degradation tracker.
     # VOICE_PARTIAL_TRANSCRIPT is an outbound push for the user's
     # speech: {"session_id", "speaker": "user", "text": str,
     # "is_final": bool} — partials are provisional display only; the
@@ -375,6 +384,16 @@ class EventType(str, Enum):
     READ_ALOUD_CHUNK = "READ_ALOUD_CHUNK"
     READ_ALOUD_STOP_REQUEST = "READ_ALOUD_STOP_REQUEST"
     READ_ALOUD_STOP_RESPONSE = "READ_ALOUD_STOP_RESPONSE"
+    # Wave 4: Settings voice preview. REQUEST payload is either
+    # {"probe": true} — answer availability only, synthesising
+    # nothing — or {"voice": str} — synthesise the ONE fixed
+    # preview sentence (engine-side constant; the request never
+    # carries text). RESPONSE: {"ok": bool, "voice": str | None,
+    # "audio_chunks": [str] (base64 WAV, in play order; empty
+    # for a probe), "error": str | None} — a refused preview is
+    # ok=False with the honest "voice unavailable: ..." reason.
+    VOICE_PREVIEW_REQUEST = "VOICE_PREVIEW_REQUEST"
+    VOICE_PREVIEW_RESPONSE = "VOICE_PREVIEW_RESPONSE"
     # Epic 1, E1-16: model thinking, streamed apart from the answer
     THINKING = "THINKING"
     # Epic 1, E1-17: agent scratchpad content for the display-only panel

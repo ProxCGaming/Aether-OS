@@ -16,18 +16,22 @@ jest.mock('../contexts/SocketContext', () => ({
 }));
 
 function makeWsRef() {
-  let messageHandler = null;
+  // A real WebSocket fans every message out to EVERY registered
+  // listener (SettingsPanel's handler and the panels it renders
+  // — e.g. the Speech card — each subscribe), so the harness
+  // keeps them all and feeds them all.
+  const handlers = new Set();
   const wsRef = {
     current: {
       readyState: 1,
       send: jest.fn(),
-      addEventListener: jest.fn((event, handler) => { messageHandler = handler; }),
-      removeEventListener: jest.fn(),
+      addEventListener: jest.fn((event, handler) => { handlers.add(handler); }),
+      removeEventListener: jest.fn((event, handler) => { handlers.delete(handler); }),
     },
   };
   const feed = (type, payload) => {
     act(() => {
-      messageHandler({ data: JSON.stringify({ type, payload }) });
+      handlers.forEach((h) => h({ data: JSON.stringify({ type, payload }) }));
     });
   };
   return { wsRef, feed };

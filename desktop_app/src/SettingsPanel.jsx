@@ -18,6 +18,7 @@ import SkillsPanel from './components/Settings/SkillsPanel';
 import AdvancedPanel from './components/Settings/AdvancedPanel';
 import AboutPanel from './components/Settings/AboutPanel';
 import VoicePanel from './components/Settings/VoicePanel';
+import SpeechSettingsPanel from './components/Settings/SpeechSettingsPanel';
 import CalendarPanel from './components/Settings/CalendarPanel';
 import ConversationPanel from './components/Settings/ConversationPanel';
 import ComputerUsePanel from './components/Settings/ComputerUsePanel';
@@ -1374,6 +1375,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             engineConfig={engineConfig}
             configUpdateError={configUpdateError}
             onConfigUpdate={sendConfigUpdate}
+            onOpenVoiceSettings={() => setActiveMenu('Voice')}
           />
         )}
 
@@ -1586,24 +1588,47 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
         )}
 
         {activeMenu === 'Voice' && (
-          <VoicePanel
-            configAnswered={!!answered.config}
-            configLoadError={configLoadError}
-            isConnected={isConnected}
-            onRetryConfigLoad={retryConfigLoad}
-            vadThreshold={vadThreshold}
-            setVadThreshold={setVadThreshold}
-            commitVadThreshold={commitVadThreshold}
-            pendingVadValue={pendingConfigValue('vad_threshold')}
-            silenceDurationMs={silenceDurationMs}
-            setSilenceDurationMs={setSilenceDurationMs}
-            commitSilenceDuration={commitSilenceDuration}
-            pendingSilenceValue={pendingConfigValue('silence_duration_ms')}
-            smartTurnSensitivity={smartTurnSensitivity}
-            setSmartTurnSensitivity={setSmartTurnSensitivity}
-            commitSmartTurnSensitivity={commitSmartTurnSensitivity}
-            pendingSmartTurnValue={pendingConfigValue('smart_turn_sensitivity')}
-          />
+          <div>
+            <VoicePanel
+              configAnswered={!!answered.config}
+              configLoadError={configLoadError}
+              isConnected={isConnected}
+              onRetryConfigLoad={retryConfigLoad}
+              vadThreshold={vadThreshold}
+              setVadThreshold={setVadThreshold}
+              commitVadThreshold={commitVadThreshold}
+              pendingVadValue={pendingConfigValue('vad_threshold')}
+              silenceDurationMs={silenceDurationMs}
+              setSilenceDurationMs={setSilenceDurationMs}
+              commitSilenceDuration={commitSilenceDuration}
+              pendingSilenceValue={pendingConfigValue('silence_duration_ms')}
+              smartTurnSensitivity={smartTurnSensitivity}
+              setSmartTurnSensitivity={setSmartTurnSensitivity}
+              commitSmartTurnSensitivity={commitSmartTurnSensitivity}
+              pendingSmartTurnValue={pendingConfigValue('smart_turn_sensitivity')}
+              inputDeviceId={(engineConfig && engineConfig.speech_input_device_id) || ''}
+              onInputDeviceChange={(val) => sendConfigUpdate({ speech_input_device_id: val })}
+              pendingInputDeviceValue={pendingConfigValue('speech_input_device_id')}
+              dictationMode={(engineConfig && engineConfig.dictation_mode) || 'hold'}
+              onDictationModeChange={(val) => sendConfigUpdate({ dictation_mode: val })}
+              pendingDictationModeValue={pendingConfigValue('dictation_mode')}
+            />
+            {/* The voice home's Speech sub-area: the speech
+                card lives here beside Tuning & Input (it used
+                to sit under Models & Tasks, which now carries a
+                cross-link instead). Same controlled contract as
+                every handed-off surface: the applied config, the
+                verbatim refusal and the one sendConfigUpdate. */}
+            <SpeechSettingsPanel
+              config={engineConfig}
+              configError={configUpdateError}
+              onConfigUpdate={sendConfigUpdate}
+              pendingMessages={pendingMessages}
+              reconnectCount={reconnectCount}
+              configReady={!!answered.config}
+              wsRef={wsRef}
+            />
+          </div>
         )}
       </div>
     </div>

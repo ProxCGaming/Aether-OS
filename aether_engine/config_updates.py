@@ -41,14 +41,28 @@ unvalidated typo would become a surprise multi-GB download at
 first voice use. The voice is validated against the Kokoro
 voice-id pattern. Both checks are offline and exact: no coercion,
 no network probe.
+
+Wave 4 extends the speech set: ``speech_tts_speed`` (a preset name
+from ``voice/tts.py``), ``speech_stt_language`` ('auto' or a code
+from ``voice/stt.py``), ``speech_input_device_id`` (an opaque
+browser-minted microphone id, shape-checked only) and
+``dictation_mode`` ('hold' | 'toggle').
 """
 from __future__ import annotations
 
 from typing import Any
 
 from aether_engine.memory.facade import VALID_BACKENDS
-from aether_engine.voice.stt import is_supported_stt_model
-from aether_engine.voice.tts import is_valid_kokoro_voice
+from aether_engine.voice.stt import STT_LANGUAGES, is_supported_stt_model
+from aether_engine.voice.tts import TTS_SPEED_PRESETS, is_valid_kokoro_voice
+
+# The microphone deviceId is minted by the browser and is opaque
+# (often a long hash); the bound only keeps a hostile or corrupt
+# write from parking an unbounded string in the config file.
+MAX_INPUT_DEVICE_ID_LEN = 512
+
+# The dictation interaction modes the composer implements.
+DICTATION_MODES = ("hold", "toggle")
 
 HANDED_OFF_FIELDS = (
     "supervisor_spawn_allowlist",
@@ -63,6 +77,10 @@ HANDED_OFF_FIELDS = (
     "speech_stt_model",
     "transcription_stt_model",
     "speech_tts_voice",
+    "speech_tts_speed",
+    "speech_stt_language",
+    "speech_input_device_id",
+    "dictation_mode",
     "calendar_enabled",
     "calendar_reminder_day_before",
     "calendar_reminder_lead_minutes",
@@ -225,6 +243,56 @@ def _validate_tts_voice(value: Any) -> str:
                     f"like 'af_heart': a language/gender prefix and "
                     f"a lowercase name)")
     return voice
+
+
+def _validate_tts_speed(value: Any) -> str:
+    """A speech-speed write (Wave 4): a preset NAME from
+    voice/tts.py TTS_SPEED_PRESETS — the factor itself is never
+    accepted from a client, so a stored value always means the
+    pace the picker labelled."""
+    if not isinstance(value, str) or value not in TTS_SPEED_PRESETS:
+        raise _fail("speech_tts_speed",
+                    f"unsupported speech speed {value!r} (expected "
+                    f"one of: {', '.join(TTS_SPEED_PRESETS)})")
+    return value
+
+
+def _validate_stt_language(value: Any) -> str:
+    """A speech-language write (Wave 4): 'auto' or an ISO code
+    from voice/stt.py STT_LANGUAGES — the curated picker list,
+    so the setting can never name a language the UI didn't
+    offer."""
+    if not isinstance(value, str) or value not in STT_LANGUAGES:
+        raise _fail("speech_stt_language",
+                    f"unsupported speech language {value!r} "
+                    f"(expected 'auto' or one of: "
+                    f"{', '.join(sorted(STT_LANGUAGES - {'auto'}))})")
+    return value
+
+
+def _validate_input_device_id(value: Any) -> str:
+    """A microphone device write (Wave 4): the id is an opaque
+    browser-minted string ('' = the system default), so the
+    check is shape only — a bounded string, nothing coerced."""
+    if not isinstance(value, str):
+        raise _fail("speech_input_device_id",
+                    "must be a microphone device id string "
+                    "('' for the system default)")
+    if len(value) > MAX_INPUT_DEVICE_ID_LEN:
+        raise _fail("speech_input_device_id",
+                    f"device id is too long "
+                    f"({len(value)} > {MAX_INPUT_DEVICE_ID_LEN} chars)")
+    return value
+
+
+def _validate_dictation_mode(value: Any) -> str:
+    """A dictation-mode write (Wave 4): 'hold' or 'toggle' —
+    the two behaviours the composer implements."""
+    if value not in DICTATION_MODES:
+        raise _fail("dictation_mode",
+                    f"unsupported dictation mode {value!r} "
+                    f"(expected one of: {', '.join(DICTATION_MODES)})")
+    return value
 
 
 def _validate_desktop_category_modes(value: Any) -> dict:
@@ -421,6 +489,25 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
     if "speech_tts_voice" in config_data:
         cleaned["speech_tts_voice"] = _validate_tts_voice(
             config_data["speech_tts_voice"])
+
+    # Wave 4 voice home: speed preset, STT language, microphone
+    # device and dictation mode join the speech fields under the
+    # same strict contract.
+    if "speech_tts_speed" in config_data:
+        cleaned["speech_tts_speed"] = _validate_tts_speed(
+            config_data["speech_tts_speed"])
+
+    if "speech_stt_language" in config_data:
+        cleaned["speech_stt_language"] = _validate_stt_language(
+            config_data["speech_stt_language"])
+
+    if "speech_input_device_id" in config_data:
+        cleaned["speech_input_device_id"] = _validate_input_device_id(
+            config_data["speech_input_device_id"])
+
+    if "dictation_mode" in config_data:
+        cleaned["dictation_mode"] = _validate_dictation_mode(
+            config_data["dictation_mode"])
 
     # Calendar layer C5 (14 Nov 2026): the switches are real
     # booleans — a truthy string from a hand-rolled client must be
