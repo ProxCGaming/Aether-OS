@@ -40,13 +40,17 @@ describe('DiagnosticsPanel', () => {
       target: { value: '--yes, mcp-server' },
     });
     fireEvent.click(screen.getByText('Add Server'));
+    // D4-3: the add is staged behind the confirmation card first.
+    expect(mockSendMessage).not.toHaveBeenCalledWith(
+      'MCP_SERVER_ADD_REQUEST', expect.anything());
+    fireEvent.click(screen.getByText('Confirm and add'));
 
     expect(mockSendMessage).toHaveBeenCalledWith(
       'MCP_SERVER_ADD_REQUEST',
       expect.objectContaining({
         payload: {
           name: 'my-server',
-          config: { command: 'npx', args: ['--yes', 'mcp-server'] },
+          config: { command: 'npx', args: ['--yes', 'mcp-server'], confirmed: true },
         },
       })
     );
@@ -63,13 +67,14 @@ describe('DiagnosticsPanel', () => {
       { target: { value: 'http://127.0.0.1:9000/mcp' } }
     );
     fireEvent.click(screen.getByText('Add Server'));
+    fireEvent.click(screen.getByText('Confirm and add'));
 
     expect(mockSendMessage).toHaveBeenCalledWith(
       'MCP_SERVER_ADD_REQUEST',
       expect.objectContaining({
         payload: {
           name: 'fake-remote',
-          config: { transport: 'streamable_http', url: 'http://127.0.0.1:9000/mcp' },
+          config: { transport: 'streamable_http', url: 'http://127.0.0.1:9000/mcp', confirmed: true },
         },
       })
     );
@@ -92,6 +97,7 @@ describe('DiagnosticsPanel', () => {
       target: { value: '${TWENTY_FIRST_KEY}' },
     });
     fireEvent.click(screen.getByText('Add Server'));
+    fireEvent.click(screen.getByText('Confirm and add'));
 
     expect(mockSendMessage).toHaveBeenCalledWith(
       'MCP_SERVER_ADD_REQUEST',
@@ -102,6 +108,7 @@ describe('DiagnosticsPanel', () => {
             transport: 'streamable_http',
             url: 'https://21st.dev/api/mcp',
             headers: { 'x-api-key': '${TWENTY_FIRST_KEY}' },
+            confirmed: true,
           },
         },
       })
@@ -152,6 +159,7 @@ describe('DiagnosticsPanel', () => {
       target: { value: '/tmp/work' },
     });
     fireEvent.click(screen.getByText('Add Server'));
+    fireEvent.click(screen.getByText('Confirm and add'));
 
     expect(mockSendMessage).toHaveBeenCalledWith(
       'MCP_SERVER_ADD_REQUEST',
@@ -163,6 +171,7 @@ describe('DiagnosticsPanel', () => {
             args: ['--yes', 'mcp-server'],
             env: { MY_VAR: 'hello' },
             cwd: '/tmp/work',
+            confirmed: true,
           },
         },
       })
@@ -521,6 +530,8 @@ describe('DiagnosticsPanel', () => {
   };
 
   it('sends the manifest name on plugin toggle and uninstall (E7-F05)', () => {
+    // D4-4: uninstall asks first (window.confirm, the D2-28 pattern).
+    window.confirm = jest.fn(() => true);
     renderWithPlugin();
     expect(screen.getByText('CoolPlugin')).toBeInTheDocument();
 
@@ -533,6 +544,7 @@ describe('DiagnosticsPanel', () => {
     );
 
     fireEvent.click(screen.getByText('Uninstall'));
+    expect(window.confirm).toHaveBeenCalled();
     expect(mockSendMessage).toHaveBeenCalledWith(
       'PLUGIN_UNINSTALL_REQUEST',
       expect.objectContaining({
