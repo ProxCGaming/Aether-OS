@@ -512,6 +512,18 @@ class AetherSupervisorModel(BaseChatModel):
         agent_tools = configurable.get("agent_tools", {})
         allowed = agent_tools.get("supervisor") if isinstance(agent_tools, dict) else None
 
+        # P1e mode enforcement (K-04 hookup): with the delegation
+        # mode resolved to "off", the delegation tools are not
+        # offered — the supervisor answers directly. Only the
+        # tools topology's names are filtered (delegate_to_* and
+        # the group tool exist only there); legacy handoff offers
+        # are untouched, so the legacy graph's offer list is
+        # byte-identical. A call that still arrives (forged, stale,
+        # or a synthesised JSON decision) is refused inside the
+        # delegation tool itself.
+        delegation_off = (
+            resolve_delegation_settings(user_config).effective_mode == "off")
+
         # E1-F12: the spawn allow-list filters the native handoff
         # offers themselves, not only the routing prompt's text — a
         # denied specialist's transfer tool is never offered, so the
@@ -538,7 +550,8 @@ class AetherSupervisorModel(BaseChatModel):
                     offered.append(convert_to_openai_tool(tool))
                 continue
             if name.startswith(DELEGATION_PREFIX):
-                if name[len(DELEGATION_PREFIX):] in available:
+                if not delegation_off \
+                        and name[len(DELEGATION_PREFIX):] in available:
                     offered.append(convert_to_openai_tool(tool))
                 continue
             if name == GROUP_TOOL_NAME:
@@ -548,8 +561,9 @@ class AetherSupervisorModel(BaseChatModel):
                 # v1 includes the researcher. Whether a declared
                 # group actually runs in parallel is the fan-out
                 # seam's judgement (mode / width / pair), never
-                # the offer's.
-                if "researcher" in available:
+                # the offer's. P1e mode "off" suppresses the offer
+                # entirely (see delegation_off above).
+                if not delegation_off and "researcher" in available:
                     offered.append(convert_to_openai_tool(tool))
                 continue
             # S19: the desktop-observe tool exists for the model
@@ -971,6 +985,22 @@ def supervisor_routing_prompt(state: dict) -> list:
         tool_mode=True,
         delegation_tools=_pattern == "tools",
     )
+    # P1e mode enforcement (K-04 hookup): in delegation mode "off"
+    # the tools-topology supervisor is told plainly that delegation
+    # is disabled (its delegation tools are also unoffered, and a
+    # call that still arrives is refused inside the tool). The
+    # legacy prompt is byte-identical — this note exists only on
+    # the tools pattern, where the enforcement lives.
+    if _pattern == "tools" and resolve_delegation_settings(
+            (config.get("configurable", {}) or {}).get("user_config"),
+    ).effective_mode == "off":
+        text += (
+            "\n\nDelegation is DISABLED for this run (delegation "
+            "mode: off): no delegation tools are available and any "
+            "delegation decision will be refused. Do the work "
+            "yourself and answer directly; if the task genuinely "
+            "needs a specialist, say so and name the delegation "
+            "mode as the blocker.")
     board = blackboard_briefing(state)
     if board:
         text += f"\n\nShared team blackboard (written by all agents in this task):\n{board}"

@@ -1159,7 +1159,55 @@ def build_parallel_group_tool():
     async def _delegate_parallel(
             members: list[dict], runtime: ToolRuntime) -> list[Command]:
         state = dict(runtime.state or {})
+        # P1e mode enforcement (K-04 hookup), judged before the
+        # group machinery: in mode "off" no member may run in ANY
+        # scheduling (the coordinator's degrade-to-sequential would
+        # otherwise execute the group), and in mode "manual" the
+        # group pauses for the owner's approval before any member
+        # starts — one approval for the group as declared, naming
+        # every member. The helpers are the delegation tools' own
+        # (langgraph/delegation.py owns the single-delegation
+        # seam's texts and payload shape); the import is deferred
+        # because delegation.py imports this module's tool factory.
+        from aether_engine.langgraph.delegation import (
+            approval_denial_text,
+            approval_granted,
+            delegation_approval_payload,
+            delegation_settings_for,
+            mode_off_refusal,
+        )
+
+        settings = delegation_settings_for(runtime.config)
+        if settings.effective_mode == "off":
+            return [Command(update={"messages": [ToolMessage(
+                content=mode_off_refusal("the parallel group"),
+                name=GROUP_TOOL_NAME,
+                tool_call_id=runtime.tool_call_id,
+            )]})]
         parsed, error = parse_group_members(members)
+        if settings.effective_mode == "manual" and error is None:
+            names = " + ".join(m.specialist for m in parsed)
+            payload = delegation_approval_payload(
+                f"parallel group ({names})", "",
+                tool_name=GROUP_TOOL_NAME,
+                tool_call_id=runtime.tool_call_id,
+                config=runtime.config)
+            payload["args"] = {"members": members}
+            payload["delegation"] = {
+                "specialist": "parallel_group",
+                "members": [
+                    {"specialist": m.specialist, "task": m.task}
+                    for m in parsed
+                ],
+            }
+            decision = interrupt(payload)
+            if not approval_granted(decision):
+                return [Command(update={"messages": [ToolMessage(
+                    content=approval_denial_text(
+                        f"the parallel group ({names})"),
+                    name=GROUP_TOOL_NAME,
+                    tool_call_id=runtime.tool_call_id,
+                )]})]
         if error is not None:
             # The hook refuses malformed declarations before the
             # tool runs; this covers a call that reaches the tool

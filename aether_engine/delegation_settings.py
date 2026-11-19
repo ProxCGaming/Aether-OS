@@ -136,11 +136,11 @@ _ROW_FIELDS = frozenset({
 # the machinery flip their entry here.
 _MODE_AVAILABILITY: dict[str, tuple[bool, str]] = {
     "off": (True, ""),
-    # Manual maps to today's delegation path; the per-delegation
-    # owner-approval pause rides the P1d migration's interrupt
-    # surface (K-01) — until then a manual run delegates exactly
-    # like auto-coordinate, and this entry's availability claims
-    # only the mode, not the pause.
+    # Manual and off are enforced at the tools-topology
+    # delegation seam (langgraph/delegation.py, the K-04 hookup):
+    # off suppresses the delegation tools' offer and refuses any
+    # call that still arrives; manual pauses every delegation for
+    # owner approval via interrupt() before the specialist runs.
     "manual": (True, ""),
     "auto-coordinate": (True, ""),
     # P1a (supervisor tier emission, K-08) and P1b (price/headroom
