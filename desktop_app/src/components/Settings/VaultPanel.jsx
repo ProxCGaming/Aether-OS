@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { KeyRound, Pencil, Trash2, ShieldCheck, Timer } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { KeyRound, Pencil, Trash2, ShieldCheck, Timer, Search } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 import LoadStateRow from './LoadStateRow';
 
@@ -87,6 +87,14 @@ export default function VaultPanel({ wsRef: propWsRef }) {
   const [entries, setEntries] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
   const [error, setError] = useState('');
+  // One search over BOTH lists (credentials + authenticator): the
+  // filter is a derived render list, never a mutation of the
+  // served state — the TOTP countdown chain above keys off the
+  // unfiltered `codes`, so filtering must not touch it. The two
+  // section refs back the Credentials / Authenticator anchors.
+  const [query, setQuery] = useState('');
+  const credentialsRef = useRef(null);
+  const authenticatorRef = useRef(null);
   // RUX-C-05 (Wave 3 slice 1): both vault lists track whether the
   // engine has ANSWERED. Before the first list reply, the panel
   // renders a load state (loading / offline) — never "No credentials
@@ -349,6 +357,18 @@ export default function VaultPanel({ wsRef: propWsRef }) {
     setTotpError('');
   };
 
+  const queryText = query.trim().toLowerCase();
+  const matchesQuery = (...fields) => !queryText
+    || fields.some((f) => (f || '').toLowerCase().includes(queryText));
+  const visibleEntries = entries.filter((e) => matchesQuery(e.site, e.username));
+  const visibleCodes = codes.filter((r) => matchesQuery(r.label, r.issuer, r.username));
+
+  const scrollToSection = (ref) => {
+    if (ref.current && typeof ref.current.scrollIntoView === 'function') {
+      ref.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
   return (
     <div style={{ color: 'var(--text-primary)', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <div>
@@ -376,7 +396,37 @@ export default function VaultPanel({ wsRef: propWsRef }) {
         </div>
       )}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center' }}>
+        <div style={{ position: 'relative', flex: '1 1 240px' }}>
+          <Search size={15} style={{ position: 'absolute', left: '10px', top: '10px', color: 'var(--text-muted)' }} />
+          <input
+            data-testid="vault-search-input"
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search credentials and authenticator codes…"
+            style={{ ...inputStyle, paddingLeft: '32px' }}
+          />
+        </div>
+        <button
+          type="button"
+          data-testid="vault-anchor-credentials"
+          style={smallButtonStyle}
+          onClick={() => scrollToSection(credentialsRef)}
+        >
+          Credentials
+        </button>
+        <button
+          type="button"
+          data-testid="vault-anchor-authenticator"
+          style={smallButtonStyle}
+          onClick={() => scrollToSection(authenticatorRef)}
+        >
+          Authenticator
+        </button>
+      </div>
+
+      <div ref={credentialsRef} id="vault-credentials" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
         {entriesLoad !== 'ready' ? (
           <LoadStateRow
             loadState={entriesLoad}
@@ -393,7 +443,12 @@ export default function VaultPanel({ wsRef: propWsRef }) {
             during a signup task — it will appear here for your review.
           </div>
         )}
-        {entries.map((entry) => (
+        {entriesLoad === 'ready' && entries.length > 0 && visibleEntries.length === 0 && (
+          <div data-testid="vault-entries-no-match" style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+            No credentials match “{query.trim()}”.
+          </div>
+        )}
+        {visibleEntries.map((entry) => (
           <div key={entry.id} data-testid={`vault-entry-${entry.id}`} style={rowStyle}>
             <div style={{ display: 'flex', gap: '12px' }}>
               <KeyRound size={20} color="var(--accent)" style={{ marginTop: '2px', flexShrink: 0 }} />
@@ -551,6 +606,8 @@ export default function VaultPanel({ wsRef: propWsRef }) {
       </div>
 
       <div
+        ref={authenticatorRef}
+        id="vault-authenticator"
         style={{
           borderTop: '1px solid var(--border-default)',
           paddingTop: '20px',
@@ -600,7 +657,12 @@ export default function VaultPanel({ wsRef: propWsRef }) {
             its QR code, or save a TOTP secret on a credential above.
           </div>
         )}
-        {codes.map((row) => (
+        {codesLoad === 'ready' && codes.length > 0 && visibleCodes.length === 0 && (
+          <div data-testid="vault-totp-no-match" style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+            No authenticator codes match “{query.trim()}”.
+          </div>
+        )}
+        {visibleCodes.map((row) => (
           <div key={row.entry_id} data-testid={`vault-totp-entry-${row.entry_id}`} style={rowStyle}>
             <div style={{ display: 'flex', gap: '12px' }}>
               <Timer size={20} color="var(--accent)" style={{ marginTop: '2px', flexShrink: 0 }} />

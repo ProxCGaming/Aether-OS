@@ -131,3 +131,101 @@ describe('VaultPanel (E8-6.3)', () => {
     expect(screen.getByText(/agents can never read it/i)).toBeInTheDocument();
   });
 });
+
+describe('VaultPanel search + section anchors', () => {
+  const ENTRY2 = {
+    id: 'entry-2',
+    site: 'instagram.com',
+    username: 'arinxroyy',
+    ask_every_time: false,
+    created_at: 1761900000,
+    created_by: 'user',
+    last_used_at: null,
+  };
+
+  const CODES = [
+    {
+      entry_id: 'totp-1', kind: 'authenticator', label: 'octocat', issuer: 'GitHub',
+      code: '287082', period: 30, seconds_remaining: 12,
+    },
+    {
+      entry_id: 'login-1', kind: 'login', label: 'example.com', issuer: '',
+      username: 'me@example.com', code: '005924', period: 30, seconds_remaining: 12,
+    },
+  ];
+
+  function renderSearchable() {
+    const { wsRef, simulateMessage } = makeWsRef();
+    render(<VaultPanel wsRef={wsRef} />);
+    act(() => {
+      simulateMessage({ type: 'VAULT_ENTRY_LIST_RESPONSE', payload: { entries: [ENTRY, ENTRY2] } });
+      simulateMessage({ type: 'VAULT_TOTP_LIST_RESPONSE', payload: { entries: [] } });
+      simulateMessage({ type: 'VAULT_TOTP_CODES_RESPONSE', payload: { codes: CODES } });
+    });
+    return { wsRef, simulateMessage };
+  }
+
+  test('one keystroke narrows the credential list to the matching site', () => {
+    renderSearchable();
+    expect(screen.getByTestId('vault-entry-entry-1')).toBeInTheDocument();
+    expect(screen.getByTestId('vault-entry-entry-2')).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId('vault-search-input'), { target: { value: 'i' } });
+    // 'i' is in both sites; narrow further to prove filtering is live.
+    fireEvent.change(screen.getByTestId('vault-search-input'), { target: { value: 'insta' } });
+    expect(screen.queryByTestId('vault-entry-entry-1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('vault-entry-entry-2')).toBeInTheDocument();
+  });
+
+  test('the search also matches usernames', () => {
+    renderSearchable();
+    fireEvent.change(screen.getByTestId('vault-search-input'), { target: { value: 'octocat' } });
+    expect(screen.getByTestId('vault-entry-entry-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('vault-entry-entry-2')).not.toBeInTheDocument();
+  });
+
+  test('the same field filters the authenticator codes, and visible codes keep their countdown', () => {
+    renderSearchable();
+    fireEvent.change(screen.getByTestId('vault-search-input'), { target: { value: 'github' } });
+    expect(screen.getByTestId('vault-totp-entry-totp-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('vault-totp-entry-login-1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('vault-totp-code-totp-1')).toHaveTextContent('287082');
+    expect(screen.getByTestId('vault-totp-countdown-totp-1')).toHaveTextContent('12s');
+  });
+
+  test('a search with no matches says so in both sections — never the genuine empty text', () => {
+    renderSearchable();
+    fireEvent.change(screen.getByTestId('vault-search-input'), { target: { value: 'zzz-no-match' } });
+    expect(screen.getByTestId('vault-entries-no-match')).toHaveTextContent('zzz-no-match');
+    expect(screen.getByTestId('vault-totp-no-match')).toHaveTextContent('zzz-no-match');
+    expect(screen.queryByText(/No credentials saved yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No authenticator codes yet/)).not.toBeInTheDocument();
+  });
+
+  test('clearing the search restores both full lists', () => {
+    renderSearchable();
+    const input = screen.getByTestId('vault-search-input');
+    fireEvent.change(input, { target: { value: 'insta' } });
+    expect(screen.queryByTestId('vault-entry-entry-1')).not.toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '' } });
+    expect(screen.getByTestId('vault-entry-entry-1')).toBeInTheDocument();
+    expect(screen.getByTestId('vault-totp-entry-login-1')).toBeInTheDocument();
+  });
+
+  test('the anchor chips scroll to their sections', () => {
+    renderSearchable();
+    const scrollSpy = jest.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    try {
+      expect(document.getElementById('vault-credentials')).not.toBeNull();
+      expect(document.getElementById('vault-authenticator')).not.toBeNull();
+      fireEvent.click(screen.getByTestId('vault-anchor-authenticator'));
+      expect(scrollSpy).toHaveBeenCalledTimes(1);
+      expect(scrollSpy.mock.instances[0].id).toBe('vault-authenticator');
+      fireEvent.click(screen.getByTestId('vault-anchor-credentials'));
+      expect(scrollSpy).toHaveBeenCalledTimes(2);
+      expect(scrollSpy.mock.instances[1].id).toBe('vault-credentials');
+    } finally {
+      delete Element.prototype.scrollIntoView;
+    }
+  });
+});
