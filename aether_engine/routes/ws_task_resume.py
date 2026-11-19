@@ -227,25 +227,17 @@ async def handle_task_resume_request(
             "started", audit=audit)
         return
 
-    # The executor's one continuation pump is approval-shaped: its
-    # first segment input is Command(resume=<decision>). The gates
-    # above guarantee no interrupt is PENDING on this thread, so no
-    # stale approval can be answered or cleared here. KNOWN GAP
-    # against D-1's re-gate, proven empirically by
-    # tests/test_wave6_resume.py::test_real_resume_regates_approvals
-    # (marked xfail until this is fixed): with no interrupt pending,
-    # the resume value is consumed by the first FRESH approval
-    # interrupt the resumed run raises, auto-approving that one
-    # tool call instead of asking; every later gated call re-gates
-    # correctly. The correct entry is a plain continuation (a None
-    # segment input), which the executor does not expose yet — it
-    # is this lane's reported cross-fence need against executor.py
-    # (another lane's file this wave). When a
-    # continue_langgraph_task entry lands there, this call switches
-    # to it and the xfail marker comes off.
-    resume_gen = ws_module.resume_langgraph_task(
+    # The resume runs through the executor's plain continuation
+    # entry: its first segment consumes None, so no approval
+    # decision is delivered — and none can be consumed by the
+    # first fresh approval interrupt the resumed run raises. Every
+    # gated call re-gates and asks (D-1), proven by
+    # tests/test_wave6_resume.py::test_real_resume_regates_approvals.
+    # The gates above additionally guarantee no interrupt is
+    # PENDING on this thread, so no stale approval can be
+    # answered, cleared, or inherited here.
+    resume_gen = ws_module.continue_langgraph_task(
         thread_id=thread_id,
-        approved=True,
         provider=provider_instance,
         tools=tools,
         workspace_roots=resume_workspace_roots,

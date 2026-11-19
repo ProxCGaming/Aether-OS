@@ -30,6 +30,7 @@ from aether_engine.config import (
 )
 from aether_engine.langgraph.checkpointer import delete_thread_checkpoints
 from aether_engine.langgraph.executor import (
+    continue_langgraph_task,  # noqa: F401 — patch target: ws_task_resume resolves it through this module at call time
     get_pending_approvals,
     get_persisted_run_config,
     resume_langgraph_task,
@@ -127,6 +128,10 @@ from aether_engine.routes.ws_skills_registry import (
 from aether_engine.routes.ws_task_exec import (
     execute_task_generator,
     start_task_message,
+)
+from aether_engine.routes.ws_task_resume import (
+    handle_task_resume_audit_request,
+    handle_task_resume_request,
 )
 from aether_engine.routes.ws_voice import (
     cancel_voice_background_tasks,
@@ -4584,6 +4589,8 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.USAGE_LEDGER_QUERY_REQUEST: _handle_usage_ledger_query_request,
     EventType.TASK_LEDGER_QUERY_REQUEST: _handle_task_ledger_query_request,
     EventType.TASK_LEDGER_LIST_REQUEST: _handle_task_ledger_list_request,
+    EventType.TASK_RESUME_AUDIT_REQUEST: handle_task_resume_audit_request,
+    EventType.TASK_RESUME_REQUEST: handle_task_resume_request,
     EventType.CONTEXT_BREAKDOWN_REQUEST: _handle_context_breakdown_request,
     EventType.DAILY_BUDGET_SET_REQUEST: _handle_daily_budget_set_request,
     EventType.BROWSER_TASK_PAUSE_REQUEST: _handle_browser_task_pause_request,

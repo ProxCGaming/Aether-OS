@@ -374,7 +374,7 @@ def _patch_route_seams(monkeypatch, *, audit, run_cfg=None, pending=None,
         yield Event(type=EventType.TASK_COMPLETED,
                     payload={"task_id": "task-1"})
 
-    monkeypatch.setattr(ws_module, "resume_langgraph_task", _fake_resume)
+    monkeypatch.setattr(ws_module, "continue_langgraph_task", _fake_resume)
     return calls
 
 
@@ -499,18 +499,18 @@ async def test_resume_handler_ready_path(monkeypatch):
 # goes through the real handler + real pump + real executor
 # continuation.
 
-from functools import partial  # noqa: E402
+from functools import partial
 
-from aether_engine.config import UserConfig  # noqa: E402
-from aether_engine.langgraph import executor as executor_module  # noqa: E402
-from aether_engine.langgraph.orphan_sweep import sweep_orphaned_tasks  # noqa: E402
-from aether_engine.memory import episodic as episodic_module  # noqa: E402
-from aether_engine.memory import knowledge_graph as kg_module  # noqa: E402
-from aether_engine.langgraph.nodes import planner as planner_module  # noqa: E402
-from aether_engine.providers.base import StreamChunk, ToolCall  # noqa: E402
-from aether_engine.routes import ws_task_exec  # noqa: E402
-from aether_engine.state import engine_state  # noqa: E402
-from aether_engine.tools.registry import Tool, ToolRegistry, ToolRisk  # noqa: E402
+from aether_engine.config import UserConfig
+from aether_engine.langgraph import executor as executor_module
+from aether_engine.langgraph.nodes import planner as planner_module
+from aether_engine.langgraph.orphan_sweep import sweep_orphaned_tasks
+from aether_engine.memory import episodic as episodic_module
+from aether_engine.memory import knowledge_graph as kg_module
+from aether_engine.providers.base import StreamChunk, ToolCall
+from aether_engine.routes import ws_task_exec
+from aether_engine.state import engine_state
+from aether_engine.tools.registry import Tool, ToolRegistry, ToolRisk
 
 
 class _DeathProvider:
@@ -631,7 +631,7 @@ async def _drain(gen):
     return events
 
 
-from aether_common.contracts import TaskState  # noqa: E402
+from aether_common.contracts import TaskState
 
 
 def _real_conn():
@@ -669,7 +669,7 @@ async def test_real_death_audit_and_resume_to_completion(
     env = death_env
     provider = _DeathProvider()
     provider.read_path = str(env.target)
-    task_id, session_id = await _kill_mid_tool(
+    task_id, _session_id = await _kill_mid_tool(
         env, provider,
         user_config=UserConfig(
             tool_policies={"gated_probe": "Always Allow"}))
@@ -711,15 +711,6 @@ async def test_real_death_audit_and_resume_to_completion(
     assert audit_after["verdict"] == "refused"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="D-1 re-gate gap in the executor's approval-shaped "
-           "continuation: Command(resume=True) is consumed by the "
-           "first fresh approval interrupt of the resumed run, "
-           "auto-approving one gated call. Needs the cross-fence "
-           "continue_langgraph_task entry in executor.py (reported "
-           "by Lane W6-E); remove this marker when the resume route "
-           "switches to it.")
 @pytest.mark.asyncio
 async def test_real_resume_regates_approvals(death_env, monkeypatch):
     env = death_env
@@ -728,7 +719,7 @@ async def test_real_resume_regates_approvals(death_env, monkeypatch):
     # gated_probe requires approval; read_file does not.
     user_config = UserConfig(
         tool_policies={"gated_probe": "Require Approval"})
-    task_id, session_id = await _kill_mid_tool(
+    task_id, _session_id = await _kill_mid_tool(
         env, provider, user_config=user_config)
 
     _patch_real_resume_seams(monkeypatch, env, provider)
@@ -737,14 +728,14 @@ async def test_real_resume_regates_approvals(death_env, monkeypatch):
     # Keep the resumed run's events: wrap the resume generator at
     # the websocket seam (the pump forwards frames to the socket,
     # so the generator is where the event stream is observable).
-    real_resume = ws_module.resume_langgraph_task
+    real_resume = ws_module.continue_langgraph_task
 
     async def _tapped_resume(**kwargs):
         async for ev in real_resume(**kwargs):
             events.append(ev)
             yield ev
 
-    monkeypatch.setattr(ws_module, "resume_langgraph_task", _tapped_resume)
+    monkeypatch.setattr(ws_module, "continue_langgraph_task", _tapped_resume)
     msg = Event(type=EventType.TASK_RESUME_REQUEST, request_id="r1",
                 payload={"task_id": task_id})
     await ws_task_resume.handle_task_resume_request(conn, msg)

@@ -1223,6 +1223,92 @@ async def resume_langgraph_task(
     the same auxiliary vision override the original routing decision
     read, ``require_vision`` from the checkpointed history once it is
     loaded below — so the constraint cannot lapse across a pause.
+
+    The continuation machinery lives in ``_resume_thread_impl``;
+    this entry is the approval-shaped one — its first segment
+    delivers the owner's decision to the pending interrupt.
+    """
+    # Epic 8, E8-1.3: approval-time argument edits ride the
+    # resume value as a dict; an unedited approval keeps the
+    # legacy bare-boolean resume exactly as before.
+    # Epic 8, E8-6.2: a browser-envelope grant granted at a
+    # confirmation rides the same dict (the pause node scopes
+    # it to the confirmed action's category + site itself).
+    # S20: the desktop extras (per-task envelope grant +
+    # remembered-grant flag) ride it the same way.
+    resume_value: Any = approved
+    if approved and (isinstance(edited_args, dict)
+                     or isinstance(browser_envelope, dict)
+                     or isinstance(desktop_envelope, dict)
+                     or desktop_remember):
+        resume_value = {"approved": True}
+        if isinstance(edited_args, dict):
+            resume_value["edited_args"] = edited_args
+        if isinstance(browser_envelope, dict):
+            resume_value["browser_envelope"] = browser_envelope
+        if isinstance(desktop_envelope, dict):
+            resume_value["desktop_envelope"] = desktop_envelope
+        if desktop_remember:
+            resume_value["desktop_remember"] = True
+    async for event in _resume_thread_impl(
+            thread_id, Command(resume=resume_value), provider,
+            tools=tools, workspace_roots=workspace_roots,
+            disabled_nodes=disabled_nodes, agent_models=agent_models,
+            agent_tools=agent_tools, **kwargs):
+        yield event
+
+
+async def continue_langgraph_task(
+    thread_id: str,
+    provider: BaseProvider,
+    tools: ToolRegistry | None = None,
+    workspace_roots: list[str] | None = None,
+    disabled_nodes: set | None = None,
+    agent_models: dict[str, str] | None = None,
+    agent_tools: dict[str, list[str]] | None = None,
+    **kwargs,
+) -> AsyncGenerator[Event, None]:
+    """Plain continuation of an interrupted thread (Wave 6, D-1).
+
+    The same continuation machinery as ``resume_langgraph_task``
+    with one difference that matters: the first segment consumes
+    ``None``. There is no pending interrupt to answer — the task
+    was interrupted by a restart, not paused for approval — so
+    no decision is delivered, and none CAN be consumed by the
+    first fresh approval interrupt the continued run raises:
+    every gated call in the continued run re-gates and asks,
+    exactly as D-1 requires. Callers must already have
+    established (via the resume audit) that no approval is
+    pending on the thread.
+    """
+    async for event in _resume_thread_impl(
+            thread_id, None, provider,
+            tools=tools, workspace_roots=workspace_roots,
+            disabled_nodes=disabled_nodes, agent_models=agent_models,
+            agent_tools=agent_tools, **kwargs):
+        yield event
+
+
+async def _resume_thread_impl(
+    thread_id: str,
+    first_segment_input: Any,
+    provider: BaseProvider,
+    tools: ToolRegistry | None = None,
+    workspace_roots: list[str] | None = None,
+    disabled_nodes: set | None = None,
+    agent_models: dict[str, str] | None = None,
+    agent_tools: dict[str, list[str]] | None = None,
+    **kwargs,
+) -> AsyncGenerator[Event, None]:
+    """Shared continuation machinery for the two entries above.
+
+    ``first_segment_input`` is the ONLY difference between them:
+    a ``Command(resume=...)`` for the approval resume, ``None``
+    for the plain continuation. Everything else — the M17
+    routing-constraint re-derivation, E1-F04 snapshot restore,
+    E1-F16 bus subscription, manifest seeding, steering drain,
+    completion/failure translation — is identical for both, so
+    it lives exactly once, here.
     """
     _local_only = kwargs.get("local_only")
     if _local_only is None:
@@ -1520,28 +1606,6 @@ async def resume_langgraph_task(
 
 
             interrupted = False
-            # Epic 8, E8-1.3: approval-time argument edits ride the
-            # resume value as a dict; an unedited approval keeps the
-            # legacy bare-boolean resume exactly as before.
-            # Epic 8, E8-6.2: a browser-envelope grant granted at a
-            # confirmation rides the same dict (the pause node scopes
-            # it to the confirmed action's category + site itself).
-            # S20: the desktop extras (per-task envelope grant +
-            # remembered-grant flag) ride it the same way.
-            resume_value: Any = approved
-            if approved and (isinstance(edited_args, dict)
-                             or isinstance(browser_envelope, dict)
-                             or isinstance(desktop_envelope, dict)
-                             or desktop_remember):
-                resume_value = {"approved": True}
-                if isinstance(edited_args, dict):
-                    resume_value["edited_args"] = edited_args
-                if isinstance(browser_envelope, dict):
-                    resume_value["browser_envelope"] = browser_envelope
-                if isinstance(desktop_envelope, dict):
-                    resume_value["desktop_envelope"] = desktop_envelope
-                if desktop_remember:
-                    resume_value["desktop_remember"] = True
             # Wave 6 (SPEC-6B C6): the resumed reply's memory_used
             # disclosure, folded from the memory tools' completed
             # TOOL_ACTIVITY events exactly as the run path folds
@@ -1561,7 +1625,7 @@ async def resume_langgraph_task(
             # S3: the resume path's translated events tap into the
             # Task Ledger here, at the segment funnel — the mirror of
             # the run path's emit_event tap.
-            async for _ev in _consume_segment(Command(resume=resume_value)):
+            async for _ev in _consume_segment(first_segment_input):
                 _note_memory_used(_ev)
                 record_executor_event(task_id, _ev)
                 yield _ev
