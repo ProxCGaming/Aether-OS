@@ -225,17 +225,45 @@ async def test_profile_sender_answers_the_paginated_profile(kg_db, monkeypatch):
         "aether_engine.routes.websocket.backend_or_none",
         lambda config, context="": backend)
     conn = _conn()
-    await send_memory_profile_result(conn, "req-1", 2, 0)
+    await send_memory_profile_result(conn, "req-1", {"limit": 2, "offset": 0})
     assert len(conn.ws.sent) == 1
     reply = conn.ws.sent[0]
     assert reply["type"] == "MEMORY_PROFILE_RESPONSE"
     assert reply["request_id"] == "req-1"
     payload = reply["payload"]
     assert payload["backend"] == "native"
-    assert payload["profile"]["totals"] == {
-        "user": 5, "people": 3, "preferences": 3}
-    assert [i["fact_id"] for i in payload["profile"]["user"]] == ["f-u0", "f-u1"]
-    assert payload["profile"]["user"][0]["source_label"] == "Set by you"
+    # The wire shape is the panel's per-section {items, total}
+    # (integrator reconciliation, Wave 6): totals ride per section,
+    # people flattened in grouped order with entity_name intact.
+    assert payload["user"]["total"] == 5
+    assert payload["people"]["total"] == 3
+    assert payload["preferences"]["total"] == 3
+    assert [i["fact_id"] for i in payload["user"]["items"]] == ["f-u0", "f-u1"]
+    assert payload["user"]["items"][0]["source_label"] == "Set by you"
+    assert [i["fact_id"] for i in payload["people"]["items"]] == [
+        "f-a1", "f-a2"]
+    assert payload["people"]["items"][0]["entity_name"] == "Asha"
+
+
+async def test_profile_sender_pages_sections_independently(kg_db, monkeypatch):
+    _seed_many(kg_db)
+    backend = NativeMemoryBackend()
+    monkeypatch.setattr(
+        "aether_engine.routes.websocket.backend_or_none",
+        lambda config, context="": backend)
+    conn = _conn()
+    await send_memory_profile_result(conn, "req-3", {
+        "sections": {
+            "user": {"limit": 1, "offset": 4},
+            "people": {"limit": 20, "offset": 0},
+            "preferences": {"limit": 20, "offset": 0},
+        }})
+    payload = conn.ws.sent[0]["payload"]
+    # Only the user section was paged down; the others came whole.
+    assert [i["fact_id"] for i in payload["user"]["items"]] == ["f-u4"]
+    assert payload["user"]["total"] == 5
+    assert len(payload["people"]["items"]) == 3
+    assert len(payload["preferences"]["items"]) == 3
 
 
 async def test_profile_sender_reports_an_unavailable_backend(monkeypatch):
@@ -243,7 +271,7 @@ async def test_profile_sender_reports_an_unavailable_backend(monkeypatch):
         "aether_engine.routes.websocket.backend_or_none",
         lambda config, context="": None)
     conn = _conn()
-    await send_memory_profile_result(conn, "req-2", None, 0)
+    await send_memory_profile_result(conn, "req-2", {})
     payload = conn.ws.sent[0]["payload"]
     # Rule 1: an explicit unavailable state, never an empty profile.
     assert payload["profile"] is None

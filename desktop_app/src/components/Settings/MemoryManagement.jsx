@@ -3,6 +3,7 @@ import { Trash2, Pencil, Download } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 import LoadStateRow from './LoadStateRow';
 import EmptyState from '../EmptyState';
+import GraphNeighbourhood from './GraphNeighbourhood';
 
 // Memory timestamps arrive as epoch seconds from the native
 // store, but a surface must not blank on another shape: epoch
@@ -327,7 +328,7 @@ export default function MemoryManagement() {
     // Initial fetch when component mounts or memory tab changes
     if (memoryTab === 'episodic') {
       sendMessage('MEMORY_EPISODES_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
-    } else if (memoryTab === 'kg') {
+    } else if (memoryTab === 'kg' || memoryTab === 'neighbourhood') {
       const payload = { include_history: includeHistory };
       if (searchQuery) payload.query = searchQuery;
       sendMessage('MEMORY_GRAPH_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload });
@@ -706,10 +707,15 @@ export default function MemoryManagement() {
               style={{ background: memoryTab === 'episodic' ? 'rgba(var(--accent-rgb), 0.18)' : 'transparent', color: memoryTab === 'episodic' ? 'var(--accent)' : 'var(--text-secondary)', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
               Episodic Memory
             </button>
-            <button 
+            <button
               onClick={() => setMemoryTab('kg')}
               style={{ background: memoryTab === 'kg' ? 'rgba(var(--accent-rgb), 0.18)' : 'transparent', color: memoryTab === 'kg' ? 'var(--accent)' : 'var(--text-secondary)', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
               Knowledge Graph
+            </button>
+            <button
+              onClick={() => setMemoryTab('neighbourhood')}
+              style={{ background: memoryTab === 'neighbourhood' ? 'rgba(var(--accent-rgb), 0.18)' : 'transparent', color: memoryTab === 'neighbourhood' ? 'var(--accent)' : 'var(--text-secondary)', border: 'none', padding: '8px 24px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>
+              Neighbourhood
             </button>
         </div>
         {memoryTab === 'episodic' && episodes.length > 0 && (
@@ -1075,6 +1081,20 @@ export default function MemoryManagement() {
             </div>
           )}
         </div>
+      )}
+
+      {memoryTab === 'neighbourhood' && (
+        <GraphNeighbourhood
+          entities={Object.values(facts.reduce((acc, f) => {
+            const key = f.entity_name;
+            if (!key) return acc;
+            if (!acc[key]) {
+              acc[key] = { entity_name: key, entity_type: f.entity_type, fact_count: 0 };
+            }
+            acc[key].fact_count += 1;
+            return acc;
+          }, {}))}
+        />
       )}
 
       {/* Forget centre: pick topics, see exactly what a forget

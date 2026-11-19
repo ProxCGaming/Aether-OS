@@ -3420,14 +3420,8 @@ async def _handle_plugin_update_check_request(conn: WsConnection, msg: Event) ->
         req_id, msg.payload.get("name")))
 
 async def _handle_memory_profile_request(conn: WsConnection, msg: Event) -> None:
-    req_id = msg.request_id
-    payload = msg.payload or {}
-    try:
-        offset = int(payload.get("offset") or 0)
-    except (TypeError, ValueError):
-        offset = 0
     conn.spawn_background(send_memory_profile_result(
-        conn, req_id, payload.get("limit"), offset))
+        conn, msg.request_id, msg.payload or {}))
 
 async def _handle_memory_forget_candidates_request(conn: WsConnection, msg: Event) -> None:
     conn.spawn_background(send_memory_forget_candidates_result(conn, msg.request_id))

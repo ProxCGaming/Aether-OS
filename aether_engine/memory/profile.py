@@ -163,7 +163,8 @@ def _page_people(
 
 def build_user_profile(backend, *, fact_limit: int = PROFILE_FACT_LIMIT,
                        limit: int | None = None,
-                       offset: int = 0) -> dict[str, Any]:
+                       offset: int = 0,
+                       section_pages: dict | None = None) -> dict[str, Any]:
     """Derive the profile from the backend's active facts.
 
     ``backend`` is a facade MemoryBackend — this module never
@@ -198,15 +199,31 @@ def build_user_profile(backend, *, fact_limit: int = PROFILE_FACT_LIMIT,
     offset = max(0, int(offset))
     if limit is not None:
         limit = max(0, int(limit))
+
+    def _section_page(name: str) -> tuple[int | None, int]:
+        # Per-section paging (the Profile panel pages each section
+        # independently); a section absent from section_pages falls
+        # back to the call-wide limit/offset.
+        if section_pages and name in section_pages:
+            s_limit, s_offset = section_pages[name]
+            s_offset = max(0, int(s_offset))
+            if s_limit is not None:
+                s_limit = max(0, int(s_limit))
+            return s_limit, s_offset
+        return limit, offset
+
+    user_limit, user_offset = _section_page("user")
+    people_limit, people_offset = _section_page("people")
+    pref_limit, pref_offset = _section_page("preferences")
     totals = {
         "user": len(user),
         "people": sum(len(person_items) for person_items in people.values()),
         "preferences": len(preferences),
     }
     return {
-        "user": _page(user, limit, offset),
-        "people": _page_people(people, limit, offset),
-        "preferences": _page(preferences, limit, offset),
+        "user": _page(user, user_limit, user_offset),
+        "people": _page_people(people, people_limit, people_offset),
+        "preferences": _page(preferences, pref_limit, pref_offset),
         "totals": totals,
     }
 

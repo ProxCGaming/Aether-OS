@@ -25,7 +25,7 @@ logger = logging.getLogger("aether_engine.routes.ws_memory_personal")
 _UNAVAILABLE = "The configured memory backend is unavailable (see engine log)."
 
 
-async def send_memory_profile_result(conn, req_id_, limit_, offset_):
+async def send_memory_profile_result(conn, req_id_, payload_):
     """Answer a MEMORY_PROFILE_REQUEST off the loop (SPEC-6B C1).
 
     The profile view re-derives from the backend's facts on every
@@ -34,15 +34,53 @@ async def send_memory_profile_result(conn, req_id_, limit_, offset_):
     unavailable backend answers profile=None + the error: the
     explicit unavailable state, never an empty profile dressed as
     success (SPEC-6B Rule 1).
+
+    The panel pages each section independently, so the request
+    carries ``sections: {user|people|preferences: {limit, offset}}``
+    (a flat ``limit``/``offset`` applies to all three). The reply
+    is the panel's per-section shape — ``{items, total}`` per
+    section, people flattened in grouped order (each item carries
+    its entity_name; the panel regroups) — while the facade keeps
+    its grouped shape for in-engine consumers.
     """
     from aether_engine.routes import websocket as _websocket
+
+    def _section_pages():
+        payload = payload_ or {}
+        sections = payload.get("sections") or {}
+        pages = {}
+        for name in ("user", "people", "preferences"):
+            section = sections.get(name) or {}
+            try:
+                s_limit = section.get("limit", payload.get("limit"))
+                if s_limit is not None:
+                    s_limit = int(s_limit)
+            except (TypeError, ValueError):
+                s_limit = None
+            try:
+                s_offset = int(section.get("offset", payload.get("offset") or 0))
+            except (TypeError, ValueError):
+                s_offset = 0
+            pages[name] = (s_limit, s_offset)
+        return pages
 
     def _build_payload():
         backend = _websocket.backend_or_none(engine_state.user_config, context="memory profile")
         if backend is None:
             return {"profile": None, "error": _UNAVAILABLE}
+        profile = backend.user_profile(section_pages=_section_pages())
+        totals = profile["totals"]
         return {
-            "profile": backend.user_profile(limit=limit_, offset=offset_),
+            "user": {"items": profile["user"], "total": totals["user"]},
+            "people": {
+                "items": [item for items in profile["people"].values()
+                          for item in items],
+                "total": totals["people"],
+            },
+            "preferences": {
+                "items": profile["preferences"],
+                "total": totals["preferences"],
+            },
             "backend": backend.name,
         }
 
@@ -119,7 +157,13 @@ async def send_memory_forget_undo_result(conn, req_id_):
         if backend is None:
             return {"success": False, "undone": False, "error": _UNAVAILABLE}
         result = backend.forget_undo(config=engine_state.user_config)
-        return {"success": "error" not in result, **result}
+        counts = result.get("counts") or {}
+        # Flat count keys ride alongside the counts dict — the
+        # panel's restored-line reads fact_count / episode_count.
+        return {"success": "error" not in result,
+                "fact_count": counts.get("facts", 0),
+                "episode_count": counts.get("episodes", 0),
+                **result}
 
     async def _build():
         return await asyncio.to_thread(_build_payload)

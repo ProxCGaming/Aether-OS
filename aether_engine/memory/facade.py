@@ -93,7 +93,8 @@ class MemoryBackend:
         return self.search_facts(query, limit=limit)
 
     def user_profile(self, *, limit: int | None = None,
-                     offset: int = 0) -> dict[str, Any]:
+                     offset: int = 0,
+                     section_pages: dict | None = None) -> dict[str, Any]:
         """S6: the user/relationship profile VIEW over this
         backend's facts (memory/profile.py) — a derivation from
         the stored records on every call, not a store: there is
@@ -109,7 +110,8 @@ class MemoryBackend:
         digest) are unaffected."""
         from aether_engine.memory import profile
 
-        return profile.build_user_profile(self, limit=limit, offset=offset)
+        return profile.build_user_profile(
+            self, limit=limit, offset=offset, section_pages=section_pages)
 
     def profile_briefing(self) -> str:
         """S6: the profile view as a bounded briefing string
