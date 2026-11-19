@@ -437,6 +437,137 @@ def latest_tombstone() -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
+# Panel discovery + history (SPEC-6B C2 — the Forget centre)
+# ---------------------------------------------------------------------------
+
+# How many distinct topics one discovery pass will scan with the
+# per-topic finder. Candidate topics are ranked by their stored
+# counts before scanning, so the cap keeps a panel call bounded on
+# a large graph while covering every topic a user plausibly means.
+MAX_DISCOVERY_TOPICS = 25
+
+
+def _episode_tags(row: dict[str, Any]) -> list[str]:
+    """An episode row's tags as a list — the store persists them
+    as one comma-joined string; a backend row may carry a list."""
+    raw = row.get("tags")
+    if isinstance(raw, list):
+        return [str(tag).strip() for tag in raw if str(tag).strip()]
+    if isinstance(raw, str):
+        return [tag.strip() for tag in raw.split(",") if tag.strip()]
+    return []
+
+
+def discover_forget_topics(
+    backend, *, max_topics: int = MAX_DISCOVERY_TOPICS
+) -> list[dict[str, Any]]:
+    """SPEC-6B C2 topic discovery: the distinct topics a panel
+    forget could target, ranked by item count —
+    ``[{topic, fact_count, episode_count, last_touched}…]``.
+
+    A "topic" here is exactly what :func:`find_forget_candidates`
+    can match again: entity names from the stored facts (the
+    matcher's fact leg keys on entity name + fact text) and tags
+    from the stored episodes (whose text the matcher's episode
+    leg scans). Each candidate is counted by running the finder
+    itself, so the counts are what a forget of that topic would
+    actually touch — never a parallel matching rule that could
+    drift from the deleter's. Topics matching nothing (a tag the
+    episode text never repeats, say) are dropped.
+
+    Bounded: the pools are the finder's own scan limits
+    (``_FACT_SCAN_LIMIT`` facts, ``_EPISODE_SCAN_LIMIT``
+    episodes), and at most ``max_topics`` topics are scanned —
+    entities first, ranked by fact count, then tags the entities
+    did not already name. One finder run per topic is the cost;
+    the panel calls this on open, not per keystroke.
+    """
+    facts = _scan_facts(backend, "")
+    entity_counts: dict[str, int] = {}
+    for row in facts:
+        name = str(row.get("entity_name") or "").strip()
+        if name:
+            entity_counts[name] = entity_counts.get(name, 0) + 1
+
+    try:
+        episodes = backend.list_episodes(limit=_EPISODE_SCAN_LIMIT) or []
+    except Exception:
+        logger.debug("Forget discovery: episode list failed", exc_info=True)
+        episodes = []
+    tag_counts: dict[str, int] = {}
+    for row in episodes:
+        for tag in _episode_tags(row):
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+    ranked_entities = sorted(
+        entity_counts.items(),
+        key=lambda kv: (-kv[1], kv[0].casefold()))
+    topics = [name for name, _count in ranked_entities]
+    seen = {topic.casefold() for topic in topics}
+    ranked_tags = sorted(
+        tag_counts.items(), key=lambda kv: (-kv[1], kv[0].casefold()))
+    for tag, _count in ranked_tags:
+        if tag.casefold() not in seen:
+            topics.append(tag)
+            seen.add(tag.casefold())
+    topics = topics[:max_topics]
+
+    discovered: list[dict[str, Any]] = []
+    for topic in topics:
+        candidates = find_forget_candidates(backend, topic)
+        fact_rows = candidates["facts"]
+        episode_rows = candidates["episodes"]
+        if not fact_rows and not episode_rows:
+            continue
+        touched = [
+            row.get("timestamp")
+            for row in fact_rows + episode_rows
+        ]
+        touched = [
+            ts for ts in touched
+            if isinstance(ts, (int, float)) and not isinstance(ts, bool)
+        ]
+        discovered.append({
+            "topic": topic,
+            "fact_count": len(fact_rows),
+            "episode_count": len(episode_rows),
+            "last_touched": max(touched) if touched else None,
+        })
+    discovered.sort(key=lambda entry: (
+        -(entry["fact_count"] + entry["episode_count"]),
+        -(entry["last_touched"] or 0),
+        entry["topic"].casefold(),
+    ))
+    return discovered
+
+
+def forget_history(limit: int = 20, offset: int = 0) -> dict[str, Any]:
+    """SPEC-6B C2: the tombstone store as Forgotten history —
+    ``{"entries": […], "total": n}``, newest first, paginated
+    (Rule 2: limit + offset in, total out). ``undoable`` is true
+    only for the latest unconsumed tombstone — the one
+    :func:`restore_last_forget` would consume; consumed
+    tombstones stay listed (they ARE the history) with
+    ``undoable`` False."""
+    latest = latest_tombstone()
+    latest_id = latest.get("id") if latest else None
+    entries = [
+        {
+            "tombstone_id": item.get("id"),
+            "topic": item.get("topic", ""),
+            "fact_count": len(item.get("facts") or []),
+            "episode_count": len(item.get("episodes") or []),
+            "forgotten_at": item.get("created_ts"),
+            "undoable": bool(latest_id) and item.get("id") == latest_id,
+        }
+        for item in reversed(_load_tombstones())
+    ]
+    offset = max(0, int(offset))
+    limit = max(0, int(limit))
+    return {"entries": entries[offset:offset + limit], "total": len(entries)}
+
+
+# ---------------------------------------------------------------------------
 # Execute + restore
 # ---------------------------------------------------------------------------
 
@@ -677,6 +808,7 @@ def restore_last_forget(backend, *, config=None) -> dict[str, Any] | None:
     if tombstone.get("backend") not in (None, backend_name):
         return {
             "tombstone_id": tombstone.get("id"),
+            "topic": tombstone.get("topic", ""),
             "error": (
                 f"the last forget was recorded on the "
                 f"{tombstone.get('backend')} backend, not the active "
@@ -726,6 +858,7 @@ def restore_last_forget(backend, *, config=None) -> dict[str, Any] | None:
 
     result = {
         "tombstone_id": tombstone.get("id"),
+        "topic": tombstone.get("topic", ""),
         "phrase": tombstone.get("phrase", ""),
         "restored": {
             "facts": restored_facts,

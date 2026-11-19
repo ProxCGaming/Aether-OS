@@ -43,6 +43,7 @@ by DERIVING a profile from the existing facts on every call:
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger("aether_engine.memory.profile")
@@ -74,6 +75,28 @@ def _number(value: Any, default: float) -> float:
         return default
 
 
+def _source_label(provenance: str, timestamp: Any) -> str:
+    """The human provenance string the profile surface shows
+    (SPEC-6B C1): what the user asserted themselves reads "Set by
+    you"; what the engine derived from conversation reads
+    "From chat · <day> <Mon>" — the fact's own date, local time —
+    or plain "From chat" when the record carries no usable
+    timestamp. Derived here, at the facade's view, so no surface
+    ever formats raw provenance itself."""
+    if provenance == "stated":
+        return "Set by you"
+    ts = 0.0
+    if not isinstance(timestamp, bool):
+        try:
+            ts = float(timestamp)
+        except (TypeError, ValueError):
+            ts = 0.0
+    if ts > 0:
+        dt = datetime.fromtimestamp(ts)
+        return f"From chat · {dt.day} {dt.strftime('%b')}"
+    return "From chat"
+
+
 def _profile_item(fact: dict) -> dict | None:
     """One stored fact as a profile item, or None when the row
     carries no text to profile. Provenance follows the S5 rule:
@@ -85,12 +108,14 @@ def _profile_item(fact: dict) -> dict | None:
     if not text:
         return None
     provenance = str(fact.get("provenance") or "").strip().lower()
+    provenance = provenance if provenance in _PROVENANCE_KINDS else "inferred"
     return {
         "fact_id": str(fact.get("fact_id") or fact.get("id") or ""),
         "entity_name": str(fact.get("entity_name") or ""),
         "entity_type": str(fact.get("entity_type") or ""),
         "text": text,
-        "provenance": provenance if provenance in _PROVENANCE_KINDS else "inferred",
+        "provenance": provenance,
+        "source_label": _source_label(provenance, fact.get("timestamp")),
         "importance": _number(fact.get("importance"), 0.5),
         "confidence": _number(fact.get("confidence"), 0.0),
         "timestamp": fact.get("timestamp"),
@@ -114,16 +139,47 @@ def _item_sort_key(item: dict):
     )
 
 
-def build_user_profile(backend, *, fact_limit: int = PROFILE_FACT_LIMIT) -> dict[str, Any]:
+def _page(items: list[dict], limit: int | None, offset: int) -> list[dict]:
+    """One page of a section (SPEC-6B Rule 2): limit=None returns
+    the whole section, as the view always did before pagination."""
+    if limit is None:
+        return items[offset:]
+    return items[offset:offset + limit]
+
+
+def _page_people(
+    people: dict[str, list[dict]], limit: int | None, offset: int
+) -> dict[str, list[dict]]:
+    """Page the people section as ONE list contract: its items in
+    the section's grouped order (person by person, first-appearance
+    order), sliced, then regrouped — a person whose items all fall
+    outside the page does not appear."""
+    flat = [item for items in people.values() for item in items]
+    paged: dict[str, list[dict]] = {}
+    for item in _page(flat, limit, offset):
+        paged.setdefault(item["entity_name"], []).append(item)
+    return paged
+
+
+def build_user_profile(backend, *, fact_limit: int = PROFILE_FACT_LIMIT,
+                       limit: int | None = None,
+                       offset: int = 0) -> dict[str, Any]:
     """Derive the profile from the backend's active facts.
 
     ``backend`` is a facade MemoryBackend — this module never
     talks to a store directly. Returns
     ``{"user": [items], "people": {entity_name: [items]},
-    "preferences": [items]}``; every section is empty (never an
-    error) when nothing matching is stored. People entities keep
+    "preferences": [items], "totals": {"user": n, "people": n,
+    "preferences": n}}``; every section is empty (never an error)
+    when nothing matching is stored. People entities keep
     first-appearance order under the global trust sort, so the
     person Aether is most confident about leads.
+
+    Pagination (SPEC-6B C1, Rule 2): ``limit`` + ``offset`` apply
+    per section — the people section pages over its items in
+    grouped order — and ``totals`` always reports the unpaged
+    per-section item counts. The defaults (limit=None) reproduce
+    the full sections exactly as before pagination existed.
     """
     facts = backend.list_facts(limit=fact_limit) or []
     items = [item for item in (_profile_item(f) for f in facts) if item]
@@ -139,7 +195,20 @@ def build_user_profile(backend, *, fact_limit: int = PROFILE_FACT_LIMIT) -> dict
             people.setdefault(item["entity_name"], []).append(item)
         elif item["entity_type"].strip().casefold() == "preference":
             preferences.append(item)
-    return {"user": user, "people": people, "preferences": preferences}
+    offset = max(0, int(offset))
+    if limit is not None:
+        limit = max(0, int(limit))
+    totals = {
+        "user": len(user),
+        "people": sum(len(person_items) for person_items in people.values()),
+        "preferences": len(preferences),
+    }
+    return {
+        "user": _page(user, limit, offset),
+        "people": _page_people(people, limit, offset),
+        "preferences": _page(preferences, limit, offset),
+        "totals": totals,
+    }
 
 
 def _render_line(item: dict, *, with_entity: bool = False) -> str:

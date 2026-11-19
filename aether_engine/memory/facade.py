@@ -28,6 +28,16 @@ logger = logging.getLogger("aether_engine.memory.facade")
 VALID_BACKENDS = ("native", "mem0", "langmem", "graphiti")
 
 
+def _summary_line(text: Any) -> str:
+    """One stored text as a one-line summary for a wire payload
+    (SPEC-6B Rule 3): whitespace collapsed, capped — the panel
+    shows WHICH records went, not a raw store dump."""
+    line = " ".join(str(text or "").split())
+    if len(line) > 200:
+        line = line[:200].rstrip() + "…"
+    return line
+
+
 class MemoryBackendUnavailable(RuntimeError):
     """The configured backend cannot run here (missing package,
     missing service, missing credentials). The message says what."""
@@ -82,15 +92,24 @@ class MemoryBackend:
             return self.search_facts(query, limit=limit, include_history=True)
         return self.search_facts(query, limit=limit)
 
-    def user_profile(self) -> dict[str, Any]:
+    def user_profile(self, *, limit: int | None = None,
+                     offset: int = 0) -> dict[str, Any]:
         """S6: the user/relationship profile VIEW over this
         backend's facts (memory/profile.py) — a derivation from
         the stored records on every call, not a store: there is
         nothing separate to correct, and edits through
-        update_fact / delete_fact show up on the next read."""
+        update_fact / delete_fact show up on the next read.
+
+        SPEC-6B C1: ``limit`` + ``offset`` paginate per section
+        and the result carries per-section ``totals``; every item
+        carries ``source_label`` (the human provenance string,
+        derived in the view from provenance + timestamp). The
+        defaults reproduce the full sections exactly as before
+        pagination existed — existing callers (the fast-chat
+        digest) are unaffected."""
         from aether_engine.memory import profile
 
-        return profile.build_user_profile(self)
+        return profile.build_user_profile(self, limit=limit, offset=offset)
 
     def profile_briefing(self) -> str:
         """S6: the profile view as a bounded briefing string
@@ -196,6 +215,94 @@ class MemoryBackend:
         from aether_engine.memory import forget
 
         return forget.restore_last_forget(self, config=config)
+
+    # -- SPEC-6B C2: the Forget centre's panel calls --------------
+    def forget_candidates(self) -> list[dict[str, Any]]:
+        """Topic discovery for the Forget centre: distinct topics
+        ranked by item count, each with the fact/episode counts a
+        forget of it would touch (memory/forget.py —
+        discover_forget_topics; counting reuses the same finder
+        the deleter runs, so the panel never promises a different
+        set than execute would remove)."""
+        from aether_engine.memory import forget
+
+        return forget.discover_forget_topics(self)
+
+    def forget_execute(self, topic: str, *, config=None) -> dict[str, Any]:
+        """Execute a panel forget of one topic and report it in
+        the panel's shape: the EXACT removed list —
+        ``[{"fact_id", "summary"}…, {"episode_id", "summary"}…]``
+        (one-line summaries, SPEC-6B Rule 3) — plus the counts
+        (lessons included, so nothing the cascade touched is
+        hidden), the tombstone id undo would consume, and whether
+        undo is supported on this backend. Runs the same
+        cascading service as conversational forget
+        (:meth:`forget_memory`); only the report shape differs."""
+        result = self.forget_memory(topic, config=config)
+        deleted = result["deleted"]
+        removed = [
+            {"fact_id": item["id"], "summary": _summary_line(item["text"])}
+            for item in deleted["facts"]
+        ] + [
+            {"episode_id": item["id"], "summary": _summary_line(item["text"])}
+            for item in deleted["episodes"]
+        ]
+        return {
+            "topic": result["topic"],
+            "removed": removed,
+            "counts": result["counts"],
+            "tombstone_id": result["tombstone_id"],
+            "undo_supported": result["undo_supported"],
+        }
+
+    def forget_undo(self, *, config=None) -> dict[str, Any]:
+        """Undo the most recent forget for the panel. Nothing to
+        undo is an honest empty result — ``{"undone": False}``
+        with zero counts, NOT an error; a tombstone the active
+        backend may not restore reports ``undone: False`` with
+        the reason under ``error``."""
+        result = self.restore_last_forget(config=config)
+        empty_counts = {"facts": 0, "episodes": 0, "lessons": 0}
+        empty_restored = {"facts": [], "episodes": [], "lessons": []}
+        if result is None:
+            return {
+                "undone": False,
+                "topic": "",
+                "counts": empty_counts,
+                "restored": empty_restored,
+            }
+        if result.get("error"):
+            return {
+                "undone": False,
+                "topic": result.get("topic", ""),
+                "counts": empty_counts,
+                "restored": empty_restored,
+                "error": result["error"],
+            }
+        restored = result["restored"]
+        return {
+            "undone": bool(
+                restored["facts"] or restored["episodes"]
+                or restored["lessons"]),
+            "topic": result.get("topic", ""),
+            "counts": {
+                kind: len(restored[kind])
+                for kind in ("facts", "episodes", "lessons")
+            },
+            "restored": restored,
+            "unrestored": result.get("unrestored", []),
+        }
+
+    def forget_history(self, limit: int = 20,
+                       offset: int = 0) -> dict[str, Any]:
+        """The Forgotten history: tombstone entries, newest first
+        — ``{"entries": [{tombstone_id, topic, fact_count,
+        episode_count, forgotten_at, undoable}…], "total": n}``;
+        ``undoable`` is true only for the latest unconsumed
+        tombstone (memory/forget.py — forget_history)."""
+        from aether_engine.memory import forget
+
+        return forget.forget_history(limit=limit, offset=offset)
 
     def clear_facts(self) -> bool:
         raise NotImplementedError

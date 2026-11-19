@@ -270,6 +270,26 @@ class EventType(str, Enum):
     # in calendar/store.to_dict], "error": str (only on failure)}.
     CALENDAR_LIST_REQUEST = "CALENDAR_LIST_REQUEST"
     CALENDAR_LIST_RESPONSE = "CALENDAR_LIST_RESPONSE"
+    # Full Furnish SPEC-6B C3 (FF5-06): the panel's direct create /
+    # cancel — not via chat extraction. CREATE REQUEST payload:
+    # {"title": str, "start_ts": epoch seconds (or "start": ISO
+    # 8601), "duration_s": number | None, "accept_conflicts": bool
+    # (optional)}; RESPONSE payload: {"success": bool, "saved":
+    # bool, "event": event dict (calendar/store.to_dict) | None,
+    # "conflicts": [{"event_id", "title", "start", "end"}...],
+    # "error": str (only on failure)} — a non-empty conflicts list
+    # on an unaccepted create is a WARNING (saved=False, nothing
+    # stored), never an error; the same call with
+    # accept_conflicts=True stores it. CANCEL REQUEST payload:
+    # {"event_id": str}; RESPONSE: {"success": bool, "cancelled":
+    # event_id | None, "error": str (only on failure)} — a missing
+    # id is an honest not-found (success=False), never a fake
+    # success; a successful cancel is a store-level delete, durable
+    # across restart.
+    CALENDAR_CREATE_REQUEST = "CALENDAR_CREATE_REQUEST"
+    CALENDAR_CREATE_RESPONSE = "CALENDAR_CREATE_RESPONSE"
+    CALENDAR_CANCEL_REQUEST = "CALENDAR_CANCEL_REQUEST"
+    CALENDAR_CANCEL_RESPONSE = "CALENDAR_CANCEL_RESPONSE"
     # Epic 8, E8-5.1: streaming voice conversation. START_REQUEST
     # payload: {"session_id": str | None} — the engine creates a
     # session when omitted and answers {"ok": bool, "session_id": str,
@@ -515,6 +535,50 @@ class EventType(str, Enum):
     # set message.
     MEMORY_BACKENDS_REQUEST = "MEMORY_BACKENDS_REQUEST"
     MEMORY_BACKENDS_RESPONSE = "MEMORY_BACKENDS_RESPONSE"
+    # Full Furnish SPEC-6B C1 (FF5-03): the Profile panel's read of
+    # the facade's user_profile() view, paginated per section.
+    # REQUEST payload: {"limit": int | None (per-section page
+    # size; omitted/None = full sections), "offset": int};
+    # RESPONSE payload: {"profile": {"user": [items], "people":
+    # {name: [items]}, "preferences": [items], "totals": {"user":
+    # int, "people": int, "preferences": int}} | None, "backend":
+    # str, "error": str (only on failure)} — profile=None with an
+    # error is the unavailable state, never an empty profile
+    # dressed as success. Every item carries "source_label"
+    # ("Set by you" / "From chat · 17 Nov"), derived at the facade
+    # from provenance + timestamp. Edit/Delete reuse
+    # MEMORY_FACT_UPDATE / MEMORY_FACT_DELETE above.
+    MEMORY_PROFILE_REQUEST = "MEMORY_PROFILE_REQUEST"
+    MEMORY_PROFILE_RESPONSE = "MEMORY_PROFILE_RESPONSE"
+    # Full Furnish SPEC-6B C2 (FF5-05): the Forget centre's four
+    # calls. CANDIDATES REQUEST payload: {} — RESPONSE:
+    # {"candidates": [{"topic", "fact_count", "episode_count",
+    # "last_touched"}...] (distinct topics ranked by item count),
+    # "backend": str, "error": str (only on failure)}. EXECUTE
+    # REQUEST: {"topic": str} — RESPONSE: {"success": bool,
+    # "topic": str, "removed": [{"fact_id", "summary"}...,
+    # {"episode_id", "summary"}...], "counts": {"facts",
+    # "episodes", "lessons"}, "tombstone_id": str | None,
+    # "undo_supported": bool, "error": str (only on failure)} —
+    # the removed list is EXACTLY what was deleted. UNDO REQUEST:
+    # {} — RESPONSE: {"success": bool, "undone": bool, "topic":
+    # str, "counts": {...}, "restored": {...}, "error": str (only
+    # when a restore was refused)} — nothing to undo is
+    # undone=False with success=True: an honest empty result, not
+    # an error. HISTORY REQUEST: {"limit": int, "offset": int} —
+    # RESPONSE: {"history": [{"tombstone_id", "topic",
+    # "fact_count", "episode_count", "forgotten_at",
+    # "undoable"}...], "total": int, "backend": str, "error": str
+    # (only on failure)}; undoable is true only for the latest
+    # unconsumed tombstone.
+    MEMORY_FORGET_CANDIDATES_REQUEST = "MEMORY_FORGET_CANDIDATES_REQUEST"
+    MEMORY_FORGET_CANDIDATES_RESPONSE = "MEMORY_FORGET_CANDIDATES_RESPONSE"
+    MEMORY_FORGET_EXECUTE_REQUEST = "MEMORY_FORGET_EXECUTE_REQUEST"
+    MEMORY_FORGET_EXECUTE_RESPONSE = "MEMORY_FORGET_EXECUTE_RESPONSE"
+    MEMORY_FORGET_UNDO_REQUEST = "MEMORY_FORGET_UNDO_REQUEST"
+    MEMORY_FORGET_UNDO_RESPONSE = "MEMORY_FORGET_UNDO_RESPONSE"
+    MEMORY_FORGET_HISTORY_REQUEST = "MEMORY_FORGET_HISTORY_REQUEST"
+    MEMORY_FORGET_HISTORY_RESPONSE = "MEMORY_FORGET_HISTORY_RESPONSE"
     # Master build S10: the Settings "This machine" card —
     # the hardware probe + capability matrix report
     # (machine_capability.py — the MACHINE, not the LLM
