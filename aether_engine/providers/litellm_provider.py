@@ -219,6 +219,14 @@ def resolve_litellm_model(
             return f"openai/{model_id}"
         return model_id
 
+    if provider_name == "llamacpp":
+        # The llama.cpp router speaks the OpenAI protocol. Its model
+        # ids may contain slashes (e.g. a GGUF path tail), which must
+        # NOT fall through to the OpenRouter heuristic below.
+        if not model_id.startswith("openai/"):
+            return f"openai/{model_id}"
+        return model_id
+
     if provider_name in ("groq", "mistral", "ollama"):
         prefix = f"{provider_name}/"
         if not model_id.startswith(prefix):

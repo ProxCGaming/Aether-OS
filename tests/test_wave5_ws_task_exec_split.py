@@ -35,7 +35,7 @@ from aether_engine.routes import websocket, ws_connection, ws_task_exec
 # the pre-slice if/elif chain's set (123 branches; three are
 # membership tests over a pair, hence 126 types) and is
 # regenerated from the live table whenever a wave adds handlers
-# (last regenerated 19 Nov 2026 for Full Furnish: 159 types).
+# (last regenerated 19 Nov 2026 for Full Furnish: 164 types).
 # STEER_TASK is deliberately absent: the receive loop's pre-pass
 # handles it before the table is consulted.
 DISPATCHED_TYPES = (
@@ -73,6 +73,11 @@ DISPATCHED_TYPES = (
     "DICTATION_START_REQUEST",
     "DICTATION_STOP_REQUEST",
     "ENVIRONMENT_DIAGNOSTIC_RUN_REQUEST",
+    "LLAMACPP_MODEL_LOAD_REQUEST",
+    "LLAMACPP_MODEL_UNLOAD_REQUEST",
+    "LLAMACPP_MODELS_REQUEST",
+    "LLAMACPP_ROUTER_CONTROL_REQUEST",
+    "LLAMACPP_STATUS_REQUEST",
     "LOCAL_MODEL_DELETE_REQUEST",
     "LOCAL_MODEL_DOWNLOAD_CANCEL",
     "LOCAL_MODEL_DOWNLOAD_START",
@@ -299,7 +304,7 @@ class TestDispatchTable:
         assert d[EventType.PROJECT_CONFIG_GET_REQUEST] is \
             d[EventType.PROJECT_CONFIG_UPDATE_REQUEST]
 
-    def test_handlers_are_coroutine_functions_156_distinct(self):
+    def test_handlers_are_coroutine_functions_161_distinct(self):
         handlers = list(websocket._DISPATCH.values())
         assert all(inspect.iscoroutinefunction(h) for h in handlers)
         # 123 at the Wave 5 split; +1 for the calendar layer's
@@ -316,12 +321,14 @@ class TestDispatchTable:
         # voice preview, local-model unload, tool enable/disable,
         # MCP/plugin update checks, skill search/install, calendar
         # create/cancel and the SPEC-6B memory reads (profile,
-        # forget x4, stats, graph neighbourhood) — the table now
-        # carries 159 types over 156 distinct handlers (the three
-        # membership pairs above still share theirs). The list and
-        # count were regenerated from the live table on 19 Nov
-        # 2026; the pin had been stale since the master build.
-        assert len(set(handlers)) == 156
+        # forget x4, stats, graph neighbourhood), the workflow
+        # slice's six entries, and the llama.cpp router's five —
+        # the table now carries 164 types over 161 distinct
+        # handlers (the three membership pairs above still share
+        # theirs). The list and count were regenerated from the
+        # live table on 19 Nov 2026; the pin had been stale since
+        # the master build.
+        assert len(set(handlers)) == 161
 
 
 class _FakeSocket:

@@ -54,6 +54,13 @@ from aether_engine.routes.ws_calendar import (
     handle_calendar_list_request,
 )
 from aether_engine.routes.ws_connection import WsConnection
+from aether_engine.routes.ws_llamacpp import (
+    handle_llamacpp_model_load_request,
+    handle_llamacpp_model_unload_request,
+    handle_llamacpp_models_request,
+    handle_llamacpp_router_control_request,
+    handle_llamacpp_status_request,
+)
 from aether_engine.routes.ws_mcp_plugins import (
     PLUGIN_INSTALL_TTL_SECONDS,  # noqa: F401 — re-exported: tests patch the TTL on this module
     pending_plugin_install_created,
@@ -4597,6 +4604,11 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.USAGE_LEDGER_QUERY_REQUEST: _handle_usage_ledger_query_request,
     EventType.TASK_LEDGER_QUERY_REQUEST: _handle_task_ledger_query_request,
     EventType.TASK_LEDGER_LIST_REQUEST: _handle_task_ledger_list_request,
+    EventType.LLAMACPP_STATUS_REQUEST: handle_llamacpp_status_request,
+    EventType.LLAMACPP_MODELS_REQUEST: handle_llamacpp_models_request,
+    EventType.LLAMACPP_MODEL_LOAD_REQUEST: handle_llamacpp_model_load_request,
+    EventType.LLAMACPP_MODEL_UNLOAD_REQUEST: handle_llamacpp_model_unload_request,
+    EventType.LLAMACPP_ROUTER_CONTROL_REQUEST: handle_llamacpp_router_control_request,
     EventType.TASK_RESUME_AUDIT_REQUEST: handle_task_resume_audit_request,
     EventType.TASK_RESUME_REQUEST: handle_task_resume_request,
     EventType.WORKFLOW_LIST_REQUEST: handle_workflow_list_request,

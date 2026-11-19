@@ -220,6 +220,10 @@ async def send_refresh_models_result(conn, req_id_, payload_):
             if cfg.custom_provider_types[p] == "openai_compatible":
                 providers_to_refresh.add(p)
         providers_to_refresh.add("custom_openai")
+        # The llama.cpp router's models are discovered by the provider
+        # list's own router probe, not by generic key-based discovery;
+        # a stored router key must not mint a generic refresh pass.
+        providers_to_refresh.discard("llamacpp")
 
         if target_provider:
             providers_to_refresh = [target_provider]

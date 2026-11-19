@@ -27,7 +27,9 @@ def _load_provider_key(provider_name: str, secret_store: SecretStore, config) ->
     """The API key for *provider_name*: its stored secret, or the
     no-key placeholder for providers that legitimately have none.
 
-    No secret is not an error for Ollama (the local daemon) or for a
+    No secret is not an error for Ollama (the local daemon), for the
+    llama.cpp router (a local server that legitimately runs keyless;
+    a stored secret is used when one exists), or for a
     custom OpenAI-compatible provider whose saved configuration is
     complete (base URL + catalog, ADR 0013) — E5-F04. The keyless
     decision is driven by the provider's saved configuration shape
@@ -38,7 +40,7 @@ def _load_provider_key(provider_name: str, secret_store: SecretStore, config) ->
     try:
         return secret_store.load_provider(provider_name)
     except ProviderNotFoundError:
-        if provider_name == "ollama" or is_keyless_custom_provider(provider_name, config):
+        if provider_name in ("ollama", "llamacpp") or is_keyless_custom_provider(provider_name, config):
             return "sk-no-key-required"
         raise
 
@@ -75,6 +77,10 @@ def _create_provider_instance(provider_name: str, model: str, secret_store: Secr
 
     api_key = _load_provider_key(provider_name, secret_store, config)
     base_url = config.custom_base_urls.get(provider_name)
+    if provider_name == "llamacpp":
+        # The router's base URL is its own config field, not a custom
+        # provider entry; chat speaks to its OpenAI-compatible /v1.
+        base_url = f"{config.llamacpp_router_url.rstrip('/')}/v1"
     # E5-F05: the saved flavour steers construction and every model
     # resolution below (primary + fallback candidates), so an
     # anthropic-flavour custom is dispatched through the Anthropic
