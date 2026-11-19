@@ -62,16 +62,12 @@ from aether_engine.routes.ws_mcp_plugins import (
     send_mcp_server_disconnect_result,
     send_mcp_server_remove_result,
     send_mcp_server_test_result,
+    send_mcp_server_update_check_result,
     send_mcp_server_update_result,
     send_plugin_install_result,
     send_plugin_toggle_result,
     send_plugin_uninstall_result,
     send_plugin_update_check_result,
-)
-from aether_engine.routes.ws_skills_registry import (
-    send_skill_install_prepare_result,
-    send_skill_install_result,
-    send_skill_search_result,
 )
 from aether_engine.routes.ws_memory_media import (
     send_diagnostics_export_result,
@@ -107,6 +103,11 @@ from aether_engine.routes.ws_sessions import (
     _unbind_sessions_bound_to,
     _workspace_session_counts,
     handle_artifact_get,
+)
+from aether_engine.routes.ws_skills_registry import (
+    send_skill_install_prepare_result,
+    send_skill_install_result,
+    send_skill_search_result,
 )
 from aether_engine.routes.ws_task_exec import (
     execute_task_generator,
@@ -2539,7 +2540,13 @@ async def _handle_tool_list_request(conn: WsConnection, msg: Event) -> None:
         mcp_tools=GLOBAL_MCP_REGISTRY.get_mcp_tools(risk_overrides=engine_state.user_config.mcp_tool_risk_overrides),
     )
 
-    def enrich_tool(d, name, risk, _registry=tool_registry):
+    def enrich_tool(d, name, risk, _registry=tool_registry, source=None):
+        # Wave 5 (D4-2): the tool's origin rides the answer — an
+        # MCP tool's source is "mcp:<server>", which is what lets
+        # the Tools panel badge it as such (FF4-06). Absent for the
+        # supervisor tools below, which are not registry tools.
+        if source is not None:
+            d["source"] = source
         user_val = engine_state.user_config.tool_policies.get(name)
         # E2-F07: resolve through the SAME inputs enforcement
         # uses — the real registry (so a tool's registered
@@ -2572,12 +2579,11 @@ async def _handle_tool_list_request(conn: WsConnection, msg: Event) -> None:
     defs = []
     for t in all_tools:
         d = t.to_definition()
-        # D4-2 (Tools side): the tool's origin rides the payload —
-        # "builtin" or "mcp:<server>" (Tool.source) — so the
-        # panel can badge MCP tools instead of merging them
+        # D4-2: the tool's origin rides the payload via enrich_tool's
+        # source param — "builtin" or "mcp:<server>" (Tool.source) —
+        # so the panel can badge MCP tools instead of merging them
         # invisibly with the built-ins (FF4-06).
-        d["source"] = t.source
-        defs.append(enrich_tool(d, t.name, t.risk))
+        defs.append(enrich_tool(d, t.name, t.risk, source=t.source))
 
     # Add Supervisor Memory Tools — and (S19) the supervisor's
     # desktop-observe tool, listed unconditionally like the
@@ -2810,7 +2816,15 @@ async def _handle_approval_mode_set_request(conn: WsConnection, msg: Event) -> N
 async def _handle_mcp_server_list_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
     from aether_engine.mcp.registry import GLOBAL_MCP_REGISTRY
-    servers = GLOBAL_MCP_REGISTRY.list_servers_with_status()
+    # Wave 5 (D4-2): the per-server tool lists ride this answer,
+    # enriched from the same policy store the Tools list reads —
+    # the user's tool_policies, approval mode and MCP risk
+    # overrides — so both surfaces resolve identical policies.
+    servers = GLOBAL_MCP_REGISTRY.list_servers_with_status(
+        user_policies=engine_state.user_config.tool_policies,
+        approval_mode=engine_state.user_config.approval_mode,
+        risk_overrides=engine_state.user_config.mcp_tool_risk_overrides,
+    )
     await conn.ws.send_text(Event(
         type=EventType.MCP_SERVER_LIST_RESPONSE,
         request_id=req_id,
@@ -3161,10 +3175,18 @@ async def _handle_mcp_server_update_request(conn: WsConnection, msg: Event) -> N
     # Off the message loop (see send_mcp_server_update_result):
     # disabling a server disconnects it at the connect
     # timeout and must not wedge the socket (RUX-B-04).
-    conn.spawn_background(send_mcp_server_update_result(conn, 
+    conn.spawn_background(send_mcp_server_update_result(conn,
         req_id, msg.payload.get("name"),
         msg.payload.get("auto_connect"), msg.payload.get("enabled"),
-        msg.payload.get("confirmed")))
+        msg.payload.get("confirmed"), msg.payload.get("config")))
+
+async def _handle_mcp_server_update_check_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    # Off the message loop (see send_mcp_server_update_check_result):
+    # the check fetches the registry entry at its HTTP timeout and
+    # must not wedge the socket (RUX-B-04).
+    conn.spawn_background(send_mcp_server_update_check_result(conn,
+        req_id, msg.payload.get("name")))
 
 async def _handle_mcp_server_connect_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
@@ -4557,6 +4579,7 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.MCP_SERVER_ADD_REQUEST: _handle_mcp_server_add_request,
     EventType.MCP_SERVER_REMOVE_REQUEST: _handle_mcp_server_remove_request,
     EventType.MCP_SERVER_UPDATE_REQUEST: _handle_mcp_server_update_request,
+    EventType.MCP_SERVER_UPDATE_CHECK_REQUEST: _handle_mcp_server_update_check_request,
     EventType.MCP_SERVER_CONNECT_REQUEST: _handle_mcp_server_connect_request,
     EventType.MCP_SERVER_DISCONNECT_REQUEST: _handle_mcp_server_disconnect_request,
     EventType.MCP_SERVER_TEST_REQUEST: _handle_mcp_server_test_request,

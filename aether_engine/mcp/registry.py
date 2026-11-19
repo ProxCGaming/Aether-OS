@@ -10,13 +10,28 @@ converts each connected server's tools into Aether ``Tool`` objects named
 appear only after it has been connected (``connect_server`` /
 ``test_connection`` never happens implicitly here — the websocket layer
 drives connects). Before that it returns ``[]``, honestly.
+
+Wave 5 (D4-2 / D4-3 / FF4-04): ``list_servers_with_status`` also carries
+each server's converted tools (``list_server_tools`` — ``None`` while a
+server's tools are unknown, never a fabricated empty list) with the
+same policy enrichment the Tools list answer computes, so the MCP
+detail and the Tools panel are two views of one policy store; a server
+config can be replaced in place through ``update_server(config=...)``,
+where changing what runs resets ``confirmed`` unless the edit itself
+was confirmed; and a server imported from a registry entry (its config
+carries ``registry_name`` + ``version``) can be checked against the
+official MCP Registry for a newer published version
+(``check_for_update``), which the list answer surfaces as
+``has_update``.
 """
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +72,94 @@ MCP_TOOL_TIMEOUT_S = 60
 MCP_TOOL_BACKSTOP_TIMEOUT_S = (
     MCP_TOOL_TIMEOUT_S + MCP_TOOL_CALL_CANCEL_GRACE_SECONDS + 5
 )
+
+
+# The fields that decide WHAT a server runs: its transport, the
+# command/URL it executes or connects to, its arguments, its
+# headers/env and its working directory. An edit that changes any
+# of these changes what will run, so it re-opens the trust question
+# (the ``confirmed`` marker must not silently carry over — see
+# MCPRegistry.update_server). Fields outside this set (timeout,
+# enabled, registry provenance, ...) do not change what runs.
+_RUN_CONFIG_FIELDS = ("transport", "command", "args", "url", "headers", "env", "cwd")
+
+
+def _run_config_fingerprint(config: dict) -> str:
+    """SHA-256 over a config's run-relevant fields only.
+
+    Same canonicalisation as the plugin installer's config
+    fingerprint (sorted-keys JSON), but scoped to _RUN_CONFIG_FIELDS
+    and — like the installer's — indifferent to ``confirmed`` (that
+    key is not a run field, so it never enters the hash).
+    """
+    content = {k: config[k] for k in _RUN_CONFIG_FIELDS if k in config}
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# The official MCP Registry (registry.modelcontextprotocol.io) is a
+# metadata registry: a server's entry carries its published
+# versions. Update checks read it explicitly (never from the list
+# path — the list answer must stay offline-safe and fast).
+MCP_REGISTRY_API_BASE_URL = "https://registry.modelcontextprotocol.io"
+
+
+def _latest_version_from_registry_payload(payload: Any) -> str:
+    """Newest version string in a registry versions-list payload.
+
+    Defensive by design: the entry flagged ``isLatest`` in the
+    registry's official metadata wins; otherwise the highest
+    version by numeric-part comparison; a payload in any other
+    shape raises MCPConfigError instead of guessing.
+    """
+    entries = payload.get("servers") if isinstance(payload, dict) else None
+    if not isinstance(entries, list) or not entries:
+        raise MCPConfigError("The registry returned no versions for this server.")
+    versions: list[str] = []
+    for entry in entries:
+        server = entry.get("server") if isinstance(entry, dict) else None
+        if not isinstance(server, dict) or not isinstance(server.get("version"), str):
+            continue
+        meta = (entry.get("_meta") or {}).get(
+            "io.modelcontextprotocol.registry/official") or {}
+        if meta.get("isLatest") is True:
+            return server["version"]
+        versions.append(server["version"])
+    if not versions:
+        raise MCPConfigError("The registry returned no usable version entries.")
+
+    def _key(v: str):
+        return tuple(
+            (0, int(p)) if p.isdigit() else (1, p) for p in re.split(r"[.\-+]", v)
+        )
+
+    return max(versions, key=_key)
+
+
+async def fetch_registry_latest_version(registry_name: str) -> str:
+    """Latest published version of *registry_name* in the official
+    MCP Registry. Raises MCPConfigError on any failure — the caller
+    reports it; a failed check never touches the stored config."""
+    import urllib.parse
+
+    import httpx
+
+    url = (
+        f"{MCP_REGISTRY_API_BASE_URL}/v0.1/servers/"
+        f"{urllib.parse.quote(registry_name, safe='')}/versions"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers={"Accept": "application/json"})
+        response.raise_for_status()
+        payload = response.json()
+    except MCPConfigError:
+        raise
+    except Exception as e:
+        raise MCPConfigError(
+            f"Could not check the MCP registry for updates: {e}"
+        ) from e
+    return _latest_version_from_registry_payload(payload)
 
 
 def redact_mcp_config_for_ui(config: Any) -> dict[str, Any]:
@@ -314,9 +417,64 @@ class MCPRegistry:
         self.servers[name] = normalised
         self._save_config_rolled_back(snapshot)
 
+    def _merge_config_edit(self, name: str, stored: dict, edit: dict) -> dict:
+        """Merge an edit-in-place config over the stored one (D4-3).
+
+        The edit names the run configuration it wants; the stored
+        config keeps everything the edit does not mention (provenance
+        such as ``version`` / ``registry_name``, and any field the
+        form does not edit). Two explicit removal/keep conventions,
+        both resolved here BEFORE validation:
+
+        * a run field present in the edit with value ``None`` is
+          REMOVED (clearing the cwd, or dropping ``command`` when
+          switching to a URL transport);
+        * inside ``headers`` / ``env``, the edit's dict replaces the
+          stored one wholesale (absent keys are deleted), but a value
+          of ``None`` keeps the stored value for that key — header
+          and env values are secrets the UI never receives (S1
+          redaction), so "unchanged" must be expressible without the
+          value. A ``None`` for a key with no stored value is an
+          error: there is nothing to keep.
+        """
+        if not isinstance(edit, dict):
+            raise MCPConfigError(f"MCP server {name!r} 'config' must be an object.")
+        merged = dict(stored)
+        for field in _RUN_CONFIG_FIELDS + ("timeout",):
+            if field not in edit:
+                continue
+            value = edit[field]
+            if value is None:
+                merged.pop(field, None)
+                continue
+            if field in ("headers", "env") and isinstance(value, dict):
+                stored_pairs = stored.get(field) or {}
+                resolved: dict[str, Any] = {}
+                for key, pair_value in value.items():
+                    if pair_value is None:
+                        if key not in stored_pairs:
+                            raise MCPConfigError(
+                                f"MCP server {name!r} {field} entry {key!r} has no "
+                                "stored value to keep — provide a value."
+                            )
+                        resolved[key] = stored_pairs[key]
+                    else:
+                        resolved[key] = pair_value
+                merged[field] = resolved
+            else:
+                merged[field] = value
+        if "transport" not in edit:
+            # Let validation re-infer the transport from the
+            # surviving shape — an edit that nulls ``command`` and
+            # sets ``url`` is switching transports, and the stored
+            # transport label must not veto it.
+            merged.pop("transport", None)
+        return merged
+
     async def update_server(
         self, name: str, *, auto_connect: bool | None = None,
         enabled: bool | None = None, confirmed: bool | None = None,
+        config: dict | None = None,
     ) -> dict[str, Any]:
         """Toggle a server's ``auto_connect`` / ``enabled`` flags (issue 004).
 
@@ -327,8 +485,22 @@ class MCPRegistry:
         not connect or disconnect anything now. ``confirmed`` records
         the user's confirmation of the add — the marker the
         auto-connect gate reads; setting it connects nothing now.
+
+        ``config`` (D4-3 edit-in-place) replaces the server's run
+        configuration (see :meth:`_merge_config_edit` for the merge
+        rules). Trust invariant: if the edit changes what the server
+        runs (the run-field fingerprint moves), ``confirmed`` does
+        NOT carry over silently — the stored config is confirmed only
+        when this same update carries ``confirmed=True`` (the user
+        confirmed the edit on the card naming the new command/URL);
+        otherwise it resets to unconfirmed and the panel offers the
+        confirmation card again. A connected server whose run config
+        changed is disconnected: its live session still runs the old
+        configuration, and leaving it up would make the stored config
+        a lie about what is executing.
+
         Returns the redacted config. Raises MCPConfigError for an
-        unknown server or a non-boolean flag.
+        unknown server, a non-boolean flag, or an invalid edit.
         """
         if name not in self.servers:
             raise MCPConfigError(f"Unknown MCP server '{name}'")
@@ -345,13 +517,37 @@ class MCPRegistry:
             if not isinstance(confirmed, bool):
                 raise MCPConfigError(f"MCP server {name!r} 'confirmed' must be true/false.")
             updates["confirmed"] = confirmed
-        if updates:
+        run_changed = False
+        if config is not None:
+            stored = self.servers[name]
+            merged = self._merge_config_edit(name, stored, config)
+            # Validate first, fingerprint second: validation
+            # normalises (transport is inferred when the edit drops
+            # it), so the trust comparison runs over the config as
+            # it will actually be stored — a no-op edit can never
+            # trip it through a representation difference.
+            candidate = validate_mcp_server_config(name, merged)
+            run_changed = (
+                _run_config_fingerprint(candidate)
+                != _run_config_fingerprint(stored)
+            )
+            if run_changed and "confirmed" not in updates:
+                # The edit itself was not confirmed on the card:
+                # the marker resets and the panel re-asks.
+                candidate["confirmed"] = False
+            for flag in ("auto_connect", "enabled", "confirmed"):
+                if flag in updates:
+                    candidate[flag] = updates[flag]
+            snapshot = self._snapshot_servers()
+            self.servers[name] = candidate
+            self._save_config_rolled_back(snapshot)
+        elif updates:
             snapshot = self._snapshot_servers()
             self.servers[name] = validate_mcp_server_config(
                 name, {**self.servers[name], **updates}
             )
             self._save_config_rolled_back(snapshot)
-        if enabled is False:
+        if enabled is False or run_changed:
             await self.disconnect_server(name)
         return redact_mcp_config_for_ui(self.servers[name])
 
@@ -494,20 +690,120 @@ class MCPRegistry:
     def list_servers(self) -> dict[str, dict]:
         return dict(self.servers)
 
-    def list_servers_with_status(self) -> dict[str, dict]:
+    def list_server_tools(
+        self, name: str, *, user_policies: dict | None = None,
+        approval_mode: str = "ask", risk_overrides: dict | None = None,
+    ) -> list[dict[str, Any]] | None:
+        """One server's converted tools, policy-enriched (D4-2).
+
+        Returns ``None`` while the server's tools are UNKNOWN — it
+        has not been connected since the engine started (or since it
+        was last disconnected, which clears the cache): the panel
+        must say "connect to see its tools", not render a fabricated
+        empty list. A connected server that offers no tools returns
+        ``[]`` — a different, true statement.
+
+        Each entry mirrors the Tools list answer's enrichment
+        (``risk``, ``policy``, ``effective_policy``,
+        ``policy_is_default``, ``always_allow_permitted``) computed
+        through the same ``resolve_tool_policy`` the Tools handler
+        uses, over the same store (``user_policies`` is the user's
+        ``tool_policies``), so the MCP detail and the Tools panel
+        can never disagree about a tool's policy. ``name`` is the
+        prefixed ``server__tool`` name — the key a policy write
+        (TOOL_POLICY_SET_REQUEST) addresses; ``tool_name`` is the
+        name the server itself gives the tool; ``source`` is the
+        tool's origin (``mcp:<server>``). Tools whose prefixed name
+        collides across servers (E3-F01 — refused by
+        :meth:`get_mcp_tools`) carry ``name_collision: True``.
+        """
+        cached = self._tools_cache.get(name)
+        if cached is None:
+            return None
+        import dataclasses
+
+        from aether_engine.tools.policy import resolve_tool_policy
+
+        policies = user_policies or {}
+        overrides = risk_overrides or {}
+        colliding = self._colliding_tool_names()
+        prefix = f"{name}__"
+        out: list[dict[str, Any]] = []
+        for tool in cached:
+            effective_tool = tool
+            raw_override = overrides.get(tool.name)
+            if raw_override is not None:
+                try:
+                    override_risk = ToolRisk(str(raw_override))
+                except ValueError:
+                    logger.warning(
+                        "Ignoring invalid MCP risk override for %s: %r",
+                        tool.name, raw_override,
+                    )
+                else:
+                    if override_risk != tool.risk:
+                        effective_tool = dataclasses.replace(
+                            tool, risk=override_risk)
+            user_val = policies.get(tool.name)
+            entry: dict[str, Any] = {
+                "name": tool.name,
+                "tool_name": (
+                    tool.name.removeprefix(prefix)
+                ),
+                "description": tool.description,
+                "risk": effective_tool.risk.value,
+                "source": tool.source,
+                "policy": user_val or "Require Approval",
+                "effective_policy": resolve_tool_policy(
+                    effective_tool, policies, approval_mode=approval_mode
+                ),
+                "policy_is_default": user_val is None,
+                "always_allow_permitted": (
+                    effective_tool.risk == ToolRisk.READ_ONLY
+                ),
+            }
+            if tool.name in colliding:
+                entry["name_collision"] = True
+            out.append(entry)
+        return out
+
+    def list_servers_with_status(
+        self, *, user_policies: dict | None = None,
+        approval_mode: str = "ask", risk_overrides: dict | None = None,
+    ) -> dict[str, dict]:
         """Configs plus live status (connected / failed / disabled), tool count, error.
 
         Header / env *values* are redacted (S1) — only the names leave the
         engine. Invalid entries are included, marked ``status: "invalid"``.
+
+        Wave 5 (D4-2 / FF4-04): each entry also carries ``tools``
+        (the server's converted tools via :meth:`list_server_tools`,
+        or ``None`` while they are unknown) and ``has_update`` — true
+        only when a registry update check has actually recorded a
+        newer published version than the imported ``version``; the
+        check is explicit (:meth:`check_for_update`), so this answer
+        itself never touches the network.
         """
         out = {}
         for name, config in self.servers.items():
             status = self.get_server_status(name)
+            version = config.get("version")
+            latest = config.get("registry_latest_version")
             out[name] = {
                 **redact_mcp_config_for_ui(config),
                 "status": status["status"],
                 "tool_count": status.get("tool_count", 0),
                 "error": status.get("error"),
+                "tools": self.list_server_tools(
+                    name,
+                    user_policies=user_policies,
+                    approval_mode=approval_mode,
+                    risk_overrides=risk_overrides,
+                ),
+                "has_update": bool(
+                    isinstance(version, str) and isinstance(latest, str)
+                    and version != latest
+                ),
             }
         for name, entry in self._invalid_servers.items():
             out[name] = {
@@ -515,8 +811,52 @@ class MCPRegistry:
                 "status": "invalid",
                 "tool_count": 0,
                 "error": entry["error"],
+                "tools": None,
+                "has_update": False,
             }
         return out
+
+    async def check_for_update(self, name: str) -> dict[str, Any]:
+        """Check a registry-imported server for a newer version (FF4-04).
+
+        Only servers whose config records a ``registry_name`` (set
+        by the server.json import) can be checked — for any other
+        server there is no source to check against, and this raises
+        MCPConfigError saying so rather than inventing one. On a
+        successful check the latest published version and the check
+        time are persisted on the config (``registry_latest_version``
+        / ``registry_checked_at``), so the list answer's
+        ``has_update`` is stable across restarts. A failed check
+        raises and leaves the stored config untouched.
+        """
+        config = self.servers.get(name)
+        if config is None:
+            raise MCPConfigError(f"Unknown MCP server '{name}'")
+        registry_name = config.get("registry_name")
+        if not isinstance(registry_name, str) or not registry_name:
+            raise MCPConfigError(
+                f"MCP server '{name}' was not imported from a registry "
+                "entry, so there is no source to check for updates."
+            )
+        latest = await fetch_registry_latest_version(registry_name)
+        from datetime import datetime
+
+        snapshot = self._snapshot_servers()
+        self.servers[name] = validate_mcp_server_config(name, {
+            **config,
+            "registry_latest_version": latest,
+            "registry_checked_at": datetime.now(UTC).isoformat(),
+        })
+        self._save_config_rolled_back(snapshot)
+        version = self.servers[name].get("version")
+        return {
+            "name": name,
+            "version": version,
+            "latest_version": latest,
+            "has_update": bool(
+                isinstance(version, str) and version != latest
+            ),
+        }
 
     # -- live connections (delegated to the client) ----------------------
     async def _finish_connect(self, name: str, result: dict[str, Any]) -> dict[str, Any]:

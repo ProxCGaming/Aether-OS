@@ -110,8 +110,13 @@ async def send_mcp_server_remove_result(conn, req_id_, name_):
         {"success": ok, "name": name_, "error": error},
         f"Could not send MCP server remove response for {name_}")
 
-async def send_mcp_server_update_result(conn, req_id_, name_, auto_connect_, enabled_, confirmed_=None):
-    """Answer an MCP_SERVER_UPDATE_REQUEST from a background task (RUX-B-04)."""
+async def send_mcp_server_update_result(conn, req_id_, name_, auto_connect_, enabled_, confirmed_=None, config_=None):
+    """Answer an MCP_SERVER_UPDATE_REQUEST from a background task (RUX-B-04).
+
+    ``config_`` (Wave 5, D4-3) is the edit-in-place replacement run
+    config; the registry's trust gate decides whether the stored
+    ``confirmed`` marker survives it.
+    """
     from aether_engine.mcp.registry import (
         GLOBAL_MCP_REGISTRY,
         MCPConfigError,
@@ -127,6 +132,7 @@ async def send_mcp_server_update_result(conn, req_id_, name_, auto_connect_, ena
                     auto_connect=auto_connect_,
                     enabled=enabled_,
                     confirmed=confirmed_,
+                    config=config_,
                 )
         except (MCPConfigError, OSError) as e:
             # OSError: the config save's storage failure
@@ -136,6 +142,31 @@ async def send_mcp_server_update_result(conn, req_id_, name_, auto_connect_, ena
         req_id_, EventType.MCP_SERVER_UPDATE_RESPONSE,
         {"success": ok, "name": name_, "config": config, "error": error},
         f"Could not send MCP server update response for {name_}")
+
+async def send_mcp_server_update_check_result(conn, req_id_, name_):
+    """Answer an MCP_SERVER_UPDATE_CHECK_REQUEST from a background task (RUX-B-04)."""
+    # Wave 5 (FF4-04): compare a registry-imported server's recorded
+    # version with the registry's latest. The check fetches over the
+    # network at the registry client's timeout, so it runs off the
+    # message loop like every sibling here; a server with no
+    # registry provenance answers success:false with the reason.
+    from aether_engine.mcp.registry import (
+        GLOBAL_MCP_REGISTRY,
+        MCPConfigError,
+    )
+    ok, error, result = True, "", {}
+    if not name_:
+        ok, error = False, "Server name is required."
+    else:
+        try:
+            async with conn.mcp_server_lock(name_):
+                result = await GLOBAL_MCP_REGISTRY.check_for_update(name_)
+        except (MCPConfigError, OSError) as e:
+            ok, error = False, str(e)
+    await conn.send_event(
+        req_id_, EventType.MCP_SERVER_UPDATE_CHECK_RESPONSE,
+        {"success": ok, "name": name_, "error": error, **result},
+        f"Could not send MCP server update check response for {name_}")
 
 async def send_mcp_server_connect_result(conn, req_id_, name_):
     """Answer an MCP_SERVER_CONNECT_REQUEST from a background task (RUX-B-04)."""

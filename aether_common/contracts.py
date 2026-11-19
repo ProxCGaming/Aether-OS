@@ -430,6 +430,12 @@ class EventType(str, Enum):
     MCP_SERVER_TEST_RESPONSE = "MCP_SERVER_TEST_RESPONSE"
     MCP_SERVER_UPDATE_REQUEST = "MCP_SERVER_UPDATE_REQUEST"
     MCP_SERVER_UPDATE_RESPONSE = "MCP_SERVER_UPDATE_RESPONSE"
+    # MCP update check (Wave 5, FF4-04): for a server imported from a
+    # registry entry, ask the engine to compare its recorded version
+    # against the registry's latest published version. Explicit and
+    # per-server — the list answer itself never touches the network.
+    MCP_SERVER_UPDATE_CHECK_REQUEST = "MCP_SERVER_UPDATE_CHECK_REQUEST"
+    MCP_SERVER_UPDATE_CHECK_RESPONSE = "MCP_SERVER_UPDATE_CHECK_RESPONSE"
     # MCP resources (issue 006): list/read a server's resources; reading
     # loads the content into the current chat as a context message.
     MCP_RESOURCE_LIST_REQUEST = "MCP_RESOURCE_LIST_REQUEST"
