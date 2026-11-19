@@ -75,6 +75,14 @@ specialist invocation. Every decision and escalation is logged,
 published as S12-shaped NODE_ACTIVITY, and folded into the S3
 Task Ledger, so the summary can show which model ran each
 delegation and why.
+
+P3a shadow mode (see langgraph/learned_router.py): with
+``learned_routing = "shadow"`` and a trained scorer artefact
+present, each auto decision here is additionally shadowed — the
+learned scorer computes the choice it WOULD have made and logs
+it with ``source: "learned-shadow"``, after the served choice's
+own record. The served choice is never the shadow's; there is
+no "active" learned mode (activation is Gate 5).
 """
 
 from __future__ import annotations
@@ -323,6 +331,54 @@ SHORT_TASK_CHARS = 140
 OUTCOME_ROW_CAP = 5000
 
 _DEFAULT_DB_PATH = Path.home() / ".aether" / "model_routing.db"
+
+
+def learned_routing_mode(user_config: Any | None) -> str:
+    """The configured learned-router mode (P3a): "shadow" only
+    when exactly that.
+
+    "off" (the default) and "shadow" are the only modes that
+    exist. There is deliberately no "active": P3a activation is
+    Gate 5, an owner decision on shadow evidence, and no config
+    value — including the literal string "active" — turns the
+    learned scorer live. Anything unrecognised reads as "off".
+    """
+    mode = getattr(user_config, "learned_routing", "off")
+    return "shadow" if mode == "shadow" else "off"
+
+
+def _maybe_shadow_route(
+    state: dict[str, Any],
+    agent: str,
+    signals: TaskSignals,
+    candidates: list[Candidate],
+    history: History,
+    served_choice: RoutingChoice,
+    user_config: Any | None,
+) -> None:
+    """P3a Phase 2 seam: let the learned scorer log its would-be
+    choice for this delegation. SHADOW ONLY.
+
+    Called only from :func:`resolve_for_specialist`, only after
+    the served choice is fixed AND its own activity published (so
+    the S3 ledger's join can never annotate the delegation with
+    the shadow model instead of the one that ran). It cannot
+    alter the served choice — it receives it as a finished fact
+    and returns nothing — and every failure inside it is
+    swallowed here and in the shadow runner itself: a broken
+    scorer must be invisible to the run it observes.
+    """
+    try:
+        if learned_routing_mode(user_config) != "shadow":
+            return
+        from aether_engine.langgraph import learned_router
+
+        learned_router.run_shadow(
+            state=state, agent=agent, signals=signals,
+            candidates=candidates, history=history,
+            served_choice=served_choice, user_config=user_config)
+    except Exception:
+        logger.debug("Learned shadow seam failed", exc_info=True)
 
 
 def routing_mode(user_config: Any | None) -> str:
@@ -623,6 +679,26 @@ class ModelOutcomeStore:
         except Exception:
             logger.debug("Model outcome recording failed", exc_info=True)
 
+    def rows(self) -> list[dict[str, Any]]:
+        """Every recorded outcome row, oldest first (P3a export).
+
+        :meth:`stats` aggregates; the learned router's dataset
+        builder needs the rows themselves, to join each outcome
+        onto its delegation by agent + time. Read-only, and
+        degrades to ``[]`` like every read in this store.
+        """
+        try:
+            with self._get_conn() as conn:
+                self._init_db(conn)
+                found = conn.execute(
+                    "SELECT timestamp, provider_name, model_name, "
+                    "agent_name, outcome FROM model_outcomes "
+                    "ORDER BY id").fetchall()
+                return [dict(r) for r in found]
+        except Exception:
+            logger.debug("Model outcome rows unavailable", exc_info=True)
+            return []
+
     def stats(self) -> dict[tuple[str, str, str], tuple[int, int]]:
         """{(provider, model, agent): (successes, failures)}."""
         try:
@@ -825,6 +901,8 @@ def route(
     signals: TaskSignals,
     candidates: list[Candidate],
     history: History,
+    *,
+    need_fn: Any | None = None,
 ) -> RoutingChoice | None:
     """Choose the model for one delegation (pure, deterministic).
 
@@ -835,6 +913,16 @@ def route(
     filter would empty the pool the incumbent alone survives it
     if it is the only candidate (the run's own vision handling
     already vouched for it) — otherwise None.
+
+    ``need_fn`` is the P3a seam: a callable with
+    ``_complexity_need``'s signature supplying the tier need (and
+    its plain-language why) in the heuristic's place. Everything
+    else — candidate collection, hard filters, demotion, ranking,
+    the reason string — is unchanged whichever need is supplied.
+    The live path never passes it today: P3a Phase 2 (shadow mode)
+    passes the learned scorer's need to compute the choice that
+    WOULD have served, and Phase 3 activation (Gate 5, an owner
+    decision) is the only thing that would ever pass it live.
     """
     pool = list(candidates)
     if not pool:
@@ -847,7 +935,10 @@ def route(
             return None
     incumbent = next((c for c in pool if c.is_incumbent), None)
     incumbent_tier = incumbent.tier if incumbent is not None else TIER_STANDARD
-    need_tier, why = _complexity_need(signals, incumbent_tier)
+    if need_fn is None:
+        need_tier, why = _complexity_need(signals, incumbent_tier)
+    else:
+        need_tier, why = need_fn(signals, incumbent_tier)
     want = _wanted_capability(signals, need_tier)
     group, tier = _tier_group(pool, need_tier, want)
     if not group:
@@ -1044,6 +1135,9 @@ def resolve_for_specialist(
         if (choice.provider, choice.model) == (
                 str(incumbent_provider), str(incumbent_model)):
             publish_routing_activity(state, agent, choice)
+            _maybe_shadow_route(
+                state, agent, signals, candidates, history, choice,
+                user_config)
             return run_provider, context
         secret_store = configurable.get("secret_store")
         if secret_store is None:
@@ -1065,6 +1159,9 @@ def resolve_for_specialist(
             "Model routing for %s: %s:%s (%s tier) — %s",
             agent, choice.provider, choice.model,
             TIER_NAMES.get(choice.tier, choice.tier), choice.reason)
+        _maybe_shadow_route(
+            state, agent, signals, candidates, history, choice,
+            user_config)
         return provider, context
     except Exception:
         logger.warning(

@@ -289,6 +289,23 @@ class UserConfig:
     # P2c Filter 2's top-K; clamped to the plan's 8..12 range where
     # it is read (tools/retrieval.py).
     tool_retrieval_top_k: int = 10
+    # P3a: the learned router (langgraph/learned_router.py).
+    # "off" (the default) — the scorer is never loaded. "shadow" —
+    # on every auto-routed delegation the scorer ALSO computes the
+    # choice it would make and logs it (NODE_ACTIVITY, source
+    # "learned-shadow"); the heuristic router's choice is always
+    # the one that serves. There is deliberately no "active"
+    # value: activation is Gate 5, an owner decision on shadow
+    # evidence, and any other value loads as "off". Shadow only
+    # rides the auto path (it needs model_routing = "auto") and
+    # only with a trained artefact present; without one it is
+    # inert and logs nothing.
+    learned_routing: str = "off"
+    # P3a: path to the trained scorer artefact (JSON). "" (the
+    # default) means ~/.aether/learned_router.json. Artefacts are
+    # produced only by the offline training pipeline — training
+    # is a manual, versioned act, never an online loop.
+    learned_router_artefact: str = ""
     # Epic 1, E1-10: per-agent output schemas (agent name -> JSON-Schema
     # dict). When set, the agent's final answer must validate against
     # the schema; see aether_engine/langgraph/structured.py.
@@ -560,6 +577,8 @@ class UserConfig:
             "model_routing": self.model_routing,
             "tool_retrieval": self.tool_retrieval,
             "tool_retrieval_top_k": self.tool_retrieval_top_k,
+            "learned_routing": self.learned_routing,
+            "learned_router_artefact": self.learned_router_artefact,
             "agent_output_schemas": self.agent_output_schemas,
             "prewalk_agents": self.prewalk_agents,
             "custom_slash_commands": self.custom_slash_commands,
@@ -710,6 +729,8 @@ class UserConfig:
             model_routing=d.get("model_routing") if d.get("model_routing") in ("off", "auto") else "off",
             tool_retrieval=d.get("tool_retrieval") if d.get("tool_retrieval") in ("off", "auto") else "off",
             tool_retrieval_top_k=_as_int(d.get("tool_retrieval_top_k"), 10),
+            learned_routing=d.get("learned_routing") if d.get("learned_routing") in ("off", "shadow") else "off",
+            learned_router_artefact=d.get("learned_router_artefact") if isinstance(d.get("learned_router_artefact"), str) else "",
             agent_output_schemas=_as_dict(d.get("agent_output_schemas")),
             prewalk_agents=d.get("prewalk_agents") if isinstance(d.get("prewalk_agents"), list) else [],
             custom_slash_commands=_as_dict(d.get("custom_slash_commands")),
