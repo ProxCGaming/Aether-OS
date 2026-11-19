@@ -54,10 +54,20 @@ rule: ``memory_use_enabled`` (read/recall) and
 Memory switches, so a coerced truthy string would show memory
 paused (or live) when the engine never agreed — refused, like
 every other real boolean here.
+
+The llama.cpp router set joins under the same contract:
+``llamacpp_enabled`` (a real boolean), ``llamacpp_router_url``
+(an http/https URL — a stored value the client cannot parse
+would strand the panel on a dead endpoint with no explanation),
+and ``llamacpp_binary_path`` / ``llamacpp_models_dir`` (bounded
+path strings, '' = not set). The router's API key is NOT a config
+field at all: it is a provider secret, stored through the
+provider-key path under the reserved provider id "llamacpp".
 """
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 from aether_engine.memory.facade import VALID_BACKENDS
 from aether_engine.voice.stt import STT_LANGUAGES, is_supported_stt_model
@@ -67,6 +77,13 @@ from aether_engine.voice.tts import TTS_SPEED_PRESETS, is_valid_kokoro_voice
 # (often a long hash); the bound only keeps a hostile or corrupt
 # write from parking an unbounded string in the config file.
 MAX_INPUT_DEVICE_ID_LEN = 512
+
+# Bounds for the llama.cpp router strings, same reasoning: a
+# hostile or corrupt write must not park an unbounded string in
+# the config file. Real router URLs and install paths are far
+# shorter than these.
+MAX_LLAMACPP_URL_LEN = 512
+MAX_LLAMACPP_PATH_LEN = 1024
 
 # The dictation interaction modes the composer implements.
 DICTATION_MODES = ("hold", "toggle")
@@ -90,6 +107,10 @@ HANDED_OFF_FIELDS = (
     "speech_stt_language",
     "speech_input_device_id",
     "dictation_mode",
+    "llamacpp_enabled",
+    "llamacpp_router_url",
+    "llamacpp_binary_path",
+    "llamacpp_models_dir",
     "calendar_enabled",
     "calendar_reminder_day_before",
     "calendar_reminder_lead_minutes",
@@ -302,6 +323,45 @@ def _validate_dictation_mode(value: Any) -> str:
                     f"unsupported dictation mode {value!r} "
                     f"(expected one of: {', '.join(DICTATION_MODES)})")
     return value
+
+
+def _validate_llamacpp_router_url(value: Any) -> str:
+    """A router-URL write: an http/https URL with a host — the
+    client appends its endpoint paths to this base, so a value
+    it cannot parse would strand every router read on a dead
+    endpoint. The stored form is stripped, with no trailing
+    slash, exactly as the client consumes it."""
+    if not isinstance(value, str) or not value.strip():
+        raise _fail("llamacpp_router_url",
+                    "must be the router's base URL "
+                    "(e.g. http://127.0.0.1:9931)")
+    url = value.strip().rstrip("/")
+    if len(url) > MAX_LLAMACPP_URL_LEN:
+        raise _fail("llamacpp_router_url",
+                    f"URL is too long "
+                    f"({len(url)} > {MAX_LLAMACPP_URL_LEN} chars)")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise _fail("llamacpp_router_url",
+                    f"unsupported router URL {value!r} (expected "
+                    f"an http:// or https:// URL such as "
+                    f"http://127.0.0.1:9931)")
+    return url
+
+
+def _validate_llamacpp_path(field: str, value: Any) -> str:
+    """A supervised-router path write (binary / models dir):
+    a bounded string, '' = not set. Existence is NOT checked
+    here — a path may be written before the binary is
+    installed, and the router control reports the missing
+    binary honestly when a start is attempted."""
+    if not isinstance(value, str):
+        raise _fail(field, "must be a filesystem path string "
+                           "('' when not set)")
+    if len(value) > MAX_LLAMACPP_PATH_LEN:
+        raise _fail(field, f"path is too long "
+                           f"({len(value)} > {MAX_LLAMACPP_PATH_LEN} chars)")
+    return value.strip()
 
 
 def _validate_desktop_category_modes(value: Any) -> dict:
@@ -518,6 +578,22 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
         cleaned["dictation_mode"] = _validate_dictation_mode(
             config_data["dictation_mode"])
 
+    # llama.cpp router set: the URL is shape-checked (the client
+    # appends its endpoint paths to it verbatim) and the two
+    # supervised-process paths are bounded strings. The master
+    # switch joins the strict booleans below.
+    if "llamacpp_router_url" in config_data:
+        cleaned["llamacpp_router_url"] = _validate_llamacpp_router_url(
+            config_data["llamacpp_router_url"])
+
+    if "llamacpp_binary_path" in config_data:
+        cleaned["llamacpp_binary_path"] = _validate_llamacpp_path(
+            "llamacpp_binary_path", config_data["llamacpp_binary_path"])
+
+    if "llamacpp_models_dir" in config_data:
+        cleaned["llamacpp_models_dir"] = _validate_llamacpp_path(
+            "llamacpp_models_dir", config_data["llamacpp_models_dir"])
+
     # Calendar layer C5 (14 Nov 2026): the switches are real
     # booleans — a truthy string from a hand-rolled client must be
     # refused, not coerced, or the UI would show a state the engine
@@ -544,6 +620,10 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
     # Wave 6 (D-5): the memory pause pair joins them — the
     # Settings → Memory switches are real booleans for the same
     # reason (see the module docstring).
+    # The llama.cpp master switch joins them too — the router
+    # provider appears in the picker on this flag, so a coerced
+    # truthy string would advertise a backend the user never
+    # turned on.
     for bool_field in ("calendar_enabled", "calendar_reminder_day_before",
                        "eq_enabled", "subagents_enabled",
                        "voice_speculation_enabled",
@@ -551,7 +631,8 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
                        "computer_use_control", "computer_use_control_ack",
                        "computer_use_envelopes_enabled",
                        "computer_use_pixel_fallback",
-                       "memory_use_enabled", "memory_learn_enabled"):
+                       "memory_use_enabled", "memory_learn_enabled",
+                       "llamacpp_enabled"):
         if bool_field in config_data:
             value = config_data[bool_field]
             if not isinstance(value, bool):

@@ -18,6 +18,16 @@ Two disciplines carry over from the monolith:
   and a direct import here would bind a private copy the patch
   never reaches — the same reason the langgraph nodes lazy-import
   ``_create_provider_instance`` from core.
+
+The llama.cpp router provider follows the same split: the list
+builder never probes inline (PROVIDER_LIST answers from cache on
+the message loop), so the router probe runs in
+:func:`discover_pending_provider_models` — the background half —
+and in the ``discover=True`` build, refreshing a module-level
+snapshot the builder reads. ``llamacpp`` is a reserved provider
+id (it is also the SecretStore id of the router's API key), so
+it is excluded from the dynamic-custom derivation: a stored
+router key must never mint a phantom custom provider.
 """
 
 import logging
@@ -42,6 +52,13 @@ logger = logging.getLogger(__name__)
 DISCOVERY_FAILURE_TTL_SECONDS = 60.0
 
 _discovery_failures: dict[str, float] = {}
+
+# The llama.cpp router snapshot: the last probe's model rows
+# ([{"id", "loaded"}]) plus the change-detection key, or None
+# when the feature is disabled or the router did not answer.
+# Written only by _probe_llamacpp_router; read by the provider
+# list builder.
+_llamacpp_snapshot: dict[str, Any] | None = None
 
 
 def discovery_recently_failed(provider_name: str) -> bool:
@@ -139,6 +156,52 @@ async def _discover_custom_provider_models(store: SecretStore, pname: str, store
         store, pname, key, flavor=custom_provider_flavor(pname, cfg))
 
 
+async def _probe_llamacpp_router(store: SecretStore) -> bool:
+    """Refresh the llama.cpp router snapshot with one probe.
+
+    The snapshot exists only while the feature is enabled AND
+    the router answers AND it reports at least one model — a
+    down router, a disabled feature and an empty router all
+    leave the provider ABSENT from the list, never an empty
+    husk. (The local-provider precedent is absence: Ollama has
+    no provider-list entry at all; its models live on their own
+    surface.) Returns True when the snapshot's visible content
+    changed, so the caller pushes a refreshed list. Best-effort:
+    a failed probe reads as "router not answering", never raises.
+    """
+    global _llamacpp_snapshot
+    cfg = engine_state.user_config
+    rows: list[dict[str, Any]] = []
+    if getattr(cfg, "llamacpp_enabled", False):
+        try:
+            from aether_engine.models.llama_router import (
+                LlamaRouterManager,
+            )
+
+            manager = LlamaRouterManager.from_config(cfg, secret_store=store)
+            status = await manager.router_status()
+            if status["running"]:
+                listing = await manager.list_models()
+                rows = [
+                    {"id": m["id"], "loaded": m["loaded"]}
+                    for m in listing["models"]
+                ]
+        except Exception as e:  # noqa: BLE001 — discovery is best-effort; a failed probe means no snapshot
+            logger.warning(f"llama.cpp router probe failed: {e}")
+            rows = []
+    if not rows:
+        changed = _llamacpp_snapshot is not None
+        _llamacpp_snapshot = None
+        return changed
+    key = (
+        tuple(sorted(r["id"] for r in rows)),
+        tuple(sorted(r["id"] for r in rows if r["loaded"] is True)),
+    )
+    changed = _llamacpp_snapshot is None or _llamacpp_snapshot["key"] != key
+    _llamacpp_snapshot = {"key": key, "rows": rows}
+    return changed
+
+
 async def discover_pending_provider_models(store: SecretStore) -> bool:
     """Discover models for every provider whose cache is still empty.
 
@@ -155,10 +218,12 @@ async def discover_pending_provider_models(store: SecretStore) -> bool:
             changed = True
     known_names = {p.name for p in CLOUD_PROVIDERS}
     all_custom = set(cfg.custom_base_urls.keys()) | set(cfg.provider_models.keys()) | stored
-    for pname in sorted(all_custom - known_names):
+    for pname in sorted(all_custom - known_names - {"llamacpp"}):
         provider_type = cfg.custom_provider_types.get(pname, "openai_compatible")
         if not cfg.provider_models.get(pname) and (pname in stored or provider_type == "openai_compatible") and await _discover_custom_provider_models(store, pname, stored):
             changed = True
+    if await _probe_llamacpp_router(store):
+        changed = True
     return changed
 
 
@@ -256,9 +321,11 @@ async def _build_provider_list_async(store: SecretStore, discover: bool = True) 
         })
 
     # --- Dynamic custom providers (user-added, not in CLOUD_PROVIDERS) ---
+    # "llamacpp" is reserved (the router provider + its SecretStore
+    # key id) and never a dynamic custom provider.
     known_names = {p.name for p in CLOUD_PROVIDERS}
     all_custom = set(cfg.custom_base_urls.keys()) | set(cfg.provider_models.keys()) | stored
-    dynamic = all_custom - known_names
+    dynamic = all_custom - known_names - {"llamacpp"}
     for pname in sorted(dynamic):
         models = cfg.provider_models.get(pname, [])
         base_url = cfg.custom_base_urls.get(pname, "")
@@ -285,6 +352,39 @@ async def _build_provider_list_async(store: SecretStore, discover: bool = True) 
             "default_model": cfg.default_model if cfg.default_provider == pname else (models[0] if models else ""),
             "health": engine_state.health_manager.get_state(pname).status,
             "provider_type": provider_type,
+        })
+
+    # --- llama.cpp router provider (local serving) ---
+    # Present only while the feature is enabled and a probe has
+    # seen the router answering with models (the snapshot —
+    # refreshed by the background discovery pass, and here when
+    # this build is allowed to discover). Its models are the
+    # router's own, with the Wave 4 model_meta shape plus the
+    # router-reported Loaded state per model.
+    if discover and getattr(cfg, "llamacpp_enabled", False):
+        await _probe_llamacpp_router(store)
+    if getattr(cfg, "llamacpp_enabled", False) and _llamacpp_snapshot is not None:
+        rows = _llamacpp_snapshot["rows"]
+        models = [r["id"] for r in rows]
+        meta = _provider_model_meta(models)
+        for r in rows:
+            if r["loaded"] is not None:
+                meta.setdefault(r["id"], {})["loaded"] = r["loaded"]
+        result.append({
+            "name": "llamacpp",
+            "display_name": "llama.cpp",
+            "icon": "◑",
+            "key_url": "",
+            "supports_custom_url": False,
+            "base_url": cfg.llamacpp_router_url,
+            "models": models,
+            "model_meta": meta,
+            "excluded_models": [],
+            "has_key": "llamacpp" in stored,
+            "is_default": cfg.default_provider == "llamacpp",
+            "default_model": cfg.default_model if cfg.default_provider == "llamacpp" else (models[0] if models else ""),
+            "health": "healthy",
+            "provider_type": "openai_compatible",
         })
 
     return result

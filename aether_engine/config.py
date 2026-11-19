@@ -25,6 +25,12 @@ AUXILIARY_TASK_CLASSES = frozenset({"vision", "compression", "advisor", "title"}
 CONFIG_PATH = Path.home() / ".aether" / "config.json"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 
+# The llama.cpp router's default base URL: loopback only, on the
+# port the router integration owns. The router's API key is NOT a
+# config value — it lives in the SecretStore under the reserved
+# provider id "llamacpp", like every other provider key.
+DEFAULT_LLAMACPP_ROUTER_URL = "http://127.0.0.1:9931"
+
 
 def _clean_desktop_category_modes(raw: Any) -> dict:
     """S20: delegate to the desktop policy's cleaner (the policy
@@ -514,6 +520,19 @@ class UserConfig:
     speech_stt_language: str = "auto"
     speech_input_device_id: str = ""
     dictation_mode: str = "hold"
+    # llama.cpp router (local serving backend beside Ollama):
+    # the master switch, the router's base URL and the paths the
+    # supervised-process control needs (the llama-server binary
+    # and the models directory it serves from; '' = not set).
+    # The router's API key NEVER lives here — it is a provider
+    # secret, held by the SecretStore under the reserved provider
+    # id "llamacpp". Same contract as the speech fields above:
+    # strict validation on the Settings write path
+    # (config_updates.py), cleaning on load below.
+    llamacpp_enabled: bool = False
+    llamacpp_router_url: str = DEFAULT_LLAMACPP_ROUTER_URL
+    llamacpp_binary_path: str = ""
+    llamacpp_models_dir: str = ""
 
     def __post_init__(self) -> None:
         # Wave 6 (D-5 migration seed): a config that still
@@ -625,6 +644,10 @@ class UserConfig:
             "speech_stt_language": self.speech_stt_language,
             "speech_input_device_id": self.speech_input_device_id,
             "dictation_mode": self.dictation_mode,
+            "llamacpp_enabled": self.llamacpp_enabled,
+            "llamacpp_router_url": self.llamacpp_router_url,
+            "llamacpp_binary_path": self.llamacpp_binary_path,
+            "llamacpp_models_dir": self.llamacpp_models_dir,
         }
 
     @classmethod
@@ -815,6 +838,13 @@ class UserConfig:
             speech_input_device_id=_clean_speech_input_device_id(
                 d.get("speech_input_device_id")),
             dictation_mode=_clean_dictation_mode(d.get("dictation_mode")),
+            llamacpp_enabled=bool(d.get("llamacpp_enabled", False)),
+            llamacpp_router_url=_clean_llamacpp_router_url(
+                d.get("llamacpp_router_url")),
+            llamacpp_binary_path=_clean_llamacpp_path(
+                d.get("llamacpp_binary_path")),
+            llamacpp_models_dir=_clean_llamacpp_path(
+                d.get("llamacpp_models_dir")),
         )
 
 
@@ -890,6 +920,25 @@ def _clean_dictation_mode(value) -> str:
     """'toggle' survives; anything else reads as the historical
     'hold' behaviour."""
     return value if value == "toggle" else "hold"
+
+
+def _clean_llamacpp_router_url(value) -> str:
+    """The router's base URL: a non-empty string survives
+    (stripped, trailing slash removed — the client appends its
+    own paths); anything else falls back to the loopback
+    default. Strict shape checks live on the Settings write
+    path (config_updates.py); loading stays tolerant."""
+    if isinstance(value, str):
+        url = value.strip().rstrip("/")
+        if url:
+            return url
+    return DEFAULT_LLAMACPP_ROUTER_URL
+
+
+def _clean_llamacpp_path(value) -> str:
+    """A supervised-router path (binary / models directory):
+    a string survives stripped; anything else means unset."""
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _clean_browser_category_modes(value) -> dict[str, str]:
