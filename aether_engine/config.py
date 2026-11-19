@@ -312,9 +312,11 @@ class UserConfig:
     # Fast chat — the default conversational surface and the ONLY
     # voice surface — was memory-blind: its prompt carried the
     # persona, the session history and a one-line calendar
-    # itinerary, never a stored fact. fast_chat_memory_enabled
-    # gates the whole briefing (off = the pre-S7 prompt
-    # composition, byte for byte); fast_chat_memory_token_budget
+    # itinerary, never a stored fact. The briefing's gate was
+    # fast_chat_memory_enabled when S7 landed (off = the pre-S7
+    # prompt composition, byte for byte); Wave 6 retired that
+    # key for the D-5 pair below — memory_use_enabled gates the
+    # briefing now, on both chat paths. fast_chat_memory_token_budget
     # is the ONE sub-budget the whole memory section shares
     # (profile digest + assembler-scored facts/episodes +
     # lessons), passed INTO the assembler's call rather than
@@ -325,6 +327,29 @@ class UserConfig:
     # fast chat's 20-message / 24,000-char history window.
     fast_chat_memory_enabled: bool = True
     fast_chat_memory_token_budget: int = 400
+    # Full Furnish Wave 6 (D-5, SPEC-6B C4): the memory pause
+    # pair — memory_use_enabled gates READING memory (context
+    # assembly / recall) and memory_learn_enabled gates WRITING
+    # it (episode recording + fact/lesson extraction), on BOTH
+    # chat paths (supervisor graph and fast chat). Independent
+    # booleans: use ON + learn OFF is the deciding combination —
+    # Aether answers from what it already knows and stores
+    # nothing new. Neither key ever deletes or hides stored
+    # data; off means "not used / not added to", and the stored
+    # facts and episodes are all still there when the switch
+    # comes back on.
+    #
+    # fast_chat_memory_enabled above is RETIRED in favour of
+    # this pair: no engine path reads it any more. It survives
+    # as a load-time seed only — a config stored before the pair
+    # existed carries its fast-chat choice into
+    # memory_use_enabled (from_dict resolves the seed, and
+    # __post_init__ applies the same seed to directly-built
+    # configs), and to_dict keeps writing it as a mirror of
+    # memory_use_enabled so an older build reading the same
+    # file keeps the user's fast-chat gate.
+    memory_use_enabled: bool = True
+    memory_learn_enabled: bool = True
     # S11: EQ adaptation (aether_engine/eq.py). eq_enabled gates
     # the whole EQ path in BOTH prompt builders (fast chat and
     # the supervisor routing prompt): off = the pre-S11 prompt
@@ -490,6 +515,19 @@ class UserConfig:
     speech_input_device_id: str = ""
     dictation_mode: str = "hold"
 
+    def __post_init__(self) -> None:
+        # Wave 6 (D-5 migration seed): a config that still
+        # carries the retired fast-chat gate in its OFF position
+        # — built directly with fast_chat_memory_enabled=False,
+        # the pre-pair shape — seeds memory_use_enabled OFF.
+        # from_dict resolves the pair first when the stored file
+        # names it (the pair always wins there: it passes the
+        # resolved pair value as the legacy field too), so this
+        # seed only ever fires for a legacy-only OFF, never
+        # against an explicit pair value.
+        if not self.fast_chat_memory_enabled and self.memory_use_enabled:
+            self.memory_use_enabled = False
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "default_provider": self.default_provider,
@@ -545,8 +583,13 @@ class UserConfig:
             "memory_context_token_budget": self.memory_context_token_budget,
             "memory_decay_half_life_days": self.memory_decay_half_life_days,
             "memory_decay_floor": self.memory_decay_floor,
-            "fast_chat_memory_enabled": self.fast_chat_memory_enabled,
+            # Wave 6 (D-5): the legacy key is written as a
+            # mirror of memory_use_enabled (see the field
+            # comment) — the pair below is the real state.
+            "fast_chat_memory_enabled": self.memory_use_enabled,
             "fast_chat_memory_token_budget": self.fast_chat_memory_token_budget,
+            "memory_use_enabled": self.memory_use_enabled,
+            "memory_learn_enabled": self.memory_learn_enabled,
             "eq_enabled": self.eq_enabled,
             "voice_speculation_enabled": self.voice_speculation_enabled,
             "computer_use_enabled": self.computer_use_enabled,
@@ -590,6 +633,21 @@ class UserConfig:
         # substring rewrite. Only a missing/empty value falls back to
         # the verified working default.
         def_model = d.get("default_model", DEFAULT_GEMINI_MODEL) or DEFAULT_GEMINI_MODEL
+
+        # Wave 6 (D-5, SPEC-6B C4): the memory pause pair. When
+        # the stored file names memory_use_enabled, the pair is
+        # the state and wins outright; a file stored before the
+        # pair existed seeds it from the retired fast-chat gate,
+        # so an upgrade never silently re-enables memory a user
+        # had turned off for fast chat. The legacy field is
+        # passed the RESOLVED value (it is a mirror now), which
+        # also keeps __post_init__'s legacy seed from ever
+        # overriding an explicit pair value.
+        _legacy_memory_gate = bool(d.get("fast_chat_memory_enabled", True))
+        _memory_use_enabled = (
+            bool(d["memory_use_enabled"])
+            if "memory_use_enabled" in d else _legacy_memory_gate)
+        _memory_learn_enabled = bool(d.get("memory_learn_enabled", True))
 
         def _as_dict(value: Any) -> dict[str, Any]:
             # Older/corrupted config files may contain null for these maps,
@@ -697,8 +755,10 @@ class UserConfig:
             memory_context_token_budget=_as_int(d.get("memory_context_token_budget"), 1500),
             memory_decay_half_life_days=_as_float(d.get("memory_decay_half_life_days"), 45.0),
             memory_decay_floor=_as_float(d.get("memory_decay_floor"), 0.1),
-            fast_chat_memory_enabled=bool(d.get("fast_chat_memory_enabled", True)),
+            fast_chat_memory_enabled=_memory_use_enabled,
             fast_chat_memory_token_budget=_as_int(d.get("fast_chat_memory_token_budget"), 400),
+            memory_use_enabled=_memory_use_enabled,
+            memory_learn_enabled=_memory_learn_enabled,
             eq_enabled=bool(d.get("eq_enabled", True)),
             voice_speculation_enabled=bool(
                 d.get("voice_speculation_enabled", False)),

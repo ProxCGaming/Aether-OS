@@ -537,17 +537,21 @@ class EventType(str, Enum):
     MEMORY_BACKENDS_RESPONSE = "MEMORY_BACKENDS_RESPONSE"
     # Full Furnish SPEC-6B C1 (FF5-03): the Profile panel's read of
     # the facade's user_profile() view, paginated per section.
-    # REQUEST payload: {"limit": int | None (per-section page
-    # size; omitted/None = full sections), "offset": int};
-    # RESPONSE payload: {"profile": {"user": [items], "people":
-    # {name: [items]}, "preferences": [items], "totals": {"user":
-    # int, "people": int, "preferences": int}} | None, "backend":
-    # str, "error": str (only on failure)} — profile=None with an
-    # error is the unavailable state, never an empty profile
-    # dressed as success. Every item carries "source_label"
-    # ("Set by you" / "From chat · 17 Nov"), derived at the facade
-    # from provenance + timestamp. Edit/Delete reuse
-    # MEMORY_FACT_UPDATE / MEMORY_FACT_DELETE above.
+    # REQUEST payload: {"sections": {"user"|"people"|"preferences":
+    # {"limit": int | None, "offset": int}}} (a flat "limit"/
+    # "offset" applies to all three sections); RESPONSE payload:
+    # {"user": {"items": [...], "total": int}, "people": {"items":
+    # [...] (flattened in grouped order, each item carrying its
+    # entity_name), "total": int}, "preferences": {"items": [...],
+    # "total": int}, "backend": str} — or {"profile": None,
+    # "error": str} when the backend is unavailable: the explicit
+    # unavailable state, never an empty profile dressed as success.
+    # Every item carries "source_label" ("Set by you" / "From
+    # chat · 17 Nov"), derived at the facade from provenance +
+    # timestamp. Edit/Delete reuse MEMORY_FACT_UPDATE /
+    # MEMORY_FACT_DELETE above. (The facade keeps its grouped
+    # shape for in-engine consumers; the wire shape above is the
+    # panel's — integrator reconciliation, Wave 6.)
     MEMORY_PROFILE_REQUEST = "MEMORY_PROFILE_REQUEST"
     MEMORY_PROFILE_RESPONSE = "MEMORY_PROFILE_RESPONSE"
     # Full Furnish SPEC-6B C2 (FF5-05): the Forget centre's four
@@ -579,6 +583,16 @@ class EventType(str, Enum):
     MEMORY_FORGET_UNDO_RESPONSE = "MEMORY_FORGET_UNDO_RESPONSE"
     MEMORY_FORGET_HISTORY_REQUEST = "MEMORY_FORGET_HISTORY_REQUEST"
     MEMORY_FORGET_HISTORY_RESPONSE = "MEMORY_FORGET_HISTORY_RESPONSE"
+    # Full Furnish Wave 6 (SPEC-6B C4/C5): the Settings → Memory
+    # controls read — store counts + decay read-out from the
+    # facade's memory_stats() — and the graph neighbourhood read
+    # (co-occurrence derived at read time, D-4). Both are plain
+    # request/response reads over the facade, answered off the
+    # receive loop like the other MEMORY_* reads.
+    MEMORY_STATS_REQUEST = "MEMORY_STATS_REQUEST"
+    MEMORY_STATS_RESPONSE = "MEMORY_STATS_RESPONSE"
+    MEMORY_GRAPH_NEIGHBOURHOOD_REQUEST = "MEMORY_GRAPH_NEIGHBOURHOOD_REQUEST"
+    MEMORY_GRAPH_NEIGHBOURHOOD_RESPONSE = "MEMORY_GRAPH_NEIGHBOURHOOD_RESPONSE"
     # Master build S10: the Settings "This machine" card —
     # the hardware probe + capability matrix report
     # (machine_capability.py — the MACHINE, not the LLM

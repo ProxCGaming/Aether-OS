@@ -632,10 +632,22 @@ async def run_langgraph_task(
         delegation_count_seen = 0
         thinking_log = []
         accumulated_thoughts = []
+        # Wave 6 (SPEC-6B C6): the reply's memory_used disclosure,
+        # folded from the memory tools' completed TOOL_ACTIVITY
+        # events (nodes/supervisor.py attaches the scored items
+        # as payload["memory_used"]). One entry per (kind, id),
+        # first-seen order; capped when the reply is emitted.
+        memory_used_items: list[dict] = []
+        memory_used_seen: set = set()
 
         def record_thought(ev: Event):
             p = ev.payload
             if ev.type == EventType.TOOL_ACTIVITY:
+                for entry in p.get("memory_used") or []:
+                    key = (entry.get("kind"), entry.get("id"))
+                    if key not in memory_used_seen:
+                        memory_used_seen.add(key)
+                        memory_used_items.append(entry)
                 st = p.get("status")
                 t_name = p.get("tool_name")
                 if st != "pending":
@@ -1004,7 +1016,14 @@ async def run_langgraph_task(
                 # episodes and facts live; an unavailable backend is
                 # logged by backend_or_none and skips memory for this
                 # completion instead of failing the task.
-                if full_response:
+                # Wave 6 (D-5, SPEC-6B C4): the write gate — with
+                # memory_learn_enabled off, a completed task stores
+                # nothing (no episode, no facts, no lessons). This
+                # is the supervisor path's learn seam; the resume
+                # completion below gates the same way.
+                if full_response and getattr(
+                        kwargs.get("user_config"),
+                        "memory_learn_enabled", True):
                     memory_backend = backend_or_none(kwargs.get("user_config"), context="task completion memory")
                     if memory_backend is not None:
                         try:
@@ -1108,6 +1127,10 @@ async def run_langgraph_task(
                         "response": full_response or "(task completed)",
                         "thoughts": accumulated_thoughts,
                         "session_id": session_id,
+                        # SPEC-6B C6: the memory items this reply's
+                        # context actually used, capped at 5 (empty
+                        # when memory was off or nothing scored).
+                        "memory_used": memory_used_items[:5],
                     },
                 )
         except Exception as e:
@@ -1519,10 +1542,27 @@ async def resume_langgraph_task(
                     resume_value["desktop_envelope"] = desktop_envelope
                 if desktop_remember:
                     resume_value["desktop_remember"] = True
+            # Wave 6 (SPEC-6B C6): the resumed reply's memory_used
+            # disclosure, folded from the memory tools' completed
+            # TOOL_ACTIVITY events exactly as the run path folds
+            # them in record_thought — one entry per (kind, id).
+            memory_used_items: list[dict] = []
+            memory_used_seen: set = set()
+
+            def _note_memory_used(_ev: Event) -> None:
+                if _ev.type != EventType.TOOL_ACTIVITY:
+                    return
+                for entry in _ev.payload.get("memory_used") or []:
+                    key = (entry.get("kind"), entry.get("id"))
+                    if key not in memory_used_seen:
+                        memory_used_seen.add(key)
+                        memory_used_items.append(entry)
+
             # S3: the resume path's translated events tap into the
             # Task Ledger here, at the segment funnel — the mirror of
             # the run path's emit_event tap.
             async for _ev in _consume_segment(Command(resume=resume_value)):
+                _note_memory_used(_ev)
                 record_executor_event(task_id, _ev)
                 yield _ev
 
@@ -1557,6 +1597,7 @@ async def resume_langgraph_task(
                     )
                 async for _ev in _consume_segment(
                         steer_state_update(steers_to_apply)):
+                    _note_memory_used(_ev)
                     record_executor_event(task_id, _ev)
                     yield _ev
             if pending_steers:
@@ -1597,8 +1638,14 @@ async def resume_langgraph_task(
                 
                 orig_prompt = state_obj.values.get("original_prompt", "")
                 # Epic 4, E4-01: same facade path as fresh completions.
+                # Wave 6 (D-5, SPEC-6B C4): the write gate, same as
+                # the fresh-completion path — memory_learn_enabled
+                # off stores nothing for a resumed task either.
+                _resume_user_config = config["configurable"].get("user_config")
                 memory_backend = backend_or_none(
-                    config["configurable"].get("user_config"), context="resumed task memory")
+                    _resume_user_config, context="resumed task memory") \
+                    if getattr(_resume_user_config,
+                               "memory_learn_enabled", True) else None
                 if memory_backend is not None:
                     try:
                         await memory_backend.record_episode(task_id, orig_prompt, full_response, ["task", "completed", "resumed"], TaskState.SUCCEEDED.value)
@@ -1678,6 +1725,10 @@ async def resume_langgraph_task(
                         "latency_ms": elapsed_ms,
                         "response": full_response or "(task completed)",
                         "session_id": state_obj.values.get("session_id"),
+                        # SPEC-6B C6: as the run path's reply —
+                        # the memory items this resumed reply's
+                        # context actually used, capped at 5.
+                        "memory_used": memory_used_items[:5],
                     },
                 )
         except Exception as e:

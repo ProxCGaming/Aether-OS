@@ -241,6 +241,22 @@ async def learn_fast_chat_exchange(
     """
     from aether_engine.memory.facade import backend_or_none
 
+    # Wave 6 (D-5, SPEC-6B C4): the write gate — with
+    # memory_learn_enabled off, a fast-chat exchange stores
+    # nothing: no episode, no facts, no lessons. The stored data
+    # is untouched (the gate is on the write, not the store);
+    # turning learning back on resumes from the next exchange.
+    try:
+        config = user_config
+        if config is None:
+            from aether_engine.config import load_config
+
+            config = load_config()
+        if not getattr(config, "memory_learn_enabled", True):
+            return
+    except Exception:  # a gate-read fault must not break learning
+        logger.debug("Fast-chat memory learn gate unavailable", exc_info=True)
+
     # S8 (14 Nov 2026): never learn from a forget/undo exchange. The
     # reply to a forget command quotes the deleted item (the engine's
     # note enumerates it), so extraction over this exchange could
@@ -418,6 +434,8 @@ def _profile_digest(profile: dict[str, Any] | None) -> str:
 async def fast_chat_memory_briefing(
     prompt: str,
     user_config=None,
+    *,
+    used_items_out: list | None = None,
 ) -> str:
     """The per-turn memory section for fast chat's prompt, or "".
 
@@ -426,7 +444,30 @@ async def fast_chat_memory_briefing(
     pass nothing and the saved config is loaded, mirroring
     fast_chat_itinerary_line(). Never raises — see the S7 block
     comment above for the full contract.
+
+    ONE builder (S16): the voice speculation preparer prepares
+    and adopts this function's TEXT, and run_fast_chat calls the
+    same function — passing ``used_items_out`` (a list) to also
+    receive the SPEC-6B C6 disclosure entries for the items that
+    scored into the section (profile digest items first, then
+    the assembler's scored facts/episodes — deduped by id,
+    capped at 5, summaries only). The list is left untouched
+    whenever no memory section was built — memory off, no
+    backend, or nothing scored.
     """
+    section, used = await _fast_chat_memory_briefing_impl(
+        prompt, user_config)
+    if used_items_out is not None:
+        used_items_out.extend(used)
+    return section
+
+
+async def _fast_chat_memory_briefing_impl(
+    prompt: str,
+    user_config=None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """The briefing builder: (section text, C6 disclosure
+    entries) — see fast_chat_memory_briefing for the contract."""
     started = time.perf_counter()
     try:
         config = user_config
@@ -434,23 +475,31 @@ async def fast_chat_memory_briefing(
             from aether_engine.config import load_config
 
             config = load_config()
-        if not getattr(config, "fast_chat_memory_enabled", True):
-            return ""
+        # Wave 6 (D-5, SPEC-6B C4): the read gate is the pair's
+        # memory_use_enabled, on this path exactly as on the
+        # supervisor's — the retired fast_chat_memory_enabled
+        # only seeds it at config load (config.py).
+        if not getattr(config, "memory_use_enabled", True):
+            return "", []
         budget = int(getattr(config, "fast_chat_memory_token_budget", 400) or 0)
         if budget <= 0:
-            return ""
+            return "", []
 
         from aether_engine.memory.context_assembler import (
+            MEMORY_USED_LIMIT,
             assemble_memory_context,
             estimate_tokens,
+            memory_used_entries,
+            profile_used_entries,
         )
         from aether_engine.memory.facade import backend_or_none
 
         backend = backend_or_none(config, context="fast-chat memory briefing")
         if backend is None:
-            return ""
+            return "", []
 
-        digest = _profile_digest(backend.user_profile())
+        profile = backend.user_profile()
+        digest = _profile_digest(profile)
         # Budget accounting in per-part ceilings — each part's
         # estimate includes its join newline, the assembler's own
         # convention — so when the parts' ceilings sum inside the
@@ -472,19 +521,40 @@ async def fast_chat_memory_briefing(
             if lessons and estimate_tokens(lessons + "\n") <= remaining:
                 blocks.append(lessons)
         if not blocks:
-            return ""
+            return "", []
         section = "\n".join([_MEMORY_SECTION_HEADER, *blocks])
+        # C6 disclosure: exactly the items the section above
+        # carries — the digest's profile items (only when the
+        # digest made the section) and the assembler's scored
+        # items (its items exist only when its text does). A
+        # fact the digest showed as a profile item is not
+        # reported twice when recall also scored it: one entry
+        # per id, profile form first. Lessons carry no per-item
+        # identity and are not disclosed (context_assembler's
+        # C6 section comment).
+        used_entries: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        candidates = (
+            (profile_used_entries(profile) if digest else [])
+            + memory_used_entries(assembled["items"], limit=MEMORY_USED_LIMIT))
+        for entry in candidates:
+            if entry["id"] in seen_ids:
+                continue
+            seen_ids.add(entry["id"])
+            used_entries.append(entry)
+            if len(used_entries) >= MEMORY_USED_LIMIT:
+                break
         logger.debug(
             "Fast-chat memory briefing: %d scored items, digest=%s, "
             "assembled in %.1f ms (est %d/%d tokens)",
             len(assembled["items"]), bool(digest),
             (time.perf_counter() - started) * 1000,
             estimate_tokens(section), budget)
-        return section
+        return section, used_entries
     except Exception:
         # Memory is additive; it must never break a chat turn.
         logger.debug("Fast-chat memory briefing unavailable", exc_info=True)
-        return ""
+        return "", []
 
 
 # ---------------------------------------------------------------------------
@@ -619,10 +689,19 @@ async def run_fast_chat(
     # recomputed: still ONE builder, no fork. None — every typed
     # caller and every unmatched/unprepared voice turn — runs the
     # builder here exactly as pre-S16, byte for byte.
+    # Wave 6 (SPEC-6B C6): the turn's memory_used disclosure —
+    # the items the briefing below scored into this reply's
+    # context, carried out on the TASK_COMPLETED payload. A
+    # prepared (speculated) briefing arrives as text only — the
+    # preparer keeps no item list — so an adopted briefing
+    # discloses an empty list for that turn rather than a
+    # reconstructed guess.
+    _memory_used: list[dict[str, Any]] = []
     if prepared_memory_briefing is not None:
         _memory_briefing = prepared_memory_briefing
     else:
-        _memory_briefing = await fast_chat_memory_briefing(prompt, user_config)
+        _memory_briefing = await fast_chat_memory_briefing(
+            prompt, user_config, used_items_out=_memory_used)
     if _memory_briefing:
         messages.append({"role": "system", "content": _memory_briefing})
 
@@ -777,5 +856,9 @@ async def run_fast_chat(
             "response": full_text or "(task completed)",
             "thoughts": [],
             "session_id": session_id,
+            # SPEC-6B C6: the memory items this reply's context
+            # actually used (empty when memory was off, nothing
+            # scored, or a prepared briefing was adopted).
+            "memory_used": _memory_used,
         },
     )

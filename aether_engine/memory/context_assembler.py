@@ -428,3 +428,95 @@ async def assemble_memory_context(
         "budget_tokens": budget_tokens,
         "estimated_tokens": estimate_tokens(text),
     }
+
+
+# ---------------------------------------------------------------------------
+# Wave 6 (SPEC-6B C6): memory-used disclosure shaping.
+#
+# Both chat paths report which memory items actually scored into
+# a reply's context, as ``memory_used`` entries on the reply:
+# ``{id, summary, kind}`` with kind fact | episode | profile —
+# IDs and one-line summaries only (SPEC-6B Rule 3), never raw
+# stored text beyond the summary line. The shaping lives here,
+# beside the assembler whose items it shapes, so the supervisor
+# and fast-chat paths can never drift into two dialects.
+#
+# Two sources are deliberately NOT disclosed: the assembler's
+# "curated" candidates (lines of the derived consolidation
+# document — they restate stored facts, and the contract's kind
+# vocabulary has no honest bucket for a document line) and the
+# learned.md lessons (no per-item identity exists to name).
+# ---------------------------------------------------------------------------
+
+# A summary is one line of a chat affordance, not the record:
+# long enough to recognise the item, short enough to scan.
+_DISCLOSURE_SUMMARY_MAX_CHARS = 120
+
+# SPEC-6B C6: a reply discloses at most this many items.
+MEMORY_USED_LIMIT = 5
+
+
+def _summary_line(text: Any) -> str:
+    """One line, whitespace-collapsed, capped — the disclosure
+    form of a stored item's text."""
+    line = " ".join(str(text or "").split())
+    if len(line) > _DISCLOSURE_SUMMARY_MAX_CHARS:
+        line = line[: _DISCLOSURE_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+    return line
+
+
+def memory_used_entries(
+    items: list[dict] | None, *, limit: int = MEMORY_USED_LIMIT
+) -> list[dict[str, Any]]:
+    """Disclosure entries for assembler ``items`` (the scored
+    candidates assemble_memory_context returned), best first —
+    the order the assembler ranked them. Fact and episode items
+    only; curated lines are skipped (see the section comment).
+    Deduped by (kind, id)."""
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items or []:
+        source = item.get("source")
+        if source not in ("fact", "episode"):
+            continue
+        item_id = str(item.get("id") or "")
+        summary = _summary_line(item.get("text"))
+        if not item_id or not summary:
+            continue
+        key = (source, item_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append({"id": item_id, "summary": summary, "kind": source})
+        if len(entries) >= limit:
+            break
+    return entries
+
+
+def profile_used_entries(
+    profile: dict | None, *, limit: int = MEMORY_USED_LIMIT
+) -> list[dict[str, Any]]:
+    """Disclosure entries for the profile-digest items of a
+    facade ``user_profile()`` view: the user facts and
+    preferences the digest renders (its top-3 user items and
+    top-2 preferences — the same shown sets fast chat's digest
+    builder uses). The digest's people line carries names only,
+    no item text, so people items are not disclosed here.
+    Deduped by id."""
+    if not profile:
+        return []
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    shown = list(profile.get("user") or [])[:3] + \
+        list(profile.get("preferences") or [])[:2]
+    for item in shown:
+        fact_id = str(item.get("fact_id") or item.get("id") or "")
+        summary = _summary_line(item.get("text"))
+        if not fact_id or not summary or fact_id in seen:
+            continue
+        seen.add(fact_id)
+        entries.append(
+            {"id": fact_id, "summary": summary, "kind": "profile"})
+        if len(entries) >= limit:
+            break
+    return entries

@@ -47,6 +47,13 @@ from ``voice/tts.py``), ``speech_stt_language`` ('auto' or a code
 from ``voice/stt.py``), ``speech_input_device_id`` (an opaque
 browser-minted microphone id, shape-checked only) and
 ``dictation_mode`` ('hold' | 'toggle').
+
+Wave 6 (D-5) adds the memory pause pair under the strict-boolean
+rule: ``memory_use_enabled`` (read/recall) and
+``memory_learn_enabled`` (write/save). They are the Settings →
+Memory switches, so a coerced truthy string would show memory
+paused (or live) when the engine never agreed — refused, like
+every other real boolean here.
 """
 from __future__ import annotations
 
@@ -74,6 +81,8 @@ HANDED_OFF_FIELDS = (
     "compaction_keep_recent",
     "path_rules",
     "memory_backend",
+    "memory_use_enabled",
+    "memory_learn_enabled",
     "speech_stt_model",
     "transcription_stt_model",
     "speech_tts_voice",
@@ -532,13 +541,17 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
     # fallback are all real booleans; for a feature that clicks
     # and types in the user's apps, a coerced truthy string is
     # exactly the failure this contract exists to prevent.
+    # Wave 6 (D-5): the memory pause pair joins them — the
+    # Settings → Memory switches are real booleans for the same
+    # reason (see the module docstring).
     for bool_field in ("calendar_enabled", "calendar_reminder_day_before",
                        "eq_enabled", "subagents_enabled",
                        "voice_speculation_enabled",
                        "computer_use_enabled", "computer_use_observe",
                        "computer_use_control", "computer_use_control_ack",
                        "computer_use_envelopes_enabled",
-                       "computer_use_pixel_fallback"):
+                       "computer_use_pixel_fallback",
+                       "memory_use_enabled", "memory_learn_enabled"):
         if bool_field in config_data:
             value = config_data[bool_field]
             if not isinstance(value, bool):

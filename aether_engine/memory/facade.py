@@ -120,6 +120,29 @@ class MemoryBackend:
 
         return profile.profile_briefing(self)
 
+    def memory_stats(self, *, config=None) -> dict[str, Any]:
+        """Wave 6 (SPEC-6B C4): store counts + decay read-out
+        for the Settings → Memory controls row (memory/stats.py)
+        — derived from this backend's own listings on every
+        call; a leg the backend cannot serve reports null for
+        its number, never a fabricated zero."""
+        from aether_engine.memory import stats
+
+        return stats.memory_stats(self, config=config)
+
+    def graph_neighbourhood(
+        self, entity_name: str, depth: int = 1
+    ) -> dict[str, Any]:
+        """Wave 6 (SPEC-6B C5, D-4): one entity's neighbourhood
+        — co-occurrence edges derived at read time from the
+        stored facts/episodes plus the superseded-by chains
+        (memory/graph_read.py). No edges are stored; an unknown
+        entity is an honest empty result, not an error."""
+        from aether_engine.memory import graph_read
+
+        return graph_read.graph_neighbourhood(
+            self, entity_name, depth=depth)
+
     def list_facts(self, limit: int = 100, include_history: bool = False) -> list[dict]:
         raise NotImplementedError
 

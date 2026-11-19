@@ -200,6 +200,34 @@ def _forget_result_text(outcome: dict) -> str:
     return "\n".join(lines)
 
 
+# Wave 6 (D-5, SPEC-6B C4): the read gate for the supervisor's
+# memory tools. With memory_use_enabled off, the three READ
+# tools (search_knowledge_graph, search_past_episodes,
+# get_user_profile) return this text instead of stored content —
+# the model is told plainly that memory is paused, so the reply
+# can say so instead of silently answering without it. Two
+# tools are deliberately NOT gated: get_current_chat_history
+# reads the live session (the conversation itself, not
+# long-term memory), and forget_memory is an explicit
+# user-ordered deletion, not a read or a learn.
+_MEMORY_PAUSED_TEXT = (
+    "Long-term memory is paused: the user has turned memory off "
+    "in Settings, so stored facts, past tasks and the profile "
+    "are not being read for this task. Continue without them, "
+    "and if the answer would have depended on memory, tell the "
+    "user memory is paused rather than guessing."
+)
+
+
+def _memory_use_paused(user_config) -> bool:
+    """True when the D-5 read gate (memory_use_enabled) is off.
+
+    Duck-typed like the other config reads on this path: a
+    config without the key (older snapshots, test doubles)
+    reads as enabled."""
+    return not getattr(user_config, "memory_use_enabled", True)
+
+
 async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id: str | None, original_prompt: str, task_id: str, user_config=None) -> str:
     try:
         if task_id:
@@ -216,6 +244,12 @@ async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id
             ))
 
         result_str = f"Unknown tool: {tool_name}"
+        # Wave 6 (SPEC-6B C6): the disclosure entries for what
+        # this call scores into the supervisor's context, when
+        # it is a memory read — carried out on the completed
+        # TOOL_ACTIVITY event for the executor to fold into the
+        # reply's memory_used (see executor.run_langgraph_task).
+        used_items: list[dict] = []
         if tool_name == "get_current_chat_history":
             if not session_id:
                 result_str = "No active session ID found."
@@ -248,23 +282,30 @@ async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id
             backend = backend_or_none(user_config, context="supervisor memory tool")
             if backend is None:
                 result_str = "Memory is unavailable: the configured memory backend cannot run here (see engine log)."
+            elif _memory_use_paused(user_config):
+                result_str = _MEMORY_PAUSED_TEXT
             else:
                 from aether_engine.memory.context_assembler import (
                     assemble_memory_context,
+                    memory_used_entries,
                 )
 
                 query = args.get("query", "")
                 assembled = await assemble_memory_context(
                     backend, query, config=user_config, include_episodes=False)
                 result_str = assembled["text"] or "No matching facts found in knowledge graph."
+                used_items = memory_used_entries(assembled["items"])
 
         elif tool_name == "search_past_episodes":
             backend = backend_or_none(user_config, context="supervisor memory tool")
             if backend is None:
                 result_str = "Memory is unavailable: the configured memory backend cannot run here (see engine log)."
+            elif _memory_use_paused(user_config):
+                result_str = _MEMORY_PAUSED_TEXT
             else:
                 from aether_engine.memory.context_assembler import (
                     assemble_memory_context,
+                    memory_used_entries,
                 )
 
                 query = args.get("query", original_prompt)
@@ -272,6 +313,7 @@ async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id
                     backend, query, config=user_config,
                     include_facts=False, include_curated=False)
                 result_str = assembled["text"] or "No past episodes found matching query."
+                used_items = memory_used_entries(assembled["items"])
 
         elif tool_name == "forget_memory":
             # S8: conversational forget through the SAME facade
@@ -313,12 +355,23 @@ async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id
             backend = backend_or_none(user_config, context="supervisor memory tool")
             if backend is None:
                 result_str = "Memory is unavailable: the configured memory backend cannot run here (see engine log)."
+            elif _memory_use_paused(user_config):
+                result_str = _MEMORY_PAUSED_TEXT
             else:
                 briefing = backend.profile_briefing()
                 result_str = briefing or (
                     "No user profile is stored yet — nothing has been "
                     "learned about the user, their people, or their "
                     "preferences so far.")
+                if briefing:
+                    # C6: the briefing is the profile view rendered
+                    # — disclose the view's digest items (the same
+                    # shown sets the fast-chat digest discloses).
+                    from aether_engine.memory.context_assembler import (
+                        profile_used_entries,
+                    )
+
+                    used_items = profile_used_entries(backend.user_profile())
 
         if len(result_str) > MEMORY_TOOL_RESULT_MAX_CHARS:
             result_str = result_str[:MEMORY_TOOL_RESULT_MAX_CHARS] + "\n...[memory result truncated to budget]"
@@ -331,19 +384,24 @@ async def _execute_supervisor_memory_tool(tool_name: str, args: dict, session_id
         })
         
         if task_id:
+            completed_payload = {
+                "task_id": task_id,
+                "tool_name": tool_name,
+                "tool_args": args,
+                "status": "completed",
+                "result": result_str,
+                "node": "supervisor",
+                "timestamp": int(time.time())
+            }
+            if used_items:
+                # C6: the executor folds these into the reply's
+                # memory_used disclosure (IDs + summaries only).
+                completed_payload["memory_used"] = used_items
             event_bus.publish(task_id, Event(
                 type=EventType.TOOL_ACTIVITY,
-                payload={
-                    "task_id": task_id,
-                    "tool_name": tool_name,
-                    "tool_args": args,
-                    "status": "completed",
-                    "result": result_str,
-                    "node": "supervisor",
-                    "timestamp": int(time.time())
-                }
+                payload=completed_payload,
             ))
-            
+
         return result_str
     except Exception as e:  # noqa: BLE001 — memory backends are external boundaries; any failure degrades to an error string for the model, logged above.
         logger.warning(f"Supervisor memory tool {tool_name} failed: {e}")
