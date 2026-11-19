@@ -16,6 +16,7 @@ exactly as it did when the body lived in each node module.
 """
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -41,6 +42,27 @@ from aether_engine.langgraph.state import (
 from aether_engine.langgraph.structured import apply_output_schema
 from aether_engine.langgraph.thinking import forward_thinking
 from aether_engine.providers.base import ProviderError
+
+
+def _tool_offer_entry(agent: str, offered: list, called: list) -> dict:
+    """P2c step 2: one offered-vs-called record for a specialist model
+    round, appended to ``delegation_log`` beside the supervisor's
+    decision entries.
+
+    The entry carries no ``decision`` key, and every existing reader
+    of the log keys on ``decision.next`` and skips it
+    (``delegation_briefing``, the executor's delegation event, the
+    Task Ledger, S14's briefing lookup). Its consumers are P2a's
+    cascade and P3a's learned router: which offered tools a
+    delegation never calls, and whether a call ever lands outside
+    the offer.
+    """
+    return {
+        "agent": agent,
+        "timestamp": time.time(),
+        "tools_offered": list(offered),
+        "tools_called": list(called),
+    }
 
 
 @dataclass(frozen=True)
@@ -168,26 +190,51 @@ async def run_specialist(
     registry = config.get("configurable", {}).get("tool_registry")
     all_tools = registry.get_definitions() if registry else []
 
-    allowed_tools = agent_tools.get(spec.name)
-    if allowed_tools is not None and isinstance(allowed_tools, list):
-        import copy
-        used_tools = set()
-        for msg in message_dicts(state.get("messages", [])):
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                for tc in msg.get("tool_calls"):
-                    if isinstance(tc, dict):
-                        used_tools.add(tc.get("function", {}).get("name"))
-        tools = []
-        for t in all_tools:
-            t_name = t.get("function", {}).get("name")
-            if t_name in allowed_tools:
-                tools.append(t)
-            elif t_name in used_tools:
-                disabled_t = copy.deepcopy(t)
-                disabled_t["function"]["description"] = "DO NOT USE THIS TOOL. IT IS CURRENTLY DISABLED FOR YOUR ROLE."
-                tools.append(disabled_t)
+    # P2c Filter 1: the per-agent tool ceiling (tools/ceilings.py)
+    # supersedes the legacy `agent_tools` allow-list at this
+    # resolution point. A legacy list still applies when configured,
+    # but only as an intersection — it narrows the ceiling, never
+    # widens it. A tool already used in this conversation is kept
+    # with a DO NOT USE description instead of being removed (the
+    # legacy behaviour), so in-flight calls never dangle. The
+    # plan-mode and desktop-actuation filters below stay separate,
+    # later concerns — they are not ceilings and are not merged in.
+    from aether_engine.tools.ceilings import apply_tool_ceiling
+
+    used_tools = set()
+    for msg in message_dicts(state.get("messages", [])):
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tc in msg.get("tool_calls"):
+                if isinstance(tc, dict):
+                    used_tools.add(tc.get("function", {}).get("name"))
+    _legacy_allowed = agent_tools.get(spec.name)
+    if registry is not None and hasattr(registry, "get_tools"):
+        risk_by_name = {t.name: t.risk for t in registry.get_tools()}
+    elif registry is not None:
+        # Narrow registry doubles (older test stubs) may expose only
+        # the pre-P2c surface — definitions + read_only_names. Judge
+        # everything not known read-only as EXECUTE (fail closed,
+        # the registry's own default for an unlabelled tool).
+        from aether_engine.tools.registry import ToolRisk as _ToolRisk
+
+        _read_only = (registry.read_only_names()
+                      if hasattr(registry, "read_only_names") else set())
+        risk_by_name = {}
+        for _definition in all_tools:
+            _name = _definition.get("function", {}).get("name")
+            if _name:
+                risk_by_name[_name] = (_ToolRisk.READ_ONLY
+                                       if _name in _read_only
+                                       else _ToolRisk.EXECUTE)
     else:
-        tools = all_tools
+        risk_by_name = {}
+    tools = apply_tool_ceiling(
+        spec.name,
+        all_tools,
+        risk_by_name,
+        legacy_allowed=_legacy_allowed if isinstance(_legacy_allowed, list) else None,
+        used_names=used_tools,
+    )
 
     # Plan mode (Epic 1, E1-09): only READ_ONLY tools are even offered.
     if state.get("plan_mode") and registry:
@@ -231,6 +278,12 @@ async def run_specialist(
 
         if subagent_settings(_uc).enabled:
             tools = [*tools, spawn_tool_definition()]
+
+    # P2c step 2: the offered set for this model round — every filter
+    # above has run, so this is exactly what the model is about to be
+    # offered. Recorded with the round's calls at the returns below
+    # (see _tool_offer_entry).
+    offered_names = [t.get("function", {}).get("name") for t in tools]
 
     plan_text = state.get("plan", "")
     plan_info = f"\nCurrent Plan & Context:\n{plan_text}\n" if plan_text and plan_text != "No plan currently." else ""
@@ -393,6 +446,10 @@ async def run_specialist(
             "messages": [assistant_msg],
             "pending_tool_call": pending,
             "queued_tool_calls": queued,
+            "delegation_log": [_tool_offer_entry(
+                spec.name, offered_names,
+                [tc["function"]["name"]
+                 for tc in assistant_tool_calls(accumulated_tool_calls)])],
         }
 
     # E1-10: validate against the specialist's output schema, if configured.
@@ -466,6 +523,9 @@ async def run_specialist(
         _record_outcome(provider, "success")
 
     result = {"current_phase": spec.phase}
+    # P2c step 2: this round offered tools and called none (a final
+    # answer) — the offer still belongs in the record.
+    result["delegation_log"] = [_tool_offer_entry(spec.name, offered_names, [])]
     if spec.tail_extras is not None:
         result.update(spec.tail_extras(content))
     result["messages"] = [{"role": "assistant", "content": content}]

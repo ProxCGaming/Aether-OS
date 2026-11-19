@@ -85,6 +85,7 @@ from aether_engine.langgraph.nodes.pause import (
     dummy_pause_node,
     make_desktop_final_args_gate,
 )
+from aether_engine.langgraph.nodes.coder import CODER_SPEC
 from aether_engine.langgraph.nodes.researcher import RESEARCHER_SPEC
 from aether_engine.langgraph.nodes.runner import run_specialist
 from aether_engine.providers.base import StreamChunk
@@ -1268,10 +1269,10 @@ def _tool_names(tools):
 
 
 class TestOffering:
-    async def _run_runner(self, registry, uc):
+    async def _run_runner(self, registry, uc, spec=RESEARCHER_SPEC):
         provider = _CaptureProvider()
         await run_specialist(
-            RESEARCHER_SPEC, _runner_state(),
+            spec, _runner_state(),
             {"configurable": {"provider": provider,
                               "tool_registry": registry,
                               "user_config": uc}},
@@ -1279,10 +1280,17 @@ class TestOffering:
         return provider
 
     async def test_offered_only_when_control_is_permitted(self):
+        # The vehicle is the CODER since P2c Filter 1 (18 Nov 2026):
+        # desktop_act is a WRITE tool and the researcher's ceiling is
+        # read-only, so the researcher can no longer be offered it
+        # even with control permitted — the ceiling is the stricter
+        # bound and wins. The S20 property itself (offered iff
+        # control is permitted) is judged on an agent whose ceiling
+        # admits the tool.
         registry = build_tool_registry()
-        off = await self._run_runner(registry, UserConfig())
+        off = await self._run_runner(registry, UserConfig(), spec=CODER_SPEC)
         assert "desktop_act" not in _tool_names(off.tools)
-        on = await self._run_runner(registry, _uc())
+        on = await self._run_runner(registry, _uc(), spec=CODER_SPEC)
         assert "desktop_act" in _tool_names(on.tools)
 
     async def test_prompt_byte_identical_when_control_off(self):
