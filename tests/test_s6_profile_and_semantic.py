@@ -474,8 +474,11 @@ def test_profile_view_derives_sections_with_provenance(kg_db):
 def test_profile_of_empty_graph_is_empty_not_error(kg_db):
     kg.init_kg_db()
     backend = NativeMemoryBackend()
+    # SPEC-6B C1 (Wave 6): the contracted reply also carries
+    # per-section totals (Rule 2 of the contract note).
     assert backend.user_profile() == {
-        "user": [], "people": {}, "preferences": []}
+        "user": [], "people": {}, "preferences": [],
+        "totals": {"user": 0, "people": 0, "preferences": 0}}
     assert backend.profile_briefing() == ""
 
 

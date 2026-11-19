@@ -47,7 +47,11 @@ from aether_engine.providers.discovery import fetch_available_models  # noqa: F4
 from aether_engine.rewind import fork as fork_service
 from aether_engine.rewind import manifest as rewind_manifest
 from aether_engine.rewind import service as rewind_service
-from aether_engine.routes.ws_calendar import handle_calendar_list_request
+from aether_engine.routes.ws_calendar import (
+    handle_calendar_cancel_request,
+    handle_calendar_create_request,
+    handle_calendar_list_request,
+)
 from aether_engine.routes.ws_connection import WsConnection
 from aether_engine.routes.ws_mcp_plugins import (
     PLUGIN_INSTALL_TTL_SECONDS,  # noqa: F401 — re-exported: tests patch the TTL on this module
@@ -82,6 +86,13 @@ from aether_engine.routes.ws_memory_media import (
     send_model_hub_detail_result,
     send_model_hub_search_result,
     send_version_check_result,
+)
+from aether_engine.routes.ws_memory_personal import (
+    send_memory_forget_candidates_result,
+    send_memory_forget_execute_result,
+    send_memory_forget_history_result,
+    send_memory_forget_undo_result,
+    send_memory_profile_result,
 )
 from aether_engine.routes.ws_providers import (
     complete_provider_save_discovery,
@@ -3408,6 +3419,39 @@ async def _handle_plugin_update_check_request(conn: WsConnection, msg: Event) ->
     conn.spawn_background(send_plugin_update_check_result(conn,
         req_id, msg.payload.get("name")))
 
+async def _handle_memory_profile_request(conn: WsConnection, msg: Event) -> None:
+    req_id = msg.request_id
+    payload = msg.payload or {}
+    try:
+        offset = int(payload.get("offset") or 0)
+    except (TypeError, ValueError):
+        offset = 0
+    conn.spawn_background(send_memory_profile_result(
+        conn, req_id, payload.get("limit"), offset))
+
+async def _handle_memory_forget_candidates_request(conn: WsConnection, msg: Event) -> None:
+    conn.spawn_background(send_memory_forget_candidates_result(conn, msg.request_id))
+
+async def _handle_memory_forget_execute_request(conn: WsConnection, msg: Event) -> None:
+    conn.spawn_background(send_memory_forget_execute_result(
+        conn, msg.request_id, (msg.payload or {}).get("topic")))
+
+async def _handle_memory_forget_undo_request(conn: WsConnection, msg: Event) -> None:
+    conn.spawn_background(send_memory_forget_undo_result(conn, msg.request_id))
+
+async def _handle_memory_forget_history_request(conn: WsConnection, msg: Event) -> None:
+    payload = msg.payload or {}
+    try:
+        limit = int(payload.get("limit") or 20)
+    except (TypeError, ValueError):
+        limit = 20
+    try:
+        offset = int(payload.get("offset") or 0)
+    except (TypeError, ValueError):
+        offset = 0
+    conn.spawn_background(send_memory_forget_history_result(
+        conn, msg.request_id, limit, offset))
+
 async def _handle_memory_episodes_request(conn: WsConnection, msg: Event) -> None:
     req_id = msg.request_id
     # Epic 4, E4-01/E4-04: through the facade; the payload
@@ -4595,6 +4639,13 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.PLUGIN_TOGGLE_REQUEST: _handle_plugin_toggle_request,
     EventType.PLUGIN_UPDATE_CHECK_REQUEST: _handle_plugin_update_check_request,
     EventType.CALENDAR_LIST_REQUEST: handle_calendar_list_request,
+    EventType.CALENDAR_CREATE_REQUEST: handle_calendar_create_request,
+    EventType.CALENDAR_CANCEL_REQUEST: handle_calendar_cancel_request,
+    EventType.MEMORY_PROFILE_REQUEST: _handle_memory_profile_request,
+    EventType.MEMORY_FORGET_CANDIDATES_REQUEST: _handle_memory_forget_candidates_request,
+    EventType.MEMORY_FORGET_EXECUTE_REQUEST: _handle_memory_forget_execute_request,
+    EventType.MEMORY_FORGET_UNDO_REQUEST: _handle_memory_forget_undo_request,
+    EventType.MEMORY_FORGET_HISTORY_REQUEST: _handle_memory_forget_history_request,
     EventType.MEMORY_EPISODES_REQUEST: _handle_memory_episodes_request,
     EventType.MEMORY_EPISODE_DELETE_REQUEST: _handle_memory_episode_delete_request,
     EventType.MEMORY_EPISODES_CLEAR_REQUEST: _handle_memory_episodes_clear_request,
