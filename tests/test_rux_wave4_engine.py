@@ -421,10 +421,17 @@ class TestVoiceOffLoop:
             # degradation ladder's voice_profile + notices; a
             # pipeline without the ladder surface (this fake)
             # reads as a full-profile session with no notices.
+            # Full Furnish Wave 4: the response also carries the
+            # effective speech settings the overlay displays —
+            # tts_voice (the configured default), stt_model (the
+            # ladder's effective model; this fake has none, so
+            # None) and stt_configured_model (what was asked for).
             assert start_ev.payload == {
                 "ok": True, "session_id": sid,
                 "webrtc_config": {"sdp": "fake-config"}, "error": None,
                 "voice_profile": "full", "notices": [],
+                "tts_voice": "af_heart", "stt_model": None,
+                "stt_configured_model": "small",
             }
             # Clean shutdown of the live session.
             _send(ws, EventType.VOICE_SESSION_STOP_REQUEST,

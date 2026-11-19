@@ -289,7 +289,8 @@ class TestMcpResponseContract:
         }
 
     def test_update_success_payload(self, ws_env, stack):
-        async def ok_update(name, *, auto_connect=None, enabled=None):
+        async def ok_update(name, *, auto_connect=None, enabled=None,
+                            confirmed=None, config=None):
             return {"transport": "streamable_http", "enabled": False}
 
         stack.enter_context(patch.object(
