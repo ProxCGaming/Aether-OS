@@ -56,6 +56,12 @@ dependencies = [
     "docx2txt==0.9",
     "mini-swe-agent==1.17.5",
     "gpt-researcher==0.17.0",
+    # Cap on gpt-researcher's transitive pymupdf: 2.x pulls
+    # onnxruntime into the CORE install (its layout engine), which
+    # breaks the voice-extra packaging contract (SileroVad's
+    # unavailable-reason ladder) and bloats the payload. 1.27.x is
+    # the last line without that dependency.
+    "pymupdf==1.27.2.3",
 ]
 
 # Skill registry CLI (Epic 7, E7-F09; addendum omp #28): install /
