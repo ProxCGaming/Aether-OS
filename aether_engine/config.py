@@ -199,6 +199,15 @@ class UserConfig:
     # rebuilt (the prose indexer drops its chunks on a switch).
     embedding_model: str = "qwen3-embedding:0.6b"
     agent_models: dict[str, str] = field(default_factory=dict)
+    # P4a (orchestration programme): which coder backend executes
+    # coder delegations. "native" (the default) is the built-in
+    # specialist loop in langgraph/nodes/runner.py — behaviour is
+    # byte-identical to pre-P4a. "miniswe" routes coder delegations
+    # to the mini-SWE-agent backend (langgraph/backends/), which
+    # runs in a throwaway worktree and returns a proposed diff;
+    # nothing it produces is applied to the live tree by the backend
+    # itself. The owner flips this; builders never do.
+    coder_backend: str = "native"
     agent_tools: dict[str, list[str]] = field(default_factory=dict)
     agent_skills: dict[str, list[str]] = field(default_factory=dict)
     # Epic 1, E1-11: supervisor spawn policy. The allow-list names the
@@ -492,6 +501,7 @@ class UserConfig:
             "repo_map_token_budget": self.repo_map_token_budget,
             "embedding_model": self.embedding_model,
             "agent_models": self.agent_models,
+            "coder_backend": self.coder_backend,
             "agent_tools": self.agent_tools,
             "agent_skills": self.agent_skills,
             "supervisor_spawn_allowlist": self.supervisor_spawn_allowlist,
@@ -636,6 +646,7 @@ class UserConfig:
             repo_map_token_budget=_as_int(d.get("repo_map_token_budget"), 1000),
             embedding_model=str(d.get("embedding_model") or "qwen3-embedding:0.6b"),
             agent_models=_as_dict(d.get("agent_models")),
+            coder_backend=d.get("coder_backend") if d.get("coder_backend") in ("native", "miniswe") else "native",
             agent_tools=_as_list_dict(d.get("agent_tools")),
             agent_skills=_as_list_dict(d.get("agent_skills")),
             supervisor_spawn_allowlist=_as_optional_str_list(d.get("supervisor_spawn_allowlist")),
