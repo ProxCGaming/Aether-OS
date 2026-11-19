@@ -112,6 +112,13 @@ async def test_coder_result_shape(monkeypatch):
     calls = _stub_save_artifact(monkeypatch, coder_module)
     result = await coder_module.coder_node(
         _state(), _config(StubProvider("print('hi')")))
+    # P2c step 2: the result also carries the round's offered-vs-
+    # called entry for the delegation log (no registry in this
+    # harness, so only the S13 spawn tool was offered).
+    (offer_entry,) = result.pop("delegation_log")
+    assert offer_entry["agent"] == "coder"
+    assert offer_entry["tools_offered"] == ["spawn_subagent"]
+    assert offer_entry["tools_called"] == []
     assert result == {
         "current_phase": "coding",
         "messages": [{"role": "assistant", "content": "print('hi')"}],
@@ -126,6 +133,12 @@ async def test_planner_result_shape(monkeypatch):
     calls = _stub_save_artifact(monkeypatch, planner_module)
     result = await planner_module.planner_node(
         _state(), _config(StubProvider("Step 1: scaffold.")))
+    # P2c step 2: offered-vs-called entry rides the result (see the
+    # coder shape test).
+    (offer_entry,) = result.pop("delegation_log")
+    assert offer_entry["agent"] == "planner"
+    assert offer_entry["tools_offered"] == ["spawn_subagent"]
+    assert offer_entry["tools_called"] == []
     assert result == {
         "current_phase": "planning",
         "plan": "Step 1: scaffold.",
@@ -145,6 +158,12 @@ async def test_researcher_result_shape_and_finding_derivation(monkeypatch):
         _state(), _config(StubProvider(raw)))
     expected_finding = "x" * 150 + " " + "y" * 49
     assert len(expected_finding) == 200
+    # P2c step 2: offered-vs-called entry rides the result (see the
+    # coder shape test).
+    (offer_entry,) = result.pop("delegation_log")
+    assert offer_entry["agent"] == "researcher"
+    assert offer_entry["tools_offered"] == ["spawn_subagent"]
+    assert offer_entry["tools_called"] == []
     assert result == {
         "current_phase": "researching",
         "blackboard": {"findings": [expected_finding]},

@@ -120,7 +120,10 @@ HANDED_OFF_FIELDS = (
     "subagent_timeout_s",
     "subagent_token_budget",
     "subagent_cost_budget_usd",
+    "delegation_settings",
     "model_routing",
+    "learned_routing",
+    "learned_router_artefact",
     "voice_speculation_enabled",
     "computer_use_enabled",
     "computer_use_observe",
@@ -481,6 +484,23 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
             "subagent_cost_budget_usd",
             config_data["subagent_cost_budget_usd"], 0.0, 10_000.0)
 
+    # P1e: the delegation settings block, validated strictly by
+    # its owning module (delegation_settings.py): enums, ranges,
+    # per-agent rows, unknown keys refused. The composed cap /
+    # cost fields are refused as block keys there — they are
+    # written through supervisor_delegation_cap /
+    # subagent_cost_budget_usd above and read into the schema by
+    # the resolver, so a block copy would store a value nothing
+    # reads. delegation_settings_version is engine-managed (the
+    # migration owns it) and is not Settings-writable.
+    if "delegation_settings" in config_data:
+        from aether_engine.delegation_settings import (
+            validate_delegation_settings,
+        )
+
+        cleaned["delegation_settings"] = validate_delegation_settings(
+            config_data["delegation_settings"])
+
     # S14: model routing is a closed two-value mode, validated like
     # memory_backend — an unknown value is refused (naming the valid
     # set), never coerced, so the Settings toggle can only ever store
@@ -494,6 +514,29 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
             raise _fail("model_routing",
                         f"unknown mode {value!r} (valid: off, auto)")
         cleaned["model_routing"] = mode
+
+    # P3a: the learned router's mode is a closed two-value set,
+    # validated like model_routing. There is deliberately no
+    # "active" value to refuse-or-accept: activation is Gate 5,
+    # an owner decision on shadow evidence, and the Settings
+    # toggle can only ever store a mode the scorer implements —
+    # "off", or "shadow" (compute and log the would-be choice;
+    # the heuristic's choice always serves).
+    if "learned_routing" in config_data:
+        value = config_data["learned_routing"]
+        if not isinstance(value, str) or not value.strip():
+            raise _fail("learned_routing", "must be a learned routing mode")
+        mode = value.strip().lower()
+        if mode not in ("off", "shadow"):
+            raise _fail("learned_routing",
+                        f"unknown mode {value!r} (valid: off, shadow)")
+        cleaned["learned_routing"] = mode
+
+    if "learned_router_artefact" in config_data:
+        value = config_data["learned_router_artefact"]
+        if not isinstance(value, str):
+            raise _fail("learned_router_artefact", "must be a path string")
+        cleaned["learned_router_artefact"] = value.strip()
 
     if "prewalk_agents" in config_data:
         cleaned["prewalk_agents"] = _str_list(

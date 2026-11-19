@@ -57,6 +57,33 @@ def _clean_desktop_app_rules(raw: Any) -> list:
 
     return clean_app_rules(raw)
 
+
+def _default_delegation_settings() -> dict:
+    """P1e: the UserConfig default for the delegation settings
+    block — delegation_settings.py owns the schema; the lazy import
+    follows the desktop-policy pattern above."""
+    from aether_engine.delegation_settings import (
+        default_delegation_settings,
+    )
+
+    return default_delegation_settings()
+
+
+def _migrate_delegation_settings(d: dict) -> dict:
+    """P1e: run the delegation-settings migration over a stored
+    config dict (delegation_settings.py owns the migration; it
+    folds the legacy agent_models pins into the block's rows)."""
+    from aether_engine.delegation_settings import (
+        migrate_delegation_settings,
+    )
+
+    agent_models = d.get("agent_models")
+    return migrate_delegation_settings(
+        d.get("delegation_settings"),
+        agent_models=agent_models if isinstance(agent_models, dict) else {},
+        stored_version=d.get("delegation_settings_version"),
+    )
+
 # ---------------------------------------------------------------------------
 # Base provider registry metadata (URLs, icons, display names)
 # ---------------------------------------------------------------------------
@@ -187,6 +214,16 @@ class UserConfig:
     # keyed provider's failure happens ONLY when explicitly enabled.
     search_provider: str = "ddgs"
     search_fallback_to_ddgs: bool = False
+    # P4d step 4 (K-13): the knowledge-base reranker stage
+    # (knowledge/rerank.py) is wired into search but OPT-IN, and
+    # this is the switch. Measured reason, recorded in
+    # tests/test_p4d_collections_rerank.py: on the programme's
+    # offline eval harness the embedding-cosine reranker degrades
+    # retrieval (hit@3 1.00 → 0.95, MRR@3 0.942 → 0.867) because
+    # the harness's fake embedder makes cosine ranks noise. The
+    # stage ships ready; enable it when a measured real embedder
+    # (or the P3b local tier serving a cross-encoder) justifies it.
+    knowledge_rerank: bool = False
     # Epic 2, E2-08: approval mode. "ask" = today's behaviour (every
     # non-read-only call asks unless a path rule allows it). "write" =
     # WRITE-risk calls are auto-allowed like reads; EXECUTE and
@@ -215,6 +252,34 @@ class UserConfig:
     # rebuilt (the prose indexer drops its chunks on a switch).
     embedding_model: str = "qwen3-embedding:0.6b"
     agent_models: dict[str, str] = field(default_factory=dict)
+    # P4a/P4b (orchestration programme): which coder backend
+    # executes coder delegations. "native" (the default) is the
+    # built-in specialist loop in langgraph/nodes/runner.py —
+    # behaviour is byte-identical to pre-P4a. "miniswe" routes
+    # coder delegations to the mini-SWE-agent backend
+    # (langgraph/backends/), which runs in a throwaway worktree and
+    # returns a proposed diff; "openhands" routes them to the
+    # OpenHands strong tier (same wrapper discipline, Docker
+    # sandbox) — which reports itself unavailable-with-reason until
+    # the SDK packages are installed and Docker is present, so
+    # selecting it before then yields an honest failed delegation,
+    # never a fake run. Nothing either backend produces is applied
+    # to the live tree by the backend itself. The owner flips this;
+    # builders never do.
+    coder_backend: str = "native"
+    # Orchestration programme P2a (K-10): the coder verifier
+    # cascade (langgraph/coder_cascade.py). With coder_backend =
+    # "miniswe" AND model_routing = "auto" AND no coder pin, a
+    # coder delegation starts one tier DOWN on the backend, a
+    # deterministic verifier judges the completed attempt, and a
+    # rejection escalates — once to the decided tier, and (only
+    # with coder_cascade_two_step, the Gate 3 ladder switch) once
+    # more to the tier above. Default OFF at ship (the plan's
+    # rollback term): with the flag off, the backend path is
+    # exactly the pre-P2a single run. Default-on is a Gate 3
+    # follow-up decision using P0's measurement method.
+    coder_cascade: bool = False
+    coder_cascade_two_step: bool = False
     agent_tools: dict[str, list[str]] = field(default_factory=dict)
     agent_skills: dict[str, list[str]] = field(default_factory=dict)
     # Epic 1, E1-11: supervisor spawn policy. The allow-list names the
@@ -242,6 +307,34 @@ class UserConfig:
     subagent_timeout_s: int = 120
     subagent_token_budget: int = 20000
     subagent_cost_budget_usd: float = 0.0
+    # Orchestration programme P4c: per-run budget for the GPT
+    # Researcher backend behind the researcher's deep_research tool
+    # (langgraph/backends/researcher_gpt.py). Modelled on the S13
+    # cost budget above: a PER-RUN cap in USD, judged from the
+    # library's own recorded costs between its research and report
+    # stages; 0 (the default) disables the budget, in which case the
+    # wrapper's stage caps (iteration limits in the library config)
+    # are the only bound and the tool result says so. P1e's
+    # per-delegation budget, when it lands, supersedes this field as
+    # the budget source; the wrapper reads it through one resolver.
+    deep_research_cost_budget_usd: float = 0.0
+    # Orchestration programme P1e (K-04): the delegation settings
+    # schema — aether_engine/delegation_settings.py owns the shape,
+    # defaults, validation, migration and the single read path
+    # (resolve_delegation_settings) the supervisor, the specialist
+    # runner and S13 consume. delegation_settings_version is the
+    # block's schema version — the config's first versioned section
+    # (the composed-stack audit, RA2-03: no versioning existed
+    # before this). The block deliberately does NOT store
+    # max_delegations_per_turn or the per-delegation cost budget:
+    # for this transition release those live in
+    # supervisor_delegation_cap / subagent_cost_budget_usd above
+    # (their long-standing fields, still written by Settings) and
+    # the resolver composes them into the schema view — one
+    # storage source per field, so the two can never diverge.
+    delegation_settings: dict = field(
+        default_factory=_default_delegation_settings)
+    delegation_settings_version: int = 1
     # Master build S14: automatic per-agent model routing
     # (langgraph/model_routing.py). "off" (the default) is today's
     # behaviour exactly: an agent_models pin wins, "inherit" falls
@@ -253,6 +346,44 @@ class UserConfig:
     # is NEVER overridden in either mode, and the auxiliary_models
     # task classes keep their own resolution untouched.
     model_routing: str = "off"
+    # P2c Filter 2: task-based tool retrieval (tools/retrieval.py).
+    # "off" (the default) is today's behaviour exactly: a specialist
+    # is offered its whole Filter 1 ceiling set. "auto" narrows the
+    # offer per delegation to the top-K tools the task briefing
+    # retrieves, plus the agent's pinned essentials, with a
+    # confidence fallback to the full ceiling set — retrieval only
+    # ever narrows Filter 1's output, and Filter 3 (policy/approval
+    # at call time) is untouched either way. P1e's per-agent tool
+    # access surface supersedes this switch when it lands.
+    tool_retrieval: str = "off"
+    # P2c Filter 2's top-K; clamped to the plan's 8..12 range where
+    # it is read (tools/retrieval.py).
+    tool_retrieval_top_k: int = 10
+    # P3a: the learned router (langgraph/learned_router.py).
+    # "off" (the default) — the scorer is never loaded. "shadow" —
+    # on every auto-routed delegation the scorer ALSO computes the
+    # choice it would make and logs it (NODE_ACTIVITY, source
+    # "learned-shadow"); the heuristic router's choice is always
+    # the one that serves. There is deliberately no "active"
+    # value: activation is Gate 5, an owner decision on shadow
+    # evidence, and any other value loads as "off". Shadow only
+    # rides the auto path (it needs model_routing = "auto") and
+    # only with a trained artefact present; without one it is
+    # inert and logs nothing.
+    learned_routing: str = "off"
+    # P3a: path to the trained scorer artefact (JSON). "" (the
+    # default) means ~/.aether/learned_router.json. Artefacts are
+    # produced only by the offline training pipeline — training
+    # is a manual, versioned act, never an online loop.
+    learned_router_artefact: str = ""
+    # P1d: supervisor topology. "legacy" (the default) builds the
+    # supervisor with langgraph-supervisor's create_supervisor();
+    # "tools" builds the subagents-as-tools supervisor
+    # (langgraph/delegation.py) that replaces it. Dual-graph phase:
+    # legacy stays the default until the migration's flip criteria
+    # (differential characterisation pass + full gate) are met, and
+    # the flip removes this field's legacy branch with the library.
+    supervisor_pattern: str = "legacy"
     # Epic 1, E1-10: per-agent output schemas (agent name -> JSON-Schema
     # dict). When set, the agent's final answer must validate against
     # the schema; see aether_engine/langgraph/structured.py.
@@ -535,6 +666,12 @@ class UserConfig:
     llamacpp_models_dir: str = ""
 
     def __post_init__(self) -> None:
+        # Merge resolution (20 Nov 2026): the Furnish stack and the
+        # routing programme each added a __post_init__ to this class
+        # on their own branch; git's auto-merge kept both defs and
+        # Python would have run only the second. Both bodies live
+        # here now, in programme order — neither may be dropped.
+        #
         # Wave 6 (D-5 migration seed): a config that still
         # carries the retired fast-chat gate in its OFF position
         # — built directly with fast_chat_memory_enabled=False,
@@ -546,6 +683,19 @@ class UserConfig:
         # against an explicit pair value.
         if not self.fast_chat_memory_enabled and self.memory_use_enabled:
             self.memory_use_enabled = False
+        # P1e: from the moment the object exists, the delegation
+        # rows' model fields mirror agent_models (the live-written
+        # pin map) — the fold the load migration also runs, so a
+        # config built by hand (tests, layering) resolves the same
+        # rows as one loaded from disk. agent_models wins on any
+        # disagreement; see delegation_settings.fold_agent_models.
+        if isinstance(self.delegation_settings, dict) and self.agent_models:
+            from aether_engine.delegation_settings import (
+                fold_agent_models,
+            )
+
+            self.delegation_settings = fold_agent_models(
+                self.delegation_settings, self.agent_models)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -571,10 +721,14 @@ class UserConfig:
             "approval_binding_mode": self.approval_binding_mode,
             "search_provider": self.search_provider,
             "search_fallback_to_ddgs": self.search_fallback_to_ddgs,
+            "knowledge_rerank": self.knowledge_rerank,
             "workspace_roots": self.workspace_roots,
             "repo_map_token_budget": self.repo_map_token_budget,
             "embedding_model": self.embedding_model,
             "agent_models": self.agent_models,
+            "coder_backend": self.coder_backend,
+            "coder_cascade": self.coder_cascade,
+            "coder_cascade_two_step": self.coder_cascade_two_step,
             "agent_tools": self.agent_tools,
             "agent_skills": self.agent_skills,
             "supervisor_spawn_allowlist": self.supervisor_spawn_allowlist,
@@ -584,7 +738,15 @@ class UserConfig:
             "subagent_timeout_s": self.subagent_timeout_s,
             "subagent_token_budget": self.subagent_token_budget,
             "subagent_cost_budget_usd": self.subagent_cost_budget_usd,
+            "deep_research_cost_budget_usd": self.deep_research_cost_budget_usd,
+            "delegation_settings": self.delegation_settings,
+            "delegation_settings_version": self.delegation_settings_version,
             "model_routing": self.model_routing,
+            "tool_retrieval": self.tool_retrieval,
+            "tool_retrieval_top_k": self.tool_retrieval_top_k,
+            "learned_routing": self.learned_routing,
+            "learned_router_artefact": self.learned_router_artefact,
+            "supervisor_pattern": self.supervisor_pattern,
             "agent_output_schemas": self.agent_output_schemas,
             "prewalk_agents": self.prewalk_agents,
             "custom_slash_commands": self.custom_slash_commands,
@@ -744,10 +906,14 @@ class UserConfig:
             approval_binding_mode=d.get("approval_binding_mode") if d.get("approval_binding_mode") in ("rebind", "carry") else "rebind",
             search_provider=d.get("search_provider") if d.get("search_provider") in ("ddgs", "exa", "brave", "tavily", "firecrawl") else "ddgs",
             search_fallback_to_ddgs=bool(d.get("search_fallback_to_ddgs", False)),
+            knowledge_rerank=bool(d.get("knowledge_rerank", False)),
             workspace_roots=_clean_workspace_roots(d.get("workspace_roots")),
             repo_map_token_budget=_as_int(d.get("repo_map_token_budget"), 1000),
             embedding_model=str(d.get("embedding_model") or "qwen3-embedding:0.6b"),
             agent_models=_as_dict(d.get("agent_models")),
+            coder_backend=d.get("coder_backend") if d.get("coder_backend") in ("native", "miniswe", "openhands") else "native",
+            coder_cascade=bool(d.get("coder_cascade", False)),
+            coder_cascade_two_step=bool(d.get("coder_cascade_two_step", False)),
             agent_tools=_as_list_dict(d.get("agent_tools")),
             agent_skills=_as_list_dict(d.get("agent_skills")),
             supervisor_spawn_allowlist=_as_optional_str_list(d.get("supervisor_spawn_allowlist")),
@@ -757,7 +923,20 @@ class UserConfig:
             subagent_timeout_s=_as_int(d.get("subagent_timeout_s"), 120),
             subagent_token_budget=_as_int(d.get("subagent_token_budget"), 20000),
             subagent_cost_budget_usd=_as_float(d.get("subagent_cost_budget_usd"), 0.0),
+            deep_research_cost_budget_usd=_as_float(d.get("deep_research_cost_budget_usd"), 0.0),
+            # P1e: the migration runs over the raw stored dict (it
+            # needs the stored agent_models alongside the block);
+            # the version floors at 1 and a newer stored version is
+            # kept, so re-saving a newer file does not downgrade it.
+            delegation_settings=_migrate_delegation_settings(d),
+            delegation_settings_version=max(
+                1, _as_int(d.get("delegation_settings_version"), 1)),
             model_routing=d.get("model_routing") if d.get("model_routing") in ("off", "auto") else "off",
+            tool_retrieval=d.get("tool_retrieval") if d.get("tool_retrieval") in ("off", "auto") else "off",
+            tool_retrieval_top_k=_as_int(d.get("tool_retrieval_top_k"), 10),
+            learned_routing=d.get("learned_routing") if d.get("learned_routing") in ("off", "shadow") else "off",
+            learned_router_artefact=d.get("learned_router_artefact") if isinstance(d.get("learned_router_artefact"), str) else "",
+            supervisor_pattern=d.get("supervisor_pattern") if d.get("supervisor_pattern") in ("legacy", "tools") else "legacy",
             agent_output_schemas=_as_dict(d.get("agent_output_schemas")),
             prewalk_agents=d.get("prewalk_agents") if isinstance(d.get("prewalk_agents"), list) else [],
             custom_slash_commands=_as_dict(d.get("custom_slash_commands")),

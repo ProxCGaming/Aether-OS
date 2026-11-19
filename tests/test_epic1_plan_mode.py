@@ -4,7 +4,10 @@ In plan mode a specialist's tool list contains only READ_ONLY tools —
 write/execute/destructive tools (and MCP tools, EXECUTE by default) are
 never offered to the model. As a backstop, execute_tool refuses a risky
 pending call if one ever appears in plan-mode state. Outside plan mode
-nothing changes.
+the offer is governed by the per-agent tool ceiling (P2c Filter 1,
+tools/ceilings.py) — for the planner that is the same read-only set
+plus its scratchpad tools, so its plan-mode and normal-mode offers
+coincide; the coder's ceiling is the full set.
 """
 from types import SimpleNamespace
 
@@ -78,21 +81,36 @@ async def test_plan_mode_offers_only_read_only_tools(monkeypatch):
         # Epic 8, E8-4.3: media_recall is READ_ONLY media-index
         # retrieval, offered on the same basis.
         "media_recall",
+        # P4d (orchestration programme): search_knowledge_base is
+        # READ_ONLY knowledge-collection retrieval, offered on the
+        # same basis.
+        "search_knowledge_base",
         # Calendar layer (14 Nov 2026): list_events is READ_ONLY
         # diary retrieval, offered on the same basis; its WRITE
         # siblings (add_event / cancel_event) stay out of plan mode.
         "list_events",
+        # Orchestration programme P4c: deep_research is READ_ONLY
+        # (the GPT Researcher backend reads the web; its only write
+        # is the task's own artifact record), offered on the same
+        # basis as the other readers.
+        "deep_research",
     }
 
 
 @pytest.mark.asyncio
-async def test_normal_mode_offers_everything(monkeypatch):
+async def test_normal_mode_offers_the_planners_ceiling(monkeypatch):
+    # Was test_normal_mode_offers_everything (Epic 1): outside plan
+    # mode the planner was offered the full registry. P2c Filter 1
+    # (18 Nov 2026) replaces that with the per-agent ceiling — the
+    # planner's is read + scratchpad in EVERY mode; plan mode remains
+    # a separate, additional filter below the ceiling.
     monkeypatch.setattr(planner_module, "save_artifact", lambda *a, **k: "/tmp/p.txt")
     registry = build_tool_registry()
     provider = StubProvider("a plan")
     await planner_module.planner_node(_state(plan_mode=False), _config(provider, registry))
     names = {t["function"]["name"] for t in provider.seen_tools}
-    assert {"write_file", "delete_file", "execute_shell"} <= names
+    assert {"read_file", "search_web", "scratchpad_render"} <= names
+    assert not {"write_file", "delete_file", "execute_shell"} & names
 
 
 class CountingRegistry:

@@ -114,7 +114,9 @@ def _tap_entry(task_id: str) -> dict[str, Any]:
             "error": None,
             "delegations": [],
             "subagents": [],
+            "parallel_groups": [],
             "model_routing": [],
+            "model_cascade": [],
             "desktop_actions": [],
             "tool_calls": [],
             "node_activity": [],
@@ -188,10 +190,57 @@ def record_executor_event(task_id: str | None, event: Any) -> None:
                     "provider": out.get("provider"),
                     "model": out.get("model"),
                     "tier": out.get("tier"),
+                    # P1a: whether the tier need was the supervisor's
+                    # explicit statement or the router's inference —
+                    # P3a's dataset separates the two by this field.
+                    "tier_source": out.get("tier_source"),
                     "routing_source": out.get("source") or (
                         "escalation" if action == "model_escalation" else "auto"),
                     "reason": out.get("reason") or payload.get("reason", ""),
                     "escalated_from": out.get("escalated_from"),
+                    "timestamp": ts,
+                    "source": "executor_event",
+                })
+            elif action == "parallel_group":
+                # P2b: one parallel delegation group, recorded as
+                # ONE unit with per-member outcomes — the fan-out
+                # is a single visible act in the ledger, while the
+                # members' own delegation transitions still land in
+                # "delegations" individually (they are real
+                # delegations and consume the cap individually).
+                out = payload.get("output_payload") or {}
+                _tap_append(entry, "parallel_groups", {
+                    "group_id": out.get("group_id"),
+                    "scheduling": out.get("scheduling"),
+                    "degraded_reason": out.get("degraded_reason") or None,
+                    "members": [
+                        {"agent": m.get("agent"), "status": m.get("status")}
+                        for m in (out.get("members") or [])
+                        if isinstance(m, dict)
+                    ],
+                    "status": out.get("status") or payload.get("status"),
+                    "timestamp": ts,
+                    "source": "executor_event",
+                })
+            elif action == "model_cascade":
+                # P2a: one verifier-cascade attempt for a coder
+                # delegation (cheap rung first, escalate on
+                # rejection). Recorded under its own list — an
+                # attempt is neither a delegation nor a routing
+                # decision — and rendered as the plan's one-line
+                # trail in task_summary.
+                out = payload.get("output_payload") or {}
+                _tap_append(entry, "model_cascade", {
+                    "agent": payload.get("from_node"),
+                    "attempt": out.get("attempt"),
+                    "tier": out.get("tier"),
+                    "tier_name": out.get("tier"),
+                    "model": out.get("model"),
+                    "backend": out.get("backend"),
+                    "verifier": out.get("verifier"),
+                    "verdict": out.get("verdict"),
+                    "reason": out.get("reason") or payload.get("reason", ""),
+                    "status": out.get("status") or payload.get("status"),
                     "timestamp": ts,
                     "source": "executor_event",
                 })
@@ -774,6 +823,15 @@ def _merge_approvals(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 # ── The joined summary ───────────────────────────────────────────────
 
+def _cascade_summary(records: list[dict[str, Any]]) -> str:
+    """The P2a one-line cascade trail for the summary, rendered
+    by the cascade module itself so the ledger and the coder
+    node's own message can never drift apart."""
+    from aether_engine.langgraph.coder_cascade import cascade_summary_line
+
+    return cascade_summary_line(records)
+
+
 def _annotate_delegation_models(
     delegations: list[dict[str, Any]],
     routing_records: list[dict[str, Any]],
@@ -843,6 +901,8 @@ async def task_summary(
     routing_records = (tap or {}).get("model_routing") or []
     if routing_records:
         _annotate_delegation_models(delegations, routing_records)
+    # P2a (additive): the live tap's cascade attempts, raw.
+    cascade_records = (tap or {}).get("model_cascade") or []
     tool_calls = (checkpoint or {}).get("tool_calls") or (tap or {}).get("tool_calls") or []
     files = list((checkpoint or {}).get("files_touched") or [])
     for path in _files_from_tool_calls(tool_calls):
@@ -928,9 +988,19 @@ async def task_summary(
         # delegations above are annotated from these; the raw list
         # stays available for surfaces that want the full trail.
         "model_routing": routing_records,
+        # P2a (additive): the verifier-cascade attempts for this
+        # task's coder delegations, in order, plus the plan's
+        # one-line trail ("coder: small → rejected (tests) →
+        # standard ✓") rendered from them.
+        "model_cascade": cascade_records,
+        "cascade_summary": (
+            _cascade_summary(cascade_records) if cascade_records else None),
         # S20 (additive): the tap's desktop-actuation records for
         # this task (category / app / via / status per action).
         "desktop_actions": (tap or {}).get("desktop_actions") or [],
+        # P2b (additive): the tap's parallel-group records for this
+        # task — one per fan-out, with per-member outcomes.
+        "parallel_groups": (tap or {}).get("parallel_groups") or [],
         # S4 (additive): the checkpointed delegation counter for the
         # task's turn, or None when no checkpoint carries one.
         "delegation_count": (checkpoint or {}).get("delegation_count"),
@@ -1089,6 +1159,15 @@ def task_briefing(summary: dict[str, Any], *, max_chars: int = BRIEFING_MAX_CHAR
             + (f" ({str(d.get('reason'))[:60]})" if d.get("reason") else "")
             for d in delegations[:6])
         parts.append(f"Delegations: {rendered}")
+    parallel_groups = summary.get("parallel_groups") or []
+    if parallel_groups:
+        rendered = "; ".join(
+            f"{g.get('scheduling') or 'sequential'} group: "
+            + ", ".join(
+                f"{m.get('agent') or '?'} ({m.get('status') or '?'})"
+                for m in (g.get("members") or []))
+            for g in parallel_groups[:4])
+        parts.append(f"Parallel delegations: {rendered}")
     subagents = summary.get("subagents") or []
     if subagents:
         rendered = ", ".join(

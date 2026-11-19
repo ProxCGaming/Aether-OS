@@ -119,6 +119,30 @@ def price_call(
     return PriceResult(cost_usd=0.0, status="unpriced", is_local=False)
 
 
+def static_price_estimate(
+    model: str,
+    provider_name: str,
+    *,
+    input_tokens: int = 1000,
+    output_tokens: int = 1000,
+) -> float | None:
+    """The static cost of a nominal call, for routing (P1b).
+
+    Prices ``input_tokens``/``output_tokens`` through
+    :func:`price_call` — the ledger's one source of truth — so a
+    routing estimate can never drift from the rates the ledger
+    itself charges. Returns None for an ``unpriced`` model:
+    unpriced is NOT free, and routing must keep treating such a
+    model as cost-unknown rather than cheapest. Local models
+    return 0.0, because they are priced — at zero.
+    """
+    result = price_call(
+        model, provider_name, input_tokens, output_tokens)
+    if result.status == "unpriced":
+        return None
+    return result.cost_usd
+
+
 def estimate_token_counts(
     *,
     model: str,

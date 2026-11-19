@@ -148,6 +148,17 @@ def build_tool_registry(
     from aether_engine.tools.media_recall import create_media_recall_tool
 
     _add(create_media_recall_tool())
+    # P4d (orchestration programme): deliberate retrieval over the
+    # owner's knowledge collections (knowledge/). READ_ONLY and
+    # self-limiting — with nothing indexed it answers "nothing
+    # indexed" instead of failing. Registered via _add like every
+    # other built-in so the D4-8 Disabled set applies to it too
+    # (merge resolution, 20 Nov 2026).
+    from aether_engine.tools.knowledge_search import (
+        create_search_knowledge_base_tool,
+    )
+
+    _add(create_search_knowledge_base_tool())
     # Calendar layer (14 Nov 2026): the schedule tools — add / list /
     # cancel over ~/.aether/calendar.db. WRITE tools ride the same
     # policy + approval pipeline as every other built-in.
@@ -163,6 +174,19 @@ def build_tool_registry(
     if include_web_tools:
         for tool in create_web_tools():
             _add(tool)
+    # Orchestration programme P4c: the deep_research tool — GPT
+    # Researcher behind the researcher specialist
+    # (langgraph/backends/researcher_gpt.py). READ_ONLY, so the
+    # researcher's P2c ceiling admits it; registered unconditionally
+    # like the browser/desktop tools — when the backend cannot run
+    # (no resolvable model, library missing) the tool itself returns
+    # an honest error result naming the cause. Via _add so the D4-8
+    # Disabled set applies (merge resolution, 20 Nov 2026).
+    from aether_engine.langgraph.backends.researcher_gpt import (
+        create_deep_research_tool,
+    )
+
+    _add(create_deep_research_tool())
     # Epic 8, E8-6.1: agent-browser tools. Registered like every
     # other built-in — risk levels attached, the policy pipeline
     # applies unchanged; the tools themselves fail closed when

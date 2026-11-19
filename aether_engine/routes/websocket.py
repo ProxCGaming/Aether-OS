@@ -506,6 +506,20 @@ async def ws_tasks(ws: WebSocket):
         lambda: default_vision_provider(
             engine_state.user_config, secret_store))
 
+    # Orchestration programme P4c: the deep_research backend (GPT
+    # Researcher) reads the live user config and THIS connection's
+    # secret store through the same module-global seam pattern —
+    # installed here, restored on disconnect with the rest (N-43).
+    from aether_engine.langgraph.backends.researcher_gpt import (
+        DeepResearchRuntime,
+        set_deep_research_runtime_loader,
+    )
+
+    _prev_deep_research_loader = set_deep_research_runtime_loader(
+        lambda: DeepResearchRuntime(
+            user_config=engine_state.user_config,
+            secret_store=secret_store))
+
     # N07: forward production-analyzer events (MEDIA_ANALYSIS_PROGRESS
     # / MEDIA_ANALYZED) to this connection so the Media Library
     # reflects analysis state live. Analysis is triggered from many
@@ -580,6 +594,7 @@ async def ws_tasks(ws: WebSocket):
         set_browser_policy_loader(_prev_browser_policy_loader)
         set_desktop_policy_loader(_prev_desktop_policy_loader)
         set_vision_provider_resolver(_prev_vision_resolver)
+        set_deep_research_runtime_loader(_prev_deep_research_loader)
 
     try:
         while True:
@@ -2706,6 +2721,16 @@ async def _handle_agent_update_request(conn: WsConnection, msg: Event) -> None:
     else:
         if model is not None:
             engine_state.user_config.agent_models[agent_id] = model
+            # P1e: keep the delegation-settings row for this agent
+            # in step with the pin on the live object (the load
+            # migration folds agent_models into the rows; this is
+            # the same fold for a write that happens after load).
+            from aether_engine.delegation_settings import (
+                sync_agent_model_row,
+            )
+
+            sync_agent_model_row(
+                engine_state.user_config, agent_id, model)
         if tools is not None:
             engine_state.user_config.agent_tools[agent_id] = tools
         # E1-10: a save failure is reported in the same

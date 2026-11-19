@@ -528,6 +528,24 @@ def _resolve_supervisor_provider(config: RunnableConfig):
     if pin_targets_unusable_model(agent_model_override):
         note_pin_refused("supervisor", agent_model_override)
         agent_model_override = None
+    # P1e step 3: a tier alias as the supervisor's model value
+    # resolves through the S14 registry tiers, exactly as in the
+    # specialist runner — a pin-class directive naming a tier, not
+    # a model. Consumed here so the "provider:model" split below
+    # never sees it; an unresolvable alias degrades to the graph
+    # provider, the pin path's failure doctrine.
+    from aether_engine.delegation_settings import is_tier_alias
+
+    if agent_model_override and is_tier_alias(agent_model_override):
+        if secret_store:
+            from aether_engine.langgraph import model_routing as _routing
+
+            _alias_provider = _routing.resolve_alias_provider(
+                agent="supervisor", alias=agent_model_override,
+                config=config, run_provider=provider)
+            if _alias_provider is not None:
+                provider = _alias_provider
+        agent_model_override = None
     if agent_model_override and agent_model_override != "inherit" and secret_store:
         try:
             parts = agent_model_override.split(":", 1)
@@ -584,18 +602,34 @@ def _decision_from_text(content: str, available_nodes: list[str]) -> dict:
         return {"next": fallback_node, "reason": f"Failed to parse supervisor decision: {content_clean[:100]}", "briefing": ""}
 
 
-def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: list[str], *, tool_mode: bool = False) -> str:
+def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: list[str], *, tool_mode: bool = False, delegation_tools: bool = False) -> str:
     """Build the supervisor's routing prompt.
 
     ``tool_mode=False`` is the original prompt format (JSON decision
     output). ``tool_mode=True`` swaps the decision format for
     transfer-tool delegation, used by the create_supervisor routing
     prompt; everything else (memory guidance, anti-hallucination
-    rules) is identical.
+    rules) is identical. ``delegation_tools=True`` (P1d) swaps the
+    transfer wording for the subagents-as-tools supervisor's
+    delegation tools, whose briefing argument is how retrieved
+    facts reach the specialist.
     """
     options_str = "'" + "', '".join(available_nodes) + "'"
     immediate = "make your routing decision immediately" if tool_mode else "output your JSON routing decision immediately"
-    if tool_mode:
+    if tool_mode and delegation_tools:
+        decision_rules = (
+            "3. Facts you retrieve from memory tools reach the specialist through the delegation call's briefing argument. "
+            "Do NOT infer or hallucinate history — only put briefing context you actually retrieved.\n"
+            "4. To delegate, call the matching delegation tool for exactly one specialist "
+            f"({options_str}), passing the retrieved facts as its briefing argument; put the operational goal for the specialist in your reply text alongside the call. "
+            "To finish the task, reply with plain text and call no tool."
+            "\n5. When two sub-tasks are fully independent and both are research or planning, you may delegate them together "
+            "with delegate_in_parallel (a researcher+planner pair, or two independent researcher questions): each member "
+            "receives ONLY its own task text plus the shared blackboard — not this conversation — so state each member's "
+            "task completely. Never use it for the coder, and never when one sub-task needs the other's result; delegate "
+            "those one at a time instead. The results return together, in the order you declared them."
+        )
+    elif tool_mode:
         decision_rules = (
             "3. Facts you retrieve from memory tools are shared with the specialist automatically. "
             "Do NOT infer or hallucinate history — only use briefing context you actually retrieved.\n"
@@ -612,6 +646,18 @@ def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: 
             "   - 'reason': a concise description of the operational goal for the specialist\n"
             "   - 'briefing': ONLY facts retrieved from memory tools (empty string if no tool was called)"
         )
+    # P1a: the tier instruction — the supervisor states the model
+    # tier each delegation needs as a tag opening its briefing,
+    # instead of leaving the router to guess complexity from the
+    # briefing's length and keywords. The post-model hook parses
+    # and strips the tag (supervisor_model.parse_tier_tag), so the
+    # statement reaches the router and never the specialist.
+    decision_rules += (
+        "\n5. Tier marking: begin each briefing with a tier tag naming the model tier the delegation needs — "
+        "[tier: small] = mechanical or short work; [tier: standard] = ordinary specialist work; "
+        "[tier: strong] = deep reasoning, hard debugging, architecture. "
+        "The tag is consumed by the router and stripped before the specialist sees the briefing."
+    )
     # Epic 7, E7-04: stage-1 skill disclosure — the supervisor sees
     # the summary catalog (never bodies) so it can route with skill
     # awareness; full instructions load only for activated skills.

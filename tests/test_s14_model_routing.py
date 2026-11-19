@@ -557,7 +557,13 @@ def test_effective_models_report_shapes(monkeypatch):
     assert by_agent["coder"]["model"] == "gpt-4o"
     assert by_agent["supervisor"]["source"] == "run_default"
     assert by_agent["researcher"]["source"] == "auto"
-    assert by_agent["researcher"]["model"] == "gemini-3.5-flash"
+    # P1b: the neutral cold-start decision is no longer an
+    # automatic incumbent win — gemini-2.0-flash's static price
+    # estimate is cheaper than the incumbent gemini-3.5-flash's,
+    # so the never-run cheaper model wins its first run, and the
+    # reason says the pick was estimate-based.
+    assert by_agent["researcher"]["model"] == "gemini-2.0-flash"
+    assert "estimated price" in by_agent["researcher"]["reason"]
     assert by_agent["researcher"]["reason"]
 
 

@@ -16,6 +16,7 @@ exactly as it did when the body lived in each node module.
 """
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -41,6 +42,27 @@ from aether_engine.langgraph.state import (
 from aether_engine.langgraph.structured import apply_output_schema
 from aether_engine.langgraph.thinking import forward_thinking
 from aether_engine.providers.base import ProviderError
+
+
+def _tool_offer_entry(agent: str, offered: list, called: list) -> dict:
+    """P2c step 2: one offered-vs-called record for a specialist model
+    round, appended to ``delegation_log`` beside the supervisor's
+    decision entries.
+
+    The entry carries no ``decision`` key, and every existing reader
+    of the log keys on ``decision.next`` and skips it
+    (``delegation_briefing``, the executor's delegation event, the
+    Task Ledger, S14's briefing lookup). Its consumers are P2a's
+    cascade and P3a's learned router: which offered tools a
+    delegation never calls, and whether a call ever lands outside
+    the offer.
+    """
+    return {
+        "agent": agent,
+        "timestamp": time.time(),
+        "tools_offered": list(offered),
+        "tools_called": list(called),
+    }
 
 
 @dataclass(frozen=True)
@@ -85,6 +107,7 @@ async def run_specialist(
     # on the run's default provider — the model selected in Settings.
     # Without this, the pin constructs fine and the provider call
     # 404s mid-run, failing the whole task.
+    from aether_engine.delegation_settings import is_tier_alias
     from aether_engine.langgraph.model_routing import (
         note_pin_refused,
         pin_targets_unusable_model,
@@ -103,6 +126,26 @@ async def run_specialist(
     # the agent plans on the run's (strong) provider instead.
     _uc = config.get("configurable", {}).get("user_config")
     if agent_model_override and spec.name in (getattr(_uc, "prewalk_agents", None) or []) and not state.get("write_tool_used"):
+        agent_model_override = None
+    # P1e step 3: a tier alias ("strong" / "balanced" / "cheap" /
+    # "local") as the agent's model value is a pin-class directive
+    # that names a tier, not a model: it resolves through the S14
+    # registry tiers to a concrete provider for this run's pool, at
+    # the pin's own seam — so the pin doctrine (never auto-routed,
+    # never escalated, per _pin_present above) and the prewalk
+    # split apply unchanged. An alias that cannot resolve degrades
+    # to the run provider, the pin path's failure doctrine; either
+    # way the value is consumed here, so the "provider:model" split
+    # below never sees it.
+    if agent_model_override and is_tier_alias(agent_model_override):
+        if secret_store:
+            from aether_engine.langgraph import model_routing as _routing
+
+            _alias_provider = _routing.resolve_alias_provider(
+                agent=spec.name, alias=agent_model_override,
+                config=config, run_provider=provider)
+            if _alias_provider is not None:
+                provider = _alias_provider
         agent_model_override = None
     if agent_model_override and agent_model_override != "inherit" and secret_store:
         try:
@@ -168,26 +211,74 @@ async def run_specialist(
     registry = config.get("configurable", {}).get("tool_registry")
     all_tools = registry.get_definitions() if registry else []
 
-    allowed_tools = agent_tools.get(spec.name)
-    if allowed_tools is not None and isinstance(allowed_tools, list):
-        import copy
-        used_tools = set()
-        for msg in message_dicts(state.get("messages", [])):
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                for tc in msg.get("tool_calls"):
-                    if isinstance(tc, dict):
-                        used_tools.add(tc.get("function", {}).get("name"))
-        tools = []
-        for t in all_tools:
-            t_name = t.get("function", {}).get("name")
-            if t_name in allowed_tools:
-                tools.append(t)
-            elif t_name in used_tools:
-                disabled_t = copy.deepcopy(t)
-                disabled_t["function"]["description"] = "DO NOT USE THIS TOOL. IT IS CURRENTLY DISABLED FOR YOUR ROLE."
-                tools.append(disabled_t)
+    # P2c Filter 1: the per-agent tool ceiling (tools/ceilings.py)
+    # supersedes the legacy `agent_tools` allow-list at this
+    # resolution point. A legacy list still applies when configured,
+    # but only as an intersection — it narrows the ceiling, never
+    # widens it. A tool already used in this conversation is kept
+    # with a DO NOT USE description instead of being removed (the
+    # legacy behaviour), so in-flight calls never dangle. The
+    # plan-mode and desktop-actuation filters below stay separate,
+    # later concerns — they are not ceilings and are not merged in.
+    from aether_engine.tools.ceilings import apply_tool_ceiling
+
+    used_tools = set()
+    for msg in message_dicts(state.get("messages", [])):
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tc in msg.get("tool_calls"):
+                if isinstance(tc, dict):
+                    used_tools.add(tc.get("function", {}).get("name"))
+    _legacy_allowed = agent_tools.get(spec.name)
+    # P1e: the agent's tool_access mode (delegation settings,
+    # resolved through the single read path) governs how the
+    # legacy list participates. "manual" (the default) is today's
+    # behaviour — the list narrows the ceiling when one exists.
+    # "all-allowed" is Filter-1 ceiling only: the list is set
+    # aside entirely. "auto" (P2c Filter-2 retrieval) has not
+    # landed — until K-03 the manual semantics apply and the gap
+    # is logged, never silent (the schema reports the mode
+    # unavailable-with-reason; tool_top_k is read by Filter 2
+    # when it lands).
+    from aether_engine.delegation_settings import (
+        resolve_delegation_settings,
+    )
+
+    _tool_access = resolve_delegation_settings(_uc).agent(
+        spec.name).tool_access
+    if _tool_access == "all-allowed":
+        _legacy_allowed = None
+    elif _tool_access == "auto":
+        logger.warning(
+            "%s: tool_access 'auto' requested but P2c Filter-2 "
+            "retrieval has not landed; applying the Filter-1 "
+            "ceiling plus any manual list", spec.display_name)
+    if registry is not None and hasattr(registry, "get_tools"):
+        risk_by_name = {t.name: t.risk for t in registry.get_tools()}
+    elif registry is not None:
+        # Narrow registry doubles (older test stubs) may expose only
+        # the pre-P2c surface — definitions + read_only_names. Judge
+        # everything not known read-only as EXECUTE (fail closed,
+        # the registry's own default for an unlabelled tool).
+        from aether_engine.tools.registry import ToolRisk as _ToolRisk
+
+        _read_only = (registry.read_only_names()
+                      if hasattr(registry, "read_only_names") else set())
+        risk_by_name = {}
+        for _definition in all_tools:
+            _name = _definition.get("function", {}).get("name")
+            if _name:
+                risk_by_name[_name] = (_ToolRisk.READ_ONLY
+                                       if _name in _read_only
+                                       else _ToolRisk.EXECUTE)
     else:
-        tools = all_tools
+        risk_by_name = {}
+    tools = apply_tool_ceiling(
+        spec.name,
+        all_tools,
+        risk_by_name,
+        legacy_allowed=_legacy_allowed if isinstance(_legacy_allowed, list) else None,
+        used_names=used_tools,
+    )
 
     # Plan mode (Epic 1, E1-09): only READ_ONLY tools are even offered.
     if state.get("plan_mode") and registry:
@@ -210,6 +301,38 @@ async def run_specialist(
         tools = [t for t in tools
                  if t.get("function", {}).get("name") not in DESKTOP_TOOL_NAMES]
 
+    # P2c Filter 2: task-based retrieval inside the Filter 1 set
+    # (tools/retrieval.py). Off by default (UserConfig.tool_retrieval)
+    # — with it off this block is inert and the offer is exactly the
+    # filtered set above, as pre-P2c-step-3. In "auto" it narrows the
+    # offer to the briefing's top-K plus the agent's pinned
+    # essentials, falling back to the full set when the set is small
+    # or retrieval has no signal. It runs after the ceiling,
+    # plan-mode and desktop filters (it may only narrow their output,
+    # never widen it) and before the S13 spawn append below, which is
+    # not a registry tool and is not retrieval's to judge. Filter 3
+    # (the policy/approval gate at call time) is untouched.
+    from aether_engine.tools.retrieval import (
+        apply_tool_retrieval,
+        tool_retrieval_mode,
+        tool_retrieval_top_k,
+    )
+
+    if tool_retrieval_mode(_uc) == "auto":
+        _query_parts = [state.get("original_prompt") or "",
+                        state.get("context_briefing") or ""]
+        _plan = state.get("plan") or ""
+        if _plan and _plan != "No plan currently.":
+            _query_parts.append(_plan)
+        tools = apply_tool_retrieval(
+            spec.name,
+            tools,
+            risk_by_name,
+            query="\n".join(part for part in _query_parts if part),
+            top_k=tool_retrieval_top_k(_uc),
+            used_names=used_tools,
+        )
+
     # S13: bounded sub-agent spawning — a specialist may spawn a
     # bounded sub-agent for a focused sub-task (langgraph/subagents).
     # Offered only; every bound is enforced at execution time in
@@ -231,6 +354,12 @@ async def run_specialist(
 
         if subagent_settings(_uc).enabled:
             tools = [*tools, spawn_tool_definition()]
+
+    # P2c step 2: the offered set for this model round — every filter
+    # above has run, so this is exactly what the model is about to be
+    # offered. Recorded with the round's calls at the returns below
+    # (see _tool_offer_entry).
+    offered_names = [t.get("function", {}).get("name") for t in tools]
 
     plan_text = state.get("plan", "")
     plan_info = f"\nCurrent Plan & Context:\n{plan_text}\n" if plan_text and plan_text != "No plan currently." else ""
@@ -288,6 +417,18 @@ async def run_specialist(
             getattr(provider_obj, "model", None),
             spec.name, outcome)
 
+    def _note_rate_limit(provider_obj: Any, exc: BaseException) -> None:
+        # P1b: the S14 outcome seam is one of the two places 429s
+        # surface with a provider identity attached — record the
+        # rate-limit evidence the headroom signal learns from.
+        # Observational only (routing.headroom never raises).
+        from aether_engine.routing.headroom import note_rate_limit
+
+        note_rate_limit(
+            exc,
+            getattr(provider_obj, "provider_name", None) or "",
+            getattr(provider_obj, "model", None))
+
     async def _stream_round(provider_obj):
         """One model round on ``provider_obj``.
 
@@ -325,6 +466,7 @@ async def run_specialist(
     if stream_error is not None:
         if isinstance(stream_error, ProviderError):
             _record_outcome(provider, "failure")
+            _note_rate_limit(provider, stream_error)
         # S14 escalation: ONE step up to the next tier, only for
         # an auto-routed (unpinned) invocation, only for a typed
         # provider failure that arrived before ANY output streamed
@@ -366,6 +508,7 @@ async def run_specialist(
         if stream_error is not None:
             if isinstance(stream_error, ProviderError):
                 _record_outcome(provider, "failure")
+                _note_rate_limit(provider, stream_error)
             raise stream_error
 
     if accumulated_tool_calls:
@@ -393,6 +536,10 @@ async def run_specialist(
             "messages": [assistant_msg],
             "pending_tool_call": pending,
             "queued_tool_calls": queued,
+            "delegation_log": [_tool_offer_entry(
+                spec.name, offered_names,
+                [tc["function"]["name"]
+                 for tc in assistant_tool_calls(accumulated_tool_calls)])],
         }
 
     # E1-10: validate against the specialist's output schema, if configured.
@@ -466,6 +613,9 @@ async def run_specialist(
         _record_outcome(provider, "success")
 
     result = {"current_phase": spec.phase}
+    # P2c step 2: this round offered tools and called none (a final
+    # answer) — the offer still belongs in the record.
+    result["delegation_log"] = [_tool_offer_entry(spec.name, offered_names, [])]
     if spec.tail_extras is not None:
         result.update(spec.tail_extras(content))
     result["messages"] = [{"role": "assistant", "content": content}]

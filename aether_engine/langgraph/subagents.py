@@ -97,6 +97,7 @@ from langgraph.types import Command, interrupt
 
 from aether_common.contracts import Event, EventType
 from aether_engine.cost.ledger import get_usage_ledger, usage_context
+from aether_engine.delegation_settings import resolve_delegation_settings
 from aether_engine.event_bus import event_bus
 
 logger = logging.getLogger("aether_engine.langgraph.subagents")
@@ -169,8 +170,17 @@ def subagent_settings(user_config: Any | None) -> SubagentSettings:
             getattr(user_config, "subagent_timeout_s", 120), 120)),
         token_budget=max(0, _int_or(
             getattr(user_config, "subagent_token_budget", 20000), 20000)),
+        # P1e: the cost budget is the schema's per-delegation cost
+        # budget (its semantics extend S13's to all delegations),
+        # read through the delegation-settings resolver — the
+        # single read path. The resolver composes it from
+        # subagent_cost_budget_usd, its storage field, so the value
+        # is unchanged. S13's own per-sub-agent bounds above
+        # (enabled / max_per_turn / timeout / token budget) are
+        # not delegation settings and stay S13's.
         cost_budget_usd=max(0.0, _float_or(
-            getattr(user_config, "subagent_cost_budget_usd", 0.0), 0.0)),
+            resolve_delegation_settings(user_config)
+            .per_delegation_cost_budget_usd, 0.0)),
     )
 
 

@@ -207,11 +207,78 @@ def get_configured_fallback_candidates(
             continue
         if not health_manager.is_provider_available(provider):
             continue
-        for entry in reg.get_models_for_provider(provider):
-            if "chat" not in entry.capabilities:
-                continue
-            if require_vision and "vision" not in entry.capabilities:
-                continue
-            candidates.append(entry)
-            break
+        models = [
+            entry for entry in reg.get_models_for_provider(provider)
+            if "chat" in entry.capabilities
+            and (not require_vision or "vision" in entry.capabilities)
+        ]
+        if not models:
+            continue
+        if len(models) == 1:
+            candidates.append(models[0])
+            continue
+        # P1b: when the chain names a provider with several chat
+        # models, its representative is chosen by the run-level
+        # scoring (headroom → price → TTFT within a priority tier)
+        # instead of first-in-registry order. With no scoring
+        # evidence the first model still wins, exactly as before.
+        from aether_engine.routing.policy import RoutingPolicy
+
+        best, _signal = RoutingPolicy(registry=reg)._pick_scored(models)
+        candidates.append(best)
     return candidates
+
+
+def suggested_fallback_chain(
+    config,
+    configured_providers: list[str],
+    registry: ModelRegistry | None = None,
+) -> list[str]:
+    """The tiered fallback-ladder template (P1b, Part 3).
+
+    A *suggestion* for Settings to render when the user has
+    configured >= 2 providers and no chain: strong cloud ->
+    second cloud -> cheap/fast cloud -> local. It is never
+    applied by the engine — Aether never silently writes user
+    config (the dead-pin doctrine: runtime acts, config is the
+    owner's); the chain takes effect only when the user saves
+    it into ``fallback_chain`` themselves.
+
+    Provider classes derive from the registry's own capability
+    vocabulary: a provider offering a ``reasoning`` chat model
+    is strong; one whose chat models are all ``fast`` is the
+    cheap/fast rung; anything else is a standard cloud rung.
+    Local providers always close the ladder. Configured order
+    is preserved within a class. Returns [] when a chain is
+    already configured or fewer than 2 providers are configured
+    (no ladder to suggest).
+    """
+    if getattr(config, "fallback_chain", None):
+        return []
+    providers = [p for p in (configured_providers or []) if p]
+    if len(providers) < 2:
+        return []
+    reg = registry or GLOBAL_MODEL_REGISTRY
+    strong: list[str] = []
+    standard: list[str] = []
+    cheap: list[str] = []
+    local: list[str] = []
+    for provider in providers:
+        if is_local_provider(provider):
+            local.append(provider)
+            continue
+        try:
+            chat_caps = [
+                set(entry.capabilities or [])
+                for entry in reg.get_models_for_provider(provider)
+                if "chat" in (entry.capabilities or [])
+            ]
+        except Exception:  # noqa: BLE001 — a registry hiccup classes as standard.
+            chat_caps = []
+        if any("reasoning" in caps for caps in chat_caps):
+            strong.append(provider)
+        elif chat_caps and all("fast" in caps for caps in chat_caps):
+            cheap.append(provider)
+        else:
+            standard.append(provider)
+    return strong + standard + cheap + local

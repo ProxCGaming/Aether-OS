@@ -1,5 +1,7 @@
 """Intelligent routing policy mapping task requirements and health state to model candidates."""
+import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 from aether_engine.routing.health import ProviderHealthManager
@@ -10,6 +12,21 @@ from aether_engine.routing.registry import (
     ModelRegistry,
     is_local_provider,
 )
+from aether_engine.routing.signals import text_signals
+
+
+@lru_cache(maxsize=512)
+def _static_price(provider: str, model: str) -> float | None:
+    """P1b: the static price of a nominal call (see
+    ``cost.pricing.static_price_estimate``), cached per
+    (provider, model) — rates are static within a process.
+    None = unpriced (cost unknown, never treated as free)."""
+    try:
+        from aether_engine.cost.pricing import static_price_estimate
+
+        return static_price_estimate(model, provider)
+    except Exception:  # noqa: BLE001 — price is an input, never a gate.
+        return None
 
 
 @dataclass
@@ -34,17 +51,6 @@ class RoutingDecision:
     local_only: bool = False
 
 
-_CODE_KEYWORDS = {
-    "code", "sql", "html", "css", "function", "def ", "class ", "bug", "refactor",
-    "algorithm", "script", "regex", "api", "endpoint", "syntax", "compile", "traceback"
-}
-
-_REASONING_KEYWORDS = {
-    "step by step", "deep think", "reasoning", "prove", "math proof", "derivation",
-    "complex analysis", "solve riddle", "logic puzzle", "benchmark comparison"
-}
-
-
 def infer_task_requirements(
     prompt: str,
     images: list[Any] | None = None,
@@ -52,18 +58,14 @@ def infer_task_requirements(
 ) -> TaskRequirements:
     """Infer task requirements by inspecting prompt tokens and attached assets."""
     has_images = bool(images)
-    lower = prompt.lower()
-
-    wants_code = any(kw in lower for kw in _CODE_KEYWORDS) or ("```" in prompt)
-    wants_reasoning = any(kw in lower for kw in _REASONING_KEYWORDS)
-    low_latency = not wants_reasoning
+    sig = text_signals(prompt)
 
     return TaskRequirements(
-        wants_code=wants_code,
-        wants_reasoning=wants_reasoning,
+        wants_code=sig.wants_code,
+        wants_reasoning=sig.wants_reasoning,
         has_images=has_images,
         prefer_local=prefer_local,
-        low_latency=low_latency,
+        low_latency=not sig.wants_reasoning,
     )
 
 
@@ -112,39 +114,25 @@ class RoutingPolicy:
         self,
         registry: ModelRegistry | None = None,
         latency_store=None,
+        headroom_store=None,
     ):
         self.registry = registry or GLOBAL_MODEL_REGISTRY
         # E5-F11: the measured-latency store consulted by the
         # tie-break in _pick. None resolves the process-global store
         # lazily at selection time; tests inject a tmp store.
         self._latency_store = latency_store
+        # P1b: the rate-limit evidence store consulted for provider
+        # heat in _pick. Same injection pattern as the latency store.
+        self._headroom_store = headroom_store
 
-    def _pick(self, candidates: list[ModelEntry]) -> tuple[ModelEntry, bool]:
-        """Choose from an already-ordered candidate list.
+    def _ttft_scores(self, candidates: list[ModelEntry]) -> dict[int, float]:
+        """Measured TTFT p50 per candidate index ({} on failure).
 
-        Returns ``(chosen, latency_decided)``. The default is
-        exactly today's behaviour — the first candidate.
-
-        E5-F11 measured-latency tie-break: within one priority tier,
-        candidates WITH a measured TTFT percentile are re-ordered
-        among their own slots by p50 TTFT (fastest first). This is
-        deliberately the weakest rule that honours "routing uses
-        measured latency":
-
-        * it never crosses a priority tier;
-        * it never displaces a candidate with no measurements —
-          unmeasured models keep their exact slots, so cold start
-          (no measurements anywhere) is byte-identical to the
-          pre-E5-F11 selection;
-        * it is consulted only where the existing order picks from
-          a candidate list — never on the explicit-request path,
-          the vision-override path, or the user's default-model
-          pin, and health eligibility has already filtered the list
-          before this runs;
-        * any store failure degrades to today's order (fail-open).
+        E5-H: score every candidate over ONE store read — the
+        per-candidate call cost a fresh SQLite connect per
+        candidate per selection. Stores without the batch read
+        (test doubles) keep the per-candidate path.
         """
-        if len(candidates) < 2:
-            return candidates[0], False
         try:
             store = (
                 self._latency_store
@@ -152,10 +140,6 @@ class RoutingPolicy:
                 else get_latency_store()
             )
             scores: dict[int, float] = {}
-            # E5-H: score every candidate over ONE store read —
-            # the per-candidate call cost a fresh SQLite connect
-            # per candidate per selection. Stores without the
-            # batch read (test doubles) keep the per-candidate path.
             batch = getattr(store, "ttft_p50_ms_many", None)
             if callable(batch):
                 values = batch(
@@ -169,22 +153,134 @@ class RoutingPolicy:
                     value = store.ttft_p50_ms(entry.provider, entry.id)
                     if value is not None:
                         scores[idx] = value
+            return scores
         except Exception:  # noqa: BLE001 — measured latency is an input, never a gate.
-            return candidates[0], False
-        if len(scores) < 2:
-            return candidates[0], False
+            return {}
+
+    def _heat_infos(self, candidates: list[ModelEntry]) -> dict[str, Any]:
+        """Provider heat per provider name ({} on failure)."""
+        try:
+            from aether_engine.routing.headroom import heat_states
+
+            return heat_states(
+                {e.provider for e in candidates},
+                store=self._headroom_store)
+        except Exception:  # noqa: BLE001 — headroom is an input, never a gate.
+            return {}
+
+    def _pick(self, candidates: list[ModelEntry]) -> tuple[ModelEntry, bool]:
+        """Choose from an already-ordered candidate list.
+
+        Returns ``(chosen, scoring_decided)`` — see
+        :meth:`_pick_scored` for the rule set. Kept as the
+        two-value form the E5-F11 callers and tests were built on.
+        """
+        chosen, signal = self._pick_scored(candidates)
+        return chosen, signal is not None
+
+    def _pick_scored(
+        self, candidates: list[ModelEntry],
+    ) -> tuple[ModelEntry, str | None]:
+        """Choose from an already-ordered candidate list, and name
+        the signal that decided it (None when the existing order
+        stood — the reason string then says nothing extra).
+
+        Within one registry priority tier, candidates are ordered
+        by **headroom state → static price → measured TTFT**
+        (P1b, extending the E5-F11 TTFT tie-break):
+
+        * headroom: a provider with fresh rate-limit evidence
+          (``routing.headroom``: hot, then warm) sorts after an
+          equally-tiered cool provider. Heat is provider-level
+          evidence — when any candidate in the tier is hot or
+          warm, every candidate in the tier is scored, so a hot
+          provider can be demoted past a cool one even when the
+          cool one has no price or latency data;
+        * price: the static price of a nominal call from
+          ``cost.pricing`` (cheapest first). An *unpriced* model
+          is cost-unknown, never free, and keeps its slot unless
+          heat or TTFT data scores it; only local models price
+          at a true $0;
+        * TTFT: the E5-F11 measured p50, fastest first.
+
+        The preserved contract, verbatim from E5-F11:
+
+        * it never crosses a priority tier;
+        * a candidate with no discriminating data (cool, unpriced,
+          unmeasured — in a tier with no heat) keeps its exact
+          slot, so a cold start with no evidence anywhere is
+          byte-identical to the pre-P1b selection;
+        * it is consulted only where the existing order picks from
+          a candidate list — never on the explicit-request path,
+          the vision-override path, or the user's default-model
+          pin, and health eligibility has already filtered the list
+          before this runs;
+        * any store failure degrades to today's order (fail-open).
+        """
+        if len(candidates) < 2:
+            return candidates[0], None
+        from aether_engine.routing.headroom import heat_rank
+
+        ttft = self._ttft_scores(candidates)
+        heats = self._heat_infos(candidates)
+        prices = {
+            idx: _static_price(entry.provider, entry.id)
+            for idx, entry in enumerate(candidates)
+        }
+
+        def _heat(idx: int) -> int:
+            info = heats.get(candidates[idx].provider)
+            return heat_rank(info.state) if info is not None else 0
+
         slots_by_priority: dict[int, list[int]] = {}
         for idx, entry in enumerate(candidates):
             slots_by_priority.setdefault(entry.priority, []).append(idx)
         ordered = list(candidates)
         for slots in slots_by_priority.values():
-            measured = [i for i in slots if i in scores]
-            if len(measured) < 2:
+            if len(slots) < 2:
                 continue
-            ranked = sorted(measured, key=lambda i: (scores[i], i))
-            for slot, source in zip(measured, ranked, strict=True):
+            any_heat = any(_heat(i) > 0 for i in slots)
+            scored = [
+                i for i in slots
+                if any_heat or prices[i] is not None or i in ttft
+            ]
+            if len(scored) < 2:
+                continue
+
+            def _key(i: int) -> tuple:
+                return (
+                    _heat(i),
+                    prices[i] if prices[i] is not None else float("inf"),
+                    ttft.get(i, float("inf")),
+                    i,
+                )
+
+            ranked = sorted(scored, key=_key)
+            for slot, source in zip(scored, ranked, strict=True):
                 ordered[slot] = candidates[source]
-        return ordered[0], ordered[0] is not candidates[0]
+        chosen = ordered[0]
+        if chosen is candidates[0]:
+            return chosen, None
+        # Name the deciding signal: the first key component on
+        # which the winner actually beat the displaced first
+        # candidate (they share a priority tier by construction).
+        first_idx = next(
+            i for i, entry in enumerate(candidates) if entry is chosen)
+        if _heat(first_idx) != _heat(0):
+            info = heats.get(candidates[0].provider)
+            when = ""
+            if info is not None and info.last_event_at is not None:
+                when = time.strftime(
+                    " at %H:%M", time.localtime(info.last_event_at))
+            return chosen, (
+                f"provider {candidates[0].provider} is cooling down "
+                f"after a rate limit{when}")
+        if prices[first_idx] != prices[0]:
+            return chosen, (
+                "cheapest among equal-priority candidates "
+                "on estimated price")
+        return chosen, (
+            "fastest measured TTFT among equal-priority candidates")
 
     def select_route(
         self,
@@ -327,10 +423,10 @@ class RoutingPolicy:
                 )
             vision_models = [m for m in available_models if "vision" in m.capabilities]
             if vision_models:
-                best, by_latency = self._pick(vision_models)
+                best, signal = self._pick_scored(vision_models)
                 reason = f"Routed to {best.label} — vision & image processing"
-                if by_latency:
-                    reason += " (fastest measured TTFT among equal-priority candidates)"
+                if signal:
+                    reason += f" ({signal})"
                 return RoutingDecision(
                     provider=best.provider,
                     model=best.id,
@@ -348,10 +444,10 @@ class RoutingPolicy:
                 )
             reasoning_models = [m for m in available_models if "reasoning" in m.capabilities]
             if reasoning_models:
-                best, by_latency = self._pick(reasoning_models)
+                best, signal = self._pick_scored(reasoning_models)
                 reason = f"Routed to {best.label} — deep reasoning & complex logic"
-                if by_latency:
-                    reason += " (fastest measured TTFT among equal-priority candidates)"
+                if signal:
+                    reason += f" ({signal})"
                 return RoutingDecision(
                     provider=best.provider,
                     model=best.id,
@@ -369,10 +465,10 @@ class RoutingPolicy:
                 )
             code_models = [m for m in available_models if "code" in m.capabilities]
             if code_models:
-                best, by_latency = self._pick(code_models)
+                best, signal = self._pick_scored(code_models)
                 reason = f"Routed to {best.label} — code generation & tool capabilities"
-                if by_latency:
-                    reason += " (fastest measured TTFT among equal-priority candidates)"
+                if signal:
+                    reason += f" ({signal})"
                 return RoutingDecision(
                     provider=best.provider,
                     model=best.id,
@@ -390,12 +486,12 @@ class RoutingPolicy:
             )
 
         # Otherwise pick the highest priority available model for user default provider or next provider
-        fallback_model, by_latency = self._pick(available_models)
+        fallback_model, signal = self._pick_scored(available_models)
         reason = f"Routed to {fallback_model.label} — optimal available model"
         if fallback_model.provider != user_default_provider:
             reason = f"Routed to {fallback_model.label} — fallback from {user_default_provider}"
-        if by_latency:
-            reason += " (fastest measured TTFT among equal-priority candidates)"
+        if signal:
+            reason += f" ({signal})"
 
         return RoutingDecision(
             provider=fallback_model.provider,

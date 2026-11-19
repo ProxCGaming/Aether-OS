@@ -11,7 +11,10 @@ not LangChain chat models, so this module adapts them:
   the agent framework:
 
   - native transfer-tool calls (``transfer_to_<specialist>``) pass
-    through and become real handoffs;
+    through and become real handoffs — under the P1d
+    subagents-as-tools supervisor the same role is played by native
+    delegation-tool calls (``delegate_to_<specialist>``), which pass
+    through with their briefing argument intact;
   - memory-tool calls pass through to the agent's ToolNode, which runs
     the same audited memory execution path as before;
   - providers that answer with the supervisor's JSON decision text
@@ -35,6 +38,8 @@ not LangChain chat models, so this module adapts them:
 import copy
 import json
 import logging
+import os
+import re
 import time
 import uuid
 from typing import Any
@@ -46,10 +51,16 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.config import get_config
 from pydantic import Field
 
+from aether_engine.delegation_settings import resolve_delegation_settings
 from aether_engine.desktop import observe_permitted
 from aether_engine.langgraph.compaction import (
     context_summary_section,
     model_facing_messages,
+)
+from aether_engine.langgraph.fanout import (
+    GROUP_TOOL_NAME,
+    group_id_for,
+    parse_group_members,
 )
 from aether_engine.langgraph.nodes.supervisor import (
     MEMORY_TOOL_NAMES,
@@ -71,6 +82,45 @@ from aether_engine.tools.policy import resolve_policy_by_name
 logger = logging.getLogger("aether_engine.langgraph.supervisor_model")
 
 HANDOFF_PREFIX = "transfer_to_"
+
+# P1d: the subagents-as-tools supervisor's delegation calls. The
+# adapter speaks both protocols while both graph topologies exist:
+# which one a run uses is decided by the tools bound into the agent
+# (transfer tools under create_supervisor, delegation tools under
+# langgraph/delegation.py), never by config sniffing here.
+DELEGATION_PREFIX = "delegate_to_"
+
+# P1a (Option A — the briefing tag): the supervisor states the
+# tier a delegation needs by opening its briefing with a tag —
+# "[tier: strong]" — instead of leaving S14 to guess complexity
+# from the briefing's length and keywords. The post-model hook
+# parses and strips the tag at the seam where the briefing becomes
+# the delegation log entry (see parse_tier_tag), stores the tier
+# on the decision, and the specialist only ever sees the stripped
+# briefing. A missing tag degrades exactly to today's inference.
+TIER_TAG_VALUES = ("small", "standard", "strong")
+_TIER_TAG_RE = re.compile(r"^\s*\[tier:\s*([A-Za-z]+)\s*\]\s*", re.IGNORECASE)
+
+
+def parse_tier_tag(briefing: Any) -> tuple[str | None, Any]:
+    """Split a leading tier tag off a supervisor briefing.
+
+    Returns ``(tier_name, stripped_briefing)`` when the briefing
+    opens with a well-formed tag naming a valid tier; otherwise
+    ``(None, briefing)`` with the briefing untouched — a malformed
+    tag, or a well-formed tag with an unknown tier value, is
+    treated as absent, exactly as if the supervisor had not
+    tagged the briefing at all.
+    """
+    if not isinstance(briefing, str) or not briefing:
+        return None, briefing
+    match = _TIER_TAG_RE.match(briefing)
+    if match is None:
+        return None, briefing
+    tier = match.group(1).lower()
+    if tier not in TIER_TAG_VALUES:
+        return None, briefing
+    return tier, briefing[match.end():]
 
 
 def _end_result(reason: str, decision: dict | None = None) -> ChatResult:
@@ -100,6 +150,82 @@ def _handoff_result(target: str, decision: dict, memory_calls: list | None = Non
             "type": "tool_call",
         }
     )
+    message = AIMessage(
+        content="",
+        tool_calls=tool_calls,
+        additional_kwargs={"aether_decision": decision},
+    )
+    return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _provider_call_args(provider_call: Any) -> dict:
+    """A provider ToolCall's arguments as a dict (the same
+    normalisation ``_langchain_tool_call`` applies)."""
+    args = provider_call.args
+    if isinstance(args, dict):
+        return args
+    try:
+        parsed = json.loads(args) if args else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _delegation_result(
+    target: str,
+    decision: dict,
+    memory_calls: list | None = None,
+    provider_call: Any = None,
+) -> ChatResult:
+    """An AIMessage carrying a delegation tool call for ``target``.
+
+    The P1d counterpart of ``_handoff_result``: the call is
+    ``delegate_to_<target>`` and carries the decision's briefing as
+    its ``briefing`` argument (the seam P1a's tier emission later
+    targets). A native provider call passes through with its own
+    id and arguments — the model authored both — while a call the
+    adapter synthesises (JSON decision protocol, forced runs) gets
+    a fresh id, exactly as handoffs do: providers that stream one
+    call in several chunks reuse an id, and the agent's ToolNode
+    rejects duplicate ids inside a run.
+    """
+    tool_calls = [_langchain_tool_call(tc) for tc in (memory_calls or [])]
+    if provider_call is not None:
+        tool_calls.append(_langchain_tool_call(provider_call))
+    else:
+        tool_calls.append(
+            {
+                "name": f"{DELEGATION_PREFIX}{target}",
+                "args": {"briefing": decision.get("briefing", "") or ""},
+                "id": f"aether-delegation-{uuid.uuid4().hex}",
+                "type": "tool_call",
+            }
+        )
+    message = AIMessage(
+        content="",
+        tool_calls=tool_calls,
+        additional_kwargs={"aether_decision": decision},
+    )
+    return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _group_result(
+    decision: dict,
+    memory_calls: list | None = None,
+    provider_call: Any = None,
+) -> ChatResult:
+    """An AIMessage carrying a ``delegate_in_parallel`` group call.
+
+    The P2b counterpart of ``_delegation_result``: the model's own
+    group call passes through with its id and its members argument;
+    the stamped decision (``next = "parallel_group"``) is what the
+    post-model hook judges — it parses the members from the call,
+    applies the spawn policy and the cap per member, and writes one
+    delegation-log entry per member.
+    """
+    tool_calls = [_langchain_tool_call(tc) for tc in (memory_calls or [])]
+    if provider_call is not None:
+        tool_calls.append(_langchain_tool_call(provider_call))
     message = AIMessage(
         content="",
         tool_calls=tool_calls,
@@ -218,7 +344,9 @@ def _delegation_count(state: dict) -> int:
     handoffs = 0
     for msg in dict_messages[last_user + 1:]:
         for tc in msg.get("tool_calls") or []:
-            if (tc.get("function", {}).get("name") or "").startswith(HANDOFF_PREFIX):
+            if (tc.get("function", {}).get("name") or "").startswith(
+                (HANDOFF_PREFIX, DELEGATION_PREFIX)
+            ):
                 handoffs += 1
     # The pending handoff (the one being judged) is in the messages
     # but has not executed; the executed count excludes it.
@@ -226,15 +354,40 @@ def _delegation_count(state: dict) -> int:
 
 
 def _delegation_cap(config: dict | None = None) -> int:
-    """The configured per-turn delegation cap (default 8)."""
+    """The configured per-turn delegation cap (default 8).
+
+    P1e: read through the delegation-settings resolver — the
+    single read path for the cap (the resolver composes it from
+    ``supervisor_delegation_cap``, its storage field).
+    """
     if config is None:
         try:
             config = get_config()
         except Exception:  # noqa: BLE001 — outside a graph run there is no config; the default cap applies.
             config = {}
     user_config = ((config or {}).get("configurable", {}) or {}).get("user_config")
-    cap = getattr(user_config, "supervisor_delegation_cap", 8)
-    return cap if isinstance(cap, int) and cap >= 0 else 8
+    return resolve_delegation_settings(user_config).max_delegations_per_turn
+
+
+def _group_result_in_view(dict_messages: list) -> bool:
+    """True when a parallel group's joined result is in view.
+
+    P2b: a group's outcome reaches the supervisor as the group
+    tool's result message, not as assistant text — so the
+    post-specialist derivations (the adapter's finish semantics,
+    the hook's cap surface) must recognise it as a specialist
+    response in view, the way a single delegation's merged answer
+    is recognised. Only ever true after a group ran, so every
+    pre-P2b flow is unaffected.
+    """
+    last_user = max(
+        (i for i, m in enumerate(dict_messages) if m.get("role") == "user"),
+        default=-1,
+    )
+    return any(
+        m.get("role") == "tool" and m.get("name") == GROUP_TOOL_NAME
+        for m in dict_messages[last_user + 1:]
+    )
 
 
 def _specialist_answers(state: dict) -> list:
@@ -311,6 +464,20 @@ class AetherSupervisorModel(BaseChatModel):
         bound.aether_tools = list(tools)
         return bound
 
+    def _uses_delegation_tools(self) -> bool:
+        """True when this agent carries P1d delegation tools.
+
+        The bound tools are the topology's ground truth: the legacy
+        graph binds ``transfer_to_*`` handoff tools, the
+        subagents-as-tools graph binds ``delegate_to_*`` tools, and
+        the decision protocol below speaks whichever the run was
+        built with.
+        """
+        return any(
+            (_tool_name(t) or "").startswith(DELEGATION_PREFIX)
+            for t in self.aether_tools
+        )
+
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         raise NotImplementedError(
             "AetherSupervisorModel is async-only; Aether providers stream via call_stream."
@@ -345,6 +512,18 @@ class AetherSupervisorModel(BaseChatModel):
         agent_tools = configurable.get("agent_tools", {})
         allowed = agent_tools.get("supervisor") if isinstance(agent_tools, dict) else None
 
+        # P1e mode enforcement (K-04 hookup): with the delegation
+        # mode resolved to "off", the delegation tools are not
+        # offered — the supervisor answers directly. Only the
+        # tools topology's names are filtered (delegate_to_* and
+        # the group tool exist only there); legacy handoff offers
+        # are untouched, so the legacy graph's offer list is
+        # byte-identical. A call that still arrives (forged, stale,
+        # or a synthesised JSON decision) is refused inside the
+        # delegation tool itself.
+        delegation_off = (
+            resolve_delegation_settings(user_config).effective_mode == "off")
+
         # E1-F12: the spawn allow-list filters the native handoff
         # offers themselves, not only the routing prompt's text — a
         # denied specialist's transfer tool is never offered, so the
@@ -368,6 +547,23 @@ class AetherSupervisorModel(BaseChatModel):
                 continue
             if name.startswith(HANDOFF_PREFIX):
                 if name[len(HANDOFF_PREFIX):] in available:
+                    offered.append(convert_to_openai_tool(tool))
+                continue
+            if name.startswith(DELEGATION_PREFIX):
+                if not delegation_off \
+                        and name[len(DELEGATION_PREFIX):] in available:
+                    offered.append(convert_to_openai_tool(tool))
+                continue
+            if name == GROUP_TOOL_NAME:
+                # P2b: the parallel-group tool is bound only on
+                # the tools topology; it is offered whenever a
+                # Gate-4 pair is formable — every allowed pair in
+                # v1 includes the researcher. Whether a declared
+                # group actually runs in parallel is the fan-out
+                # seam's judgement (mode / width / pair), never
+                # the offer's. P1e mode "off" suppresses the offer
+                # entirely (see delegation_off above).
+                if not delegation_off and "researcher" in available:
                     offered.append(convert_to_openai_tool(tool))
                 continue
             # S19: the desktop-observe tool exists for the model
@@ -424,7 +620,12 @@ class AetherSupervisorModel(BaseChatModel):
             for msg in dict_messages[last_user + 1:]
             if msg.get("role") == "assistant" and msg.get("content") and not msg.get("tool_calls")
         ]
-        specialist_responded = bool(specialist_texts)
+        # P2b: a parallel group's joined result (a tool message,
+        # not assistant text) is also a specialist response in view
+        # — the supervisor's next step gets post-specialist finish
+        # semantics, exactly as after a single delegation.
+        specialist_responded = bool(specialist_texts) or _group_result_in_view(
+            dict_messages)
         # The turn's delegation cap is NOT judged at this seam (S4):
         # the model cannot see the authoritative delegation counter,
         # so the cap is enforced at the post-model hook against
@@ -435,6 +636,8 @@ class AetherSupervisorModel(BaseChatModel):
             if specialist_responded:
                 return _specialist_end_result()
             decision = {"next": forced_agent, "reason": "Forced via slash command.", "briefing": ""}
+            if self._uses_delegation_tools():
+                return _delegation_result(forced_agent, decision)
             return _handoff_result(forced_agent, decision)
 
         if not available:
@@ -474,6 +677,8 @@ class AetherSupervisorModel(BaseChatModel):
                         if tc.name in MEMORY_TOOL_NAMES
                         or tc.name in SCREEN_TOOL_NAMES]
         transfer_calls = [tc for tc in tool_calls if tc.name.startswith(HANDOFF_PREFIX)]
+        delegate_calls = [tc for tc in tool_calls if tc.name.startswith(DELEGATION_PREFIX)]
+        group_calls = [tc for tc in tool_calls if tc.name == GROUP_TOOL_NAME]
         # Epic 3, E3-01 (issue 012 diagnosability): calls that are
         # neither memory nor handoff are NOT the supervisor's to run —
         # it is offered only memory + handoff tools, and real tool work
@@ -482,13 +687,81 @@ class AetherSupervisorModel(BaseChatModel):
         # recorded on the decision (delegation_log) so a vanished tool
         # call is diagnosable instead of a mystery.
         dropped_calls = [
-            tc.name for tc in tool_calls if tc not in memory_calls and tc not in transfer_calls
+            tc.name for tc in tool_calls
+            if tc not in memory_calls and tc not in transfer_calls
+            and tc not in delegate_calls and tc not in group_calls
         ]
         if dropped_calls:
             logger.warning(
                 "Supervisor emitted non-supervisor tool calls, dropped (delegate to a specialist instead): %s",
                 dropped_calls,
             )
+
+        if group_calls:
+            # P2b native protocol: the model's parallel-group call
+            # passes through with its id and members argument; the
+            # decision is stamped from it, and the post-model hook
+            # judges the group (parse, spawn policy, cap — per
+            # member). A single delegation emitted alongside a
+            # group is not executed (the group is the richer
+            # declaration) and is recorded as dropped, never silent.
+            call = group_calls[0]
+            members, parse_error = parse_group_members(
+                _provider_call_args(call).get("members"))
+            if specialist_responded:
+                chain_end = _chain_end_reason(specialist_texts)
+                if chain_end is not None:
+                    logger.warning(
+                        "Post-specialist parallel group refused: %s; "
+                        "ending with the latest answer standing.",
+                        chain_end)
+                    return _specialist_end_result()
+            decision = {
+                "next": "parallel_group",
+                "reason": (content or "").strip(),
+                "briefing": "",
+            }
+            extra_dropped = dropped_calls + [
+                tc.name for tc in delegate_calls + transfer_calls]
+            if extra_dropped:
+                decision["dropped_tool_calls"] = extra_dropped
+            if parse_error is None and any(
+                    m.specialist not in available for m in members):
+                # Routing clamps to END, exactly like a single
+                # delegation to an unavailable specialist; the
+                # attempted decision is still what gets logged.
+                return _end_result(decision["reason"], decision=decision)
+            return _group_result(decision, memory_calls, provider_call=call)
+
+        if delegate_calls:
+            # P1d native protocol: the model's own delegation call
+            # passes through with its id and its briefing argument;
+            # the decision is stamped from it, so the post-model
+            # hook's bookkeeping (and its briefing rule — a decision
+            # carrying a real briefing keeps it) works unchanged.
+            call = delegate_calls[0]
+            target = call.name[len(DELEGATION_PREFIX):]
+            if specialist_responded:
+                chain_end = _chain_end_reason(specialist_texts)
+                if chain_end is not None:
+                    logger.warning(
+                        "Post-specialist delegation to %s refused: %s; "
+                        "ending with the latest answer standing.",
+                        target, chain_end)
+                    return _specialist_end_result()
+            decision = {
+                "next": target,
+                "reason": (content or "").strip(),
+                "briefing": _provider_call_args(call).get("briefing", "") or "",
+            }
+            if dropped_calls:
+                decision["dropped_tool_calls"] = dropped_calls
+            if target not in available:
+                # Routing clamps to END, exactly like the old node; the
+                # attempted decision is still what gets logged (hook).
+                return _end_result(decision["reason"], decision=decision)
+            return _delegation_result(
+                target, decision, memory_calls, provider_call=call)
 
         if transfer_calls:
             target = transfer_calls[0].name[len(HANDOFF_PREFIX):]
@@ -519,7 +792,8 @@ class AetherSupervisorModel(BaseChatModel):
 
         if specialist_responded:
             return self._post_specialist_result(
-                content, available, dropped_calls, specialist_texts)
+                content, available, dropped_calls, specialist_texts,
+                delegation=self._uses_delegation_tools())
 
         decision = _decision_from_text(content or "", available)
         if not isinstance(decision, dict):
@@ -532,12 +806,14 @@ class AetherSupervisorModel(BaseChatModel):
             decision["dropped_tool_calls"] = dropped_calls
         next_node = decision.get("next", "END")
         if next_node != "END" and next_node in available:
+            if self._uses_delegation_tools():
+                return _delegation_result(next_node, decision)
             return _handoff_result(next_node, decision)
         return _end_result(decision.get("reason") or content or "", decision=decision)
 
     @staticmethod
     def _post_specialist_result(content, available, dropped_calls,
-                                specialist_texts) -> ChatResult:
+                                specialist_texts, delegation: bool = False) -> ChatResult:
         """Interpret the supervisor's reply after a specialist responded.
 
         The supervisor has the specialist's output in view, so its
@@ -579,6 +855,8 @@ class AetherSupervisorModel(BaseChatModel):
                         "ending with the latest answer standing.",
                         next_node, chain_end)
                     return _specialist_end_result()
+                if delegation:
+                    return _delegation_result(next_node, decision)
                 return _handoff_result(next_node, decision)
             return _end_result(decision.get("reason") or text, decision=decision)
         decision = {"next": "END", "reason": text, "briefing": ""}
@@ -692,12 +970,37 @@ def supervisor_routing_prompt(state: dict) -> list:
         "supervisor_spawn_allowlist", None)
     if _allowlist is not None:
         available = [a for a in available if a in _allowlist]
+    # P1d: the prompt teaches the delegation protocol the run's
+    # graph was built with — resolved from the same sources as
+    # graph.resolve_supervisor_pattern (the environment override
+    # first, then the run's UserConfig field), minus the
+    # compile-time argument the prompt cannot see.
+    _pattern = os.environ.get("AETHER_SUPERVISOR_PATTERN") or getattr(
+        (config.get("configurable", {}) or {}).get("user_config"),
+        "supervisor_pattern", None)
     text = _supervisor_system_prompt(
         state.get("original_prompt", "None"),
         state.get("plan", "No plan yet."),
         available,
         tool_mode=True,
+        delegation_tools=_pattern == "tools",
     )
+    # P1e mode enforcement (K-04 hookup): in delegation mode "off"
+    # the tools-topology supervisor is told plainly that delegation
+    # is disabled (its delegation tools are also unoffered, and a
+    # call that still arrives is refused inside the tool). The
+    # legacy prompt is byte-identical — this note exists only on
+    # the tools pattern, where the enforcement lives.
+    if _pattern == "tools" and resolve_delegation_settings(
+            (config.get("configurable", {}) or {}).get("user_config"),
+    ).effective_mode == "off":
+        text += (
+            "\n\nDelegation is DISABLED for this run (delegation "
+            "mode: off): no delegation tools are available and any "
+            "delegation decision will be refused. Do the work "
+            "yourself and answer directly; if the task genuinely "
+            "needs a specialist, say so and name the delegation "
+            "mode as the blocker.")
     board = blackboard_briefing(state)
     if board:
         text += f"\n\nShared team blackboard (written by all agents in this task):\n{board}"
@@ -790,7 +1093,9 @@ def _spawn_policy_denial(state: dict, target: str, config: dict | None = None) -
         if user_config is None:
             return None
         allowlist = getattr(user_config, "supervisor_spawn_allowlist", None)
-        cap = getattr(user_config, "supervisor_delegation_cap", 8)
+        # P1e: the cap comes from the delegation-settings resolver
+        # (the single read path), as in _delegation_cap above.
+        cap = resolve_delegation_settings(user_config).max_delegations_per_turn
         if allowlist is not None and target not in allowlist:
             reason = f"'{target}' is not in the supervisor spawn allow-list ({', '.join(allowlist) or 'empty'})"
         # S4: the cap is judged against the authoritative delegation
@@ -843,6 +1148,226 @@ def _spawn_policy_denial(state: dict, target: str, config: dict | None = None) -
     }
 
 
+def _message_with_stripped_briefing(message: AIMessage, stripped: str) -> AIMessage | None:
+    """The pending message with its delegation calls' briefing
+    arguments replaced by the tag-stripped briefing (P1a).
+
+    The P1d delegation tool receives its ``briefing`` argument
+    from the pending message, and that message stays in the run
+    history the specialist reads — stripping only the decision
+    would leave the tag sitting in the call arguments. The copy
+    keeps the message id, so the state reducer replaces the
+    original in place (the same mechanism the spawn-policy denial
+    relies on). Returns None when no delegation call carries a
+    different briefing — legacy handoff calls carry no arguments
+    at all, so the legacy topology never rewrites a message.
+    """
+    changed = False
+    new_calls = []
+    for tc in message.tool_calls or []:
+        if (tc.get("name") or "").startswith(DELEGATION_PREFIX):
+            args = tc.get("args")
+            if isinstance(args, dict) and args.get("briefing") != stripped:
+                tc = {**tc, "args": {**args, "briefing": stripped}}
+                changed = True
+        new_calls.append(tc)
+    if not changed:
+        return None
+    return message.model_copy(update={"tool_calls": new_calls})
+def _parallel_group_policy_denial(
+        state: dict, members: list, config: dict | None = None) -> str | None:
+    """Spawn policy for a parallel group (P2b): a denial reason, or
+    None to allow.
+
+    The group form of ``_spawn_policy_denial`` — the same policy,
+    judged for the group as a unit before anything runs, so a
+    policy-denied specialist never executes in any scheduling (the
+    fan-out seam's degrade-to-sequential covers fan-out validity,
+    never policy). Plan mode refuses groups outright: plan mode's
+    contract is one planner delegation at a time, judged per
+    delegation. The cap is judged for the whole group: a group of
+    N needs N of the turn's remaining delegations.
+    """
+    if state.get("plan_mode"):
+        return (
+            "plan mode is active: parallel delegation groups are "
+            "disabled in plan mode — delegate to one specialist "
+            "at a time"
+        )
+    if config is None:
+        try:
+            config = get_config()
+        except Exception:  # noqa: BLE001 — policy must never break routing when config is unavailable.
+            return None
+    user_config = (config.get("configurable", {}) or {}).get("user_config")
+    if user_config is None:
+        return None
+    allowlist = getattr(user_config, "supervisor_spawn_allowlist", None)
+    if allowlist is not None:
+        for member in members:
+            if member.specialist not in allowlist:
+                return (
+                    f"'{member.specialist}' is not in the supervisor "
+                    f"spawn allow-list ({', '.join(allowlist) or 'empty'})")
+    cap = resolve_delegation_settings(user_config).max_delegations_per_turn
+    count = _delegation_count(state)
+    if isinstance(cap, int) and cap >= 0 and count + len(members) > cap:
+        names = " + ".join(m.specialist for m in members)
+        return (
+            f"the parallel group ({names}) needs {len(members)} "
+            f"delegations, but the turn has already used {count} of "
+            f"its delegation cap ({cap})")
+    return None
+
+
+def _parallel_group_denial(
+        state: dict, reason: str, members: list | None = None,
+        decision: dict | None = None) -> dict:
+    """The group form of the spawn-policy denial update (P2b).
+
+    Same surface as ``_spawn_policy_denial``: the pending message
+    is replaced in place by an explanation with no tool calls (the
+    supervisor's turn ends, no specialist starts), and the denial
+    is logged as one group decision.
+    """
+    messages = state.get("messages", [])
+    last = messages[-1] if messages else None
+    names = (
+        " + ".join(m.specialist for m in members)
+        if members else "the declared members")
+    explanation = (
+        f"Parallel delegation ({names}) was blocked by the spawn "
+        f"policy: {reason}. No specialist was started. Delegate to "
+        "one specialist at a time, adjust supervisor_spawn_allowlist "
+        "/ supervisor_delegation_cap in the config, or ask for the "
+        "work to be handled another way."
+    )
+    stripped = AIMessage(content=explanation, id=getattr(last, "id", None))
+    denial_decision: dict[str, Any] = {
+        "next": "parallel_group", "denied": True,
+        "reason": reason, "briefing": "",
+    }
+    if members:
+        denial_decision["members"] = [m.specialist for m in members]
+        denial_decision["parallel_group"] = group_id_for(
+            state.get("task_id"), members)
+    # E3-F10, as in _spawn_policy_denial: calls dropped alongside
+    # the group call ride the denial decision into the log.
+    if isinstance(decision, dict) and decision.get("dropped_tool_calls"):
+        denial_decision["dropped_tool_calls"] = list(
+            decision["dropped_tool_calls"])
+    return {
+        "messages": [stripped],
+        "delegation_log": [
+            {"agent": "supervisor", "timestamp": time.time(),
+             "decision": denial_decision}
+        ],
+        "active_specialist": None,
+    }
+
+
+def _parallel_group_update(state: dict, call: dict,
+                           decision: dict | None) -> dict:
+    """Post-model bookkeeping for one parallel-group call (P2b).
+
+    The group form of the hook's handoff branch: parse the members
+    from the call, judge policy for the group as a unit, then write
+    ONE delegation-log entry per member and move the authoritative
+    counter by the member count — a group of N consumes N
+    delegations, no free ones. The entries carry the group id, so
+    the executor's per-entry activity events and the fan-out seam's
+    per-turn group cap read the same record.
+    """
+    args = call.get("args") or {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (json.JSONDecodeError, TypeError):
+            args = {}
+    members, error = parse_group_members(
+        args.get("members") if isinstance(args, dict) else None)
+    if error is not None:
+        return _parallel_group_denial(
+            state,
+            f"the parallel group declaration is malformed: {error}",
+            decision=decision)
+    # S4 cap surface, judged before the denial exactly as in the
+    # single-handoff branch: a group that would overflow the cap
+    # while a specialist answer stands ends the chain with that
+    # answer standing. A previous group's joined result counts as
+    # an answer standing (it is a tool message, not assistant
+    # text — see _group_result_in_view).
+    if (_specialist_answers(state)
+            or _group_result_in_view(message_dicts(
+                state.get("messages", [])))) and (
+            _delegation_count(state) + len(members) > _delegation_cap()):
+        logger.warning(
+            "Post-specialist parallel group refused: the turn "
+            "already has %s delegations and the group needs %s "
+            "(the cap); ending with the latest answer standing.",
+            _delegation_count(state), len(members))
+        return _cap_end_update(state)
+    denial_reason = _parallel_group_policy_denial(state, members)
+    if denial_reason is not None:
+        return _parallel_group_denial(
+            state, denial_reason, members=members, decision=decision)
+    if decision is None or (
+        isinstance(decision, dict) and not decision.get("briefing")
+    ):
+        # Briefing reconstruction, identical to the single-handoff
+        # branch: the briefing is what memory tools returned since
+        # the last user message, and it reaches the members through
+        # context_briefing (their child states seed from it).
+        messages = state.get("messages", [])
+        last = messages[-1] if messages else None
+        briefing_parts = []
+        dict_messages = message_dicts(messages)
+        last_user = max(
+            (i for i, m in enumerate(dict_messages) if m.get("role") == "user"),
+            default=-1,
+        )
+        for msg in dict_messages[last_user + 1:]:
+            if msg.get("role") == "tool" and msg.get("content"):
+                briefing_parts.append(msg["content"])
+        reconstructed = "\n".join(briefing_parts)
+        if decision is None:
+            decision = {
+                "next": "parallel_group",
+                "reason": last.content if last is not None and isinstance(
+                    getattr(last, "content", None), str) else "",
+                "briefing": reconstructed,
+            }
+        elif reconstructed:
+            decision = {**decision, "briefing": reconstructed}
+    reason = decision.get("reason", "")
+    gid = group_id_for(state.get("task_id"), members)
+    entries = []
+    for index, member in enumerate(members):
+        member_decision: dict[str, Any] = {
+            "next": member.specialist,
+            "reason": reason,
+            "briefing": member.task,
+            "parallel_group": gid,
+            "parallel_index": index,
+        }
+        if member.tier:
+            member_decision["tier"] = member.tier
+        entries.append({
+            "agent": "supervisor", "timestamp": time.time(),
+            "decision": member_decision,
+        })
+    return {
+        "delegation_log": entries,
+        # S4: the single counter move for the group — N delegations
+        # become delegations-that-will-execute here, so the counter
+        # moves by N. Denials returned above never reach this.
+        "delegation_count": _delegation_count(state) + len(members),
+        "context_briefing": decision.get("briefing", "") or "",
+        "plan": f"Goal: {reason}",
+        "active_specialist": members[0].specialist,
+    }
+
+
 def supervisor_post_model_hook(state: dict) -> dict:
     """State bookkeeping for one supervisor model step.
 
@@ -856,12 +1381,35 @@ def supervisor_post_model_hook(state: dict) -> dict:
     if not isinstance(last, AIMessage):
         return {}
     tool_calls = last.tool_calls or []
-    handoffs = [tc for tc in tool_calls if (tc.get("name") or "").startswith(HANDOFF_PREFIX)]
+    # A pending delegation, in either topology's protocol: the
+    # legacy transfer call or the P1d delegation call. Everything
+    # below (cap surface, spawn policy, briefing reconstruction,
+    # the counter increment) is protocol-independent — it judges
+    # the decision, not the call's shape.
+    handoffs = [
+        tc for tc in tool_calls
+        if (tc.get("name") or "").startswith((HANDOFF_PREFIX, DELEGATION_PREFIX))
+    ]
     additional = last.additional_kwargs or {}
     decision = additional.get("aether_decision")
 
+    # A pending parallel group (P2b, tools topology only — the
+    # group tool is bound nowhere else): judged as a unit by its
+    # own branch (parse, group spawn policy, per-member log
+    # entries, the counter moving by the member count).
+    group_calls = [
+        tc for tc in tool_calls
+        if (tc.get("name") or "") == GROUP_TOOL_NAME
+    ]
+    if group_calls:
+        return _parallel_group_update(state, group_calls[0], decision)
+
     if handoffs:
-        target = handoffs[0]["name"][len(HANDOFF_PREFIX):]
+        pending_name = handoffs[0]["name"]
+        target = pending_name[
+            len(HANDOFF_PREFIX) if pending_name.startswith(HANDOFF_PREFIX)
+            else len(DELEGATION_PREFIX):
+        ]
         # S4 cap surface, judged BEFORE the spawn-policy denial: when
         # the authoritative counter already stands at the cap AND a
         # specialist answer is in view, the chain ends with that
@@ -882,6 +1430,22 @@ def supervisor_post_model_hook(state: dict) -> dict:
         denial = _spawn_policy_denial(state, target)
         if denial is not None:
             return denial
+        # P1a: parse + strip the tier tag from the AUTHORED
+        # briefing — the decision as the adapter stamped it from
+        # the model's own decision text / delegation call. This
+        # runs before the reconstruction below on purpose: the
+        # reconstructed briefing is memory output, not supervisor
+        # prose, so a tag can only ever come from the supervisor's
+        # own statement. A valid tag becomes decision["tier"] and
+        # leaves the briefing (context_briefing and the delegation
+        # call's argument both read the stripped text); anything
+        # else leaves the decision untouched.
+        tier = None
+        if isinstance(decision, dict) and decision.get("briefing"):
+            tier, stripped_briefing = parse_tier_tag(decision["briefing"])
+            if tier is not None:
+                decision = {**decision, "briefing": stripped_briefing,
+                            "tier": tier}
         if decision is None or (
             isinstance(decision, dict) and not decision.get("briefing")
         ):
@@ -915,7 +1479,7 @@ def supervisor_post_model_hook(state: dict) -> dict:
             elif reconstructed:
                 decision = {**decision, "briefing": reconstructed}
         reason = decision.get("reason", "")
-        return {
+        update: dict[str, Any] = {
             "delegation_log": [
                 {"agent": "supervisor", "timestamp": time.time(), "decision": decision}
             ],
@@ -930,6 +1494,16 @@ def supervisor_post_model_hook(state: dict) -> dict:
             "plan": f"Goal: {reason}",
             "active_specialist": target,
         }
+        if tier is not None:
+            # P1a: the pending delegation call's briefing argument
+            # still carries the tag — rewrite the message so the
+            # tool (and the history the specialist reads) receives
+            # the stripped briefing too.
+            rewritten = _message_with_stripped_briefing(
+                last, decision.get("briefing", "") or "")
+            if rewritten is not None:
+                update["messages"] = [rewritten]
+        return update
 
     if tool_calls:
         # Memory step: the model decides again once the results land,

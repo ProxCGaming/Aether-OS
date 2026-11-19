@@ -23,6 +23,7 @@ rules (``workspace_roots``, ``extra_shell_deny_patterns``,
 otherwise clear the user's own patterns by setting ``[]``); tool,
 skill and delegation surface (``agent_tools``, ``agent_skills``,
 ``supervisor_spawn_allowlist``, ``supervisor_delegation_cap``,
+``delegation_settings``, ``delegation_settings_version``,
 ``task_classes`` sandbox caps); provider and model routing
 (``default_provider``, ``default_model``, ``provider_models``,
 ``provider_excluded_models``, ``custom_base_urls``,
@@ -77,6 +78,11 @@ PROJECT_FORBIDDEN_KEYS = frozenset({
     # Tool / skill / delegation surface.
     "agent_tools", "agent_skills",
     "supervisor_spawn_allowlist", "supervisor_delegation_cap",
+    # P1e: the delegation settings block carries delegation caps
+    # and budgets, per-agent models, tool access and strategies —
+    # the delegation surface, model routing and spend categories
+    # above in one key; a project must not loosen any of it.
+    "delegation_settings", "delegation_settings_version",
     # Provider and model routing, incl. custom endpoints (a project
     # must not point the user's agents, keys or spend at its own
     # endpoint) and fallback behaviour.

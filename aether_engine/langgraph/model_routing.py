@@ -29,6 +29,10 @@ Contract (the owner's pins always win):
 
 Signals (honest and cheap — no model call, no invented data):
 
+* the tier the supervisor explicitly stated for the delegation
+  (P1a: its briefing tag, stored on the delegation log entry) —
+  the primary complexity signal when present; the text inference
+  below is the fallback for delegations it did not mark;
 * the delegation's own text (the supervisor's reason + briefing
   for this specialist, or the run's original prompt when the
   specialist state carries no delegation entry — the S13 child
@@ -43,8 +47,15 @@ Signals (honest and cheap — no model call, no invented data):
   ``~/.aether/model_routing.db``, latency-store house style),
   per-model usage/cost aggregates from the UsageLedger's real
   rows, and measured TTFT percentiles from the latency store.
-  There is deliberately NO price table: cost enters only as the
-  average cost of calls the ledger actually recorded.
+  Cost enters first as the average cost of calls the ledger
+  actually recorded; P1b adds two honest supplements, never
+  inventions: a never-run (or barely-run, <3 recorded calls)
+  model falls back to ``cost.pricing``'s static estimate —
+  the same rates the ledger charges, labelled ``estimated``
+  wherever the decision surfaces — and provider headroom from
+  the rate-limit evidence store (``routing.headroom``: hot /
+  warm / cool, learned from observed 429s only) demotes a
+  provider that recently hit its wall.
 
 Candidates come only from providers that are configured AND
 currently available (the health manager the run-level policy
@@ -75,12 +86,19 @@ specialist invocation. Every decision and escalation is logged,
 published as S12-shaped NODE_ACTIVITY, and folded into the S3
 Task Ledger, so the summary can show which model ran each
 delegation and why.
+
+P3a shadow mode (see langgraph/learned_router.py): with
+``learned_routing = "shadow"`` and a trained scorer artefact
+present, each auto decision here is additionally shadowed — the
+learned scorer computes the choice it WOULD have made and logs
+it with ``source: "learned-shadow"``, after the served choice's
+own record. The served choice is never the shadow's; there is
+no "active" learned mode (activation is Gate 5).
 """
 
 from __future__ import annotations
 
 import logging
-import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -89,8 +107,11 @@ from typing import Any
 
 from aether_common.contracts import Event, EventType
 from aether_engine.event_bus import event_bus
-from aether_engine.routing.policy import _CODE_KEYWORDS, _REASONING_KEYWORDS
 from aether_engine.routing.registry import _infer_capabilities, is_local_provider
+from aether_engine.routing.signals import (
+    CODE_KEYWORDS,
+    text_signals,
+)
 
 logger = logging.getLogger("aether_engine.langgraph.model_routing")
 
@@ -100,6 +121,9 @@ TIER_SMALL = 0
 TIER_STANDARD = 1
 TIER_STRONG = 2
 TIER_NAMES = {TIER_SMALL: "small", TIER_STANDARD: "standard", TIER_STRONG: "strong"}
+#: Tier name -> tier int (the delegation log stores the tier the
+#: supervisor stated by name — P1a's ``decision["tier"]``).
+TIER_BY_NAME = {name: tier for tier, name in TIER_NAMES.items()}
 
 #: Models that must never be routed to, however the tiers fall:
 #: gemini-2.5-flash returns 404 on the owner's key (registry E5-03;
@@ -322,6 +346,54 @@ OUTCOME_ROW_CAP = 5000
 _DEFAULT_DB_PATH = Path.home() / ".aether" / "model_routing.db"
 
 
+def learned_routing_mode(user_config: Any | None) -> str:
+    """The configured learned-router mode (P3a): "shadow" only
+    when exactly that.
+
+    "off" (the default) and "shadow" are the only modes that
+    exist. There is deliberately no "active": P3a activation is
+    Gate 5, an owner decision on shadow evidence, and no config
+    value — including the literal string "active" — turns the
+    learned scorer live. Anything unrecognised reads as "off".
+    """
+    mode = getattr(user_config, "learned_routing", "off")
+    return "shadow" if mode == "shadow" else "off"
+
+
+def _maybe_shadow_route(
+    state: dict[str, Any],
+    agent: str,
+    signals: TaskSignals,
+    candidates: list[Candidate],
+    history: History,
+    served_choice: RoutingChoice,
+    user_config: Any | None,
+) -> None:
+    """P3a Phase 2 seam: let the learned scorer log its would-be
+    choice for this delegation. SHADOW ONLY.
+
+    Called only from :func:`resolve_for_specialist`, only after
+    the served choice is fixed AND its own activity published (so
+    the S3 ledger's join can never annotate the delegation with
+    the shadow model instead of the one that ran). It cannot
+    alter the served choice — it receives it as a finished fact
+    and returns nothing — and every failure inside it is
+    swallowed here and in the shadow runner itself: a broken
+    scorer must be invisible to the run it observes.
+    """
+    try:
+        if learned_routing_mode(user_config) != "shadow":
+            return
+        from aether_engine.langgraph import learned_router
+
+        learned_router.run_shadow(
+            state=state, agent=agent, signals=signals,
+            candidates=candidates, history=history,
+            served_choice=served_choice, user_config=user_config)
+    except Exception:
+        logger.debug("Learned shadow seam failed", exc_info=True)
+
+
 def routing_mode(user_config: Any | None) -> str:
     """The configured routing mode: "auto" only when exactly that."""
     mode = getattr(user_config, "model_routing", "off")
@@ -370,6 +442,11 @@ class TaskSignals:
     agent: str
     task_text: str = ""
     has_images: bool = False
+    # P1a: the tier the supervisor explicitly stated for this
+    # delegation (its briefing tag, stored on the delegation log
+    # entry by the post-model hook), or None when it stated none —
+    # the router then infers from the task text, as it always has.
+    explicit_tier: int | None = None
 
 
 def _state_has_images(state: dict[str, Any]) -> bool:
@@ -404,6 +481,7 @@ def signals_for_state(agent: str, state: dict[str, Any]) -> TaskSignals:
     sub-task text), which is the honest description of its work.
     """
     text = ""
+    explicit_tier: int | None = None
     for entry in reversed(state.get("delegation_log") or []):
         if not isinstance(entry, dict):
             continue
@@ -417,34 +495,50 @@ def signals_for_state(agent: str, state: dict[str, Any]) -> TaskSignals:
         text = " ".join(
             part for part in (decision.get("reason", ""), decision.get("briefing", ""))
             if isinstance(part, str) and part).strip()
+        # P1a: the supervisor's stated tier rides the same entry.
+        # Stored by name; an unrecognised stored value (a hand-
+        # edited or pre-P1a checkpoint) reads as no statement.
+        raw_tier = decision.get("tier")
+        if isinstance(raw_tier, str):
+            explicit_tier = TIER_BY_NAME.get(raw_tier.strip().lower())
+        elif isinstance(raw_tier, int) and not isinstance(raw_tier, bool):
+            explicit_tier = raw_tier if raw_tier in TIER_NAMES else None
         break
     if not text:
         text = str(state.get("original_prompt") or "")
     return TaskSignals(agent=agent, task_text=text,
-                       has_images=_state_has_images(state))
-
-
-_STEP_MARKERS = re.compile(r"(?m)^\s*(?:\d+[.)]|step\s+\d+\b)", re.IGNORECASE)
+                       has_images=_state_has_images(state),
+                       explicit_tier=explicit_tier)
 
 
 def _complexity_need(signals: TaskSignals, incumbent_tier: int) -> tuple[int, str]:
     """The tier this task warrants, and the plain-language why.
 
-    The default is the incumbent's own tier: a standard task
+    The supervisor's explicit statement wins (P1a): when it marked
+    the delegation with a tier, that IS the need — the supervisor
+    knows why it is delegating, and inference from the text was
+    always a proxy for that knowledge. Untagged delegations (older
+    checkpoints, child states) fall back to inference, unchanged:
+    the default is the incumbent's own tier — a standard task
     should run on the model the user already runs it on, and only
     a real signal moves the choice. Reasoning markers ask for the
     strong tier; a long brief or an explicitly multi-step one
     asks one tier up from standard; a short, marker-free sub-task
     is small-tier work.
     """
+    if signals.explicit_tier is not None:
+        return signals.explicit_tier, (
+            "the supervisor marked this delegation "
+            f"{TIER_NAMES.get(signals.explicit_tier, 'standard')} tier")
     text = signals.task_text or ""
-    lower = text.lower()
-    if any(kw in lower for kw in _REASONING_KEYWORDS):
+    sig = text_signals(text)
+    if sig.wants_reasoning:
         return TIER_STRONG, "the task calls for deep reasoning"
-    if len(text) > LONG_TASK_CHARS or len(_STEP_MARKERS.findall(text)) >= 3:
+    if sig.char_length > LONG_TASK_CHARS or sig.step_count >= 3:
         return min(TIER_STRONG, max(incumbent_tier, TIER_STANDARD) + 1), \
             "the brief is long or explicitly multi-step"
-    if len(text) < SHORT_TASK_CHARS and not any(kw in lower for kw in _CODE_KEYWORDS):
+    lower = text.lower()
+    if sig.char_length < SHORT_TASK_CHARS and not any(kw in lower for kw in CODE_KEYWORDS):
         return TIER_SMALL, "the sub-task is short and simple"
     return incumbent_tier, "a standard task"
 
@@ -452,7 +546,7 @@ def _complexity_need(signals: TaskSignals, incumbent_tier: int) -> tuple[int, st
 def _wanted_capability(signals: TaskSignals, need_tier: int) -> str | None:
     """A capability the task specifically wants, if any."""
     lower = (signals.task_text or "").lower()
-    if signals.agent == "coder" or any(kw in lower for kw in _CODE_KEYWORDS):
+    if signals.agent == "coder" or any(kw in lower for kw in CODE_KEYWORDS):
         return "code"
     if need_tier == TIER_STRONG:
         return "reasoning"
@@ -622,6 +716,26 @@ class ModelOutcomeStore:
         except Exception:
             logger.debug("Model outcome recording failed", exc_info=True)
 
+    def rows(self) -> list[dict[str, Any]]:
+        """Every recorded outcome row, oldest first (P3a export).
+
+        :meth:`stats` aggregates; the learned router's dataset
+        builder needs the rows themselves, to join each outcome
+        onto its delegation by agent + time. Read-only, and
+        degrades to ``[]`` like every read in this store.
+        """
+        try:
+            with self._get_conn() as conn:
+                self._init_db(conn)
+                found = conn.execute(
+                    "SELECT timestamp, provider_name, model_name, "
+                    "agent_name, outcome FROM model_outcomes "
+                    "ORDER BY id").fetchall()
+                return [dict(r) for r in found]
+        except Exception:
+            logger.debug("Model outcome rows unavailable", exc_info=True)
+            return []
+
     def stats(self) -> dict[tuple[str, str, str], tuple[int, int]]:
         """{(provider, model, agent): (successes, failures)}."""
         try:
@@ -684,6 +798,12 @@ class History:
     usage: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     # (provider, model) -> measured TTFT p50 (ms)
     ttft_p50_ms: dict[tuple[str, str], float] = field(default_factory=dict)
+    # provider -> HeatInfo (P1b rate-limit evidence; absent = cool)
+    provider_heat: dict[str, Any] = field(default_factory=dict)
+    # (provider, model) -> static estimated cost of a nominal call
+    # (P1b; only models pricing could price — unpriced models are
+    # absent, which ranking reads as cost-unknown, never as free)
+    estimated_cost: dict[tuple[str, str], float] = field(default_factory=dict)
 
 
 def collect_history(
@@ -692,6 +812,7 @@ def collect_history(
     ledger: Any | None = None,
     outcome_store: ModelOutcomeStore | None = None,
     latency_store: Any | None = None,
+    headroom_store: Any | None = None,
 ) -> History:
     """Assemble the recorded history for a pool (fail-open).
 
@@ -741,6 +862,28 @@ def collect_history(
             }
         except Exception:  # noqa: BLE001 — same doctrine.
             history.ttft_p50_ms = {}
+    # P1b: provider heat from the rate-limit evidence store, and
+    # static price estimates for candidates without a mature
+    # recorded cost. Both fail-open like every source above.
+    if candidates:
+        try:
+            from aether_engine.routing.headroom import heat_states
+
+            history.provider_heat = heat_states(
+                {c.provider for c in candidates}, store=headroom_store)
+        except Exception:  # noqa: BLE001 — same doctrine.
+            history.provider_heat = {}
+        try:
+            from aether_engine.cost.pricing import static_price_estimate
+
+            for candidate in candidates:
+                estimate = static_price_estimate(
+                    candidate.model, candidate.provider)
+                if estimate is not None:
+                    history.estimated_cost[
+                        (candidate.provider, candidate.model)] = float(estimate)
+        except Exception:  # noqa: BLE001 — same doctrine.
+            history.estimated_cost = {}
     return history
 
 
@@ -752,9 +895,23 @@ class RoutingChoice:
     provider: str
     model: str
     tier: int
-    source: str  # "auto" | "escalation"
+    source: str  # "auto" | "escalation" | "alias"
     reason: str
     escalated_from: str | None = None  # "provider:model" stepped up from
+    # P1b: how the chosen model's cost was known when it was
+    # ranked — "recorded" (ledger average over >= 3 calls),
+    # "estimated" (pricing's static estimate), or "none"
+    # (cost-unknown). Published with the decision so the ledger
+    # marks estimate-based picks as estimate-based.
+    cost_basis: str = "none"
+    # P1a: where the tier need came from — "explicit" (the
+    # supervisor stated the tier; _complexity_need served its
+    # statement) or "inferred" (the heuristic read of the task
+    # text, a need_fn's answer, or a non-need decision path such
+    # as escalation / a tier alias). Published with the decision
+    # so the Task Ledger — and P3a's dataset — can tell stated
+    # tiers from guessed ones.
+    tier_source: str = "inferred"
 
 
 def _demoted(candidate: Candidate, agent: str, history: History) -> bool:
@@ -764,27 +921,70 @@ def _demoted(candidate: Candidate, agent: str, history: History) -> bool:
     return (successes + failures) >= DEMOTE_MIN_SAMPLES and failures > successes
 
 
+def _heat_state(candidate: Candidate, history: History) -> str:
+    """The candidate's provider heat ("cool" when no evidence)."""
+    info = history.provider_heat.get(candidate.provider)
+    return getattr(info, "state", "cool") or "cool"
+
+
+def _cost_basis(candidate: Candidate, history: History) -> str:
+    """How this candidate's ranking cost is known (P1b).
+
+    The recorded average outranks the static estimate once the
+    ledger holds >= DEMOTE_MIN_SAMPLES calls for the model (the
+    same 3-sample maturity the demotion rule uses); below that,
+    the estimate — when pricing knows the model at all — is the
+    honest cold-start figure, labelled as estimated.
+    """
+    usage = history.usage.get((candidate.provider, candidate.model))
+    if usage and int(usage.get("calls") or 0) >= DEMOTE_MIN_SAMPLES:
+        return "recorded"
+    if (candidate.provider, candidate.model) in history.estimated_cost:
+        return "estimated"
+    return "none"
+
+
+def _ranking_cost(candidate: Candidate, history: History) -> float:
+    """The per-call cost ranking uses, per :func:`_cost_basis`.
+
+    Unpriced and unrecorded stays infinity — cost-unknown is
+    never treated as free (only local models price at a true $0,
+    and pricing says so explicitly).
+    """
+    basis = _cost_basis(candidate, history)
+    if basis == "recorded":
+        usage = history.usage[(candidate.provider, candidate.model)]
+        return float(usage["cost_usd"]) / int(usage["calls"])
+    if basis == "estimated":
+        return float(history.estimated_cost[(candidate.provider, candidate.model)])
+    return float("inf")
+
+
 def _rank_key(candidate: Candidate, agent: str, history: History) -> tuple:
     """Deterministic within-tier ranking.
 
     Order of evidence: a demoted model (losing record for this
-    agent) sorts last; then the average recorded cost per call
-    (cheaper first, unrecorded = infinity — no invented prices);
-    then measured TTFT p50 (faster first, unmeasured last); then
-    the incumbent (the status quo wins an honest tie); then names,
-    so the result never depends on pool ordering.
+    agent) sorts last within its class; a *hot* provider (fresh
+    rate-limit evidence, P1b) is demoted alongside it — hot
+    sorts after equally-tiered cool candidates; then cost per
+    call (recorded average once mature, else the labelled static
+    estimate, else infinity — no invented prices); then measured
+    TTFT p50 (faster first, unmeasured last); then *warm* as a
+    pure tie-break (it never demotes a class by itself); then
+    the incumbent (the status quo wins an honest tie); then
+    names, so the result never depends on pool ordering.
     """
-    usage = history.usage.get((candidate.provider, candidate.model))
-    if usage and usage.get("calls"):
-        cost_per_call = float(usage["cost_usd"]) / int(usage["calls"])
-    else:
-        cost_per_call = float("inf")
+    from aether_engine.routing.headroom import heat_rank
+
+    heat = heat_rank(_heat_state(candidate, history))
     ttft = history.ttft_p50_ms.get(
         (candidate.provider, candidate.model), float("inf"))
     return (
         1 if _demoted(candidate, agent, history) else 0,
-        cost_per_call,
+        1 if heat >= 2 else 0,
+        _ranking_cost(candidate, history),
         ttft,
+        1 if heat == 1 else 0,
         0 if candidate.is_incumbent else 1,
         candidate.provider,
         candidate.model,
@@ -824,6 +1024,8 @@ def route(
     signals: TaskSignals,
     candidates: list[Candidate],
     history: History,
+    *,
+    need_fn: Any | None = None,
 ) -> RoutingChoice | None:
     """Choose the model for one delegation (pure, deterministic).
 
@@ -834,6 +1036,16 @@ def route(
     filter would empty the pool the incumbent alone survives it
     if it is the only candidate (the run's own vision handling
     already vouched for it) — otherwise None.
+
+    ``need_fn`` is the P3a seam: a callable with
+    ``_complexity_need``'s signature supplying the tier need (and
+    its plain-language why) in the heuristic's place. Everything
+    else — candidate collection, hard filters, demotion, ranking,
+    the reason string — is unchanged whichever need is supplied.
+    The live path never passes it today: P3a Phase 2 (shadow mode)
+    passes the learned scorer's need to compute the choice that
+    WOULD have served, and Phase 3 activation (Gate 5, an owner
+    decision) is the only thing that would ever pass it live.
     """
     pool = list(candidates)
     if not pool:
@@ -846,7 +1058,10 @@ def route(
             return None
     incumbent = next((c for c in pool if c.is_incumbent), None)
     incumbent_tier = incumbent.tier if incumbent is not None else TIER_STANDARD
-    need_tier, why = _complexity_need(signals, incumbent_tier)
+    if need_fn is None:
+        need_tier, why = _complexity_need(signals, incumbent_tier)
+    else:
+        need_tier, why = need_fn(signals, incumbent_tier)
     want = _wanted_capability(signals, need_tier)
     group, tier = _tier_group(pool, need_tier, want)
     if not group:
@@ -875,9 +1090,38 @@ def route(
             reason_parts.append(
                 f"{worst.provider}:{worst.model} has failed {failures} of "
                 f"{successes + failures} recent {signals.agent} runs")
+    # P1b: name the headroom and price evidence when it shaped
+    # the pick — the reason string is the ledger-visible proof.
+    hot_others = [
+        c for c in group
+        if (c.provider, c.model) != (chosen.provider, chosen.model)
+        and _heat_state(c, history) == "hot"
+    ]
+    if hot_others:
+        info = history.provider_heat.get(hot_others[0].provider)
+        when = ""
+        last_event = getattr(info, "last_event_at", None)
+        if last_event is not None:
+            when = time.strftime(" at %H:%M", time.localtime(last_event))
+        reason_parts.append(
+            f"provider {hot_others[0].provider} is cooling down "
+            f"after a rate limit{when}")
+    basis = _cost_basis(chosen, history)
+    if basis == "estimated":
+        reason_parts.append(
+            "picked on estimated price — no recorded cost "
+            "history yet")
+    # P1a: the need is the supervisor's own statement only when
+    # the heuristic path served it — a need_fn (P3a's scorer)
+    # supplies its own need, which is not the supervisor's mark.
+    tier_source = (
+        "explicit"
+        if need_fn is None and signals.explicit_tier is not None
+        else "inferred")
     return RoutingChoice(
         provider=chosen.provider, model=chosen.model, tier=tier,
-        source="auto", reason=" — ".join(reason_parts) + ".")
+        source="auto", reason=" — ".join(reason_parts) + ".",
+        cost_basis=basis, tier_source=tier_source)
 
 
 def escalate(
@@ -918,7 +1162,8 @@ def escalate(
             f"Escalated from {current_provider}:{current_model} after a "
             f"failed run — next stronger tier: {chosen.provider}:"
             f"{chosen.model} ({TIER_NAMES[tier]} tier)."),
-        escalated_from=f"{current_provider}:{current_model}")
+        escalated_from=f"{current_provider}:{current_model}",
+        cost_basis=_cost_basis(chosen, history))
 
 
 # ── Application seam (used by the specialist runner) ──────────────
@@ -969,7 +1214,9 @@ def publish_routing_activity(
             "model": choice.model,
             "tier": TIER_NAMES.get(choice.tier, str(choice.tier)),
             "source": choice.source,
+            "tier_source": choice.tier_source,
             "escalated_from": choice.escalated_from,
+            "cost_basis": choice.cost_basis,
             "reason": choice.reason,
         },
         "status": "completed",
@@ -1043,6 +1290,9 @@ def resolve_for_specialist(
         if (choice.provider, choice.model) == (
                 str(incumbent_provider), str(incumbent_model)):
             publish_routing_activity(state, agent, choice)
+            _maybe_shadow_route(
+                state, agent, signals, candidates, history, choice,
+                user_config)
             return run_provider, context
         secret_store = configurable.get("secret_store")
         if secret_store is None:
@@ -1064,12 +1314,139 @@ def resolve_for_specialist(
             "Model routing for %s: %s:%s (%s tier) — %s",
             agent, choice.provider, choice.model,
             TIER_NAMES.get(choice.tier, choice.tier), choice.reason)
+        _maybe_shadow_route(
+            state, agent, signals, candidates, history, choice,
+            user_config)
         return provider, context
     except Exception:
         logger.warning(
             "Model routing unavailable for %s; keeping the run "
             "provider", agent, exc_info=True)
         return run_provider, None
+
+
+# ── Tier aliases (P1e step 3) ─────────────────────────────────────
+
+#: The S14 tier each tier alias names ("local" is a provider
+#: property, not a tier — it is handled separately in the pick).
+_ALIAS_TIERS = {"strong": TIER_STRONG, "balanced": TIER_STANDARD,
+                "cheap": TIER_SMALL}
+
+
+def pick_alias_candidate(
+    alias: str,
+    candidates: list[Candidate],
+    history: History,
+    agent: str,
+) -> RoutingChoice | None:
+    """The concrete model a tier alias names in this pool (pure).
+
+    Aliases resolve through the registry tiers S14 already
+    computes: ``strong`` / ``balanced`` / ``cheap`` pick the best
+    candidate of the strong / standard / small tier group (the
+    router's own nearest-tier grouping and within-tier ranking —
+    a tier with no member resolves to the nearest available tier,
+    never to nothing while the pool is non-empty); ``local``
+    picks the best-ranked candidate served by a local provider.
+    None only when the pool is empty (or, for ``local``, holds no
+    local candidate) — the caller then keeps the run provider.
+    """
+    pool = list(candidates)
+    if not pool:
+        return None
+    alias = str(alias or "").strip().lower()
+    if alias == "local":
+        local = [c for c in pool if is_local_provider(c.provider)]
+        if not local:
+            return None
+        chosen = min(local, key=lambda c: _rank_key(c, agent, history))
+        return RoutingChoice(
+            provider=chosen.provider, model=chosen.model,
+            tier=chosen.tier, source="alias",
+            reason=(f"Tier alias 'local' resolved to "
+                    f"{chosen.provider}:{chosen.model} "
+                    f"({TIER_NAMES.get(chosen.tier, chosen.tier)} tier) "
+                    "— the best-ranked local model in the pool"))
+    target = _ALIAS_TIERS.get(alias)
+    if target is None:
+        return None
+    group, tier = _tier_group(pool, target, None)
+    if not group:
+        return None
+    chosen = min(group, key=lambda c: _rank_key(c, agent, history))
+    return RoutingChoice(
+        provider=chosen.provider, model=chosen.model, tier=tier,
+        source="alias",
+        reason=(f"Tier alias '{alias}' resolved to "
+                f"{chosen.provider}:{chosen.model} "
+                f"({TIER_NAMES.get(tier, tier)} tier)"))
+
+
+def resolve_alias_provider(
+    *,
+    agent: str,
+    alias: str,
+    config: dict[str, Any],
+    run_provider: Any,
+) -> Any | None:
+    """Resolve one agent's tier-alias pin to a provider.
+
+    The alias counterpart of the pin path: the chosen provider is
+    constructed with the run's own constraints, the run provider
+    itself is returned when the alias picks the incumbent, and
+    None means resolution was impossible (no incumbent to anchor
+    the pool, an empty pool, no secret store for a non-incumbent
+    pick) — the caller then keeps the run provider, the pin
+    path's failure doctrine. Never raises into the run.
+    """
+    configurable = config.get("configurable", {}) or {}
+    incumbent_provider = getattr(run_provider, "provider_name", None)
+    incumbent_model = getattr(run_provider, "model", None)
+    if not incumbent_provider or not incumbent_model:
+        return None
+    try:
+        from aether_engine.state import engine_state
+
+        candidates = collect_candidates(
+            registry=engine_state.model_registry,
+            configured_providers=engine_state.configured_providers,
+            health_manager=engine_state.health_manager,
+            incumbent_provider=str(incumbent_provider),
+            incumbent_model=str(incumbent_model),
+            local_only=bool(configurable.get("local_only")),
+        )
+        history = collect_history(candidates)
+        choice = pick_alias_candidate(alias, candidates, history, agent)
+        if choice is None:
+            return None
+        if (choice.provider, choice.model) == (
+                str(incumbent_provider), str(incumbent_model)):
+            return run_provider
+        secret_store = configurable.get("secret_store")
+        if secret_store is None:
+            logger.warning(
+                "Tier alias %r for %s picked %s:%s but no secret "
+                "store is available to construct it; keeping the "
+                "run provider", alias, agent, choice.provider,
+                choice.model)
+            return None
+        from aether_engine.orchestration.core import _create_provider_instance
+
+        provider = _create_provider_instance(
+            choice.provider, choice.model, secret_store,
+            local_only=bool(configurable.get("local_only")),
+            require_vision=bool(configurable.get("require_vision")),
+            user_config=configurable.get("user_config"),
+        )
+        logger.info(
+            "Tier alias for %s: %s (%s)",
+            agent, f"{choice.provider}:{choice.model}", choice.reason)
+        return provider
+    except Exception:
+        logger.warning(
+            "Tier alias %r unavailable for %s; keeping the run "
+            "provider", alias, agent, exc_info=True)
+        return None
 
 
 def construct_choice_provider(
@@ -1125,9 +1502,15 @@ def effective_models_report(user_config: Any | None) -> dict[str, Any]:
     default_provider = getattr(config, "default_provider", None) or "google_gemini"
     default_model = getattr(config, "default_model", None) or ""
 
+    from aether_engine.delegation_settings import is_tier_alias
+
     candidates: list[Candidate] = []
     history = History()
-    if mode == "auto":
+    # P1e: tier-alias pins resolve through the tiers in ANY routing
+    # mode (an alias is a pin-class directive, not auto routing),
+    # so the pool is gathered when an alias needs it too.
+    if mode == "auto" or any(
+            is_tier_alias(v) for v in agent_models.values()):
         try:
             candidates = collect_candidates(
                 registry=engine_state.model_registry,
@@ -1144,6 +1527,38 @@ def effective_models_report(user_config: Any | None) -> dict[str, Any]:
     agents: list[dict[str, Any]] = []
     for agent in ("supervisor", "researcher", "planner", "coder"):
         pin = agent_models.get(agent)
+        if pin and is_tier_alias(pin):
+            # P1e: a tier alias — report what it resolves to in the
+            # current pool (the pick is re-made per delegation, so
+            # this is the standing resolution, labelled as such).
+            choice = pick_alias_candidate(
+                str(pin), candidates, history, agent) if candidates \
+                else None
+            if choice is None:
+                agents.append({
+                    "agent": agent,
+                    "provider": None,
+                    "model": str(pin),
+                    "source": "tier_alias",
+                    "tier": None,
+                    "reason": (
+                        f"Pinned to the '{pin}' tier alias — no "
+                        "eligible model is currently configured for "
+                        "it, so the run's model serves until one is."),
+                })
+            else:
+                agents.append({
+                    "agent": agent,
+                    "provider": choice.provider,
+                    "model": choice.model,
+                    "source": "tier_alias",
+                    "tier": TIER_NAMES.get(choice.tier),
+                    "reason": (
+                        f"Pinned to the '{pin}' tier alias — "
+                        f"{choice.reason}; the pick is re-made per "
+                        "delegation from the live pool."),
+                })
+            continue
         if pin and pin != "inherit":
             p_name, _, m_name = str(pin).partition(":")
             agents.append({
