@@ -305,6 +305,61 @@ function VaultFillApprovalMessage({ msg, onVaultFillApproval }) {
   );
 }
 
+// C6 (Wave 6): the memory-used disclosure on a finished assistant
+// reply — which memory items the reply drew on, as the engine
+// disclosed them on the completion payload (useEngineMessages
+// carries them onto the message as memory_used). Collapsed by
+// default; expands to the summaries with the kind in plain words.
+// Summaries only: raw memory ids are never rendered as text. No
+// usable items (memory off, or nothing scored) renders nothing.
+const MEMORY_KIND_LABELS = { fact: 'Fact', episode: 'Episode', profile: 'Profile' };
+
+function MemoryUsedDisclosure({ items }) {
+  const [expanded, setExpanded] = React.useState(false);
+  const usable = (Array.isArray(items) ? items : []).filter(
+    (item) => item && typeof item.summary === 'string' && item.summary);
+  if (!usable.length) return null;
+  return (
+    <div style={{ marginTop: '6px' }}>
+      <button
+        type="button"
+        data-testid="memory-used-toggle"
+        aria-expanded={expanded}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setExpanded((v) => !v);
+        }}
+        style={{
+          background: 'var(--bg-hover)',
+          border: '1px solid var(--border-default)',
+          borderRadius: '6px',
+          color: 'var(--text-secondary)',
+          cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          fontSize: '11px',
+          padding: '3px 8px',
+        }}
+      >
+        Memory used ({usable.length})
+      </button>
+      {expanded && (
+        <div data-testid="memory-used-list" style={{ marginTop: '4px' }}>
+          {usable.map((item, i) => (
+            <div key={i} style={{ fontSize: '12px', color: 'var(--text-secondary)', padding: '2px 0' }}>
+              <span style={{ color: 'var(--text-muted)' }}>
+                {MEMORY_KIND_LABELS[item.kind] || 'Fact'}:{' '}
+              </span>
+              {item.summary}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ChatMessageRow({
   msg,
   index,
@@ -564,6 +619,9 @@ function ChatMessageRow({
         >
           {readAloudError}
         </div>
+      )}
+      {(msg.role === 'agent' || msg.role === 'assistant') && (
+        <MemoryUsedDisclosure items={msg.memory_used} />
       )}
       {isLastFinalAgent && !isThinking && onRegenerate && (
         <button

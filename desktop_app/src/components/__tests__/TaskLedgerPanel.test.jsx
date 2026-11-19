@@ -253,3 +253,173 @@ describe('TaskLedgerPanel', () => {
     expect(lists).toHaveLength(2);
   });
 });
+
+// ── Wave 6 (D-1): manual resume for restart-interrupted tasks ──────
+// Fixtures match the REAL engine shapes: the interrupted list row is
+// the audit-spine row from task_ledger.recent_tasks() (session from
+// the checkpoint, sources ["audit_log"]), and the audit is
+// resume_audit.build_resume_audit's dict verbatim in structure.
+const INTERRUPTED_LIST_PAYLOAD = {
+  tasks: [
+    {
+      task_id: 'task-33333333-eeee-ffff',
+      session_id: 'sess-9',
+      prompt: 'Index the photo library',
+      summary: null,
+      state: 'INTERRUPTED',
+      timestamp: 1730000200,
+      sources: ['audit_log'],
+      cost_usd: null,
+    },
+  ],
+  count: 1,
+};
+
+const AUDIT_READY = {
+  task_id: 'task-33333333-eeee-ffff',
+  session_id: 'sess-9',
+  prompt: 'Index the photo library',
+  state: 'INTERRUPTED',
+  verdict: 'ready',
+  refusal_reason: null,
+  completed_steps: [
+    { kind: 'delegation', label: 'Delegated to planner', detail: 'index photos', status: 'completed' },
+    { kind: 'tool_call', label: 'read_file', detail: '', status: 'completed' },
+  ],
+  in_flight: {
+    kind: 'tool_call', tool_name: 'find_files',
+    tool_args: { pattern: '*.jpg' }, node: 'planner',
+    classification: 'not_done',
+    reason: 'find_files only reads — it has no completion record, and running it again changes nothing',
+  },
+  files: [{ path: '/tmp/photos/index.json', exists: true }],
+  pending_approvals: [],
+  coverage: { checkpoint: true, audit_transitions: 2, checkpoint_scan_capped: false, notes: [] },
+};
+
+const AUDIT_UNCERTAIN = {
+  ...AUDIT_READY,
+  verdict: 'uncertain',
+  in_flight: {
+    kind: 'tool_call', tool_name: 'write_file',
+    tool_args: { path: '/tmp/photos/index.json' }, node: 'planner',
+    classification: 'uncertain',
+    reason: 'a file exists at /tmp/photos/index.json with no completion record — the write may already have happened',
+  },
+  files: [{ path: '/tmp/photos/index.json', exists: true }],
+};
+
+const AUDIT_REFUSED = {
+  ...AUDIT_READY,
+  verdict: 'refused',
+  refusal_reason: 'the task is waiting on an approval decision — answer the approval instead of resuming',
+  completed_steps: [],
+  in_flight: null,
+  files: [],
+};
+
+function renderInterrupted() {
+  const ref = makeWsRef();
+  render(<TaskLedgerPanel wsRef={ref.wsRef} isConnected />);
+  deliver(ref.handler, 'TASK_LEDGER_LIST_RESPONSE', INTERRUPTED_LIST_PAYLOAD);
+  fireEvent.click(screen.getByText('Index the photo library'));
+  return ref;
+}
+
+describe('TaskLedgerPanel resume (D-1)', () => {
+  it('renders the Interrupted by restart treatment and a Resume review entry', () => {
+    const ref = renderInterrupted();
+    expect(screen.getByText('Interrupted by restart')).toBeInTheDocument();
+    expect(screen.getByTestId('task-resume-section')).toBeInTheDocument();
+    expect(screen.getByTestId('task-resume-review-button')).toBeInTheDocument();
+    // Nothing has been sent yet beyond list + detail query: resume
+    // is audit-first, never one-click.
+    const types = sentFrames(ref.wsRef).map((f) => f.type);
+    expect(types).not.toContain('TASK_RESUME_AUDIT_REQUEST');
+    expect(types).not.toContain('TASK_RESUME_REQUEST');
+  });
+
+  it('does not offer resume on a non-interrupted task', () => {
+    const ref = makeWsRef();
+    render(<TaskLedgerPanel wsRef={ref.wsRef} isConnected />);
+    deliver(ref.handler, 'TASK_LEDGER_LIST_RESPONSE', LIST_PAYLOAD);
+    fireEvent.click(screen.getByText('Summarise the repository layout'));
+    expect(screen.queryByTestId('task-resume-section')).not.toBeInTheDocument();
+  });
+
+  it('audit-first flow: review fetches the audit, confirm sends the resume, success refreshes the list', () => {
+    const ref = renderInterrupted();
+    fireEvent.click(screen.getByTestId('task-resume-review-button'));
+    const auditReq = sentFrames(ref.wsRef).find((f) => f.type === 'TASK_RESUME_AUDIT_REQUEST');
+    expect(auditReq).toBeDefined();
+    expect(auditReq.payload).toEqual({
+      task_id: 'task-33333333-eeee-ffff', session_id: 'sess-9',
+    });
+    deliver(ref.handler, 'TASK_RESUME_AUDIT_RESPONSE', {
+      success: true, task_id: 'task-33333333-eeee-ffff', audit: AUDIT_READY, error: null,
+    });
+    // Completed steps are named as done/skipped; the in-flight step
+    // carries its classification in plain words.
+    expect(screen.getByText('Delegated to planner')).toBeInTheDocument();
+    expect(screen.getByText('find_files')).toBeInTheDocument();
+    expect(screen.getByText('Not done — safe to run again')).toBeInTheDocument();
+    expect(screen.getByText(/still on disk/)).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('task-resume-confirm-button'));
+    const resumeReq = sentFrames(ref.wsRef).find((f) => f.type === 'TASK_RESUME_REQUEST');
+    expect(resumeReq).toBeDefined();
+    expect(resumeReq.payload).toEqual({
+      task_id: 'task-33333333-eeee-ffff', session_id: 'sess-9',
+    });
+    expect(resumeReq.payload.confirm_uncertain).toBeUndefined();
+    deliver(ref.handler, 'TASK_RESUME_RESPONSE', {
+      success: true, task_id: 'task-33333333-eeee-ffff', session_id: 'sess-9',
+      error: null, requires_confirmation: false, audit: AUDIT_READY,
+    });
+    expect(screen.getByTestId('task-resume-started')).toHaveTextContent(
+      'Resume started — the task is running again.');
+    const lists = sentFrames(ref.wsRef).filter((f) => f.type === 'TASK_LEDGER_LIST_REQUEST');
+    expect(lists.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('uncertain audit: the confirm copy names the uncertainty and the request carries confirm_uncertain', () => {
+    const ref = renderInterrupted();
+    fireEvent.click(screen.getByTestId('task-resume-review-button'));
+    deliver(ref.handler, 'TASK_RESUME_AUDIT_RESPONSE', {
+      success: true, task_id: 'task-33333333-eeee-ffff', audit: AUDIT_UNCERTAIN, error: null,
+    });
+    expect(screen.getByText('Uncertain — cannot be verified')).toBeInTheDocument();
+    const warning = screen.getByTestId('task-resume-uncertain-warning');
+    expect(warning).toHaveTextContent('cannot be verified');
+    expect(warning).toHaveTextContent('may repeat it');
+    expect(screen.getByTestId('task-resume-confirm-button')).toHaveTextContent('Resume anyway');
+    fireEvent.click(screen.getByTestId('task-resume-confirm-button'));
+    const resumeReq = sentFrames(ref.wsRef).find((f) => f.type === 'TASK_RESUME_REQUEST');
+    expect(resumeReq.payload.confirm_uncertain).toBe(true);
+  });
+
+  it('refused audit shows the refusal reason and offers no confirm', () => {
+    const ref = renderInterrupted();
+    fireEvent.click(screen.getByTestId('task-resume-review-button'));
+    deliver(ref.handler, 'TASK_RESUME_AUDIT_RESPONSE', {
+      success: true, task_id: 'task-33333333-eeee-ffff', audit: AUDIT_REFUSED, error: null,
+    });
+    expect(screen.getByText(/waiting on an approval decision/)).toBeInTheDocument();
+    expect(screen.queryByTestId('task-resume-confirm-button')).not.toBeInTheDocument();
+  });
+
+  it('a refused resume shows the engine error verbatim', () => {
+    const ref = renderInterrupted();
+    fireEvent.click(screen.getByTestId('task-resume-review-button'));
+    deliver(ref.handler, 'TASK_RESUME_AUDIT_RESPONSE', {
+      success: true, task_id: 'task-33333333-eeee-ffff', audit: AUDIT_READY, error: null,
+    });
+    fireEvent.click(screen.getByTestId('task-resume-confirm-button'));
+    deliver(ref.handler, 'TASK_RESUME_RESPONSE', {
+      success: false, task_id: 'task-33333333-eeee-ffff', session_id: 'sess-9',
+      error: 'a resume for this task is already in progress',
+      requires_confirmation: false, audit: AUDIT_READY,
+    });
+    expect(screen.getByTestId('task-resume-error')).toHaveTextContent(
+      'a resume for this task is already in progress');
+  });
+});

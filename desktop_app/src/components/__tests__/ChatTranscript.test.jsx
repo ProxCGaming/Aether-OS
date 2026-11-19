@@ -183,3 +183,65 @@ describe('ChatTranscript', () => {
     expect(screen.getByText('read_file')).toBeInTheDocument();
   });
 });
+
+describe('ChatTranscript memory-used disclosure (C6)', () => {
+  const MEMORY_USED = [
+    { id: 'fact-xyz-123', summary: 'Prefers dark themes in every app', kind: 'fact' },
+    { fact_id: 'ep-xyz-789', summary: 'Discussed the Kolkata trip last week', kind: 'episode' },
+  ];
+
+  test('collapsed by default; expands to summaries with plain kind labels; raw ids never render', () => {
+    const messages = [{
+      id: 'a1', role: 'agent', content: 'Here is your answer', isFinal: true,
+      memory_used: MEMORY_USED,
+    }];
+    render(<ChatTranscript {...makeProps({ messages })} />);
+    const toggle = screen.getByTestId('memory-used-toggle');
+    expect(toggle).toHaveTextContent('Memory used (2)');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByTestId('memory-used-list')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Prefers dark themes/)).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const list = screen.getByTestId('memory-used-list');
+    expect(list).toHaveTextContent('Fact:');
+    expect(list).toHaveTextContent('Prefers dark themes in every app');
+    expect(list).toHaveTextContent('Episode:');
+    expect(list).toHaveTextContent('Discussed the Kolkata trip last week');
+    // Summaries only — the raw memory ids are never visible text.
+    expect(document.body.textContent).not.toContain('fact-xyz-123');
+    expect(document.body.textContent).not.toContain('ep-xyz-789');
+  });
+
+  test('no affordance when memory_used is absent or empty', () => {
+    const messages = [
+      { id: 'a1', role: 'agent', content: 'plain reply', isFinal: true },
+      { id: 'a2', role: 'agent', content: 'empty list reply', isFinal: true, memory_used: [] },
+    ];
+    render(<ChatTranscript {...makeProps({ messages })} />);
+    expect(screen.queryByTestId('memory-used-toggle')).not.toBeInTheDocument();
+  });
+
+  test('no affordance on user messages even if the field is present', () => {
+    const messages = [{
+      id: 'u1', role: 'user', content: 'my question', memory_used: MEMORY_USED,
+    }];
+    render(<ChatTranscript {...makeProps({ messages })} />);
+    expect(screen.queryByTestId('memory-used-toggle')).not.toBeInTheDocument();
+  });
+
+  test('items without a summary are not counted or shown', () => {
+    const messages = [{
+      id: 'a1', role: 'agent', content: 'reply', isFinal: true,
+      memory_used: [
+        { id: 'fact-nosummary', kind: 'fact' },
+        { id: 'fact-ok', summary: 'Likes tea in the morning', kind: 'profile' },
+      ],
+    }];
+    render(<ChatTranscript {...makeProps({ messages })} />);
+    expect(screen.getByTestId('memory-used-toggle')).toHaveTextContent('Memory used (1)');
+    fireEvent.click(screen.getByTestId('memory-used-toggle'));
+    expect(screen.getByTestId('memory-used-list')).toHaveTextContent('Profile:');
+    expect(screen.getByTestId('memory-used-list')).toHaveTextContent('Likes tea in the morning');
+  });
+});

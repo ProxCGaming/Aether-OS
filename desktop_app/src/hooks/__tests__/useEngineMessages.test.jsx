@@ -261,3 +261,78 @@ describe('useEngineMessages', () => {
     expect(deps.pendingApprovalsRef.current).toEqual([]);
   });
 });
+
+describe('useEngineMessages memory-used disclosure (C6)', () => {
+  const finalMessages = (deps, seed = []) => {
+    const updaters = deps.setChatMessages.mock.calls
+      .map(([arg]) => arg).filter((a) => typeof a === 'function');
+    return updaters.reduce((acc, fn) => fn(acc), seed);
+  };
+
+  it('TASK_COMPLETED carries memory_used onto the created final message, normalised', () => {
+    const { deps, emit } = mount();
+    emit({
+      type: 'TASK_COMPLETED',
+      payload: {
+        task_id: 'task-9', session_id: 's1', response: 'the answer',
+        memory_used: [
+          { id: 'fact-1', summary: 'Prefers dark themes', kind: 'fact' },
+          { fact_id: 'ep-2', summary: 'Talked about the trip', kind: 'episode' },
+          { id: 'fact-3', kind: 'fact' },
+        ],
+      },
+    });
+    const next = finalMessages(deps);
+    const final = next[next.length - 1];
+    expect(final.role).toBe('agent');
+    expect(final.isFinal).toBe(true);
+    // fact_id normalises onto id; the summary-less item is dropped.
+    expect(final.memory_used).toEqual([
+      { id: 'fact-1', summary: 'Prefers dark themes', kind: 'fact' },
+      { id: 'ep-2', summary: 'Talked about the trip', kind: 'episode' },
+    ]);
+  });
+
+  it('TASK_COMPLETED carries memory_used onto an existing streaming bubble', () => {
+    const { deps, emit } = mount();
+    const seed = [{ role: 'agent', content: 'partial…', isFinal: false }];
+    emit({
+      type: 'TASK_COMPLETED',
+      payload: {
+        task_id: 'task-9', session_id: 's1', response: 'full answer',
+        memory_used: [{ id: 'p-1', summary: 'Name is Arindam', kind: 'profile' }],
+      },
+    });
+    const next = finalMessages(deps, seed);
+    expect(next).toHaveLength(1);
+    expect(next[0].content).toBe('full answer');
+    expect(next[0].memory_used).toEqual([
+      { id: 'p-1', summary: 'Name is Arindam', kind: 'profile' },
+    ]);
+  });
+
+  it('no memory_used on the payload leaves the field off the message', () => {
+    const { deps, emit } = mount();
+    emit({
+      type: 'TASK_COMPLETED',
+      payload: { task_id: 'task-9', session_id: 's1', response: 'plain' },
+    });
+    const next = finalMessages(deps);
+    const final = next[next.length - 1];
+    expect(final.isFinal).toBe(true);
+    expect('memory_used' in final).toBe(false);
+  });
+
+  it('an empty memory_used list leaves the field off the message', () => {
+    const { deps, emit } = mount();
+    emit({
+      type: 'TASK_COMPLETED',
+      payload: {
+        task_id: 'task-9', session_id: 's1', response: 'plain', memory_used: [],
+      },
+    });
+    const next = finalMessages(deps);
+    const final = next[next.length - 1];
+    expect('memory_used' in final).toBe(false);
+  });
+});

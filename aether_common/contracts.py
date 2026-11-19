@@ -217,6 +217,30 @@ class EventType(str, Enum):
     TASK_LEDGER_QUERY_RESPONSE = "TASK_LEDGER_QUERY_RESPONSE"
     TASK_LEDGER_LIST_REQUEST = "TASK_LEDGER_LIST_REQUEST"
     TASK_LEDGER_LIST_RESPONSE = "TASK_LEDGER_LIST_RESPONSE"
+    # Wave 6 (D-1 option B): manual resume of a restart-interrupted
+    # task from the ledger, gated by a pre-resume audit. Resume is
+    # manual-only — these two requests are the only trigger; nothing
+    # resumes at startup.
+    # TASK_RESUME_AUDIT_REQUEST payload: {"task_id": str,
+    # "session_id": str | None (thread hint)};
+    # TASK_RESUME_AUDIT_RESPONSE payload: {"success": bool,
+    # "task_id": str, "audit": {task_id, session_id, prompt, state,
+    # verdict ("ready" | "uncertain" | "refused"), refusal_reason,
+    # completed_steps, in_flight, files, pending_approvals,
+    # coverage} | None, "error": str | None}.
+    # TASK_RESUME_REQUEST payload: {"task_id": str,
+    # "session_id": str | None, "confirm_uncertain": bool — the
+    # owner's explicit confirmation, required when the audit's
+    # verdict is "uncertain"};
+    # TASK_RESUME_RESPONSE payload: {"success": bool, "task_id": str,
+    # "session_id": str | None, "error": str | None,
+    # "requires_confirmation": bool, "audit": {...} | None} — on
+    # success the resumed task's own events stream on the same
+    # socket exactly as an approval resume's do.
+    TASK_RESUME_AUDIT_REQUEST = "TASK_RESUME_AUDIT_REQUEST"
+    TASK_RESUME_AUDIT_RESPONSE = "TASK_RESUME_AUDIT_RESPONSE"
+    TASK_RESUME_REQUEST = "TASK_RESUME_REQUEST"
+    TASK_RESUME_RESPONSE = "TASK_RESUME_RESPONSE"
     # Epic 8, E8-A8.1b: context breakdown + daily budget alerting.
     # CONTEXT_BREAKDOWN_REQUEST payload: {"session_id": str, "task_id": str | None, "model": str | None}.
     # CONTEXT_BREAKDOWN_RESPONSE payload: {"model": str, "context_limit": int, "total_tokens": int,

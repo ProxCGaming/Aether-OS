@@ -30,7 +30,9 @@ writers, each owning one slice of the truth:
 
 ``task_summary()`` joins those five for one task;
 ``recent_tasks()`` lists the tasks the episodic spine + the live tap
-know about; ``task_briefing()`` renders a summary as bounded text for
+know about, plus restart-interrupted tasks from the audit spine
+(the only writer that still knows them after a restart — Wave 6);
+``task_briefing()`` renders a summary as bounded text for
 the supervisor (the ``blackboard_briefing()`` pattern — S4 wires it
 into prompts; this module only formats).
 
@@ -59,6 +61,8 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
+
+from aether_common.contracts import TaskState
 
 logger = logging.getLogger("aether_engine.task_ledger")
 
@@ -548,6 +552,62 @@ def _state_slice(values: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _writes_include_tool_result(value: Any) -> bool:
+    """True when a pending ``messages`` write carries a tool result.
+
+    Write values arrive as the channel's raw payloads: a list of
+    message dicts (this codebase's state shape) or message objects.
+    """
+    items = value if isinstance(value, list) else [value]
+    for item in items:
+        if isinstance(item, dict):
+            if item.get("role") == "tool":
+                return True
+        elif getattr(item, "type", None) == "tool":
+            return True
+    return False
+
+
+async def _pending_write_evidence(
+    saver: Any, thread_id: str, checkpoint_ns: str | None,
+) -> dict[str, Any]:
+    """Uncommitted-write evidence for one checkpoint (Wave 6, D-1).
+
+    A step that finished its work but whose superstep checkpoint
+    never committed leaves pending writes on the previous
+    checkpoint. The resume audit reads them as evidence: a tool
+    result sitting in an uncommitted ``messages`` write means the
+    call may have completed without a completion record — the
+    audit's UNCERTAIN case. Returns the write channels seen plus
+    whether any of them carries a tool result. A failed read is
+    empty evidence, never an error (the audit names the gap through
+    its other legs).
+    """
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    if checkpoint_ns:
+        config["configurable"]["checkpoint_ns"] = checkpoint_ns
+    try:
+        tuple_ = await saver.aget_tuple(config)
+    except Exception:
+        logger.debug(
+            "Task ledger pending-write read failed for thread %s",
+            thread_id, exc_info=True)
+        return {"pending_write_channels": [], "pending_tool_result": False}
+    channels: list[str] = []
+    tool_result = False
+    for write in (tuple_.pending_writes if tuple_ else None) or []:
+        try:
+            _task, channel, value = write
+        except (TypeError, ValueError):
+            continue
+        if channel not in channels:
+            channels.append(channel)
+        if channel == "messages" and _writes_include_tool_result(value):
+            tool_result = True
+    return {"pending_write_channels": channels,
+            "pending_tool_result": tool_result}
+
+
 async def checkpoint_slice_for_task(
     task_id: str, *, session_id: str | None = None,
     checkpoint_db: Path | str | None = None,
@@ -592,7 +652,9 @@ async def checkpoint_slice_for_task(
         graph = compile_graph(checkpointer=saver)
         for thread_id in thread_ids:
             try:
-                state = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+                state = await graph.aget_state(
+                    {"configurable": {"thread_id": thread_id}},
+                    subgraphs=True)
             except Exception:  # per-thread isolation, as in get_pending_approvals
                 logger.debug(
                     "Task ledger checkpoint read failed for thread %s",
@@ -614,6 +676,40 @@ async def checkpoint_slice_for_task(
                             "pending": True,
                             "source": "checkpoint_state",
                         })
+            # Wave 6 (D-1 resume audit): where the graph stopped and
+            # what was in flight. ``next_nodes`` is the parent graph's
+            # pending work; ``in_flight`` carries each pending
+            # subgraph's own position — while a specialist is mid-run
+            # its staged tool call and message-level tool calls live
+            # ONLY in the subgraph checkpoint (the parent's messages
+            # gain them when the subgraph returns), so a parent-only
+            # read cannot see the step that was in flight when the
+            # process died. Only true subgraphs (their snapshot
+            # carries a checkpoint namespace) are recorded.
+            slice_["next_nodes"] = [str(n) for n in (state.next or [])]
+            for task in state.tasks or []:
+                sub = getattr(task, "state", None)
+                sub_values = getattr(sub, "values", None)
+                if not isinstance(sub_values, dict) or not sub_values:
+                    continue
+                sub_config = getattr(sub, "config", None) or {}
+                sub_ns = (sub_config.get("configurable") or {}).get(
+                    "checkpoint_ns")
+                if not sub_ns:
+                    continue
+                entry = {
+                    "node": task.name,
+                    "next_nodes": [
+                        str(n) for n in (getattr(sub, "next", None) or [])],
+                    "pending_tool_call": sub_values.get("pending_tool_call"),
+                    "tool_calls": _tool_calls_from_messages(
+                        sub_values.get("messages") or []),
+                }
+                entry.update(await _pending_write_evidence(
+                    saver, thread_id, sub_ns))
+                slice_.setdefault("in_flight", []).append(entry)
+            slice_.update(await _pending_write_evidence(
+                saver, thread_id, None))
             return slice_, scan_capped
     return None, scan_capped
 
@@ -873,7 +969,11 @@ def recent_tasks(
     "Recent" is honestly scoped: tasks with an episode record
     (completed graph/fast-chat tasks), plus tasks the live tap has
     seen in this engine process (running, paused or just-finished
-    work that has not written an episode yet). A task that failed
+    work that has not written an episode yet), plus — Wave 6, for
+    the D-1 resume surface — tasks whose last audit transition is
+    INTERRUPTED: a restart-interrupted task has no episode and no
+    tap entry in the new process, so without the audit spine it
+    could never be listed, inspected or resumed. A task that failed
     before writing an episode and was never tapped does not appear —
     it leaves its trace in the audit trail and usage ledger instead.
     Each row carries its usage-ledger cost total so a list can show
@@ -923,6 +1023,36 @@ def recent_tasks(
         if tap.get("state"):
             row["state"] = tap["state"]
         row["timestamp"] = max(row.get("timestamp") or 0, tap.get("last_ts") or 0)
+    # Wave 6 (D-1): the audit spine for restart-interrupted tasks.
+    # The trail's payloads are redacted to key shape, so these rows
+    # carry only what a transition record itself knows — identity,
+    # state, when the sweep closed the record; the per-task summary
+    # (TASK_LEDGER_QUERY) joins the checkpoint for the rest. The
+    # import mirrors the sweep's own lazy import of this module.
+    try:
+        from aether_engine.audit import DEFAULT_AUDIT_LOG_PATH
+        from aether_engine.langgraph.orphan_sweep import (
+            last_transitions_by_task,
+        )
+
+        for task_id, record in last_transitions_by_task(
+                DEFAULT_AUDIT_LOG_PATH).items():
+            if record.get("to_state") != TaskState.INTERRUPTED.value:
+                continue
+            if task_id in rows:
+                continue
+            rows[task_id] = {
+                "task_id": task_id,
+                "session_id": None,
+                "prompt": None,
+                "summary": None,
+                "state": TaskState.INTERRUPTED.value,
+                "timestamp": record.get("ts"),
+                "sources": ["audit_log"],
+            }
+    except Exception:
+        logger.debug(
+            "Task ledger recent-list audit spine failed", exc_info=True)
     ordered = sorted(
         rows.values(), key=lambda r: float(r.get("timestamp") or 0), reverse=True)
     result = ordered[:limit]

@@ -12,6 +12,20 @@ import LoadStateRow from './Settings/LoadStateRow';
 //   TASK_LEDGER_LIST_REQUEST  {}                     -> { tasks, count }
 //   TASK_LEDGER_QUERY_REQUEST { task_id, session_id? } -> task summary
 //
+// Wave 6 (D-1) adds the manual resume pair for tasks the startup
+// sweep marked INTERRUPTED:
+//
+//   TASK_RESUME_AUDIT_REQUEST { task_id, session_id? } -> { audit }
+//   TASK_RESUME_REQUEST { task_id, confirm_uncertain? } -> { success, error }
+//
+// Resume is manual-only and audit-first: the Resume button fetches
+// the pre-resume audit (what finished, what was in flight, what
+// cannot be verified), the owner reads it, and only the confirm
+// button sends the resume request. An audit whose in-flight step is
+// UNCERTAIN names the uncertainty in the confirm copy, and the
+// request then carries confirm_uncertain: true — the engine refuses
+// an uncertain resume without it.
+//
 // Honesty rules, mirroring the engine's own contract:
 // - Only fields the payload actually carries are rendered. A recent
 //   row has no delegation count and no started/finished pair (one
@@ -283,6 +297,139 @@ function TaskDetail({ detail }) {
   );
 }
 
+const CLASSIFICATION_LABELS = {
+  not_done: 'Not done — safe to run again',
+  uncertain: 'Uncertain — cannot be verified',
+};
+
+const STEP_STATUS_LABELS = {
+  completed: 'Done',
+  failed: 'Failed',
+  denied: 'Denied',
+};
+
+// The resume review for one INTERRUPTED task (D-1): audit first,
+// owner confirms, only then does anything run. `auditState` is the
+// panel's per-task slice ({ state: 'idle'|'loading'|'ready'|'error',
+// audit, error }); `result` is the resume request's outcome slice
+// ({ state: 'sending'|'done'|'error', error, requiresConfirmation }).
+function ResumeSection({ task, auditState, result, onFetchAudit, onResume }) {
+  const audit = auditState?.state === 'ready' ? auditState.audit : null;
+  return (
+    <div data-testid="task-resume-section" style={{ padding: '10px 0 4px 0', fontSize: '14px' }}>
+      <div style={sectionLabelStyle}>Resume</div>
+      {(!auditState || auditState.state === 'idle') && (
+        <>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+            This task was interrupted when the engine restarted. Nothing restarts
+            until you confirm — first, check what it already did.
+          </div>
+          <button
+            data-testid="task-resume-review-button"
+            onClick={() => onFetchAudit(task)}
+            style={{ marginTop: '8px', background: 'transparent', border: '1px solid var(--accent)', color: 'var(--accent)', padding: '6px 12px', borderRadius: 'var(--radius-lg)', cursor: 'pointer', fontSize: '13px' }}
+          >
+            Resume
+          </button>
+        </>
+      )}
+      {auditState?.state === 'loading' && (
+        <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+          Checking what this task already did…
+        </div>
+      )}
+      {auditState?.state === 'error' && (
+        <div style={{ fontSize: '13px', color: 'var(--danger)' }}>
+          {auditState.error}
+        </div>
+      )}
+      {audit && (
+        <div data-testid="task-resume-audit">
+          {audit.verdict === 'refused' && (
+            <div style={{ fontSize: '13px', color: 'var(--danger)' }}>
+              This task cannot be resumed: {audit.refusal_reason || 'the engine refused the resume.'}
+            </div>
+          )}
+          {Array.isArray(audit.completed_steps) && audit.completed_steps.length > 0 && (
+            <>
+              <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                Already done — these will be skipped:
+              </div>
+              {audit.completed_steps.map((step, i) => (
+                <div key={i} style={{ display: 'flex', gap: '8px', alignItems: 'center', padding: '4px 0', fontSize: '13px' }}>
+                  <span>{step.label}</span>
+                  <span style={chipStyle(false)}>{STEP_STATUS_LABELS[step.status] || step.status}</span>
+                  {step.detail && <span style={{ color: 'var(--text-muted)' }}>{step.detail}</span>}
+                </div>
+              ))}
+            </>
+          )}
+          {audit.in_flight && (
+            <>
+              <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '8px' }}>
+                In flight when the engine stopped:
+              </div>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', padding: '4px 0', fontSize: '13px' }}>
+                <span>{audit.in_flight.tool_name || audit.in_flight.node || 'a step'}</span>
+                <span style={chipStyle(audit.in_flight.classification === 'uncertain')}>
+                  {CLASSIFICATION_LABELS[audit.in_flight.classification] || audit.in_flight.classification}
+                </span>
+              </div>
+              {audit.in_flight.reason && (
+                <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>{audit.in_flight.reason}</div>
+              )}
+            </>
+          )}
+          {Array.isArray(audit.files) && audit.files.length > 0 && (
+            <>
+              <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '8px' }}>
+                Files this task touched:
+              </div>
+              {audit.files.map((f, i) => (
+                <div key={i} style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                  {f.path} — {f.exists ? 'still on disk' : 'no longer on disk'}
+                </div>
+              ))}
+            </>
+          )}
+          {audit.verdict === 'uncertain' && (
+            <div data-testid="task-resume-uncertain-warning" style={{ fontSize: '13px', color: 'var(--danger)', marginTop: '10px' }}>
+              The step above cannot be verified
+              {audit.in_flight?.reason ? `: ${audit.in_flight.reason}` : '.'}
+              {' '}If it already took effect, resuming may repeat it.
+            </div>
+          )}
+          {audit.verdict !== 'refused' && result?.state !== 'done' && (
+            <button
+              data-testid="task-resume-confirm-button"
+              disabled={result?.state === 'sending'}
+              onClick={() => onResume(task, audit.verdict === 'uncertain')}
+              style={{ marginTop: '10px', background: 'transparent', border: '1px solid var(--accent)', color: 'var(--accent)', padding: '6px 12px', borderRadius: 'var(--radius-lg)', cursor: 'pointer', fontSize: '13px' }}
+            >
+              {result?.state === 'sending'
+                ? 'Resuming…'
+                : audit.verdict === 'uncertain' ? 'Resume anyway' : 'Resume task'}
+            </button>
+          )}
+          {result?.state === 'error' && (
+            <div data-testid="task-resume-error" style={{ fontSize: '13px', color: 'var(--danger)', marginTop: '8px' }}>
+              {result.error}
+              {result.requiresConfirmation
+                ? ' The engine needs your explicit confirmation for the uncertain step above.'
+                : ''}
+            </div>
+          )}
+          {result?.state === 'done' && (
+            <div data-testid="task-resume-started" style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '8px' }}>
+              Resume started — the task is running again.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function TaskLedgerPanel({ wsRef = null, reconnectCount = 0, isConnected = null }) {
   const [loadState, setLoadState] = useState('loading');
   const [listError, setListError] = useState(null);
@@ -290,6 +437,8 @@ export default function TaskLedgerPanel({ wsRef = null, reconnectCount = 0, isCo
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [expandedId, setExpandedId] = useState(null);
   const [details, setDetails] = useState({});
+  const [resumeAudits, setResumeAudits] = useState({});
+  const [resumeResults, setResumeResults] = useState({});
 
   // Dashboard's socket pattern: own message listener on the shared
   // wsRef, requests sent as raw JSON frames with the shared
@@ -323,6 +472,58 @@ export default function TaskLedgerPanel({ wsRef = null, reconnectCount = 0, isCo
             setDetails((prev) => ({
               ...prev,
               [taskId]: { state: 'ready', summary: payload },
+            }));
+          }
+        } else if (data.type === 'TASK_RESUME_AUDIT_RESPONSE') {
+          const payload = data.payload || {};
+          const taskId = payload.task_id;
+          if (!taskId) return;
+          if (payload.error || !payload.audit) {
+            setResumeAudits((prev) => ({
+              ...prev,
+              [taskId]: {
+                state: 'error',
+                error: payload.error || 'The engine did not return a resume audit.',
+              },
+            }));
+          } else {
+            setResumeAudits((prev) => ({
+              ...prev,
+              [taskId]: { state: 'ready', audit: payload.audit },
+            }));
+          }
+        } else if (data.type === 'TASK_RESUME_RESPONSE') {
+          const payload = data.payload || {};
+          const taskId = payload.task_id;
+          if (!taskId) return;
+          if (payload.audit) {
+            // The resume answer carries the audit it acted on —
+            // keep the review in sync with it (it may be fresher
+            // than the one fetched earlier).
+            setResumeAudits((prev) => ({
+              ...prev,
+              [taskId]: { state: 'ready', audit: payload.audit },
+            }));
+          }
+          if (payload.success) {
+            setResumeResults((prev) => ({
+              ...prev,
+              [taskId]: { state: 'done' },
+            }));
+            // The task is running again — refresh the list so its
+            // row picks up the live state.
+            wsRef.current.send(JSON.stringify({
+              type: 'TASK_LEDGER_LIST_REQUEST', schema_version: 1,
+              request_id: Date.now().toString(), payload: {},
+            }));
+          } else {
+            setResumeResults((prev) => ({
+              ...prev,
+              [taskId]: {
+                state: 'error',
+                error: payload.error || 'The engine refused the resume.',
+                requiresConfirmation: Boolean(payload.requires_confirmation),
+              },
             }));
           }
         }
@@ -360,9 +561,34 @@ export default function TaskLedgerPanel({ wsRef = null, reconnectCount = 0, isCo
 
   const handleRefresh = () => {
     setDetails({});
+    setResumeAudits({});
+    setResumeResults({});
     setExpandedId(null);
     setLoadState('loading');
     setRefreshNonce((n) => n + 1);
+  };
+
+  const fetchResumeAudit = (task) => {
+    if (!wsRef?.current) return;
+    setResumeAudits((prev) => ({ ...prev, [task.task_id]: { state: 'loading' } }));
+    const payload = { task_id: task.task_id };
+    if (task.session_id) payload.session_id = task.session_id;
+    wsRef.current.send(JSON.stringify({
+      type: 'TASK_RESUME_AUDIT_REQUEST', schema_version: 1,
+      request_id: Date.now().toString(), payload,
+    }));
+  };
+
+  const requestResume = (task, confirmUncertain) => {
+    if (!wsRef?.current) return;
+    setResumeResults((prev) => ({ ...prev, [task.task_id]: { state: 'sending' } }));
+    const payload = { task_id: task.task_id };
+    if (task.session_id) payload.session_id = task.session_id;
+    if (confirmUncertain) payload.confirm_uncertain = true;
+    wsRef.current.send(JSON.stringify({
+      type: 'TASK_RESUME_REQUEST', schema_version: 1,
+      request_id: Date.now().toString(), payload,
+    }));
   };
 
   return (
@@ -412,7 +638,11 @@ export default function TaskLedgerPanel({ wsRef = null, reconnectCount = 0, isCo
                 </span>
                 <span style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', fontSize: '12px', color: 'var(--text-muted)', marginTop: '3px' }}>
                   <span>{shortId(task.task_id)}</span>
-                  {task.state && <span>{task.state}</span>}
+                  {task.state === 'INTERRUPTED' ? (
+                    <span style={chipStyle(true)}>Interrupted by restart</span>
+                  ) : (
+                    task.state && <span>{task.state}</span>
+                  )}
                   {fmtTime(task.timestamp) && <span>{fmtTime(task.timestamp)}</span>}
                   {fmtCost(task.cost_usd) && <span>{fmtCost(task.cost_usd)}</span>}
                   {Array.isArray(task.sources) && task.sources.length > 0 && (
@@ -426,6 +656,15 @@ export default function TaskLedgerPanel({ wsRef = null, reconnectCount = 0, isCo
               <div style={{ fontSize: '13px', color: 'var(--text-muted)', padding: '10px 0' }}>
                 Loading task detail…
               </div>
+            )}
+            {expanded && task.state === 'INTERRUPTED' && (
+              <ResumeSection
+                task={task}
+                auditState={resumeAudits[task.task_id]}
+                result={resumeResults[task.task_id]}
+                onFetchAudit={fetchResumeAudit}
+                onResume={requestResume}
+              />
             )}
           </div>
         );

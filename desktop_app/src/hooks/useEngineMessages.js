@@ -450,6 +450,27 @@ export function useEngineMessages(deps) {
           const bufferedThoughts = pendingThinkingRef.current[completionKey] || [];
           if (bufferedThoughts.length) delete pendingThinkingRef.current[completionKey];
 
+          // C6 (Wave 6): the memory items this reply used, as the
+          // engine disclosed them on the completion payload of BOTH
+          // chat paths (supervisor task and fast chat both settle
+          // through this branch) — summaries only, engine-capped.
+          // The id key is spelled fact_id in the contract text and
+          // id on the wire; normalise here so the transcript never
+          // has to care. Items without a summary are dropped: there
+          // is nothing honest to show for them. Empty/absent leaves
+          // the field off the message entirely, and the transcript
+          // renders no affordance for it.
+          const rawMemoryUsed = Array.isArray(data.payload?.memory_used)
+            ? data.payload.memory_used : [];
+          const memoryUsed = rawMemoryUsed
+            .map((item) => (item && typeof item === 'object' ? {
+              id: item.id ?? item.fact_id ?? null,
+              summary: typeof item.summary === 'string' ? item.summary : '',
+              kind: typeof item.kind === 'string' ? item.kind : 'fact',
+            } : null))
+            .filter((item) => item && item.summary);
+          const memoryField = memoryUsed.length ? { memory_used: memoryUsed } : {};
+
           const updateCompletedMessages = (prev) => {
             let newMessages = [...prev];
             const lastAgentIdx = newMessages.findLastIndex(m => m.role === 'agent' && !m.isFinal);
@@ -460,7 +481,7 @@ export function useEngineMessages(deps) {
               const baseThoughts = (last.thoughts && last.thoughts.length > 0) ? last.thoughts : (data.payload.thoughts || []);
               const finalThoughts = bufferedThoughts.length ? mergeThoughtEntries(baseThoughts, bufferedThoughts) : baseThoughts;
               
-              newMessages[lastAgentIdx] = { ...last, content: finalContent, thoughts: finalThoughts, isFinal: true };
+              newMessages[lastAgentIdx] = { ...last, content: finalContent, thoughts: finalThoughts, isFinal: true, ...memoryField };
               return newMessages.map((m, i) => 
                 (m.role === 'agent' && !m.isFinal && i !== lastAgentIdx) ? { ...m, isFinal: true, hasError: true, content: "**Task Cancelled**: Superseded by new request." } : m
               );
@@ -469,7 +490,7 @@ export function useEngineMessages(deps) {
               if (veryLast && veryLast.role === 'agent' && veryLast.isFinal) return newMessages;
               const finalContent = (result !== undefined && result !== null) ? (typeof result !== 'string' ? JSON.stringify(result, null, 2) : result) : '';
               const createdThoughts = bufferedThoughts.length ? mergeThoughtEntries(data.payload.thoughts || [], bufferedThoughts) : (data.payload.thoughts || []);
-              return [...newMessages, { role: 'agent', content: finalContent, thoughts: createdThoughts, isFinal: true }];
+              return [...newMessages, { role: 'agent', content: finalContent, thoughts: createdThoughts, isFinal: true, ...memoryField }];
             }
           };
           
