@@ -110,6 +110,7 @@ def _tap_entry(task_id: str) -> dict[str, Any]:
             "error": None,
             "delegations": [],
             "subagents": [],
+            "parallel_groups": [],
             "model_routing": [],
             "model_cascade": [],
             "desktop_actions": [],
@@ -193,6 +194,27 @@ def record_executor_event(task_id: str | None, event: Any) -> None:
                         "escalation" if action == "model_escalation" else "auto"),
                     "reason": out.get("reason") or payload.get("reason", ""),
                     "escalated_from": out.get("escalated_from"),
+                    "timestamp": ts,
+                    "source": "executor_event",
+                })
+            elif action == "parallel_group":
+                # P2b: one parallel delegation group, recorded as
+                # ONE unit with per-member outcomes — the fan-out
+                # is a single visible act in the ledger, while the
+                # members' own delegation transitions still land in
+                # "delegations" individually (they are real
+                # delegations and consume the cap individually).
+                out = payload.get("output_payload") or {}
+                _tap_append(entry, "parallel_groups", {
+                    "group_id": out.get("group_id"),
+                    "scheduling": out.get("scheduling"),
+                    "degraded_reason": out.get("degraded_reason") or None,
+                    "members": [
+                        {"agent": m.get("agent"), "status": m.get("status")}
+                        for m in (out.get("members") or [])
+                        if isinstance(m, dict)
+                    ],
+                    "status": out.get("status") or payload.get("status"),
                     "timestamp": ts,
                     "source": "executor_event",
                 })
@@ -880,6 +902,9 @@ async def task_summary(
         # S20 (additive): the tap's desktop-actuation records for
         # this task (category / app / via / status per action).
         "desktop_actions": (tap or {}).get("desktop_actions") or [],
+        # P2b (additive): the tap's parallel-group records for this
+        # task — one per fan-out, with per-member outcomes.
+        "parallel_groups": (tap or {}).get("parallel_groups") or [],
         # S4 (additive): the checkpointed delegation counter for the
         # task's turn, or None when no checkpoint carries one.
         "delegation_count": (checkpoint or {}).get("delegation_count"),
@@ -1004,6 +1029,15 @@ def task_briefing(summary: dict[str, Any], *, max_chars: int = BRIEFING_MAX_CHAR
             + (f" ({str(d.get('reason'))[:60]})" if d.get("reason") else "")
             for d in delegations[:6])
         parts.append(f"Delegations: {rendered}")
+    parallel_groups = summary.get("parallel_groups") or []
+    if parallel_groups:
+        rendered = "; ".join(
+            f"{g.get('scheduling') or 'sequential'} group: "
+            + ", ".join(
+                f"{m.get('agent') or '?'} ({m.get('status') or '?'})"
+                for m in (g.get("members") or []))
+            for g in parallel_groups[:4])
+        parts.append(f"Parallel delegations: {rendered}")
     subagents = summary.get("subagents") or []
     if subagents:
         rendered = ", ".join(

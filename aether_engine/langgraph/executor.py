@@ -117,6 +117,8 @@ __all__ = [
     "GRAPH_RECURSION_LIMIT",
     "_DELEGATION_HANDOFF_PREFIXES",
     "_new_delegation_events",
+    "_PARALLEL_GROUP_TOOL_NAME",
+    "_is_delegation_result_message",
     "supervisor_pattern_context",
     "_LANGGRAPH_AVAILABLE",
     "_RUNNER_SHUTDOWN_GRACE_SECONDS",
@@ -239,6 +241,23 @@ async def _reap_runner(task: asyncio.Task) -> None:
 # names); defined here because supervisor_model is loaded by the
 # graph, not by this module.
 _DELEGATION_HANDOFF_PREFIXES = ("transfer_to_", "delegate_to_")
+
+# P2b: the parallel-group tool's result message carries the joined
+# member outcomes — it surfaces as response text exactly like a
+# delegation tool's result (the two sites below). Mirrors
+# fanout.GROUP_TOOL_NAME; defined here for the same reason as the
+# prefixes above.
+_PARALLEL_GROUP_TOOL_NAME = "delegate_in_parallel"
+
+
+def _is_delegation_result_message(msg: Any) -> bool:
+    """True for a tool message carrying a delegation's result: a
+    P1d delegation tool's answer, or a P2b parallel group's joined
+    member outcomes."""
+    if not isinstance(msg, dict) or msg.get("role") != "tool":
+        return False
+    name = str(msg.get("name") or "")
+    return name.startswith("delegate_to_") or name == _PARALLEL_GROUP_TOOL_NAME
 
 
 def _is_handoff_message(msg: Any) -> bool:
@@ -903,10 +922,7 @@ async def run_langgraph_task(
                         # single-message writes inside the agent stay
                         # BaseMessage objects in the update.)
                         for _msg in message_dicts(state_update["messages"])[messages_seen:]:
-                            if (isinstance(_msg, dict)
-                                    and _msg.get("role") == "tool"
-                                    and str(_msg.get("name") or "").startswith("delegate_to_")
-                                    and _msg.get("content")):
+                            if _is_delegation_result_message(_msg) and _msg.get("content"):
                                 full_response_parts.append(_msg["content"])
                                 yield emit_event(Event(
                                     type=EventType.TASK_PROGRESS,
@@ -1481,10 +1497,7 @@ async def resume_langgraph_task(
                             # messages exist under the legacy
                             # topology.)
                             for _msg in message_dicts(state_update["messages"])[messages_seen:]:
-                                if (isinstance(_msg, dict)
-                                        and _msg.get("role") == "tool"
-                                        and str(_msg.get("name") or "").startswith("delegate_to_")
-                                        and _msg.get("content")):
+                                if _is_delegation_result_message(_msg) and _msg.get("content"):
                                     full_response_parts.append(_msg["content"])
                                     yield Event(
                                         type=EventType.TASK_PROGRESS,

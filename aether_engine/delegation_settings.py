@@ -149,8 +149,11 @@ _MODE_AVAILABILITY: dict[str, tuple[bool, str]] = {
     # routing on it — exists, so the mode is honestly available.
     # S14's own model_routing flag still gates the router itself.
     "auto-route": (True, ""),
-    "auto-broadcast": (False, "auto-broadcast arrives with P2b "
-                              "(parallel fan-out)"),
+    # P2b (K-12) landed the fan-out machinery
+    # (langgraph/fanout.py): the mode is effective — parallel
+    # scheduling still requires a resolved width of 2+ and a
+    # Gate-4 pair, judged per group at the fan-out seam.
+    "auto-broadcast": (True, ""),
 }
 
 _STRATEGY_AVAILABILITY: dict[str, tuple[bool, str]] = {

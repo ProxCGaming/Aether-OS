@@ -46,6 +46,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolRuntime, create_react_agent
 from langgraph.types import Command
 
+from aether_engine.langgraph.fanout import build_parallel_group_tool
 from aether_engine.langgraph.nodes.supervisor import (
     build_supervisor_desktop_tools,
     build_supervisor_memory_tools,
@@ -191,6 +192,13 @@ def create_tools_supervisor_graph(checkpointer, build_specialist_graph,
             build_supervisor_memory_tools()
             + build_supervisor_desktop_tools()
             + build_delegation_tools(specialist_graphs)
+            # P2b: the parallel-group tool rides beside the
+            # delegation tools (tools topology only — the legacy
+            # graph binds no group tool, so no group can be
+            # declared there). Its members run as isolated
+            # S13-pattern children, never as these shared
+            # subgraphs; see langgraph/fanout.py.
+            + [build_parallel_group_tool()]
         ),
         prompt=supervisor_routing_prompt,
         state_schema=AetherState,

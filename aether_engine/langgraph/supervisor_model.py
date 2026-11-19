@@ -57,6 +57,11 @@ from aether_engine.langgraph.compaction import (
     context_summary_section,
     model_facing_messages,
 )
+from aether_engine.langgraph.fanout import (
+    GROUP_TOOL_NAME,
+    group_id_for,
+    parse_group_members,
+)
 from aether_engine.langgraph.nodes.supervisor import (
     MEMORY_TOOL_NAMES,
     SCREEN_TOOL_NAMES,
@@ -204,6 +209,31 @@ def _delegation_result(
     return ChatResult(generations=[ChatGeneration(message=message)])
 
 
+def _group_result(
+    decision: dict,
+    memory_calls: list | None = None,
+    provider_call: Any = None,
+) -> ChatResult:
+    """An AIMessage carrying a ``delegate_in_parallel`` group call.
+
+    The P2b counterpart of ``_delegation_result``: the model's own
+    group call passes through with its id and its members argument;
+    the stamped decision (``next = "parallel_group"``) is what the
+    post-model hook judges — it parses the members from the call,
+    applies the spawn policy and the cap per member, and writes one
+    delegation-log entry per member.
+    """
+    tool_calls = [_langchain_tool_call(tc) for tc in (memory_calls or [])]
+    if provider_call is not None:
+        tool_calls.append(_langchain_tool_call(provider_call))
+    message = AIMessage(
+        content="",
+        tool_calls=tool_calls,
+        additional_kwargs={"aether_decision": decision},
+    )
+    return ChatResult(generations=[ChatGeneration(message=message)])
+
+
 def _langchain_tool_call(provider_call: Any) -> dict:
     """Convert an Aether provider ToolCall to LangChain tool-call shape.
 
@@ -337,6 +367,27 @@ def _delegation_cap(config: dict | None = None) -> int:
             config = {}
     user_config = ((config or {}).get("configurable", {}) or {}).get("user_config")
     return resolve_delegation_settings(user_config).max_delegations_per_turn
+
+
+def _group_result_in_view(dict_messages: list) -> bool:
+    """True when a parallel group's joined result is in view.
+
+    P2b: a group's outcome reaches the supervisor as the group
+    tool's result message, not as assistant text — so the
+    post-specialist derivations (the adapter's finish semantics,
+    the hook's cap surface) must recognise it as a specialist
+    response in view, the way a single delegation's merged answer
+    is recognised. Only ever true after a group ran, so every
+    pre-P2b flow is unaffected.
+    """
+    last_user = max(
+        (i for i, m in enumerate(dict_messages) if m.get("role") == "user"),
+        default=-1,
+    )
+    return any(
+        m.get("role") == "tool" and m.get("name") == GROUP_TOOL_NAME
+        for m in dict_messages[last_user + 1:]
+    )
 
 
 def _specialist_answers(state: dict) -> list:
@@ -490,6 +541,17 @@ class AetherSupervisorModel(BaseChatModel):
                 if name[len(DELEGATION_PREFIX):] in available:
                     offered.append(convert_to_openai_tool(tool))
                 continue
+            if name == GROUP_TOOL_NAME:
+                # P2b: the parallel-group tool is bound only on
+                # the tools topology; it is offered whenever a
+                # Gate-4 pair is formable — every allowed pair in
+                # v1 includes the researcher. Whether a declared
+                # group actually runs in parallel is the fan-out
+                # seam's judgement (mode / width / pair), never
+                # the offer's.
+                if "researcher" in available:
+                    offered.append(convert_to_openai_tool(tool))
+                continue
             # S19: the desktop-observe tool exists for the model
             # only when Computer Use + Observe are enabled —
             # never offered (and never annotated as disabled)
@@ -544,7 +606,12 @@ class AetherSupervisorModel(BaseChatModel):
             for msg in dict_messages[last_user + 1:]
             if msg.get("role") == "assistant" and msg.get("content") and not msg.get("tool_calls")
         ]
-        specialist_responded = bool(specialist_texts)
+        # P2b: a parallel group's joined result (a tool message,
+        # not assistant text) is also a specialist response in view
+        # — the supervisor's next step gets post-specialist finish
+        # semantics, exactly as after a single delegation.
+        specialist_responded = bool(specialist_texts) or _group_result_in_view(
+            dict_messages)
         # The turn's delegation cap is NOT judged at this seam (S4):
         # the model cannot see the authoritative delegation counter,
         # so the cap is enforced at the post-model hook against
@@ -597,6 +664,7 @@ class AetherSupervisorModel(BaseChatModel):
                         or tc.name in SCREEN_TOOL_NAMES]
         transfer_calls = [tc for tc in tool_calls if tc.name.startswith(HANDOFF_PREFIX)]
         delegate_calls = [tc for tc in tool_calls if tc.name.startswith(DELEGATION_PREFIX)]
+        group_calls = [tc for tc in tool_calls if tc.name == GROUP_TOOL_NAME]
         # Epic 3, E3-01 (issue 012 diagnosability): calls that are
         # neither memory nor handoff are NOT the supervisor's to run —
         # it is offered only memory + handoff tools, and real tool work
@@ -607,13 +675,49 @@ class AetherSupervisorModel(BaseChatModel):
         dropped_calls = [
             tc.name for tc in tool_calls
             if tc not in memory_calls and tc not in transfer_calls
-            and tc not in delegate_calls
+            and tc not in delegate_calls and tc not in group_calls
         ]
         if dropped_calls:
             logger.warning(
                 "Supervisor emitted non-supervisor tool calls, dropped (delegate to a specialist instead): %s",
                 dropped_calls,
             )
+
+        if group_calls:
+            # P2b native protocol: the model's parallel-group call
+            # passes through with its id and members argument; the
+            # decision is stamped from it, and the post-model hook
+            # judges the group (parse, spawn policy, cap — per
+            # member). A single delegation emitted alongside a
+            # group is not executed (the group is the richer
+            # declaration) and is recorded as dropped, never silent.
+            call = group_calls[0]
+            members, parse_error = parse_group_members(
+                _provider_call_args(call).get("members"))
+            if specialist_responded:
+                chain_end = _chain_end_reason(specialist_texts)
+                if chain_end is not None:
+                    logger.warning(
+                        "Post-specialist parallel group refused: %s; "
+                        "ending with the latest answer standing.",
+                        chain_end)
+                    return _specialist_end_result()
+            decision = {
+                "next": "parallel_group",
+                "reason": (content or "").strip(),
+                "briefing": "",
+            }
+            extra_dropped = dropped_calls + [
+                tc.name for tc in delegate_calls + transfer_calls]
+            if extra_dropped:
+                decision["dropped_tool_calls"] = extra_dropped
+            if parse_error is None and any(
+                    m.specialist not in available for m in members):
+                # Routing clamps to END, exactly like a single
+                # delegation to an unavailable specialist; the
+                # attempted decision is still what gets logged.
+                return _end_result(decision["reason"], decision=decision)
+            return _group_result(decision, memory_calls, provider_call=call)
 
         if delegate_calls:
             # P1d native protocol: the model's own delegation call
@@ -1040,6 +1144,198 @@ def _message_with_stripped_briefing(message: AIMessage, stripped: str) -> AIMess
     if not changed:
         return None
     return message.model_copy(update={"tool_calls": new_calls})
+def _parallel_group_policy_denial(
+        state: dict, members: list, config: dict | None = None) -> str | None:
+    """Spawn policy for a parallel group (P2b): a denial reason, or
+    None to allow.
+
+    The group form of ``_spawn_policy_denial`` — the same policy,
+    judged for the group as a unit before anything runs, so a
+    policy-denied specialist never executes in any scheduling (the
+    fan-out seam's degrade-to-sequential covers fan-out validity,
+    never policy). Plan mode refuses groups outright: plan mode's
+    contract is one planner delegation at a time, judged per
+    delegation. The cap is judged for the whole group: a group of
+    N needs N of the turn's remaining delegations.
+    """
+    if state.get("plan_mode"):
+        return (
+            "plan mode is active: parallel delegation groups are "
+            "disabled in plan mode — delegate to one specialist "
+            "at a time"
+        )
+    if config is None:
+        try:
+            config = get_config()
+        except Exception:  # noqa: BLE001 — policy must never break routing when config is unavailable.
+            return None
+    user_config = (config.get("configurable", {}) or {}).get("user_config")
+    if user_config is None:
+        return None
+    allowlist = getattr(user_config, "supervisor_spawn_allowlist", None)
+    if allowlist is not None:
+        for member in members:
+            if member.specialist not in allowlist:
+                return (
+                    f"'{member.specialist}' is not in the supervisor "
+                    f"spawn allow-list ({', '.join(allowlist) or 'empty'})")
+    cap = resolve_delegation_settings(user_config).max_delegations_per_turn
+    count = _delegation_count(state)
+    if isinstance(cap, int) and cap >= 0 and count + len(members) > cap:
+        names = " + ".join(m.specialist for m in members)
+        return (
+            f"the parallel group ({names}) needs {len(members)} "
+            f"delegations, but the turn has already used {count} of "
+            f"its delegation cap ({cap})")
+    return None
+
+
+def _parallel_group_denial(
+        state: dict, reason: str, members: list | None = None,
+        decision: dict | None = None) -> dict:
+    """The group form of the spawn-policy denial update (P2b).
+
+    Same surface as ``_spawn_policy_denial``: the pending message
+    is replaced in place by an explanation with no tool calls (the
+    supervisor's turn ends, no specialist starts), and the denial
+    is logged as one group decision.
+    """
+    messages = state.get("messages", [])
+    last = messages[-1] if messages else None
+    names = (
+        " + ".join(m.specialist for m in members)
+        if members else "the declared members")
+    explanation = (
+        f"Parallel delegation ({names}) was blocked by the spawn "
+        f"policy: {reason}. No specialist was started. Delegate to "
+        "one specialist at a time, adjust supervisor_spawn_allowlist "
+        "/ supervisor_delegation_cap in the config, or ask for the "
+        "work to be handled another way."
+    )
+    stripped = AIMessage(content=explanation, id=getattr(last, "id", None))
+    denial_decision: dict[str, Any] = {
+        "next": "parallel_group", "denied": True,
+        "reason": reason, "briefing": "",
+    }
+    if members:
+        denial_decision["members"] = [m.specialist for m in members]
+        denial_decision["parallel_group"] = group_id_for(
+            state.get("task_id"), members)
+    # E3-F10, as in _spawn_policy_denial: calls dropped alongside
+    # the group call ride the denial decision into the log.
+    if isinstance(decision, dict) and decision.get("dropped_tool_calls"):
+        denial_decision["dropped_tool_calls"] = list(
+            decision["dropped_tool_calls"])
+    return {
+        "messages": [stripped],
+        "delegation_log": [
+            {"agent": "supervisor", "timestamp": time.time(),
+             "decision": denial_decision}
+        ],
+        "active_specialist": None,
+    }
+
+
+def _parallel_group_update(state: dict, call: dict,
+                           decision: dict | None) -> dict:
+    """Post-model bookkeeping for one parallel-group call (P2b).
+
+    The group form of the hook's handoff branch: parse the members
+    from the call, judge policy for the group as a unit, then write
+    ONE delegation-log entry per member and move the authoritative
+    counter by the member count — a group of N consumes N
+    delegations, no free ones. The entries carry the group id, so
+    the executor's per-entry activity events and the fan-out seam's
+    per-turn group cap read the same record.
+    """
+    args = call.get("args") or {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (json.JSONDecodeError, TypeError):
+            args = {}
+    members, error = parse_group_members(
+        args.get("members") if isinstance(args, dict) else None)
+    if error is not None:
+        return _parallel_group_denial(
+            state,
+            f"the parallel group declaration is malformed: {error}",
+            decision=decision)
+    # S4 cap surface, judged before the denial exactly as in the
+    # single-handoff branch: a group that would overflow the cap
+    # while a specialist answer stands ends the chain with that
+    # answer standing. A previous group's joined result counts as
+    # an answer standing (it is a tool message, not assistant
+    # text — see _group_result_in_view).
+    if (_specialist_answers(state)
+            or _group_result_in_view(message_dicts(
+                state.get("messages", [])))) and (
+            _delegation_count(state) + len(members) > _delegation_cap()):
+        logger.warning(
+            "Post-specialist parallel group refused: the turn "
+            "already has %s delegations and the group needs %s "
+            "(the cap); ending with the latest answer standing.",
+            _delegation_count(state), len(members))
+        return _cap_end_update(state)
+    denial_reason = _parallel_group_policy_denial(state, members)
+    if denial_reason is not None:
+        return _parallel_group_denial(
+            state, denial_reason, members=members, decision=decision)
+    if decision is None or (
+        isinstance(decision, dict) and not decision.get("briefing")
+    ):
+        # Briefing reconstruction, identical to the single-handoff
+        # branch: the briefing is what memory tools returned since
+        # the last user message, and it reaches the members through
+        # context_briefing (their child states seed from it).
+        messages = state.get("messages", [])
+        last = messages[-1] if messages else None
+        briefing_parts = []
+        dict_messages = message_dicts(messages)
+        last_user = max(
+            (i for i, m in enumerate(dict_messages) if m.get("role") == "user"),
+            default=-1,
+        )
+        for msg in dict_messages[last_user + 1:]:
+            if msg.get("role") == "tool" and msg.get("content"):
+                briefing_parts.append(msg["content"])
+        reconstructed = "\n".join(briefing_parts)
+        if decision is None:
+            decision = {
+                "next": "parallel_group",
+                "reason": last.content if last is not None and isinstance(
+                    getattr(last, "content", None), str) else "",
+                "briefing": reconstructed,
+            }
+        elif reconstructed:
+            decision = {**decision, "briefing": reconstructed}
+    reason = decision.get("reason", "")
+    gid = group_id_for(state.get("task_id"), members)
+    entries = []
+    for index, member in enumerate(members):
+        member_decision: dict[str, Any] = {
+            "next": member.specialist,
+            "reason": reason,
+            "briefing": member.task,
+            "parallel_group": gid,
+            "parallel_index": index,
+        }
+        if member.tier:
+            member_decision["tier"] = member.tier
+        entries.append({
+            "agent": "supervisor", "timestamp": time.time(),
+            "decision": member_decision,
+        })
+    return {
+        "delegation_log": entries,
+        # S4: the single counter move for the group — N delegations
+        # become delegations-that-will-execute here, so the counter
+        # moves by N. Denials returned above never reach this.
+        "delegation_count": _delegation_count(state) + len(members),
+        "context_briefing": decision.get("briefing", "") or "",
+        "plan": f"Goal: {reason}",
+        "active_specialist": members[0].specialist,
+    }
 
 
 def supervisor_post_model_hook(state: dict) -> dict:
@@ -1066,6 +1362,17 @@ def supervisor_post_model_hook(state: dict) -> dict:
     ]
     additional = last.additional_kwargs or {}
     decision = additional.get("aether_decision")
+
+    # A pending parallel group (P2b, tools topology only — the
+    # group tool is bound nowhere else): judged as a unit by its
+    # own branch (parse, group spawn policy, per-member log
+    # entries, the counter moving by the member count).
+    group_calls = [
+        tc for tc in tool_calls
+        if (tc.get("name") or "") == GROUP_TOOL_NAME
+    ]
+    if group_calls:
+        return _parallel_group_update(state, group_calls[0], decision)
 
     if handoffs:
         pending_name = handoffs[0]["name"]

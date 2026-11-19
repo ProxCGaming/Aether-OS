@@ -565,6 +565,11 @@ def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: 
             "4. To delegate, call the matching delegation tool for exactly one specialist "
             f"({options_str}), passing the retrieved facts as its briefing argument; put the operational goal for the specialist in your reply text alongside the call. "
             "To finish the task, reply with plain text and call no tool."
+            "\n5. When two sub-tasks are fully independent and both are research or planning, you may delegate them together "
+            "with delegate_in_parallel (a researcher+planner pair, or two independent researcher questions): each member "
+            "receives ONLY its own task text plus the shared blackboard — not this conversation — so state each member's "
+            "task completely. Never use it for the coder, and never when one sub-task needs the other's result; delegate "
+            "those one at a time instead. The results return together, in the order you declared them."
         )
     elif tool_mode:
         decision_rules = (

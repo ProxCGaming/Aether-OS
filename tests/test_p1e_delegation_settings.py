@@ -225,23 +225,21 @@ class TestAvailability:
         assert mode_availability("off")[0] is True
         assert mode_availability("manual")[0] is True
         assert mode_availability("auto-coordinate")[0] is True
-        # P1a/P1b landed (K-08/K-09): supervisor tier emission and
-        # price/headroom scoring exist, so auto-route's entry was
-        # flipped to available — this assertion previously pinned
-        # its pre-P1a unavailability.
+        # Both flips have landed: P1a/P1b (K-08/K-09) flipped
+        # auto-route, P2b (K-12) flipped auto-broadcast — every
+        # mode in the vocabulary is honestly available now. The
+        # falls-back-with-reason mechanism is still exercised by
+        # the strategy and tool-access tables below.
         assert mode_availability("auto-route")[0] is True
-        available, reason = mode_availability("auto-broadcast")
-        assert available is False and reason
+        assert mode_availability("auto-broadcast")[0] is True
 
-    def test_unavailable_mode_falls_back_with_reason(self):
-        # auto-broadcast is the remaining not-yet-landed mode
-        # (auto-route served this role until P1a/P1b landed).
+    def test_auto_broadcast_mode_is_effective(self):
         cfg = UserConfig.from_dict(
             {"delegation_settings": {"mode": "auto-broadcast"}})
         s = resolve_delegation_settings(cfg)
-        assert s.mode == "auto-broadcast"  # the stored choice is kept
-        assert s.effective_mode == "auto-coordinate"
-        assert "P2b" in s.mode_unavailable_reason
+        assert s.mode == "auto-broadcast"
+        assert s.effective_mode == "auto-broadcast"
+        assert not s.mode_unavailable_reason
 
     def test_auto_route_mode_is_effective(self):
         cfg = UserConfig.from_dict(
