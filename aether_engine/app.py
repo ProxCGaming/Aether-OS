@@ -1,4 +1,5 @@
 """FastAPI Engine application with authenticated loopback WebSocket, provider health, intelligent routing, safe fallbacks, local model task downloads, and capability check scheduling."""
+import asyncio
 import logging
 
 from fastapi import FastAPI
@@ -10,6 +11,7 @@ from aether_engine.config import (
     custom_provider_flavor,
     save_config,
 )
+from aether_engine.models.llama_presets import DAILY_MODEL_IDLE_TTL_S
 from aether_engine.providers.discovery import fetch_available_models
 from aether_engine.routes.websocket import router as ws_router
 from aether_engine.secrets.storage import SecretStore
@@ -31,6 +33,18 @@ _startup_discovery_task = None
 # asyncio GC pitfall) and never stopped, so shutdown could cut the
 # backfill mid-write.
 _episodic_backfill_task = None
+
+# Wave 8 follow-up: handle for the llama.cpp tier-policy loop, with
+# the same handle discipline as the two tasks above — shutdown
+# cancels and awaits it, so no pass can outlive the engine.
+_tier_policy_task = None
+
+# How often the tier-policy loop runs a pass. The policy's binding
+# clock is the daily tier's idle TTL (DAILY_MODEL_IDLE_TTL_S =
+# 600s): a pass every TTL/10 bounds a stale daily model's extra
+# idle time to ~10% of its TTL, while each pass costs one /models
+# read (plus any load/unload it decides on) against a local router.
+TIER_POLICY_INTERVAL_S = DAILY_MODEL_IDLE_TTL_S / 10
 
 
 async def _discover_startup_models():
@@ -141,6 +155,97 @@ async def _ensure_embedder_then_backfill():
         return
     episodic.set_embedder_status(status)
     await episodic.backfill_episodic_embeddings(limit=200)
+
+
+async def _run_tier_policy_pass() -> None:
+    """One llama.cpp tier-policy pass; never raises.
+
+    Reads the enable flag from the live user config on every pass,
+    so toggling llamacpp_enabled takes effect on the next pass in
+    either direction — no engine restart, and while disabled the
+    shared manager is never even resolved. The pass runs on the
+    ONE shared manager (EngineState.get_llama_router_manager):
+    its bookkeeping is per-instance, and the executor's tier hooks
+    write to that same instance — a manager built here would see
+    an empty history and judge every model unused.
+
+    A router that is down is a quiet no-op, by the manager's own
+    contract (list_models reads an absent router as an empty,
+    error-free list, so the plan is empty). Per-model errors from
+    a pass are logged once, here — never once per model — and a
+    pass that itself fails is logged and swallowed: the loop's
+    next pass is the retry.
+    """
+    try:
+        if not getattr(engine_state.user_config,
+                       "llamacpp_enabled", False):
+            return
+        manager = engine_state.get_llama_router_manager()
+        result = await manager.apply_tier_policy()
+    except Exception as e:  # noqa: BLE001 — a policy pass is best-effort; it must never take the loop (or the engine) down
+        logger.warning(f"Tier policy pass failed: {e}")
+        return
+    if result.get("load") or result.get("unload"):
+        logger.info(
+            f"Tier policy: load={result['load']} "
+            f"unload={result['unload']}")
+    if result.get("errors"):
+        logger.warning(
+            f"Tier policy pass had per-model errors: {result['errors']}")
+
+
+async def _tier_policy_loop(
+        interval_s: float = TIER_POLICY_INTERVAL_S) -> None:
+    """Run tier-policy passes for the life of the engine.
+
+    Sequential by construction — a pass is awaited before the
+    interval sleep, so passes can never overlap and a slow pass
+    (a load can take the manager's 120s load timeout) simply
+    shifts the cadence instead of piling the next pass on top of
+    itself; elapsed ticks are never made up. Cancellation (the
+    shutdown stop) propagates out of the pass or the sleep —
+    nothing here swallows it.
+    """
+    while True:
+        await _run_tier_policy_pass()
+        await asyncio.sleep(interval_s)
+
+
+def _start_tier_policy_loop(
+        interval_s: float = TIER_POLICY_INTERVAL_S):
+    """Start the tier-policy loop; a live loop is never doubled.
+
+    Returns the loop task (the existing one when already
+    running), so a second start — a repeated lifespan entry, a
+    test harness re-entry — is a no-op rather than a second loop
+    racing the first one's passes.
+    """
+    global _tier_policy_task
+    if _tier_policy_task is not None and not _tier_policy_task.done():
+        return _tier_policy_task
+    _tier_policy_task = asyncio.create_task(_tier_policy_loop(interval_s))
+    return _tier_policy_task
+
+
+async def _stop_tier_policy_loop() -> None:
+    """Cancel and await the tier-policy loop, lifespan-style.
+
+    Same discipline as the discovery/backfill stops in the
+    lifespan: the handle is cleared first, the task is cancelled
+    and awaited, and a failed stop is logged — never allowed to
+    prevent shutdown.
+    """
+    global _tier_policy_task
+    task, _tier_policy_task = _tier_policy_task, None
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        logger.debug("Tier policy loop cancelled at shutdown")
+    except Exception as e:  # noqa: BLE001 — shutdown cleanup boundary: a failed stop must not prevent shutdown
+        logger.warning(f"Tier policy loop stop failed: {e}")
 
 
 async def lifespan(_app: FastAPI):
@@ -256,7 +361,25 @@ async def lifespan(_app: FastAPI):
     except Exception as e:  # noqa: BLE001 — startup boundary: discovery is best-effort and must never block engine startup
         logger.warning(f"Startup model discovery failed to start: {e}")
 
+    # Wave 8 follow-up: the llama.cpp tier-policy loop. Wave 8's
+    # manager runs a policy pass when the router starts, but
+    # nothing re-ran it afterwards — so mid-session the daily
+    # tier's idle unload never fired. The loop re-runs the pass on
+    # the shared manager for the life of the engine; it starts
+    # unconditionally and gates each pass on the live
+    # llamacpp_enabled flag, so toggling the feature needs no
+    # restart in either direction (while disabled a pass is one
+    # config read — the manager is never resolved).
+    try:
+        _start_tier_policy_loop()
+    except Exception as e:  # noqa: BLE001 — startup boundary: the policy loop is best-effort and must never block engine startup
+        logger.warning(f"Tier policy loop failed to start: {e}")
+
     yield
+    # Stop the tier-policy loop first among the background tasks:
+    # it acts on live engine state (the shared router manager),
+    # so no pass may race the shutdown of everything below.
+    await _stop_tier_policy_loop()
     # Cancel background discovery if it is still running at shutdown,
     # so a slow provider cannot outlive the engine or leak the task.
     if _startup_discovery_task is not None:
