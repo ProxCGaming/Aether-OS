@@ -241,6 +241,60 @@ class EventType(str, Enum):
     TASK_RESUME_AUDIT_RESPONSE = "TASK_RESUME_AUDIT_RESPONSE"
     TASK_RESUME_REQUEST = "TASK_RESUME_REQUEST"
     TASK_RESUME_RESPONSE = "TASK_RESUME_RESPONSE"
+    # Full Furnish W-9: Workflows — a named, saved, ordered list of
+    # task prompts, run in order as ordinary tasks (each step's
+    # result carried into the next step's prompt as a bounded
+    # excerpt). Definitions and run records persist in the workflow
+    # store; runs are driven in-process and are NEVER auto-resumed
+    # after an engine restart (D-1 discipline: a run left active by
+    # a restart is closed as "interrupted", visible, not continued).
+    # A workflow object is {"id", "name", "description",
+    # "steps": [{"title", "prompt"}], "created_at", "updated_at"}.
+    # A run object is {"run_id", "workflow_id", "session_id",
+    # "status", "current_step", "steps": [{"title", "status",
+    # "task_id"}]}; run status is one of "running" |
+    # "awaiting_approval" | "completed" | "failed" | "stopped" |
+    # "interrupted"; step status is one of "pending" | "running" |
+    # "completed" | "failed" | "cancelled" | "skipped".
+    # WORKFLOW_LIST_REQUEST payload: {}; WORKFLOW_LIST_RESPONSE
+    # payload: {"workflows": [workflow...], "error": str (only on
+    # failure, with an empty list)}.
+    # WORKFLOW_SAVE_REQUEST payload: {"workflow": {"id": str | None
+    # (absent/None = create), "name", "description",
+    # "steps": [{"title", "prompt"}]}}; WORKFLOW_SAVE_RESPONSE
+    # payload: {"success": bool, "workflow": workflow | None,
+    # "error": str | None} — validation refusals and unknown-id
+    # updates are success=False with the reason, never silent.
+    # WORKFLOW_DELETE_REQUEST payload: {"workflow_id": str};
+    # WORKFLOW_DELETE_RESPONSE payload: {"success": bool,
+    # "error": str | None} — deleting a missing id is
+    # success=False ("nothing was deleted"), never a fake success.
+    # WORKFLOW_RUN_REQUEST payload: {"workflow_id": str};
+    # WORKFLOW_RUN_RESPONSE payload: {"success": bool,
+    # "run": run | None, "error": str | None} — on success the
+    # run's step tasks stream on the same socket as ordinary tasks
+    # in the run's session.
+    # WORKFLOW_RUN_STOP_REQUEST payload: {"run_id": str};
+    # WORKFLOW_RUN_STOP_RESPONSE payload: {"success": bool,
+    # "error": str | None}.
+    # WORKFLOW_RUN_LIST_REQUEST payload: {};
+    # WORKFLOW_RUN_LIST_RESPONSE payload: {"runs": [run...]
+    # (newest first), "error": str (only on failure)}.
+    # WORKFLOW_RUN_STATUS is an outbound event emitted on every
+    # run/step transition; its payload is the full run object.
+    WORKFLOW_LIST_REQUEST = "WORKFLOW_LIST_REQUEST"
+    WORKFLOW_LIST_RESPONSE = "WORKFLOW_LIST_RESPONSE"
+    WORKFLOW_SAVE_REQUEST = "WORKFLOW_SAVE_REQUEST"
+    WORKFLOW_SAVE_RESPONSE = "WORKFLOW_SAVE_RESPONSE"
+    WORKFLOW_DELETE_REQUEST = "WORKFLOW_DELETE_REQUEST"
+    WORKFLOW_DELETE_RESPONSE = "WORKFLOW_DELETE_RESPONSE"
+    WORKFLOW_RUN_REQUEST = "WORKFLOW_RUN_REQUEST"
+    WORKFLOW_RUN_RESPONSE = "WORKFLOW_RUN_RESPONSE"
+    WORKFLOW_RUN_STOP_REQUEST = "WORKFLOW_RUN_STOP_REQUEST"
+    WORKFLOW_RUN_STOP_RESPONSE = "WORKFLOW_RUN_STOP_RESPONSE"
+    WORKFLOW_RUN_LIST_REQUEST = "WORKFLOW_RUN_LIST_REQUEST"
+    WORKFLOW_RUN_LIST_RESPONSE = "WORKFLOW_RUN_LIST_RESPONSE"
+    WORKFLOW_RUN_STATUS = "WORKFLOW_RUN_STATUS"
     # Epic 8, E8-A8.1b: context breakdown + daily budget alerting.
     # CONTEXT_BREAKDOWN_REQUEST payload: {"session_id": str, "task_id": str | None, "model": str | None}.
     # CONTEXT_BREAKDOWN_RESPONSE payload: {"model": str, "context_limit": int, "total_tokens": int,
