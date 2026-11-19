@@ -35,7 +35,7 @@ function renderPanel() {
 // labels interleaved.
 const NAV_TEXTS = [
   'Personal', 'Connect', 'System',
-  'Memory & Storage', 'Voice Tuning', 'Usage', 'Password Vault', 'Calendar & Reminders', 'Conversation',
+  'Profile', 'Memory & Storage', 'Voice Tuning', 'Usage', 'Password Vault', 'Calendar & Reminders', 'Conversation',
   'Models & Tasks', 'API Providers', 'MCP Servers',
   'Agents', 'Tools', 'Skills', 'Plugins', 'Workspace Indexing', 'Browser Agent', 'Computer Use', 'Capabilities', 'Advanced', 'About',
 ];
@@ -51,7 +51,7 @@ describe('Settings nav grouping (S-6)', () => {
     renderPanel();
     expect(navOrder()).toEqual([
       'Personal',
-      'Memory & Storage', 'Voice Tuning', 'Usage', 'Password Vault', 'Calendar & Reminders', 'Conversation',
+      'Profile', 'Memory & Storage', 'Voice Tuning', 'Usage', 'Password Vault', 'Calendar & Reminders', 'Conversation',
       'Connect',
       'Models & Tasks', 'API Providers', 'MCP Servers',
       'System',
@@ -59,21 +59,22 @@ describe('Settings nav grouping (S-6)', () => {
     ]);
   });
 
-  it('every one of the 19 existing sections is present exactly once in the nav', () => {
+  it('every one of the 20 sections is present exactly once in the nav', () => {
     renderPanel();
     // Scoped to the sidebar: a section's label can also appear in
     // its own panel's heading (e.g. 'API Providers').
     const sidebar = screen.getByText('Password Vault').parentElement;
     const labels = [
-      'Memory & Storage', 'Voice Tuning', 'Usage', 'Password Vault', 'Calendar & Reminders', 'Conversation',
+      'Profile', 'Memory & Storage', 'Voice Tuning', 'Usage', 'Password Vault', 'Calendar & Reminders', 'Conversation',
       'Models & Tasks', 'API Providers', 'MCP Servers',
       'Agents', 'Tools', 'Skills', 'Plugins', 'Workspace Indexing', 'Browser Agent', 'Computer Use', 'Capabilities', 'Advanced', 'About',
     ];
     for (const label of labels) {
       expect(within(sidebar).getAllByText(label)).toHaveLength(1);
     }
-    // No faked Profile section — it is built in Wave 6.
-    expect(screen.queryByText('Profile')).not.toBeInTheDocument();
+    // Profile leads the Personal group (the board's order) — it
+    // is a real section since Wave 6, not a placeholder.
+    expect(within(sidebar).getAllByText('Profile')).toHaveLength(1);
   });
 
   it('a search with no match renders the no-sections-match state; clear search restores the nav', () => {

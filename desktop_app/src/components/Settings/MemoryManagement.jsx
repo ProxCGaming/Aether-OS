@@ -2,6 +2,19 @@ import React, { useState, useEffect } from 'react';
 import { Trash2, Pencil, Download } from 'lucide-react';
 import { useAetherSocket } from '../../contexts/SocketContext';
 import LoadStateRow from './LoadStateRow';
+import EmptyState from '../EmptyState';
+
+// Memory timestamps arrive as epoch seconds from the native
+// store, but a surface must not blank on another shape: epoch
+// milliseconds and ISO strings are formatted the same way, and
+// anything unparseable is shown verbatim rather than hidden.
+function formatMemoryWhen(value) {
+  if (value == null) return null;
+  const date = typeof value === 'number'
+    ? new Date(value > 1e11 ? value : value * 1000)
+    : new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
 
 // S5 provenance, surfaced in the facts list: the native knowledge
 // graph records whether each fact was stated by the user or
@@ -50,6 +63,33 @@ export default function MemoryManagement() {
   const [backendError, setBackendError] = useState(null);
   const [backendNotice, setBackendNotice] = useState(null);
   const pendingSwitchRef = React.useRef(null);
+  // Memory controls: the two independent gates — use (read) and
+  // learn (write) — plus the counts/decay read-out. The gates'
+  // confirmed values arrive with the config read; a toggle click
+  // sends CONFIG_UPDATE_REQUEST and the row keeps showing the
+  // confirmed value until the reply lands (the same
+  // pending-ref discipline as the backend switch below).
+  const [memoryStats, setMemoryStats] = useState(null);
+  const [statsLoad, setStatsLoad] = useState('loading');
+  const [statsError, setStatsError] = useState(null);
+  const [memoryUseEnabled, setMemoryUseEnabled] = useState(null);
+  const [memoryLearnEnabled, setMemoryLearnEnabled] = useState(null);
+  const pendingToggleRef = React.useRef(null);
+  const [togglePending, setTogglePending] = useState(false);
+  const [toggleError, setToggleError] = useState(null);
+  const [toggleNotice, setToggleNotice] = useState(null);
+  // Forget centre: topic candidates, the exact removed list of
+  // the last forget, and the tombstone history with undo.
+  const [forgetCandidates, setForgetCandidates] = useState(null);
+  const [forgetCandidatesLoad, setForgetCandidatesLoad] = useState('loading');
+  const [selectedForgetTopics, setSelectedForgetTopics] = useState([]);
+  const [forgetPendingCount, setForgetPendingCount] = useState(0);
+  const [forgetError, setForgetError] = useState(null);
+  const [forgottenNow, setForgottenNow] = useState([]);
+  const [forgetHistory, setForgetHistory] = useState(null);
+  const [forgetHistoryLoad, setForgetHistoryLoad] = useState('loading');
+  const [undoPending, setUndoPending] = useState(false);
+  const [undoNotice, setUndoNotice] = useState(null);
 
   // Debounce the fact search input into the query used for graph requests
   useEffect(() => {
@@ -103,6 +143,185 @@ export default function MemoryManagement() {
       }
     };
   }, [wsRef, sendMessage]);
+
+  const requestForgetCandidates = () => {
+    sendMessage('MEMORY_FORGET_CANDIDATES_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+  };
+
+  const requestForgetHistory = () => {
+    sendMessage('MEMORY_FORGET_HISTORY_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { limit: 20, offset: 0 } });
+  };
+
+  // Memory controls + forget centre: their reads go out on
+  // mount, and this listener owns their replies — including the
+  // CONFIG_UPDATE_RESPONSE for a toggle THIS panel started
+  // (pendingToggleRef distinguishes it from the backend switch
+  // and from other panels' config writes, exactly as
+  // pendingSwitchRef does above).
+  useEffect(() => {
+    sendMessage('MEMORY_STATS_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+    sendMessage('CONFIG_GET_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+    requestForgetCandidates();
+    requestForgetHistory();
+
+    const applyConfigGates = (config) => {
+      if (!config) return;
+      // Both gates default to on; a config that predates the
+      // keys reads as on, never as a silent pause.
+      setMemoryUseEnabled(config.memory_use_enabled !== false);
+      setMemoryLearnEnabled(config.memory_learn_enabled !== false);
+    };
+
+    const handleControlsMessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'MEMORY_STATS_RESPONSE') {
+          if (data.payload.success === false || data.payload.error) {
+            setStatsError(data.payload.error || 'Memory counts could not be loaded.');
+            setStatsLoad('error');
+          } else {
+            setStatsError(null);
+            setMemoryStats(data.payload);
+            setStatsLoad('ready');
+          }
+        } else if (data.type === 'CONFIG_GET_RESPONSE') {
+          if (data.payload.config) applyConfigGates(data.payload.config);
+        } else if (data.type === 'CONFIG_UPDATE_RESPONSE' && pendingToggleRef.current) {
+          const pending = pendingToggleRef.current;
+          pendingToggleRef.current = null;
+          setTogglePending(false);
+          if (data.payload.success === false) {
+            // The server's refusal, verbatim; the confirmed
+            // value stays on screen untouched.
+            setToggleError(data.payload.error || 'The change was refused.');
+          } else {
+            setToggleError(null);
+            if (data.payload.config) {
+              applyConfigGates(data.payload.config);
+            } else if (pending.key === 'memory_use_enabled') {
+              setMemoryUseEnabled(pending.value);
+            } else {
+              setMemoryLearnEnabled(pending.value);
+            }
+            setToggleNotice(pending.value
+              ? `${pending.label} is on.`
+              : `${pending.label} is off — stored memory is untouched.`);
+          }
+        } else if (data.type === 'MEMORY_FORGET_CANDIDATES_RESPONSE') {
+          if (data.payload.success === false || data.payload.error) {
+            setForgetError(data.payload.error || 'Forget candidates could not be loaded.');
+            setForgetCandidatesLoad('error');
+          } else {
+            setForgetCandidates(data.payload.candidates ?? data.payload.topics ?? []);
+            setForgetCandidatesLoad('ready');
+          }
+        } else if (data.type === 'MEMORY_FORGET_EXECUTE_RESPONSE') {
+          setForgetPendingCount((count) => Math.max(0, count - 1));
+          if (data.payload.success === false || data.payload.error) {
+            setForgetError(data.payload.error || 'The topic could not be forgotten.');
+          } else {
+            // The reply IS the exact removed list — summaries
+            // are what the owner sees; ids ride along only as
+            // keys.
+            const removed = [];
+            if (Array.isArray(data.payload.removed)) {
+              data.payload.removed.forEach((entry) => {
+                if (entry.fact_id) removed.push({ kind: 'fact', id: entry.fact_id, summary: entry.summary });
+                else if (entry.episode_id) removed.push({ kind: 'episode', id: entry.episode_id, summary: entry.summary });
+              });
+            } else {
+              (data.payload.facts || []).forEach((f) => removed.push({ kind: 'fact', id: f.fact_id, summary: f.summary }));
+              (data.payload.episodes || []).forEach((e) => removed.push({ kind: 'episode', id: e.episode_id, summary: e.summary }));
+            }
+            setForgottenNow((prev) => [...prev, ...removed]);
+            setUndoNotice(null);
+            requestForgetCandidates();
+            requestForgetHistory();
+          }
+        } else if (data.type === 'MEMORY_FORGET_HISTORY_RESPONSE') {
+          if (data.payload.success === false || data.payload.error) {
+            setForgetError(data.payload.error || 'Forgotten history could not be loaded.');
+            setForgetHistoryLoad('error');
+          } else {
+            setForgetHistory(data.payload.entries ?? data.payload.history ?? []);
+            setForgetHistoryLoad('ready');
+          }
+        } else if (data.type === 'MEMORY_FORGET_UNDO_RESPONSE') {
+          setUndoPending(false);
+          if (data.payload.success === false || data.payload.error) {
+            setForgetError(data.payload.error || 'The forget could not be undone.');
+          } else {
+            const factCount = data.payload.fact_count ?? data.payload.restored_facts ?? 0;
+            const episodeCount = data.payload.episode_count ?? data.payload.restored_episodes ?? 0;
+            const topic = data.payload.topic ? ` about "${data.payload.topic}"` : '';
+            setUndoNotice(`Restored ${factCount} facts and ${episodeCount} episodes${topic}.`);
+            setForgottenNow([]);
+            requestForgetCandidates();
+            requestForgetHistory();
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    if (wsRef.current) {
+      wsRef.current.addEventListener('message', handleControlsMessage);
+    }
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.removeEventListener('message', handleControlsMessage);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsRef, sendMessage]);
+
+  // A toggle click is the whole interaction: no confirmation
+  // dialog (the gates are reversible and delete nothing), but
+  // the write follows the panel's confirmed-result discipline —
+  // the switch keeps the confirmed value, disabled, until the
+  // engine's reply lands.
+  const handleMemoryToggle = (key, label, nextValue) => {
+    if (pendingToggleRef.current) return;
+    pendingToggleRef.current = { key, label, value: nextValue };
+    setTogglePending(true);
+    setToggleError(null);
+    setToggleNotice(null);
+    sendMessage('CONFIG_UPDATE_REQUEST', {
+      schema_version: 1,
+      request_id: Date.now().toString(),
+      payload: { config: { [key]: nextValue } }
+    });
+  };
+
+  const handleToggleForgetTopic = (topic) => {
+    setSelectedForgetTopics((prev) => (
+      prev.includes(topic) ? prev.filter((t) => t !== topic) : [...prev, topic]
+    ));
+  };
+
+  const handleForgetSelected = () => {
+    if (selectedForgetTopics.length === 0 || forgetPendingCount > 0) return;
+    setForgetError(null);
+    setForgottenNow([]);
+    setForgetPendingCount(selectedForgetTopics.length);
+    selectedForgetTopics.forEach((topic) => {
+      sendMessage('MEMORY_FORGET_EXECUTE_REQUEST', {
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: { topic }
+      });
+    });
+    setSelectedForgetTopics([]);
+  };
+
+  const handleUndoForget = () => {
+    if (undoPending) return;
+    setForgetError(null);
+    setUndoNotice(null);
+    setUndoPending(true);
+    sendMessage('MEMORY_FORGET_UNDO_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: {} });
+  };
 
   useEffect(() => {
     // Initial fetch when component mounts or memory tab changes
@@ -303,6 +522,97 @@ export default function MemoryManagement() {
     <div style={{ color: 'var(--text-primary)' }}>
       <h2 style={{ fontSize: '24px', marginBottom: '8px', fontWeight: 500 }}>Memory & Storage</h2>
       <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px' }}>Manage the internal knowledge graph and episodic memory.</p>
+
+      {/* Memory controls: the two independent gates (use /
+          learn), the live counts, and the decay read-out.
+          Neither gate deletes or hides stored data — off means
+          "not used" or "not added to", and the combination line
+          below is computed from the pair, in plain words. */}
+      <div data-testid="memory-controls" style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px', marginBottom: '24px' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, margin: '0 0 4px 0' }}>Memory controls</h3>
+        <p style={{ color: 'var(--text-secondary)', fontSize: '13px', margin: '0 0 16px 0', lineHeight: '1.5' }}>
+          Two independent switches — one for using memory when answering, one for learning from new chats. Turning either off never deletes or hides what is already stored.
+        </p>
+        {toggleError && (
+          <div data-testid="memory-toggle-error" style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '12px' }}>{toggleError}</div>
+        )}
+        {toggleNotice && (
+          <div data-testid="memory-toggle-notice" style={{ color: 'var(--success)', fontSize: '13px', marginBottom: '12px' }}>{toggleNotice}</div>
+        )}
+        {(() => {
+          const gatesKnown = memoryUseEnabled !== null && memoryLearnEnabled !== null;
+          const gateRow = (key, label, description, value) => (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', padding: '10px 0' }}>
+              <div>
+                <div style={{ fontSize: '14px', fontWeight: 500 }}>{label}</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '2px', lineHeight: '1.5' }}>{description}</div>
+              </div>
+              <input
+                type="checkbox"
+                aria-label={label}
+                data-testid={`memory-toggle-${key}`}
+                checked={value === true}
+                disabled={!gatesKnown || togglePending}
+                onChange={(e) => handleMemoryToggle(key, label, e.target.checked)}
+                style={{ width: '18px', height: '18px', accentColor: 'var(--accent)', cursor: !gatesKnown || togglePending ? 'default' : 'pointer', flexShrink: 0 }}
+              />
+            </div>
+          );
+          const combinationLine = !gatesKnown
+            ? null
+            : memoryUseEnabled && memoryLearnEnabled
+              ? 'Aether answers with your memory and keeps learning from your chats.'
+              : memoryUseEnabled
+                ? 'Aether answers with your memory, but learns nothing new — the setting for demos and travel.'
+                : memoryLearnEnabled
+                  ? 'Aether keeps learning from your chats, but does not use memory when answering.'
+                  : 'Memory is paused — Aether does not use stored memory and learns nothing new.';
+          return (
+            <>
+              {gateRow('memory_use_enabled', 'Use memory', 'When answering, Aether may draw on what it has stored about you.', memoryUseEnabled)}
+              {gateRow('memory_learn_enabled', 'Learn from chats', 'New chats may add facts and episodes to memory.', memoryLearnEnabled)}
+              {!gatesKnown ? (
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>Waiting for the engine to report the current settings…</div>
+              ) : (
+                <div data-testid="memory-combination-line" style={{ fontSize: '13px', color: 'var(--accent)', background: 'rgba(var(--accent-rgb), 0.08)', border: '1px solid rgba(var(--accent-rgb), 0.25)', borderRadius: '8px', padding: '8px 12px', marginTop: '8px', lineHeight: '1.5' }}>
+                  {combinationLine}
+                </div>
+              )}
+            </>
+          );
+        })()}
+        <div style={{ borderTop: '1px solid var(--border-default)', marginTop: '16px', paddingTop: '16px' }}>
+          {statsLoad !== 'ready' ? (
+            <LoadStateRow
+              loadState={statsLoad}
+              isConnected={isConnected}
+              testId="memory-stats-load-state"
+              variant="plain"
+              loadingText="Loading memory counts…"
+              offlineText="Waiting for the engine — memory counts will appear here once it connects."
+              errorText={statsError || 'Memory counts could not be loaded.'}
+            />
+          ) : (
+            <>
+              <div data-testid="memory-stats-counts" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                {(memoryStats.facts_active ?? 0).toLocaleString()} active · {(memoryStats.facts_superseded ?? 0).toLocaleString()} superseded · {(memoryStats.episodes ?? 0).toLocaleString()} episodes · {memoryStats.backend_label || memoryStats.backend_id || 'Current'} backend
+              </div>
+              <div data-testid="memory-stats-decay" style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                {(() => {
+                  const decay = memoryStats.decay || {};
+                  const fadeText = typeof decay.inferred_fade_days === 'number'
+                    ? `Inferred facts fade over ~${decay.inferred_fade_days} days`
+                    : 'Inferred-fact fading is not reported by this backend';
+                  const cleanupText = typeof decay.last_faded === 'number' && typeof decay.last_removed === 'number'
+                    ? `last cleanup: ${decay.last_faded} faded · ${decay.last_removed} removed${decay.last_cleanup_at ? ` · ${formatMemoryWhen(decay.last_cleanup_at)}` : ''}`
+                    : 'last cleanup: not reported by this backend';
+                  return `${fadeText}; ${cleanupText}.`;
+                })()}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
 
       {/* S9: memory-backend picker — all four backends with
           their probed states; unavailable ones stay visible
@@ -677,6 +987,7 @@ export default function MemoryManagement() {
                         ? (PROVENANCE_LABELS[fact.provenance] ?? fact.provenance)
                         : null;
                       const hasImportance = typeof fact.importance === 'number' && Number.isFinite(fact.importance);
+                      const hasConfidence = typeof fact.confidence === 'number' && Number.isFinite(fact.confidence);
                       return (
                         <div key={fact.fact_id} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', background: 'var(--bg-base)', padding: '12px', borderRadius: '8px', opacity: isSuperseded ? 0.55 : 1 }}>
                           {isEditing ? (
@@ -724,6 +1035,11 @@ export default function MemoryManagement() {
                                     importance {Math.round(fact.importance * 100)}%
                                   </span>
                                 )}
+                                {hasConfidence && (
+                                  <span data-testid={`fact-confidence-${fact.fact_id}`} style={{ marginLeft: '8px', fontSize: '10px', background: 'var(--bg-hover)', color: 'var(--text-secondary)', padding: '1px 6px', borderRadius: '8px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                                    {Math.round(fact.confidence * 100)}% sure
+                                  </span>
+                                )}
                                 {isSuperseded && (
                                   <span style={{ marginLeft: '8px', fontSize: '10px', background: 'rgba(var(--accent-rgb),0.15)', color: 'var(--accent)', padding: '1px 6px', borderRadius: '8px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>superseded</span>
                                 )}
@@ -760,6 +1076,133 @@ export default function MemoryManagement() {
           )}
         </div>
       )}
+
+      {/* Forget centre: pick topics, see exactly what a forget
+          removed (the reply is the removed list — summaries,
+          never ids as the visible text), and undo the most
+          recent forget from the tombstone history. */}
+      <div data-testid="forget-centre" style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px', marginTop: '24px' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 500, margin: '0 0 4px 0' }}>Forget centre</h3>
+        <p style={{ color: 'var(--text-secondary)', fontSize: '13px', margin: '0 0 16px 0', lineHeight: '1.5' }}>
+          Remove a whole topic from memory — its facts and episodes together. You will see exactly what was removed, and the most recent forget can be undone.
+        </p>
+        {forgetError && (
+          <div data-testid="forget-error" style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '12px' }}>{forgetError}</div>
+        )}
+        {undoNotice && (
+          <div data-testid="forget-undo-notice" style={{ color: 'var(--success)', fontSize: '13px', marginBottom: '12px' }}>{undoNotice}</div>
+        )}
+
+        <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '8px' }}>Topics in memory</div>
+        {forgetCandidatesLoad !== 'ready' ? (
+          <LoadStateRow
+            loadState={forgetCandidatesLoad}
+            isConnected={isConnected}
+            testId="forget-candidates-load-state"
+            variant="plain"
+            loadingText="Loading topics…"
+            offlineText="Waiting for the engine — topics will appear here once it connects."
+            errorText="Topics could not be loaded."
+          />
+        ) : (forgetCandidates || []).length === 0 ? (
+          <EmptyState
+            compact
+            title="Nothing to forget"
+            description="No topic candidates were found in memory."
+            testId="forget-candidates-empty"
+          />
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {(forgetCandidates || []).map((candidate) => {
+              const lastTouched = formatMemoryWhen(candidate.last_touched);
+              return (
+                <label key={candidate.topic} data-testid={`forget-candidate-${candidate.topic}`} style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'var(--bg-base)', border: '1px solid var(--border-default)', borderRadius: '8px', padding: '10px 12px', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={selectedForgetTopics.includes(candidate.topic)}
+                    onChange={() => handleToggleForgetTopic(candidate.topic)}
+                    style={{ width: '16px', height: '16px', accentColor: 'var(--accent)', flexShrink: 0 }}
+                  />
+                  <span style={{ flex: 1, fontSize: '13px' }}>{candidate.topic}</span>
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                    {candidate.fact_count ?? 0} facts · {candidate.episode_count ?? 0} episodes{lastTouched ? ` · last touched ${lastTouched}` : ''}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        )}
+        {(() => {
+          const selectedItems = (forgetCandidates || [])
+            .filter((c) => selectedForgetTopics.includes(c.topic))
+            .reduce((sum, c) => sum + (c.fact_count || 0) + (c.episode_count || 0), 0);
+          return (
+            <button
+              data-testid="forget-selected-button"
+              onClick={handleForgetSelected}
+              disabled={selectedForgetTopics.length === 0 || forgetPendingCount > 0}
+              style={{ marginTop: '12px', background: selectedForgetTopics.length === 0 || forgetPendingCount > 0 ? 'var(--bg-hover)' : 'rgba(201,42,42,0.12)', border: `1px solid ${selectedForgetTopics.length === 0 || forgetPendingCount > 0 ? 'var(--border-default)' : 'rgba(201,42,42,0.4)'}`, color: selectedForgetTopics.length === 0 || forgetPendingCount > 0 ? 'var(--text-secondary)' : 'var(--danger)', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 500, cursor: selectedForgetTopics.length === 0 || forgetPendingCount > 0 ? 'not-allowed' : 'pointer' }}
+            >
+              {forgetPendingCount > 0 ? 'Forgetting…' : selectedForgetTopics.length === 0 ? 'Forget selected' : `Forget selected — ${selectedItems} items`}
+            </button>
+          );
+        })()}
+
+        {forgottenNow.length > 0 && (
+          <div data-testid="forget-removed-list" style={{ background: 'var(--bg-base)', border: '1px solid var(--border-default)', borderRadius: '8px', padding: '12px 16px', marginTop: '16px' }}>
+            <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '8px' }}>Forgotten just now — {forgottenNow.length} items</div>
+            <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.6' }}>
+              {forgottenNow.map((entry, i) => (
+                <li key={`${entry.kind}-${entry.id || i}`}>{entry.summary}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div style={{ borderTop: '1px solid var(--border-default)', marginTop: '20px', paddingTop: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '8px' }}>
+            <div style={{ fontSize: '13px', fontWeight: 500 }}>Forgotten history</div>
+            <button
+              data-testid="forget-undo-button"
+              onClick={handleUndoForget}
+              disabled={!forgetHistory || forgetHistory.length === 0 || forgetHistory[0].undoable !== true || undoPending}
+              style={{ background: 'var(--bg-hover)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', padding: '6px 14px', borderRadius: '8px', fontSize: '12px', fontWeight: 500, cursor: !forgetHistory || forgetHistory.length === 0 || forgetHistory[0].undoable !== true || undoPending ? 'not-allowed' : 'pointer', opacity: !forgetHistory || forgetHistory.length === 0 || forgetHistory[0].undoable !== true || undoPending ? 0.55 : 1 }}
+            >
+              {undoPending ? 'Restoring…' : 'Undo last forget'}
+            </button>
+          </div>
+          {forgetHistoryLoad !== 'ready' ? (
+            <LoadStateRow
+              loadState={forgetHistoryLoad}
+              isConnected={isConnected}
+              testId="forget-history-load-state"
+              variant="plain"
+              loadingText="Loading forgotten history…"
+              offlineText="Waiting for the engine — forgotten history will appear here once it connects."
+              errorText="Forgotten history could not be loaded."
+            />
+          ) : (forgetHistory || []).length === 0 ? (
+            <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>Nothing has been forgotten yet.</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {(forgetHistory || []).map((entry) => {
+                const forgottenAt = formatMemoryWhen(entry.forgotten_at);
+                return (
+                  <div key={entry.tombstone_id} data-testid={`forget-history-${entry.tombstone_id}`} style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'var(--bg-base)', border: '1px solid var(--border-default)', borderRadius: '8px', padding: '10px 12px' }}>
+                    <span style={{ flex: 1, fontSize: '13px' }}>{entry.topic}</span>
+                    <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                      {entry.fact_count ?? 0} facts · {entry.episode_count ?? 0} episodes{forgottenAt ? ` · ${forgottenAt}` : ''}
+                    </span>
+                    {entry.undoable && (
+                      <span style={{ fontSize: '10px', background: 'rgba(var(--accent-rgb),0.15)', color: 'var(--accent)', padding: '1px 6px', borderRadius: '8px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>can be undone</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

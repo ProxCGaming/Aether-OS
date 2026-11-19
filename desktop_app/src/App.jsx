@@ -76,12 +76,14 @@ async function writeFloatingTransferState(state) {
 // can jump straight to. Ids and labels mirror SettingsPanel's own menu
 // items (SettingsPanel.jsx `menuItems`); the palette entries run
 // through App's tab state + the panel's initial-section prop.
-// S-6: the mirror is now complete (all 19 sections — Calendar,
-// Conversation and Computer Use were missing) and the order
-// follows the panel's grouped nav (Personal / Connect / System),
-// 'About' last, matching its place at the end of the panel nav.
+// S-6: the mirror is now complete (all 20 sections — Calendar,
+// Conversation and Computer Use were missing; Profile joined as
+// its own section in Wave 6) and the order follows the panel's
+// grouped nav (Personal / Connect / System), 'About' last,
+// matching its place at the end of the panel nav.
 const SETTINGS_SECTIONS = [
   // Personal
+  { id: 'Profile', label: 'Profile' },
   { id: 'Memory', label: 'Memory & Storage' },
   { id: 'Voice', label: 'Voice Tuning' },
   { id: 'Usage', label: 'Usage' },

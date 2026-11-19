@@ -801,5 +801,236 @@ describe('MemoryManagement Component', () => {
       expect(screen.queryByTestId('fact-importance-f2')).not.toBeInTheDocument();
       expect(screen.queryByTestId('memory-provenance-note')).not.toBeInTheDocument();
     });
+
+    test('confidence renders beside importance only where the payload carries it', async () => {
+      goToKgWithFacts([
+        { fact_id: 'f1', entity_name: 'Arindam', entity_type: 'Person', fact_text: 'Lives in Kolkata', status: 'active', provenance: 'stated', importance: 0.9, confidence: 0.98 },
+        { fact_id: 'f2', entity_name: 'Arindam', entity_type: 'Person', fact_text: 'Likes tea', status: 'active' }
+      ]);
+      await screen.findByText('Likes tea');
+
+      expect(screen.getByTestId('fact-confidence-f1')).toHaveTextContent('98% sure');
+      expect(screen.queryByTestId('fact-confidence-f2')).not.toBeInTheDocument();
+    });
+  });
+
+  // Memory controls: the two independent gates plus the
+  // counts/decay read-out. The gates' confirmed values arrive
+  // with the config read; a toggle sends CONFIG_UPDATE_REQUEST
+  // and the switch keeps the confirmed value until the reply
+  // lands — a refusal is surfaced verbatim and changes nothing.
+  describe('memory controls', () => {
+    const answerConfig = (config) => {
+      act(() => {
+        simulateMessage({ type: 'CONFIG_GET_RESPONSE', payload: { config } });
+      });
+    };
+
+    const answerStats = (payload) => {
+      act(() => {
+        simulateMessage({ type: 'MEMORY_STATS_RESPONSE', payload });
+      });
+    };
+
+    test('requests stats and config on mount; toggles wait for the config answer', () => {
+      render(<MemoryManagement />);
+      expect(mockSendMessage).toHaveBeenCalledWith('MEMORY_STATS_REQUEST', expect.any(Object));
+      expect(mockSendMessage).toHaveBeenCalledWith('CONFIG_GET_REQUEST', expect.any(Object));
+      expect(screen.getByTestId('memory-toggle-memory_use_enabled')).toBeDisabled();
+      expect(screen.getByTestId('memory-stats-load-state')).toHaveAttribute('data-load-display', 'loading');
+
+      answerConfig({ memory_use_enabled: true, memory_learn_enabled: false });
+      expect(screen.getByTestId('memory-toggle-memory_use_enabled')).toBeChecked();
+      expect(screen.getByTestId('memory-toggle-memory_use_enabled')).not.toBeDisabled();
+      expect(screen.getByTestId('memory-toggle-memory_learn_enabled')).not.toBeChecked();
+      // The deciding combination, in plain words.
+      expect(screen.getByTestId('memory-combination-line')).toHaveTextContent(
+        'Aether answers with your memory, but learns nothing new'
+      );
+    });
+
+    test('counts and decay render from the stats reply', () => {
+      render(<MemoryManagement />);
+      answerStats({
+        facts_active: 1284, facts_superseded: 96, episodes: 342,
+        backend_id: 'native', backend_label: 'Knowledge graph',
+        decay: { inferred_fade_days: 45, last_cleanup_at: 1760000000, last_faded: 12, last_removed: 3 },
+      });
+      expect(screen.getByTestId('memory-stats-counts')).toHaveTextContent('1,284 active · 96 superseded · 342 episodes · Knowledge graph backend');
+      expect(screen.getByTestId('memory-stats-decay')).toHaveTextContent('Inferred facts fade over ~45 days');
+      expect(screen.getByTestId('memory-stats-decay')).toHaveTextContent('last cleanup: 12 faded · 3 removed');
+    });
+
+    test('unreported decay fields say so instead of inventing numbers', () => {
+      render(<MemoryManagement />);
+      answerStats({
+        facts_active: 3, facts_superseded: 0, episodes: 1,
+        backend_id: 'mem0', backend_label: 'Mem0',
+        decay: { inferred_fade_days: null, last_cleanup_at: null, last_faded: null, last_removed: null },
+      });
+      expect(screen.getByTestId('memory-stats-decay')).toHaveTextContent('not reported by this backend');
+      expect(screen.getByTestId('memory-stats-decay')).toHaveTextContent('last cleanup: not reported by this backend');
+    });
+
+    test('a failed stats read is an error state, not zero counts', () => {
+      render(<MemoryManagement />);
+      answerStats({ success: false, error: 'Counts are unavailable on this backend.' });
+      expect(screen.getByTestId('memory-stats-load-state')).toHaveAttribute('data-load-display', 'error');
+      expect(screen.queryByTestId('memory-stats-counts')).not.toBeInTheDocument();
+    });
+
+    test('toggling learn sends the config update and applies only on the confirming reply', () => {
+      render(<MemoryManagement />);
+      answerConfig({ memory_use_enabled: true, memory_learn_enabled: true });
+
+      fireEvent.click(screen.getByTestId('memory-toggle-memory_learn_enabled'));
+      expect(mockSendMessage).toHaveBeenCalledWith(
+        'CONFIG_UPDATE_REQUEST',
+        expect.objectContaining({ payload: { config: { memory_learn_enabled: false } } })
+      );
+      // Not yet confirmed: the switch still shows the old value.
+      expect(screen.getByTestId('memory-toggle-memory_learn_enabled')).toBeChecked();
+
+      act(() => {
+        simulateMessage({
+          type: 'CONFIG_UPDATE_RESPONSE',
+          payload: { success: true, config: { memory_use_enabled: true, memory_learn_enabled: false } },
+        });
+      });
+      expect(screen.getByTestId('memory-toggle-memory_learn_enabled')).not.toBeChecked();
+      expect(screen.getByTestId('memory-combination-line')).toHaveTextContent('learns nothing new');
+    });
+
+    test('a refused toggle is surfaced verbatim and the value does not move', () => {
+      render(<MemoryManagement />);
+      answerConfig({ memory_use_enabled: true, memory_learn_enabled: true });
+
+      fireEvent.click(screen.getByTestId('memory-toggle-memory_use_enabled'));
+      act(() => {
+        simulateMessage({
+          type: 'CONFIG_UPDATE_RESPONSE',
+          payload: { success: false, error: 'memory_use_enabled is not a writable setting.' },
+        });
+      });
+      expect(screen.getByTestId('memory-toggle-error')).toHaveTextContent('memory_use_enabled is not a writable setting.');
+      expect(screen.getByTestId('memory-toggle-memory_use_enabled')).toBeChecked();
+    });
+  });
+
+  // Forget centre: candidates with counts, the exact removed
+  // list from the execute reply (summaries, not ids), tombstone
+  // history, and undo of the latest forget only.
+  describe('forget centre', () => {
+    const answerCandidates = (candidates) => {
+      act(() => {
+        simulateMessage({ type: 'MEMORY_FORGET_CANDIDATES_RESPONSE', payload: { candidates } });
+      });
+    };
+
+    const answerHistory = (entries) => {
+      act(() => {
+        simulateMessage({ type: 'MEMORY_FORGET_HISTORY_RESPONSE', payload: { entries, total: entries.length } });
+      });
+    };
+
+    test('requests candidates and history on mount and renders candidate counts', () => {
+      render(<MemoryManagement />);
+      expect(mockSendMessage).toHaveBeenCalledWith('MEMORY_FORGET_CANDIDATES_REQUEST', expect.any(Object));
+      expect(mockSendMessage).toHaveBeenCalledWith(
+        'MEMORY_FORGET_HISTORY_REQUEST',
+        expect.objectContaining({ payload: { limit: 20, offset: 0 } })
+      );
+      answerCandidates([
+        { topic: 'The breakup', fact_count: 18, episode_count: 7, last_touched: 1760000000 },
+        { topic: 'Old address', fact_count: 2, episode_count: 0, last_touched: 1750000000 },
+      ]);
+      expect(screen.getByTestId('forget-candidate-The breakup')).toHaveTextContent('18 facts · 7 episodes');
+      expect(screen.getByTestId('forget-candidate-Old address')).toHaveTextContent('2 facts · 0 episodes');
+    });
+
+    test('forgetting a topic sends one execute per topic and shows the exact removed summaries', () => {
+      render(<MemoryManagement />);
+      answerCandidates([
+        { topic: 'The breakup', fact_count: 18, episode_count: 7, last_touched: 1760000000 },
+      ]);
+      answerHistory([]);
+
+      const row = screen.getByTestId('forget-candidate-The breakup');
+      fireEvent.click(row.querySelector('input[type="checkbox"]'));
+      const button = screen.getByTestId('forget-selected-button');
+      expect(button).toHaveTextContent('Forget selected — 25 items');
+      fireEvent.click(button);
+      expect(mockSendMessage).toHaveBeenCalledWith(
+        'MEMORY_FORGET_EXECUTE_REQUEST',
+        expect.objectContaining({ payload: { topic: 'The breakup' } })
+      );
+
+      act(() => {
+        simulateMessage({
+          type: 'MEMORY_FORGET_EXECUTE_RESPONSE',
+          payload: {
+            topic: 'The breakup',
+            tombstone_id: 'tomb-1',
+            removed: [
+              { fact_id: 'f-1', summary: 'Fact about the breakup' },
+              { episode_id: 'ep-1', summary: 'Episode about the breakup' },
+            ],
+          },
+        });
+      });
+      const removedList = screen.getByTestId('forget-removed-list');
+      expect(removedList).toHaveTextContent('Fact about the breakup');
+      expect(removedList).toHaveTextContent('Episode about the breakup');
+      // Ids are keys, never the visible text.
+      expect(removedList).not.toHaveTextContent('f-1');
+      expect(removedList).not.toHaveTextContent('ep-1');
+    });
+
+    test('history renders tombstones; undo is enabled only when the latest is undoable', () => {
+      render(<MemoryManagement />);
+      answerCandidates([]);
+      answerHistory([
+        { tombstone_id: 'tomb-2', topic: 'Old address', fact_count: 2, episode_count: 0, forgotten_at: 1760001000, undoable: true },
+        { tombstone_id: 'tomb-1', topic: 'The breakup', fact_count: 18, episode_count: 7, forgotten_at: 1760000000, undoable: false },
+      ]);
+      expect(screen.getByTestId('forget-history-tomb-2')).toHaveTextContent('Old address');
+      expect(screen.getByTestId('forget-history-tomb-2')).toHaveTextContent('can be undone');
+      expect(screen.getByTestId('forget-history-tomb-1')).not.toHaveTextContent('can be undone');
+      expect(screen.getByTestId('forget-undo-button')).not.toBeDisabled();
+    });
+
+    test('undo sends the request and names what came back', () => {
+      render(<MemoryManagement />);
+      answerCandidates([]);
+      answerHistory([
+        { tombstone_id: 'tomb-2', topic: 'Old address', fact_count: 2, episode_count: 0, forgotten_at: 1760001000, undoable: true },
+      ]);
+      fireEvent.click(screen.getByTestId('forget-undo-button'));
+      expect(mockSendMessage).toHaveBeenCalledWith('MEMORY_FORGET_UNDO_REQUEST', expect.any(Object));
+      act(() => {
+        simulateMessage({
+          type: 'MEMORY_FORGET_UNDO_RESPONSE',
+          payload: { topic: 'Old address', fact_count: 2, episode_count: 0 },
+        });
+      });
+      expect(screen.getByTestId('forget-undo-notice')).toHaveTextContent('Restored 2 facts and 0 episodes about "Old address".');
+    });
+
+    test('undo stays disabled when the latest tombstone is not undoable', () => {
+      render(<MemoryManagement />);
+      answerCandidates([]);
+      answerHistory([
+        { tombstone_id: 'tomb-1', topic: 'The breakup', fact_count: 18, episode_count: 7, forgotten_at: 1760000000, undoable: false },
+      ]);
+      expect(screen.getByTestId('forget-undo-button')).toBeDisabled();
+    });
+
+    test('an answered-empty candidate list renders the empty state', () => {
+      render(<MemoryManagement />);
+      answerCandidates([]);
+      answerHistory([]);
+      expect(screen.getByTestId('forget-candidates-empty')).toBeInTheDocument();
+      expect(screen.getByText('Nothing has been forgotten yet.')).toBeInTheDocument();
+    });
   });
 });

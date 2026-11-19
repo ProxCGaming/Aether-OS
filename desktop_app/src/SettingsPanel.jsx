@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info, CalendarDays, MessagesSquare, Monitor, Search } from 'lucide-react';
+import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info, CalendarDays, MessagesSquare, Monitor, Search, User } from 'lucide-react';
 import './chat.css';
 import { resolveSnipHotkey, defaultSnipHotkey } from './snipHotkey';
 import ProviderSettings from './components/Settings/ProviderSettings';
 import MemoryManagement from './components/Settings/MemoryManagement';
+import ProfilePanel from './components/Settings/ProfilePanel';
 import DiagnosticsPanel from './components/Settings/DiagnosticsPanel';
 import WorkspaceIndexingPanel from './components/Settings/WorkspaceIndexingPanel';
 import BrowserPolicyPanel from './components/Settings/BrowserPolicyPanel';
@@ -1198,8 +1199,8 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   // board names Personal [Profile, Memory, Voice], Connect
   // [Models & Tasks, Providers, MCP] and System [Agents, Tools,
   // Skills, Plugins, General]; Profile is built as its own section
-  // in Wave 6 and 'General' has no section today (its Appearance
-  // half was removed in Phase 10.3 C2), so both are absent here
+  // (Wave 6) and 'General' has no section today (its Appearance
+  // half was removed in Phase 10.3 C2), so 'General' is absent here
   // rather than faked. The sections the board does not name are
   // placed by function: Personal takes the user's own data and
   // habits (Usage, Password Vault, Calendar, Conversation),
@@ -1210,6 +1211,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   // (SETTINGS_SECTIONS, E6-F08) carries the same ids/labels in
   // this same order.
   const menuItems = [
+    { group: 'Personal', keywords: 'profile about you people preferences facts stated source', id: 'Profile', icon: <User size={18} />, label: 'Profile' },
     { group: 'Personal', keywords: 'memory episodes facts graph storage backend', id: 'Memory', icon: <Database size={18} />, label: 'Memory & Storage' },
     { group: 'Personal', keywords: 'voice tuning audio vad endpointing silence threshold mic speech', id: 'Voice', icon: <Mic size={18} />, label: 'Voice Tuning' },
     { group: 'Personal', keywords: 'usage cost budget tokens spend ledger models agents daily alert', id: 'Usage', icon: <CircleDollarSign size={18} />, label: 'Usage' },
@@ -1492,6 +1494,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             pendingSkillToggleFor={pendingSkillToggleFor}
             onSkillToggle={handleSkillToggle}
           />
+        )}
+
+        {activeMenu === 'Profile' && (
+          <ProfilePanel />
         )}
 
         {activeMenu === 'Memory' && (
