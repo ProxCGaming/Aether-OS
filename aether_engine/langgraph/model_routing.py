@@ -29,6 +29,10 @@ Contract (the owner's pins always win):
 
 Signals (honest and cheap — no model call, no invented data):
 
+* the tier the supervisor explicitly stated for the delegation
+  (P1a: its briefing tag, stored on the delegation log entry) —
+  the primary complexity signal when present; the text inference
+  below is the fallback for delegations it did not mark;
 * the delegation's own text (the supervisor's reason + briefing
   for this specialist, or the run's original prompt when the
   specialist state carries no delegation entry — the S13 child
@@ -118,6 +122,9 @@ TIER_SMALL = 0
 TIER_STANDARD = 1
 TIER_STRONG = 2
 TIER_NAMES = {TIER_SMALL: "small", TIER_STANDARD: "standard", TIER_STRONG: "strong"}
+#: Tier name -> tier int (the delegation log stores the tier the
+#: supervisor stated by name — P1a's ``decision["tier"]``).
+TIER_BY_NAME = {name: tier for tier, name in TIER_NAMES.items()}
 
 #: Models that must never be routed to, however the tiers fall:
 #: gemini-2.5-flash returns 404 on the owner's key (registry E5-03;
@@ -436,6 +443,11 @@ class TaskSignals:
     agent: str
     task_text: str = ""
     has_images: bool = False
+    # P1a: the tier the supervisor explicitly stated for this
+    # delegation (its briefing tag, stored on the delegation log
+    # entry by the post-model hook), or None when it stated none —
+    # the router then infers from the task text, as it always has.
+    explicit_tier: int | None = None
 
 
 def _state_has_images(state: dict[str, Any]) -> bool:
@@ -470,6 +482,7 @@ def signals_for_state(agent: str, state: dict[str, Any]) -> TaskSignals:
     sub-task text), which is the honest description of its work.
     """
     text = ""
+    explicit_tier: int | None = None
     for entry in reversed(state.get("delegation_log") or []):
         if not isinstance(entry, dict):
             continue
@@ -483,23 +496,41 @@ def signals_for_state(agent: str, state: dict[str, Any]) -> TaskSignals:
         text = " ".join(
             part for part in (decision.get("reason", ""), decision.get("briefing", ""))
             if isinstance(part, str) and part).strip()
+        # P1a: the supervisor's stated tier rides the same entry.
+        # Stored by name; an unrecognised stored value (a hand-
+        # edited or pre-P1a checkpoint) reads as no statement.
+        raw_tier = decision.get("tier")
+        if isinstance(raw_tier, str):
+            explicit_tier = TIER_BY_NAME.get(raw_tier.strip().lower())
+        elif isinstance(raw_tier, int) and not isinstance(raw_tier, bool):
+            explicit_tier = raw_tier if raw_tier in TIER_NAMES else None
         break
     if not text:
         text = str(state.get("original_prompt") or "")
     return TaskSignals(agent=agent, task_text=text,
-                       has_images=_state_has_images(state))
+                       has_images=_state_has_images(state),
+                       explicit_tier=explicit_tier)
 
 
 def _complexity_need(signals: TaskSignals, incumbent_tier: int) -> tuple[int, str]:
     """The tier this task warrants, and the plain-language why.
 
-    The default is the incumbent's own tier: a standard task
+    The supervisor's explicit statement wins (P1a): when it marked
+    the delegation with a tier, that IS the need — the supervisor
+    knows why it is delegating, and inference from the text was
+    always a proxy for that knowledge. Untagged delegations (older
+    checkpoints, child states) fall back to inference, unchanged:
+    the default is the incumbent's own tier — a standard task
     should run on the model the user already runs it on, and only
     a real signal moves the choice. Reasoning markers ask for the
     strong tier; a long brief or an explicitly multi-step one
     asks one tier up from standard; a short, marker-free sub-task
     is small-tier work.
     """
+    if signals.explicit_tier is not None:
+        return signals.explicit_tier, (
+            "the supervisor marked this delegation "
+            f"{TIER_NAMES.get(signals.explicit_tier, 'standard')} tier")
     text = signals.task_text or ""
     sig = text_signals(text)
     if sig.wants_reasoning:
@@ -874,6 +905,14 @@ class RoutingChoice:
     # (cost-unknown). Published with the decision so the ledger
     # marks estimate-based picks as estimate-based.
     cost_basis: str = "none"
+    # P1a: where the tier need came from — "explicit" (the
+    # supervisor stated the tier; _complexity_need served its
+    # statement) or "inferred" (the heuristic read of the task
+    # text, a need_fn's answer, or a non-need decision path such
+    # as escalation / a tier alias). Published with the decision
+    # so the Task Ledger — and P3a's dataset — can tell stated
+    # tiers from guessed ones.
+    tier_source: str = "inferred"
 
 
 def _demoted(candidate: Candidate, agent: str, history: History) -> bool:
@@ -1073,10 +1112,17 @@ def route(
         reason_parts.append(
             "picked on estimated price — no recorded cost "
             "history yet")
+    # P1a: the need is the supervisor's own statement only when
+    # the heuristic path served it — a need_fn (P3a's scorer)
+    # supplies its own need, which is not the supervisor's mark.
+    tier_source = (
+        "explicit"
+        if need_fn is None and signals.explicit_tier is not None
+        else "inferred")
     return RoutingChoice(
         provider=chosen.provider, model=chosen.model, tier=tier,
         source="auto", reason=" — ".join(reason_parts) + ".",
-        cost_basis=basis)
+        cost_basis=basis, tier_source=tier_source)
 
 
 def escalate(
@@ -1169,6 +1215,7 @@ def publish_routing_activity(
             "model": choice.model,
             "tier": TIER_NAMES.get(choice.tier, str(choice.tier)),
             "source": choice.source,
+            "tier_source": choice.tier_source,
             "escalated_from": choice.escalated_from,
             "cost_basis": choice.cost_basis,
             "reason": choice.reason,

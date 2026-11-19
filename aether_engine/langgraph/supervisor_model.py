@@ -39,6 +39,7 @@ import copy
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Any
@@ -83,6 +84,38 @@ HANDOFF_PREFIX = "transfer_to_"
 # (transfer tools under create_supervisor, delegation tools under
 # langgraph/delegation.py), never by config sniffing here.
 DELEGATION_PREFIX = "delegate_to_"
+
+# P1a (Option A — the briefing tag): the supervisor states the
+# tier a delegation needs by opening its briefing with a tag —
+# "[tier: strong]" — instead of leaving S14 to guess complexity
+# from the briefing's length and keywords. The post-model hook
+# parses and strips the tag at the seam where the briefing becomes
+# the delegation log entry (see parse_tier_tag), stores the tier
+# on the decision, and the specialist only ever sees the stripped
+# briefing. A missing tag degrades exactly to today's inference.
+TIER_TAG_VALUES = ("small", "standard", "strong")
+_TIER_TAG_RE = re.compile(r"^\s*\[tier:\s*([A-Za-z]+)\s*\]\s*", re.IGNORECASE)
+
+
+def parse_tier_tag(briefing: Any) -> tuple[str | None, Any]:
+    """Split a leading tier tag off a supervisor briefing.
+
+    Returns ``(tier_name, stripped_briefing)`` when the briefing
+    opens with a well-formed tag naming a valid tier; otherwise
+    ``(None, briefing)`` with the briefing untouched — a malformed
+    tag, or a well-formed tag with an unknown tier value, is
+    treated as absent, exactly as if the supervisor had not
+    tagged the briefing at all.
+    """
+    if not isinstance(briefing, str) or not briefing:
+        return None, briefing
+    match = _TIER_TAG_RE.match(briefing)
+    if match is None:
+        return None, briefing
+    tier = match.group(1).lower()
+    if tier not in TIER_TAG_VALUES:
+        return None, briefing
+    return tier, briefing[match.end():]
 
 
 def _end_result(reason: str, decision: dict | None = None) -> ChatResult:
@@ -981,6 +1014,34 @@ def _spawn_policy_denial(state: dict, target: str, config: dict | None = None) -
     }
 
 
+def _message_with_stripped_briefing(message: AIMessage, stripped: str) -> AIMessage | None:
+    """The pending message with its delegation calls' briefing
+    arguments replaced by the tag-stripped briefing (P1a).
+
+    The P1d delegation tool receives its ``briefing`` argument
+    from the pending message, and that message stays in the run
+    history the specialist reads — stripping only the decision
+    would leave the tag sitting in the call arguments. The copy
+    keeps the message id, so the state reducer replaces the
+    original in place (the same mechanism the spawn-policy denial
+    relies on). Returns None when no delegation call carries a
+    different briefing — legacy handoff calls carry no arguments
+    at all, so the legacy topology never rewrites a message.
+    """
+    changed = False
+    new_calls = []
+    for tc in message.tool_calls or []:
+        if (tc.get("name") or "").startswith(DELEGATION_PREFIX):
+            args = tc.get("args")
+            if isinstance(args, dict) and args.get("briefing") != stripped:
+                tc = {**tc, "args": {**args, "briefing": stripped}}
+                changed = True
+        new_calls.append(tc)
+    if not changed:
+        return None
+    return message.model_copy(update={"tool_calls": new_calls})
+
+
 def supervisor_post_model_hook(state: dict) -> dict:
     """State bookkeeping for one supervisor model step.
 
@@ -1032,6 +1093,22 @@ def supervisor_post_model_hook(state: dict) -> dict:
         denial = _spawn_policy_denial(state, target)
         if denial is not None:
             return denial
+        # P1a: parse + strip the tier tag from the AUTHORED
+        # briefing — the decision as the adapter stamped it from
+        # the model's own decision text / delegation call. This
+        # runs before the reconstruction below on purpose: the
+        # reconstructed briefing is memory output, not supervisor
+        # prose, so a tag can only ever come from the supervisor's
+        # own statement. A valid tag becomes decision["tier"] and
+        # leaves the briefing (context_briefing and the delegation
+        # call's argument both read the stripped text); anything
+        # else leaves the decision untouched.
+        tier = None
+        if isinstance(decision, dict) and decision.get("briefing"):
+            tier, stripped_briefing = parse_tier_tag(decision["briefing"])
+            if tier is not None:
+                decision = {**decision, "briefing": stripped_briefing,
+                            "tier": tier}
         if decision is None or (
             isinstance(decision, dict) and not decision.get("briefing")
         ):
@@ -1065,7 +1142,7 @@ def supervisor_post_model_hook(state: dict) -> dict:
             elif reconstructed:
                 decision = {**decision, "briefing": reconstructed}
         reason = decision.get("reason", "")
-        return {
+        update: dict[str, Any] = {
             "delegation_log": [
                 {"agent": "supervisor", "timestamp": time.time(), "decision": decision}
             ],
@@ -1080,6 +1157,16 @@ def supervisor_post_model_hook(state: dict) -> dict:
             "plan": f"Goal: {reason}",
             "active_specialist": target,
         }
+        if tier is not None:
+            # P1a: the pending delegation call's briefing argument
+            # still carries the tag — rewrite the message so the
+            # tool (and the history the specialist reads) receives
+            # the stripped briefing too.
+            rewritten = _message_with_stripped_briefing(
+                last, decision.get("briefing", "") or "")
+            if rewritten is not None:
+                update["messages"] = [rewritten]
+        return update
 
     if tool_calls:
         # Memory step: the model decides again once the results land,

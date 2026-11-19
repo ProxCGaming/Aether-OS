@@ -583,6 +583,18 @@ def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: 
             "   - 'reason': a concise description of the operational goal for the specialist\n"
             "   - 'briefing': ONLY facts retrieved from memory tools (empty string if no tool was called)"
         )
+    # P1a: the tier instruction — the supervisor states the model
+    # tier each delegation needs as a tag opening its briefing,
+    # instead of leaving the router to guess complexity from the
+    # briefing's length and keywords. The post-model hook parses
+    # and strips the tag (supervisor_model.parse_tier_tag), so the
+    # statement reaches the router and never the specialist.
+    decision_rules += (
+        "\n5. Tier marking: begin each briefing with a tier tag naming the model tier the delegation needs — "
+        "[tier: small] = mechanical or short work; [tier: standard] = ordinary specialist work; "
+        "[tier: strong] = deep reasoning, hard debugging, architecture. "
+        "The tag is consumed by the router and stripped before the specialist sees the briefing."
+    )
     # Epic 7, E7-04: stage-1 skill disclosure — the supervisor sees
     # the summary catalog (never bodies) so it can route with skill
     # awareness; full instructions load only for activated skills.

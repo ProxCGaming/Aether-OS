@@ -45,11 +45,13 @@ rows, so the block the UI will render never shows a stale pin).
 
 **Honest availability.** A mode or strategy is only *effective*
 when the machinery behind it exists (the S-series
-honest-unavailable pattern). ``auto-route`` arrives with P1a/P1b,
-``auto-broadcast`` with P2b, the ``tiered-cascade`` strategy with
-P2a, and ``auto`` tool access with P2c Filter 2 (K-03). The schema
-accepts and stores those values today, but the resolver reports
-them unavailable-with-reason and the effective mode falls back to
+honest-unavailable pattern). ``auto-route`` arrived with P1a/P1b
+(supervisor tier emission + price/headroom scoring; its entry
+below is available), ``auto-broadcast`` arrives with P2b, the
+``tiered-cascade`` strategy with P2a, and ``auto`` tool access
+with P2c Filter 2 (K-03). The schema accepts and stores the
+not-yet-landed values today, but the resolver reports them
+unavailable-with-reason and the effective mode falls back to
 ``auto-coordinate`` — never a silent no-op. The slices that land
 the machinery flip their own availability entries here.
 
@@ -141,9 +143,12 @@ _MODE_AVAILABILITY: dict[str, tuple[bool, str]] = {
     # only the mode, not the pause.
     "manual": (True, ""),
     "auto-coordinate": (True, ""),
-    "auto-route": (False, "auto-route arrives with P1a/P1b "
-                           "(supervisor tier emission and "
-                           "price/headroom scoring)"),
+    # P1a (supervisor tier emission, K-08) and P1b (price/headroom
+    # scoring, K-09) have landed: the machinery auto-route names —
+    # the supervisor stating each delegation's tier and S14
+    # routing on it — exists, so the mode is honestly available.
+    # S14's own model_routing flag still gates the router itself.
+    "auto-route": (True, ""),
     "auto-broadcast": (False, "auto-broadcast arrives with P2b "
                               "(parallel fan-out)"),
 }

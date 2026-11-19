@@ -185,6 +185,10 @@ def record_executor_event(task_id: str | None, event: Any) -> None:
                     "provider": out.get("provider"),
                     "model": out.get("model"),
                     "tier": out.get("tier"),
+                    # P1a: whether the tier need was the supervisor's
+                    # explicit statement or the router's inference —
+                    # P3a's dataset separates the two by this field.
+                    "tier_source": out.get("tier_source"),
                     "routing_source": out.get("source") or (
                         "escalation" if action == "model_escalation" else "auto"),
                     "reason": out.get("reason") or payload.get("reason", ""),
