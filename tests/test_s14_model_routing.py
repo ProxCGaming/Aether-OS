@@ -542,7 +542,30 @@ async def test_subagent_retry_flag_steps_the_child_up(routing_env):
 # ── The Settings report + WS surface ──────────────────────────────
 
 
-def test_effective_models_report_shapes(monkeypatch):
+def test_effective_models_report_shapes(tmp_path, monkeypatch):
+    # Hermetic history (merge fix, 20 Nov 2026): the report reads
+    # the REAL persistent stores under ~/.aether by default — the
+    # usage ledger, the latency DB, the outcome store, rate-limit
+    # heat. On any machine where the app or other tests have run,
+    # those carry the incumbent's recorded history and the P1b
+    # cold-start assertions below stop being cold. Point every
+    # store at an empty tmp home, the same isolation routing_env
+    # applies to the outcome store for specialist calls.
+    from aether_engine.cost.ledger import UsageLedger
+    from aether_engine.routing import headroom as headroom_module
+    from aether_engine.routing.latency import LatencyStore
+
+    monkeypatch.setattr(
+        model_routing, "_GLOBAL_OUTCOME_STORE",
+        ModelOutcomeStore(tmp_path / "routing.db"))
+    monkeypatch.setattr(
+        "aether_engine.routing.latency.get_latency_store",
+        lambda: LatencyStore(tmp_path / "latency.db"))
+    monkeypatch.setattr(
+        "aether_engine.cost.ledger.get_usage_ledger",
+        lambda: UsageLedger(tmp_path / "usage.db"))
+    monkeypatch.setattr(
+        headroom_module, "heat_states", lambda names, **kw: {})
     monkeypatch.setattr(engine_state, "configured_providers", ["google_gemini"])
     off = model_routing.effective_models_report(UserConfig())
     assert off["mode"] == "off"

@@ -55,12 +55,20 @@ async def _fake_aembedding(model=None, input=None, **_kwargs):
 
 @pytest.fixture(autouse=True)
 def _fake_embedder():
+    # Both halves of the shared embedder's failure state must be
+    # reset: the breaker timestamp AND the endpoint-suspect flag.
+    # The suspect flag makes embed_text probe 127.0.0.1:11434 and
+    # fail before the patched aembedding is ever reached, so any
+    # earlier test that hit a real embed failure (an episodic store
+    # with Ollama down) silently zeroes every ingest in this file.
     episodic._embed_unavailable_until = 0.0
+    episodic._embed_endpoint_suspect = False
     clear_knowledge_base_cache()
     with patch("aether_engine.memory.episodic.litellm.aembedding",
                new=AsyncMock(side_effect=_fake_aembedding)):
         yield
     episodic._embed_unavailable_until = 0.0
+    episodic._embed_endpoint_suspect = False
     clear_knowledge_base_cache()
 
 

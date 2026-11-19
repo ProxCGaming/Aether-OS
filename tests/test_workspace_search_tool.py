@@ -46,9 +46,13 @@ async def _fake_aembedding(model=None, input=None, **_kwargs):
 
 @pytest.fixture(autouse=True)
 def _reset_breaker():
+    # Both halves of the shared embedder's failure state — see the
+    # note in test_p4d_knowledge_base's _fake_embedder fixture.
     episodic._embed_unavailable_until = 0.0
+    episodic._embed_endpoint_suspect = False
     yield
     episodic._embed_unavailable_until = 0.0
+    episodic._embed_endpoint_suspect = False
 
 
 @pytest.fixture

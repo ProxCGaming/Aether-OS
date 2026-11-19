@@ -84,12 +84,18 @@ async def _fake_aembedding(model=None, input=None, **_kwargs):
 
 @pytest.fixture(autouse=True)
 def _fake_embedder():
+    # Reset BOTH halves of the shared embedder's failure state —
+    # see the note in test_p4d_knowledge_base's fixture: leaving
+    # _embed_endpoint_suspect set makes embed_text probe the dead
+    # endpoint and fail before the patched aembedding runs.
     episodic._embed_unavailable_until = 0.0
+    episodic._embed_endpoint_suspect = False
     clear_knowledge_base_cache()
     with patch("aether_engine.memory.episodic.litellm.aembedding",
                new=AsyncMock(side_effect=_fake_aembedding)):
         yield
     episodic._embed_unavailable_until = 0.0
+    episodic._embed_endpoint_suspect = False
     clear_knowledge_base_cache()
 
 
