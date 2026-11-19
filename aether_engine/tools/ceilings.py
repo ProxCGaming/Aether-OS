@@ -7,9 +7,10 @@ Three filters decide what a specialist delegation can do with tools:
   tool list is resolved (`langgraph/nodes/runner.py`). Retrieval
   (P2c Filter 2, a later slice) may narrow an offer further; nothing
   may widen it past the ceiling.
-* **Filter 2 — task-based retrieval** inside the ceiling (not yet
-  built; the offered-vs-called log this slice adds is its evidence
-  base).
+* **Filter 2 — task-based retrieval** inside the ceiling
+  (`tools/retrieval.py`, P2c step 3): narrows this filter's output
+  per delegation when enabled; the offered-vs-called log this slice
+  adds is its evidence base.
 * **Filter 3 — the policy/approval execution gate**
   (`tools/policy.py`, `tools/enforcement.py`), unchanged: it judges
   each call at execution time, offered or not.

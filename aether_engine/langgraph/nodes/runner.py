@@ -257,6 +257,38 @@ async def run_specialist(
         tools = [t for t in tools
                  if t.get("function", {}).get("name") not in DESKTOP_TOOL_NAMES]
 
+    # P2c Filter 2: task-based retrieval inside the Filter 1 set
+    # (tools/retrieval.py). Off by default (UserConfig.tool_retrieval)
+    # — with it off this block is inert and the offer is exactly the
+    # filtered set above, as pre-P2c-step-3. In "auto" it narrows the
+    # offer to the briefing's top-K plus the agent's pinned
+    # essentials, falling back to the full set when the set is small
+    # or retrieval has no signal. It runs after the ceiling,
+    # plan-mode and desktop filters (it may only narrow their output,
+    # never widen it) and before the S13 spawn append below, which is
+    # not a registry tool and is not retrieval's to judge. Filter 3
+    # (the policy/approval gate at call time) is untouched.
+    from aether_engine.tools.retrieval import (
+        apply_tool_retrieval,
+        tool_retrieval_mode,
+        tool_retrieval_top_k,
+    )
+
+    if tool_retrieval_mode(_uc) == "auto":
+        _query_parts = [state.get("original_prompt") or "",
+                        state.get("context_briefing") or ""]
+        _plan = state.get("plan") or ""
+        if _plan and _plan != "No plan currently.":
+            _query_parts.append(_plan)
+        tools = apply_tool_retrieval(
+            spec.name,
+            tools,
+            risk_by_name,
+            query="\n".join(part for part in _query_parts if part),
+            top_k=tool_retrieval_top_k(_uc),
+            used_names=used_tools,
+        )
+
     # S13: bounded sub-agent spawning — a specialist may spawn a
     # bounded sub-agent for a focused sub-task (langgraph/subagents).
     # Offered only; every bound is enforced at execution time in

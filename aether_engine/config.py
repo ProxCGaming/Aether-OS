@@ -257,6 +257,19 @@ class UserConfig:
     # is NEVER overridden in either mode, and the auxiliary_models
     # task classes keep their own resolution untouched.
     model_routing: str = "off"
+    # P2c Filter 2: task-based tool retrieval (tools/retrieval.py).
+    # "off" (the default) is today's behaviour exactly: a specialist
+    # is offered its whole Filter 1 ceiling set. "auto" narrows the
+    # offer per delegation to the top-K tools the task briefing
+    # retrieves, plus the agent's pinned essentials, with a
+    # confidence fallback to the full ceiling set — retrieval only
+    # ever narrows Filter 1's output, and Filter 3 (policy/approval
+    # at call time) is untouched either way. P1e's per-agent tool
+    # access surface supersedes this switch when it lands.
+    tool_retrieval: str = "off"
+    # P2c Filter 2's top-K; clamped to the plan's 8..12 range where
+    # it is read (tools/retrieval.py).
+    tool_retrieval_top_k: int = 10
     # Epic 1, E1-10: per-agent output schemas (agent name -> JSON-Schema
     # dict). When set, the agent's final answer must validate against
     # the schema; see aether_engine/langgraph/structured.py.
@@ -524,6 +537,8 @@ class UserConfig:
             "subagent_cost_budget_usd": self.subagent_cost_budget_usd,
             "deep_research_cost_budget_usd": self.deep_research_cost_budget_usd,
             "model_routing": self.model_routing,
+            "tool_retrieval": self.tool_retrieval,
+            "tool_retrieval_top_k": self.tool_retrieval_top_k,
             "agent_output_schemas": self.agent_output_schemas,
             "prewalk_agents": self.prewalk_agents,
             "custom_slash_commands": self.custom_slash_commands,
@@ -670,6 +685,8 @@ class UserConfig:
             subagent_cost_budget_usd=_as_float(d.get("subagent_cost_budget_usd"), 0.0),
             deep_research_cost_budget_usd=_as_float(d.get("deep_research_cost_budget_usd"), 0.0),
             model_routing=d.get("model_routing") if d.get("model_routing") in ("off", "auto") else "off",
+            tool_retrieval=d.get("tool_retrieval") if d.get("tool_retrieval") in ("off", "auto") else "off",
+            tool_retrieval_top_k=_as_int(d.get("tool_retrieval_top_k"), 10),
             agent_output_schemas=_as_dict(d.get("agent_output_schemas")),
             prewalk_agents=d.get("prewalk_agents") if isinstance(d.get("prewalk_agents"), list) else [],
             custom_slash_commands=_as_dict(d.get("custom_slash_commands")),
