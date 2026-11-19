@@ -111,6 +111,7 @@ def _tap_entry(task_id: str) -> dict[str, Any]:
             "delegations": [],
             "subagents": [],
             "model_routing": [],
+            "model_cascade": [],
             "desktop_actions": [],
             "tool_calls": [],
             "node_activity": [],
@@ -188,6 +189,28 @@ def record_executor_event(task_id: str | None, event: Any) -> None:
                         "escalation" if action == "model_escalation" else "auto"),
                     "reason": out.get("reason") or payload.get("reason", ""),
                     "escalated_from": out.get("escalated_from"),
+                    "timestamp": ts,
+                    "source": "executor_event",
+                })
+            elif action == "model_cascade":
+                # P2a: one verifier-cascade attempt for a coder
+                # delegation (cheap rung first, escalate on
+                # rejection). Recorded under its own list — an
+                # attempt is neither a delegation nor a routing
+                # decision — and rendered as the plan's one-line
+                # trail in task_summary.
+                out = payload.get("output_payload") or {}
+                _tap_append(entry, "model_cascade", {
+                    "agent": payload.get("from_node"),
+                    "attempt": out.get("attempt"),
+                    "tier": out.get("tier"),
+                    "tier_name": out.get("tier"),
+                    "model": out.get("model"),
+                    "backend": out.get("backend"),
+                    "verifier": out.get("verifier"),
+                    "verdict": out.get("verdict"),
+                    "reason": out.get("reason") or payload.get("reason", ""),
+                    "status": out.get("status") or payload.get("status"),
                     "timestamp": ts,
                     "source": "executor_event",
                 })
@@ -678,6 +701,15 @@ def _merge_approvals(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 # ── The joined summary ───────────────────────────────────────────────
 
+def _cascade_summary(records: list[dict[str, Any]]) -> str:
+    """The P2a one-line cascade trail for the summary, rendered
+    by the cascade module itself so the ledger and the coder
+    node's own message can never drift apart."""
+    from aether_engine.langgraph.coder_cascade import cascade_summary_line
+
+    return cascade_summary_line(records)
+
+
 def _annotate_delegation_models(
     delegations: list[dict[str, Any]],
     routing_records: list[dict[str, Any]],
@@ -747,6 +779,8 @@ async def task_summary(
     routing_records = (tap or {}).get("model_routing") or []
     if routing_records:
         _annotate_delegation_models(delegations, routing_records)
+    # P2a (additive): the live tap's cascade attempts, raw.
+    cascade_records = (tap or {}).get("model_cascade") or []
     tool_calls = (checkpoint or {}).get("tool_calls") or (tap or {}).get("tool_calls") or []
     files = list((checkpoint or {}).get("files_touched") or [])
     for path in _files_from_tool_calls(tool_calls):
@@ -832,6 +866,13 @@ async def task_summary(
         # delegations above are annotated from these; the raw list
         # stays available for surfaces that want the full trail.
         "model_routing": routing_records,
+        # P2a (additive): the verifier-cascade attempts for this
+        # task's coder delegations, in order, plus the plan's
+        # one-line trail ("coder: small → rejected (tests) →
+        # standard ✓") rendered from them.
+        "model_cascade": cascade_records,
+        "cascade_summary": (
+            _cascade_summary(cascade_records) if cascade_records else None),
         # S20 (additive): the tap's desktop-actuation records for
         # this task (category / app / via / status per action).
         "desktop_actions": (tap or {}).get("desktop_actions") or [],

@@ -208,6 +208,19 @@ class UserConfig:
     # nothing it produces is applied to the live tree by the backend
     # itself. The owner flips this; builders never do.
     coder_backend: str = "native"
+    # Orchestration programme P2a (K-10): the coder verifier
+    # cascade (langgraph/coder_cascade.py). With coder_backend =
+    # "miniswe" AND model_routing = "auto" AND no coder pin, a
+    # coder delegation starts one tier DOWN on the backend, a
+    # deterministic verifier judges the completed attempt, and a
+    # rejection escalates — once to the decided tier, and (only
+    # with coder_cascade_two_step, the Gate 3 ladder switch) once
+    # more to the tier above. Default OFF at ship (the plan's
+    # rollback term): with the flag off, the backend path is
+    # exactly the pre-P2a single run. Default-on is a Gate 3
+    # follow-up decision using P0's measurement method.
+    coder_cascade: bool = False
+    coder_cascade_two_step: bool = False
     agent_tools: dict[str, list[str]] = field(default_factory=dict)
     agent_skills: dict[str, list[str]] = field(default_factory=dict)
     # Epic 1, E1-11: supervisor spawn policy. The allow-list names the
@@ -526,6 +539,8 @@ class UserConfig:
             "embedding_model": self.embedding_model,
             "agent_models": self.agent_models,
             "coder_backend": self.coder_backend,
+            "coder_cascade": self.coder_cascade,
+            "coder_cascade_two_step": self.coder_cascade_two_step,
             "agent_tools": self.agent_tools,
             "agent_skills": self.agent_skills,
             "supervisor_spawn_allowlist": self.supervisor_spawn_allowlist,
@@ -674,6 +689,8 @@ class UserConfig:
             embedding_model=str(d.get("embedding_model") or "qwen3-embedding:0.6b"),
             agent_models=_as_dict(d.get("agent_models")),
             coder_backend=d.get("coder_backend") if d.get("coder_backend") in ("native", "miniswe") else "native",
+            coder_cascade=bool(d.get("coder_cascade", False)),
+            coder_cascade_two_step=bool(d.get("coder_cascade_two_step", False)),
             agent_tools=_as_list_dict(d.get("agent_tools")),
             agent_skills=_as_list_dict(d.get("agent_skills")),
             supervisor_spawn_allowlist=_as_optional_str_list(d.get("supervisor_spawn_allowlist")),
