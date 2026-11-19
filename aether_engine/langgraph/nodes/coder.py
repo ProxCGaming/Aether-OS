@@ -39,12 +39,15 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
     Coder node writes, tests, and debugs code.
     Uses LiteLLMProvider from config for per-node fallback (ADR 0014 Fix 4).
 
-    P4a: with ``user_config.coder_backend == "miniswe"`` the
-    delegation is executed by the mini-SWE backend instead of the
-    native loop (see _run_coder_backend). The flag defaults to
-    "native", and plan mode always takes the native path (plan mode
-    executes nothing), so with the flag off — or in plan mode —
-    behaviour is exactly the pre-P4a path below.
+    P4a/P4b: with ``user_config.coder_backend`` set to "miniswe"
+    or "openhands" the delegation is executed by that backend
+    instead of the native loop (see _run_coder_backend). The flag
+    defaults to "native", and plan mode always takes the native
+    path (plan mode executes nothing), so with the flag off — or
+    in plan mode — behaviour is exactly the pre-P4a path below.
+    The openhands backend reports itself unavailable-with-reason
+    until its SDK and Docker are present; that surfaces here as an
+    honest failed delegation, never a fake run.
 
     P2a: with ``user_config.coder_cascade`` also on (and routing
     in "auto", and no coder pin), that backend delegation runs as
@@ -53,9 +56,12 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
     changes nothing until the owner enables it.
     """
     user_config = config.get("configurable", {}).get("user_config")
-    if (getattr(user_config, "coder_backend", "native") == "miniswe"
-            and not state.get("plan_mode")):
-        return await _run_coder_backend(state, config)
+    selected = getattr(user_config, "coder_backend", "native")
+    if selected in ("miniswe", "openhands") and not state.get("plan_mode"):
+        builder = (_build_miniswe_backend if selected == "miniswe"
+                   else _build_openhands_backend)
+        return await _run_coder_backend(
+            state, config, builder=builder, backend_name=selected)
     # save_artifact is passed from this module's globals at call time so
     # the module-level patch seam (tests stub nodes.coder.save_artifact)
     # keeps working now that the shared body lives in runner.py.
@@ -64,7 +70,8 @@ async def coder_node(state: AetherState, config: RunnableConfig) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# P4a: the mini-SWE backend path
+# P4a/P4b: the external backend path (mini-SWE cheap tier, OpenHands
+# strong tier — one shared result-shaping path for both)
 # ---------------------------------------------------------------------------
 
 
@@ -130,6 +137,36 @@ def _build_miniswe_backend(config: RunnableConfig, provider):
     return backend, model_alias
 
 
+def _build_openhands_backend(config: RunnableConfig, provider):
+    """Construct the OpenHands backend + the LiteLLM model alias it
+    will run. Same route discipline as the mini-SWE builder: the
+    provider's own LiteLLM model string, its API key handed to the
+    wrapper (which injects it into the child env — never into the
+    request file), and its base URL when it has one. Module-level
+    so tests can substitute a stub backend without a subprocess.
+    """
+    from aether_engine.langgraph.backends.coder_miniswe import (
+        route_env_for_model,
+    )
+    from aether_engine.langgraph.backends.coder_openhands import (
+        OpenHandsCoderBackend,
+    )
+    from aether_engine.providers.litellm_provider import (
+        resolve_litellm_model,
+    )
+
+    model_alias = getattr(provider, "litellm_model", None) or resolve_litellm_model(
+        str(getattr(provider, "model", "") or ""),
+        str(getattr(provider, "provider_name", "") or ""))
+    route_env = route_env_for_model(
+        model_alias, getattr(provider, "api_key", None))
+    base_url = getattr(provider, "base_url", None)
+    model_kwargs = {"api_base": base_url} if base_url else {}
+    backend = OpenHandsCoderBackend(
+        route_env=route_env, model_kwargs=model_kwargs)
+    return backend, model_alias
+
+
 def _backend_repo_path(config: RunnableConfig) -> str:
     configurable = config.get("configurable", {})
     roots = configurable.get("workspace_roots")
@@ -173,7 +210,8 @@ def _backend_content(result: CoderTaskResult) -> str:
     the proposed diff, which is never applied by the backend."""
     content = result.summary
     if result.status != STATUS_DONE:
-        content = f"[coder backend: miniswe — {result.status}] {content}"
+        content = (f"[coder backend: {result.backend or 'miniswe'}"
+                   f" — {result.status}] {content}")
     if result.diff:
         content += (
             "\n\nProposed diff (produced in a throwaway worktree; "
@@ -200,23 +238,31 @@ def _backend_out(state: AetherState, content: str, entries: list) -> dict:
 
 
 async def _run_coder_backend(
-        state: AetherState, config: RunnableConfig) -> dict:
-    """Execute one coder delegation on the mini-SWE backend (or,
-    with the P2a cascade enabled, as a verifier cascade across
-    backend rungs) and shape the result for the supervisor."""
+        state: AetherState, config: RunnableConfig, *,
+        builder, backend_name: str) -> dict:
+    """Execute one coder delegation on an external backend and
+    shape the result like the native runner's final-answer return,
+    so the supervisor and executor see the same surface either way.
+    The backend's diff is PROPOSED, never applied: it rides the
+    assistant message (and the coder artifact) for the existing
+    approval flow to present. With the P2a cascade enabled (and
+    the mini-SWE backend selected), the delegation instead runs
+    as a verifier cascade across backend rungs — see
+    _cascade_ladder."""
     provider = _backend_provider(config)
     if provider is None:
         result = CoderTaskResult(
             status="failed", diff="",
-            summary=("Coder backend 'miniswe' is selected but no "
+            summary=(f"Coder backend '{backend_name}' is selected but no "
                      "provider is configured for this run."),
             files_touched=[], cost_actual=0.0, transcript_ref="",
-            backend="miniswe")
+            backend=backend_name)
     else:
-        ladder = _cascade_ladder(state, config, provider)
-        if ladder is not None:
-            return await _run_coder_cascade(state, config, ladder)
-        backend, model_alias = _build_miniswe_backend(config, provider)
+        if backend_name == "miniswe":
+            ladder = _cascade_ladder(state, config, provider)
+            if ladder is not None:
+                return await _run_coder_cascade(state, config, ladder)
+        backend, model_alias = builder(config, provider)
         request = CoderTaskRequest(
             task_briefing=_backend_task_briefing(state),
             repo_path=_backend_repo_path(config),
@@ -225,7 +271,7 @@ async def _run_coder_backend(
 
     entry = {
         "agent": "coder",
-        "backend": result.backend or "miniswe",
+        "backend": result.backend or backend_name,
         "timestamp": time.time(),
         "status": result.status,
         "cost_actual": result.cost_actual,

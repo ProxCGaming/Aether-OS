@@ -199,14 +199,20 @@ class UserConfig:
     # rebuilt (the prose indexer drops its chunks on a switch).
     embedding_model: str = "qwen3-embedding:0.6b"
     agent_models: dict[str, str] = field(default_factory=dict)
-    # P4a (orchestration programme): which coder backend executes
-    # coder delegations. "native" (the default) is the built-in
-    # specialist loop in langgraph/nodes/runner.py — behaviour is
-    # byte-identical to pre-P4a. "miniswe" routes coder delegations
-    # to the mini-SWE-agent backend (langgraph/backends/), which
-    # runs in a throwaway worktree and returns a proposed diff;
-    # nothing it produces is applied to the live tree by the backend
-    # itself. The owner flips this; builders never do.
+    # P4a/P4b (orchestration programme): which coder backend
+    # executes coder delegations. "native" (the default) is the
+    # built-in specialist loop in langgraph/nodes/runner.py —
+    # behaviour is byte-identical to pre-P4a. "miniswe" routes
+    # coder delegations to the mini-SWE-agent backend
+    # (langgraph/backends/), which runs in a throwaway worktree and
+    # returns a proposed diff; "openhands" routes them to the
+    # OpenHands strong tier (same wrapper discipline, Docker
+    # sandbox) — which reports itself unavailable-with-reason until
+    # the SDK packages are installed and Docker is present, so
+    # selecting it before then yields an honest failed delegation,
+    # never a fake run. Nothing either backend produces is applied
+    # to the live tree by the backend itself. The owner flips this;
+    # builders never do.
     coder_backend: str = "native"
     # Orchestration programme P2a (K-10): the coder verifier
     # cascade (langgraph/coder_cascade.py). With coder_backend =
@@ -688,7 +694,7 @@ class UserConfig:
             repo_map_token_budget=_as_int(d.get("repo_map_token_budget"), 1000),
             embedding_model=str(d.get("embedding_model") or "qwen3-embedding:0.6b"),
             agent_models=_as_dict(d.get("agent_models")),
-            coder_backend=d.get("coder_backend") if d.get("coder_backend") in ("native", "miniswe") else "native",
+            coder_backend=d.get("coder_backend") if d.get("coder_backend") in ("native", "miniswe", "openhands") else "native",
             coder_cascade=bool(d.get("coder_cascade", False)),
             coder_cascade_two_step=bool(d.get("coder_cascade_two_step", False)),
             agent_tools=_as_list_dict(d.get("agent_tools")),
