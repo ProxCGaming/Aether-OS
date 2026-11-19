@@ -417,6 +417,18 @@ async def run_specialist(
             getattr(provider_obj, "model", None),
             spec.name, outcome)
 
+    def _note_rate_limit(provider_obj: Any, exc: BaseException) -> None:
+        # P1b: the S14 outcome seam is one of the two places 429s
+        # surface with a provider identity attached — record the
+        # rate-limit evidence the headroom signal learns from.
+        # Observational only (routing.headroom never raises).
+        from aether_engine.routing.headroom import note_rate_limit
+
+        note_rate_limit(
+            exc,
+            getattr(provider_obj, "provider_name", None) or "",
+            getattr(provider_obj, "model", None))
+
     async def _stream_round(provider_obj):
         """One model round on ``provider_obj``.
 
@@ -454,6 +466,7 @@ async def run_specialist(
     if stream_error is not None:
         if isinstance(stream_error, ProviderError):
             _record_outcome(provider, "failure")
+            _note_rate_limit(provider, stream_error)
         # S14 escalation: ONE step up to the next tier, only for
         # an auto-routed (unpinned) invocation, only for a typed
         # provider failure that arrived before ANY output streamed
@@ -495,6 +508,7 @@ async def run_specialist(
         if stream_error is not None:
             if isinstance(stream_error, ProviderError):
                 _record_outcome(provider, "failure")
+                _note_rate_limit(provider, stream_error)
             raise stream_error
 
     if accumulated_tool_calls:

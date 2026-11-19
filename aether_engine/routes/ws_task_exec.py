@@ -232,6 +232,13 @@ async def execute_task_generator(conn: WsConnection, generator, p_name: str, p_m
                             p_name,
                             ev.payload.get("error", "Unknown error"),
                             is_retriable=False)
+                        # P1b: rate-limit evidence for headroom —
+                        # records only when the error is a 429 /
+                        # RESOURCE_EXHAUSTED (headroom's own check).
+                        from aether_engine.routing.headroom import note_rate_limit
+
+                        note_rate_limit(
+                            ev.payload.get("error", ""), p_name, p_model)
 
                 if ev.type == EventType.TASK_COMPLETED:
                     latency = ev.payload.get("latency_ms", 100.0)
@@ -297,6 +304,10 @@ async def execute_task_generator(conn: WsConnection, generator, p_name: str, p_m
 
             err_msg = failure_event.payload.get("error", "Unknown error")
             engine_state.health_manager.record_failure(p_name, err_msg, is_retriable=True)
+            # P1b: rate-limit evidence for headroom (see above).
+            from aether_engine.routing.headroom import note_rate_limit
+
+            note_rate_limit(err_msg, p_name, p_model)
 
             # §6.4 gate: one retry, only before any tool ran,
             # only when the caller supplied a factory.

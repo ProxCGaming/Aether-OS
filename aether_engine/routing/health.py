@@ -67,6 +67,18 @@ class ProviderHealthManager:
         state.cooldown_until = 0.0
         state.last_error = None
 
+        # P1b: a successful call is proof of recovery — clear the
+        # provider's rate-limit heat immediately instead of letting
+        # stale evidence punish it for the rest of the window.
+        # Best-effort: the evidence store is a routing input, never
+        # a gate on recording health.
+        try:
+            from aether_engine.routing.headroom import clear_provider_heat
+
+            clear_provider_heat(provider)
+        except Exception:  # noqa: BLE001 — observational only.
+            pass
+
         if self.on_status_change:
             self.on_status_change(provider, state)
         return state

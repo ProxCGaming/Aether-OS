@@ -43,8 +43,15 @@ Signals (honest and cheap — no model call, no invented data):
   ``~/.aether/model_routing.db``, latency-store house style),
   per-model usage/cost aggregates from the UsageLedger's real
   rows, and measured TTFT percentiles from the latency store.
-  There is deliberately NO price table: cost enters only as the
-  average cost of calls the ledger actually recorded.
+  Cost enters first as the average cost of calls the ledger
+  actually recorded; P1b adds two honest supplements, never
+  inventions: a never-run (or barely-run, <3 recorded calls)
+  model falls back to ``cost.pricing``'s static estimate —
+  the same rates the ledger charges, labelled ``estimated``
+  wherever the decision surfaces — and provider headroom from
+  the rate-limit evidence store (``routing.headroom``: hot /
+  warm / cool, learned from observed 429s only) demotes a
+  provider that recently hit its wall.
 
 Candidates come only from providers that are configured AND
 currently available (the health manager the run-level policy
@@ -761,6 +768,12 @@ class History:
     usage: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     # (provider, model) -> measured TTFT p50 (ms)
     ttft_p50_ms: dict[tuple[str, str], float] = field(default_factory=dict)
+    # provider -> HeatInfo (P1b rate-limit evidence; absent = cool)
+    provider_heat: dict[str, Any] = field(default_factory=dict)
+    # (provider, model) -> static estimated cost of a nominal call
+    # (P1b; only models pricing could price — unpriced models are
+    # absent, which ranking reads as cost-unknown, never as free)
+    estimated_cost: dict[tuple[str, str], float] = field(default_factory=dict)
 
 
 def collect_history(
@@ -769,6 +782,7 @@ def collect_history(
     ledger: Any | None = None,
     outcome_store: ModelOutcomeStore | None = None,
     latency_store: Any | None = None,
+    headroom_store: Any | None = None,
 ) -> History:
     """Assemble the recorded history for a pool (fail-open).
 
@@ -818,6 +832,28 @@ def collect_history(
             }
         except Exception:  # noqa: BLE001 — same doctrine.
             history.ttft_p50_ms = {}
+    # P1b: provider heat from the rate-limit evidence store, and
+    # static price estimates for candidates without a mature
+    # recorded cost. Both fail-open like every source above.
+    if candidates:
+        try:
+            from aether_engine.routing.headroom import heat_states
+
+            history.provider_heat = heat_states(
+                {c.provider for c in candidates}, store=headroom_store)
+        except Exception:  # noqa: BLE001 — same doctrine.
+            history.provider_heat = {}
+        try:
+            from aether_engine.cost.pricing import static_price_estimate
+
+            for candidate in candidates:
+                estimate = static_price_estimate(
+                    candidate.model, candidate.provider)
+                if estimate is not None:
+                    history.estimated_cost[
+                        (candidate.provider, candidate.model)] = float(estimate)
+        except Exception:  # noqa: BLE001 — same doctrine.
+            history.estimated_cost = {}
     return history
 
 
@@ -832,6 +868,12 @@ class RoutingChoice:
     source: str  # "auto" | "escalation" | "alias"
     reason: str
     escalated_from: str | None = None  # "provider:model" stepped up from
+    # P1b: how the chosen model's cost was known when it was
+    # ranked — "recorded" (ledger average over >= 3 calls),
+    # "estimated" (pricing's static estimate), or "none"
+    # (cost-unknown). Published with the decision so the ledger
+    # marks estimate-based picks as estimate-based.
+    cost_basis: str = "none"
 
 
 def _demoted(candidate: Candidate, agent: str, history: History) -> bool:
@@ -841,27 +883,70 @@ def _demoted(candidate: Candidate, agent: str, history: History) -> bool:
     return (successes + failures) >= DEMOTE_MIN_SAMPLES and failures > successes
 
 
+def _heat_state(candidate: Candidate, history: History) -> str:
+    """The candidate's provider heat ("cool" when no evidence)."""
+    info = history.provider_heat.get(candidate.provider)
+    return getattr(info, "state", "cool") or "cool"
+
+
+def _cost_basis(candidate: Candidate, history: History) -> str:
+    """How this candidate's ranking cost is known (P1b).
+
+    The recorded average outranks the static estimate once the
+    ledger holds >= DEMOTE_MIN_SAMPLES calls for the model (the
+    same 3-sample maturity the demotion rule uses); below that,
+    the estimate — when pricing knows the model at all — is the
+    honest cold-start figure, labelled as estimated.
+    """
+    usage = history.usage.get((candidate.provider, candidate.model))
+    if usage and int(usage.get("calls") or 0) >= DEMOTE_MIN_SAMPLES:
+        return "recorded"
+    if (candidate.provider, candidate.model) in history.estimated_cost:
+        return "estimated"
+    return "none"
+
+
+def _ranking_cost(candidate: Candidate, history: History) -> float:
+    """The per-call cost ranking uses, per :func:`_cost_basis`.
+
+    Unpriced and unrecorded stays infinity — cost-unknown is
+    never treated as free (only local models price at a true $0,
+    and pricing says so explicitly).
+    """
+    basis = _cost_basis(candidate, history)
+    if basis == "recorded":
+        usage = history.usage[(candidate.provider, candidate.model)]
+        return float(usage["cost_usd"]) / int(usage["calls"])
+    if basis == "estimated":
+        return float(history.estimated_cost[(candidate.provider, candidate.model)])
+    return float("inf")
+
+
 def _rank_key(candidate: Candidate, agent: str, history: History) -> tuple:
     """Deterministic within-tier ranking.
 
     Order of evidence: a demoted model (losing record for this
-    agent) sorts last; then the average recorded cost per call
-    (cheaper first, unrecorded = infinity — no invented prices);
-    then measured TTFT p50 (faster first, unmeasured last); then
-    the incumbent (the status quo wins an honest tie); then names,
-    so the result never depends on pool ordering.
+    agent) sorts last within its class; a *hot* provider (fresh
+    rate-limit evidence, P1b) is demoted alongside it — hot
+    sorts after equally-tiered cool candidates; then cost per
+    call (recorded average once mature, else the labelled static
+    estimate, else infinity — no invented prices); then measured
+    TTFT p50 (faster first, unmeasured last); then *warm* as a
+    pure tie-break (it never demotes a class by itself); then
+    the incumbent (the status quo wins an honest tie); then
+    names, so the result never depends on pool ordering.
     """
-    usage = history.usage.get((candidate.provider, candidate.model))
-    if usage and usage.get("calls"):
-        cost_per_call = float(usage["cost_usd"]) / int(usage["calls"])
-    else:
-        cost_per_call = float("inf")
+    from aether_engine.routing.headroom import heat_rank
+
+    heat = heat_rank(_heat_state(candidate, history))
     ttft = history.ttft_p50_ms.get(
         (candidate.provider, candidate.model), float("inf"))
     return (
         1 if _demoted(candidate, agent, history) else 0,
-        cost_per_call,
+        1 if heat >= 2 else 0,
+        _ranking_cost(candidate, history),
         ttft,
+        1 if heat == 1 else 0,
         0 if candidate.is_incumbent else 1,
         candidate.provider,
         candidate.model,
@@ -967,9 +1052,31 @@ def route(
             reason_parts.append(
                 f"{worst.provider}:{worst.model} has failed {failures} of "
                 f"{successes + failures} recent {signals.agent} runs")
+    # P1b: name the headroom and price evidence when it shaped
+    # the pick — the reason string is the ledger-visible proof.
+    hot_others = [
+        c for c in group
+        if (c.provider, c.model) != (chosen.provider, chosen.model)
+        and _heat_state(c, history) == "hot"
+    ]
+    if hot_others:
+        info = history.provider_heat.get(hot_others[0].provider)
+        when = ""
+        last_event = getattr(info, "last_event_at", None)
+        if last_event is not None:
+            when = time.strftime(" at %H:%M", time.localtime(last_event))
+        reason_parts.append(
+            f"provider {hot_others[0].provider} is cooling down "
+            f"after a rate limit{when}")
+    basis = _cost_basis(chosen, history)
+    if basis == "estimated":
+        reason_parts.append(
+            "picked on estimated price — no recorded cost "
+            "history yet")
     return RoutingChoice(
         provider=chosen.provider, model=chosen.model, tier=tier,
-        source="auto", reason=" — ".join(reason_parts) + ".")
+        source="auto", reason=" — ".join(reason_parts) + ".",
+        cost_basis=basis)
 
 
 def escalate(
@@ -1010,7 +1117,8 @@ def escalate(
             f"Escalated from {current_provider}:{current_model} after a "
             f"failed run — next stronger tier: {chosen.provider}:"
             f"{chosen.model} ({TIER_NAMES[tier]} tier)."),
-        escalated_from=f"{current_provider}:{current_model}")
+        escalated_from=f"{current_provider}:{current_model}",
+        cost_basis=_cost_basis(chosen, history))
 
 
 # ── Application seam (used by the specialist runner) ──────────────
@@ -1062,6 +1170,7 @@ def publish_routing_activity(
             "tier": TIER_NAMES.get(choice.tier, str(choice.tier)),
             "source": choice.source,
             "escalated_from": choice.escalated_from,
+            "cost_basis": choice.cost_basis,
             "reason": choice.reason,
         },
         "status": "completed",
