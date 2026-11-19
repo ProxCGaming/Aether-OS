@@ -47,16 +47,26 @@ def clear_serving_provider() -> None:
         scope.clear()
 
 
-def note_serving_provider(provider_name: str | None) -> None:
+def note_serving_provider(provider_name: str | None,
+                          model: str | None = None) -> None:
     """Record that ``provider_name`` served a call in the current
     task. A no-op outside a pump scope — provider calls also happen
     for probes, classification and titles, where there is no task
-    outcome to attribute."""
+    outcome to attribute.
+
+    ``model`` (the call's own model id, when the firing point
+    knows it) rides the same note: consumers that need the exact
+    serving model — the llama.cpp tier-policy hooks in the task
+    pump — read it via :func:`serving_model` instead of trusting
+    the task's routed model, which per-call fallback may have
+    superseded in exactly the same way as the provider."""
     if not provider_name:
         return
     scope = _serving_scope.get()
     if scope is not None:
         scope["provider"] = provider_name
+        if model:
+            scope["model"] = model
 
 
 def serving_provider() -> str | None:
@@ -65,4 +75,13 @@ def serving_provider() -> str | None:
     scope = _serving_scope.get()
     if scope:
         return scope.get("provider")
+    return None
+
+
+def serving_model() -> str | None:
+    """The model that served the most recent noted call in this
+    task, or None when no call noted one (or no scope is active)."""
+    scope = _serving_scope.get()
+    if scope:
+        return scope.get("model")
     return None

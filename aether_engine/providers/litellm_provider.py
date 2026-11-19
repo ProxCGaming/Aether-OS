@@ -961,7 +961,7 @@ class LiteLLMProvider(BaseProvider):
                                 current_model, current_provider,
                                 call_usage, attempt_started,
                                 attempt_first_event)
-                            note_serving_provider(current_provider)
+                            note_serving_provider(current_provider, current_model)
                             raise
                     elif finish_reason and not accumulated_tool_calls:
                         yielded_any = True
@@ -979,7 +979,7 @@ class LiteLLMProvider(BaseProvider):
                                 current_model, current_provider,
                                 call_usage, attempt_started,
                                 attempt_first_event)
-                            note_serving_provider(current_provider)
+                            note_serving_provider(current_provider, current_model)
                             raise
 
                     # When stream is done with tool calls, emit them all at once
@@ -1013,7 +1013,7 @@ class LiteLLMProvider(BaseProvider):
                                 current_model, current_provider,
                                 call_usage, attempt_started,
                                 attempt_first_event)
-                            note_serving_provider(current_provider)
+                            note_serving_provider(current_provider, current_model)
                             raise
 
                 # If we got here, the call succeeded. The fallback
@@ -1040,7 +1040,7 @@ class LiteLLMProvider(BaseProvider):
                 # Finding E5-F07: note who actually served this call
                 # so the task pump can credit the completion to the
                 # serving provider, not the instance's primary.
-                note_serving_provider(current_provider)
+                note_serving_provider(current_provider, current_model)
                 return  # Success — exit the retry loop
 
             except litellm.AuthenticationError as e:

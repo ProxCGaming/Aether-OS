@@ -33,10 +33,12 @@ from aether_engine.cost.ledger import (
 )
 from aether_engine.langgraph.fast_chat import load_session_history
 from aether_engine.memory import session_store
+from aether_engine.models.llama_router import LLAMACPP_PROVIDER_ID
 from aether_engine.providers.serving import (
     begin_serving_tracking,
     clear_serving_provider,
     end_serving_tracking,
+    serving_model,
     serving_provider,
 )
 from aether_engine.routes.ws_connection import WsConnection
@@ -55,6 +57,55 @@ from aether_engine.secrets.storage import ProviderNotFoundError
 from aether_engine.state import engine_state
 
 logger = logging.getLogger("aether_engine.routes.ws_task_exec")
+
+
+# ------------------------------------------------------------------
+# Wave 8 tier policy: the LlamaRouterManager executor hooks.
+#
+# The manager's tier bookkeeping (which models are mid-job, when
+# each was last used) lives on ONE shared instance
+# (engine_state.get_llama_router_manager); these wrappers are the
+# call sites its hooks always lacked. Both are strictly
+# best-effort: tier bookkeeping must never fail, delay or
+# otherwise touch the task they ride on — every failure is
+# caught and logged, and the completion hook runs as a
+# background task so even a slow router unload cannot hold up
+# the terminal event's delivery.
+# ------------------------------------------------------------------
+
+def _llama_hook_manager(conn):
+    """The shared router manager for a hook call, or None when
+    even constructing/resolving it failed (logged, swallowed)."""
+    try:
+        return engine_state.get_llama_router_manager(conn.secret_store)
+    except Exception as e:  # noqa: BLE001 — hooks are best-effort by contract
+        logger.warning(f"llama.cpp tier hook: manager unavailable: {e}")
+        return None
+
+
+def _note_llama_model_used(conn, model_id: str) -> None:
+    """Record that the router's ``model_id`` just did work."""
+    manager = _llama_hook_manager(conn)
+    if manager is None:
+        return
+    try:
+        manager.note_model_used(model_id)
+    except Exception as e:  # noqa: BLE001 — hooks are best-effort by contract
+        logger.warning(
+            f"llama.cpp tier hook note_model_used({model_id}) failed: {e}")
+
+
+async def _note_llama_job_completed(manager, model_id: str) -> None:
+    """Tell the manager the job ``model_id`` was serving ended.
+
+    Runs detached (spawn_background): a heavy model's immediate
+    unload is an HTTP call to the router and must not delay the
+    task's terminal event."""
+    try:
+        await manager.note_job_completed(model_id)
+    except Exception as e:  # noqa: BLE001 — hooks are best-effort by contract
+        logger.warning(
+            f"llama.cpp tier hook note_job_completed({model_id}) failed: {e}")
 
 
 async def _learn_fast_chat_in_background(conn: WsConnection, task_id: str, prompt: str, response_text: str, p_name: str, p_model: str):
@@ -166,6 +217,11 @@ async def execute_task_generator(conn: WsConnection, generator, p_name: str, p_m
             saw_tool_activity = False
             task_path: str | None = None
             task_prompt: str | None = None
+            # Wave 8 tier hooks: the last router model this
+            # attempt was noted as using (the note re-fires when
+            # the serving model changes mid-task, e.g. an S14
+            # delegation to a second router model).
+            llama_used_model: str | None = None
 
             async for ev in generator:
                 # Epic 8, E8-A8.1a: keep the usage attribution
@@ -212,6 +268,37 @@ async def execute_task_generator(conn: WsConnection, generator, p_name: str, p_m
                         to,
                         ev.payload,
                     )
+
+                # Wave 8 tier policy hooks. The serving note
+                # (E5-F07's channel, now carrying the model too)
+                # is the evidence of who is actually doing the
+                # work: when it names the local llama.cpp
+                # router, the model that served the most recent
+                # call is recorded as used — at the first event
+                # the pump sees after that call, i.e. while the
+                # work is happening, not after it. On a terminal
+                # event (completed, failed or cancelled — a
+                # finished job is finished; TASK_INTERRUPTED is
+                # a pause, not an ending, and is excluded) the
+                # job-completed hook fires detached. The §6.4
+                # retry mirrors the health recording beside it:
+                # a failed attempt's job has ended even when the
+                # task itself retries on another provider. Tasks
+                # served by any other provider never touch the
+                # manager.
+                if serving_provider() == LLAMACPP_PROVIDER_ID:
+                    _served_model = serving_model() or p_model
+                    if _served_model and _served_model != llama_used_model:
+                        llama_used_model = _served_model
+                        _note_llama_model_used(conn, _served_model)
+                    if _served_model and ev.type in (
+                            EventType.TASK_COMPLETED,
+                            EventType.TASK_FAILED,
+                            EventType.TASK_CANCELLED):
+                        _manager = _llama_hook_manager(conn)
+                        if _manager is not None:
+                            conn.spawn_background(_note_llama_job_completed(
+                                _manager, _served_model))
 
                 if ev.type == EventType.TASK_FAILED:
                     if ev.payload.get("retriable"):

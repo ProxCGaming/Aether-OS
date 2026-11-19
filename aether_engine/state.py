@@ -9,10 +9,12 @@ from aether_common.auth import (
 from aether_engine.audit import AuditLogger
 from aether_engine.config import (
     DEFAULT_GEMINI_MODEL,
+    DEFAULT_LLAMACPP_ROUTER_URL,
     UserConfig,
     load_config,
 )
 from aether_engine.models.hub_downloads import ModelHubDownloads
+from aether_engine.models.llama_router import LlamaRouterManager
 from aether_engine.models.local_models import OllamaManager
 from aether_engine.models.model_hub import ModelHub
 from aether_engine.routing.health import (
@@ -44,6 +46,15 @@ class EngineState:
         self.routing_policy = GLOBAL_ROUTING_POLICY
         self.scheduler_manager = CapabilitySchedulerManager()
         self.ollama_manager = OllamaManager()
+        # The shared llama.cpp router manager (Wave 8 tier
+        # policy): built lazily by get_llama_router_manager() and
+        # rebuilt when the llamacpp config fields it is built
+        # from change. Unlike OllamaManager it cannot be built
+        # eagerly here — it is parameterised by user config that
+        # only exists after load_config().
+        self.llama_router_manager: LlamaRouterManager | None = None
+        self._llama_router_manager_key: tuple | None = None
+        self._llama_router_secret_store: SecretStore | None = None
         self.model_hub = ModelHub()
         self.hub_downloads = ModelHubDownloads(
             hub=self.model_hub, ollama=self.ollama_manager)
@@ -61,6 +72,51 @@ class EngineState:
         # Readiness for /health (N-44): True only once initialize()
         # has run to completion; shutdown() clears it again.
         self.initialized: bool = False
+
+    def get_llama_router_manager(
+            self, secret_store: SecretStore | None = None
+    ) -> LlamaRouterManager:
+        """The one long-lived LlamaRouterManager for the run path.
+
+        The manager's tier bookkeeping (``_last_used`` /
+        ``_job_state``) is per-instance in-memory state, so the
+        executor's tier-policy hooks and any policy-facing reads
+        must share ONE instance — a manager constructed per call
+        would forget every note the moment it returned. (The
+        websocket panel routes keep their per-connection
+        construction: their operations are stateless reads and
+        process control, which carry no bookkeeping to lose.)
+
+        The instance is keyed on the config fields the manager is
+        built from — router URL (which carries the port), binary
+        path and models dir — and rebuilt on the next access
+        after any of them changes, whichever path changed them
+        (CONFIG_UPDATE replaces fields in place; CONFIG_RESET
+        swaps the whole object and resyncs). The router API key
+        is NOT part of the key: the manager resolves it from the
+        secret store on every call, so a saved key is picked up
+        without a rebuild. A caller-supplied secret store (the
+        connection's own) is remembered for later rebuilds.
+        """
+        if secret_store is not None:
+            self._llama_router_secret_store = secret_store
+        cfg = self.user_config
+        key = (
+            getattr(cfg, "llamacpp_router_url",
+                    DEFAULT_LLAMACPP_ROUTER_URL),
+            getattr(cfg, "llamacpp_binary_path", ""),
+            getattr(cfg, "llamacpp_models_dir", ""),
+        )
+        if (self.llama_router_manager is None
+                or self._llama_router_manager_key != key):
+            store = self._llama_router_secret_store
+            if store is None:
+                store = SecretStore()
+                self._llama_router_secret_store = store
+            self.llama_router_manager = LlamaRouterManager.from_config(
+                cfg, secret_store=store)
+            self._llama_router_manager_key = key
+        return self.llama_router_manager
 
     def initialize(self) -> str:
         self.auth_token = generate_token()
