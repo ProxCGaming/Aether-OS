@@ -1,8 +1,15 @@
 """Top-level graph assembly (Epic 1: prebuilt supervisor + subgraphs).
 
-The top-level graph is built by LangGraph's ``create_supervisor()``:
-the supervisor agent routes between three compiled specialist
-subgraphs. Each subgraph wraps the specialist's existing node function
+Two supervisor topologies share this assembly (P1d switch, below):
+
+- ``legacy``: LangGraph's ``create_supervisor()`` — the supervisor
+  agent routes between three compiled specialist subgraphs.
+- ``tools``: the subagents-as-tools supervisor
+  (``langgraph/delegation.py``) — the same supervisor agent, whose
+  delegation tools invoke the specialist subgraphs and return their
+  results as tool results.
+
+Each specialist subgraph wraps the specialist's existing node function
 with the shared central tool pipeline — ``pause_for_approval`` (the
 Phase 9 approval interrupt) and ``execute_tool`` (``ToolRegistry
 .execute()``) — so a specialist's tool calls traverse the same
@@ -16,6 +23,9 @@ execution path as before. See ``supervisor_model.py``.
 """
 
 import logging
+import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from langgraph.graph import END, START, StateGraph
 from langgraph_supervisor import create_supervisor
@@ -171,8 +181,62 @@ def _build_specialist_graph(name: str, node_fn, checkpointer=None):
     return builder.compile(checkpointer=checkpointer, name=name)
 
 
-def create_graph(checkpointer=None):
+# P1d: supervisor topology switch. "legacy" builds the supervisor
+# with langgraph-supervisor's create_supervisor(); "tools" builds
+# the subagents-as-tools supervisor (langgraph/delegation.py).
+# Resolution order: explicit argument, then the
+# AETHER_SUPERVISOR_PATTERN environment variable (the operator
+# override — it must outrank the config field, whose "legacy"
+# default would otherwise shadow it permanently), then the
+# compilation context (below; the executor's per-run UserConfig
+# choice), then the default — legacy, until the migration's flip
+# criteria are met (plan P1d, step 4).
+SUPERVISOR_PATTERNS = ("legacy", "tools")
+SUPERVISOR_PATTERN_ENV = "AETHER_SUPERVISOR_PATTERN"
+
+_PATTERN_CONTEXT: ContextVar[str | None] = ContextVar(
+    "aether_supervisor_pattern", default=None)
+
+
+@contextmanager
+def supervisor_pattern_context(pattern: str | None):
+    """Scope a supervisor-pattern choice to one graph compilation.
+
+    The executor compiles the graph per run with the run's
+    UserConfig in hand, while ``compile_graph(checkpointer=...)``
+    is a seam other code (and test doubles) builds against — so
+    the per-run choice (``UserConfig.supervisor_pattern``) travels
+    through this context variable instead of a new call argument.
+    Direct callers can still pass ``supervisor_pattern=`` to
+    create_graph/compile_graph explicitly.
+    """
+    token = _PATTERN_CONTEXT.set(pattern)
+    try:
+        yield
+    finally:
+        _PATTERN_CONTEXT.reset(token)
+
+
+def resolve_supervisor_pattern(explicit: str | None = None) -> str:
+    """The supervisor topology a graph build should use."""
+    candidate = (
+        explicit
+        or os.environ.get(SUPERVISOR_PATTERN_ENV)
+        or _PATTERN_CONTEXT.get()
+        or "legacy"
+    )
+    return candidate if candidate in SUPERVISOR_PATTERNS else "legacy"
+
+
+def create_graph(checkpointer=None, supervisor_pattern: str | None = None):
     """Build the (uncompiled) supervisor workflow over the specialists."""
+    if resolve_supervisor_pattern(supervisor_pattern) == "tools":
+        from aether_engine.langgraph.delegation import (
+            create_tools_supervisor_graph,
+        )
+
+        return create_tools_supervisor_graph(
+            checkpointer, _build_specialist_graph, SPECIALIST_NODES)
     specialists = [
         _build_specialist_graph(name, node_fn, checkpointer)
         for name, node_fn in SPECIALIST_NODES.items()
@@ -194,6 +258,9 @@ def create_graph(checkpointer=None):
     )
 
 
-def compile_graph(checkpointer=None):
+def compile_graph(checkpointer=None, supervisor_pattern: str | None = None):
     """Compile the full graph — the executor's entry point (unchanged)."""
-    return create_graph(checkpointer=checkpointer).compile(checkpointer=checkpointer)
+    return create_graph(
+        checkpointer=checkpointer,
+        supervisor_pattern=supervisor_pattern,
+    ).compile(checkpointer=checkpointer)

@@ -360,6 +360,14 @@ class UserConfig:
     # produced only by the offline training pipeline — training
     # is a manual, versioned act, never an online loop.
     learned_router_artefact: str = ""
+    # P1d: supervisor topology. "legacy" (the default) builds the
+    # supervisor with langgraph-supervisor's create_supervisor();
+    # "tools" builds the subagents-as-tools supervisor
+    # (langgraph/delegation.py) that replaces it. Dual-graph phase:
+    # legacy stays the default until the migration's flip criteria
+    # (differential characterisation pass + full gate) are met, and
+    # the flip removes this field's legacy branch with the library.
+    supervisor_pattern: str = "legacy"
     # Epic 1, E1-10: per-agent output schemas (agent name -> JSON-Schema
     # dict). When set, the agent's final answer must validate against
     # the schema; see aether_engine/langgraph/structured.py.
@@ -651,6 +659,7 @@ class UserConfig:
             "tool_retrieval_top_k": self.tool_retrieval_top_k,
             "learned_routing": self.learned_routing,
             "learned_router_artefact": self.learned_router_artefact,
+            "supervisor_pattern": self.supervisor_pattern,
             "agent_output_schemas": self.agent_output_schemas,
             "prewalk_agents": self.prewalk_agents,
             "custom_slash_commands": self.custom_slash_commands,
@@ -811,6 +820,7 @@ class UserConfig:
             tool_retrieval_top_k=_as_int(d.get("tool_retrieval_top_k"), 10),
             learned_routing=d.get("learned_routing") if d.get("learned_routing") in ("off", "shadow") else "off",
             learned_router_artefact=d.get("learned_router_artefact") if isinstance(d.get("learned_router_artefact"), str) else "",
+            supervisor_pattern=d.get("supervisor_pattern") if d.get("supervisor_pattern") in ("legacy", "tools") else "legacy",
             agent_output_schemas=_as_dict(d.get("agent_output_schemas")),
             prewalk_agents=d.get("prewalk_agents") if isinstance(d.get("prewalk_agents"), list) else [],
             custom_slash_commands=_as_dict(d.get("custom_slash_commands")),

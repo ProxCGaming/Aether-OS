@@ -544,18 +544,29 @@ def _decision_from_text(content: str, available_nodes: list[str]) -> dict:
         return {"next": fallback_node, "reason": f"Failed to parse supervisor decision: {content_clean[:100]}", "briefing": ""}
 
 
-def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: list[str], *, tool_mode: bool = False) -> str:
+def _supervisor_system_prompt(original_prompt: str, plan: str, available_nodes: list[str], *, tool_mode: bool = False, delegation_tools: bool = False) -> str:
     """Build the supervisor's routing prompt.
 
     ``tool_mode=False`` is the original prompt format (JSON decision
     output). ``tool_mode=True`` swaps the decision format for
     transfer-tool delegation, used by the create_supervisor routing
     prompt; everything else (memory guidance, anti-hallucination
-    rules) is identical.
+    rules) is identical. ``delegation_tools=True`` (P1d) swaps the
+    transfer wording for the subagents-as-tools supervisor's
+    delegation tools, whose briefing argument is how retrieved
+    facts reach the specialist.
     """
     options_str = "'" + "', '".join(available_nodes) + "'"
     immediate = "make your routing decision immediately" if tool_mode else "output your JSON routing decision immediately"
-    if tool_mode:
+    if tool_mode and delegation_tools:
+        decision_rules = (
+            "3. Facts you retrieve from memory tools reach the specialist through the delegation call's briefing argument. "
+            "Do NOT infer or hallucinate history — only put briefing context you actually retrieved.\n"
+            "4. To delegate, call the matching delegation tool for exactly one specialist "
+            f"({options_str}), passing the retrieved facts as its briefing argument; put the operational goal for the specialist in your reply text alongside the call. "
+            "To finish the task, reply with plain text and call no tool."
+        )
+    elif tool_mode:
         decision_rules = (
             "3. Facts you retrieve from memory tools are shared with the specialist automatically. "
             "Do NOT infer or hallucinate history — only use briefing context you actually retrieved.\n"

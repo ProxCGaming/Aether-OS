@@ -11,7 +11,10 @@ not LangChain chat models, so this module adapts them:
   the agent framework:
 
   - native transfer-tool calls (``transfer_to_<specialist>``) pass
-    through and become real handoffs;
+    through and become real handoffs — under the P1d
+    subagents-as-tools supervisor the same role is played by native
+    delegation-tool calls (``delegate_to_<specialist>``), which pass
+    through with their briefing argument intact;
   - memory-tool calls pass through to the agent's ToolNode, which runs
     the same audited memory execution path as before;
   - providers that answer with the supervisor's JSON decision text
@@ -35,6 +38,7 @@ not LangChain chat models, so this module adapts them:
 import copy
 import json
 import logging
+import os
 import time
 import uuid
 from typing import Any
@@ -73,6 +77,13 @@ logger = logging.getLogger("aether_engine.langgraph.supervisor_model")
 
 HANDOFF_PREFIX = "transfer_to_"
 
+# P1d: the subagents-as-tools supervisor's delegation calls. The
+# adapter speaks both protocols while both graph topologies exist:
+# which one a run uses is decided by the tools bound into the agent
+# (transfer tools under create_supervisor, delegation tools under
+# langgraph/delegation.py), never by config sniffing here.
+DELEGATION_PREFIX = "delegate_to_"
+
 
 def _end_result(reason: str, decision: dict | None = None) -> ChatResult:
     """A final supervisor message that ends the agent run."""
@@ -101,6 +112,57 @@ def _handoff_result(target: str, decision: dict, memory_calls: list | None = Non
             "type": "tool_call",
         }
     )
+    message = AIMessage(
+        content="",
+        tool_calls=tool_calls,
+        additional_kwargs={"aether_decision": decision},
+    )
+    return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _provider_call_args(provider_call: Any) -> dict:
+    """A provider ToolCall's arguments as a dict (the same
+    normalisation ``_langchain_tool_call`` applies)."""
+    args = provider_call.args
+    if isinstance(args, dict):
+        return args
+    try:
+        parsed = json.loads(args) if args else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _delegation_result(
+    target: str,
+    decision: dict,
+    memory_calls: list | None = None,
+    provider_call: Any = None,
+) -> ChatResult:
+    """An AIMessage carrying a delegation tool call for ``target``.
+
+    The P1d counterpart of ``_handoff_result``: the call is
+    ``delegate_to_<target>`` and carries the decision's briefing as
+    its ``briefing`` argument (the seam P1a's tier emission later
+    targets). A native provider call passes through with its own
+    id and arguments — the model authored both — while a call the
+    adapter synthesises (JSON decision protocol, forced runs) gets
+    a fresh id, exactly as handoffs do: providers that stream one
+    call in several chunks reuse an id, and the agent's ToolNode
+    rejects duplicate ids inside a run.
+    """
+    tool_calls = [_langchain_tool_call(tc) for tc in (memory_calls or [])]
+    if provider_call is not None:
+        tool_calls.append(_langchain_tool_call(provider_call))
+    else:
+        tool_calls.append(
+            {
+                "name": f"{DELEGATION_PREFIX}{target}",
+                "args": {"briefing": decision.get("briefing", "") or ""},
+                "id": f"aether-delegation-{uuid.uuid4().hex}",
+                "type": "tool_call",
+            }
+        )
     message = AIMessage(
         content="",
         tool_calls=tool_calls,
@@ -219,7 +281,9 @@ def _delegation_count(state: dict) -> int:
     handoffs = 0
     for msg in dict_messages[last_user + 1:]:
         for tc in msg.get("tool_calls") or []:
-            if (tc.get("function", {}).get("name") or "").startswith(HANDOFF_PREFIX):
+            if (tc.get("function", {}).get("name") or "").startswith(
+                (HANDOFF_PREFIX, DELEGATION_PREFIX)
+            ):
                 handoffs += 1
     # The pending handoff (the one being judged) is in the messages
     # but has not executed; the executed count excludes it.
@@ -316,6 +380,20 @@ class AetherSupervisorModel(BaseChatModel):
         bound.aether_tools = list(tools)
         return bound
 
+    def _uses_delegation_tools(self) -> bool:
+        """True when this agent carries P1d delegation tools.
+
+        The bound tools are the topology's ground truth: the legacy
+        graph binds ``transfer_to_*`` handoff tools, the
+        subagents-as-tools graph binds ``delegate_to_*`` tools, and
+        the decision protocol below speaks whichever the run was
+        built with.
+        """
+        return any(
+            (_tool_name(t) or "").startswith(DELEGATION_PREFIX)
+            for t in self.aether_tools
+        )
+
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         raise NotImplementedError(
             "AetherSupervisorModel is async-only; Aether providers stream via call_stream."
@@ -373,6 +451,10 @@ class AetherSupervisorModel(BaseChatModel):
                 continue
             if name.startswith(HANDOFF_PREFIX):
                 if name[len(HANDOFF_PREFIX):] in available:
+                    offered.append(convert_to_openai_tool(tool))
+                continue
+            if name.startswith(DELEGATION_PREFIX):
+                if name[len(DELEGATION_PREFIX):] in available:
                     offered.append(convert_to_openai_tool(tool))
                 continue
             # S19: the desktop-observe tool exists for the model
@@ -440,6 +522,8 @@ class AetherSupervisorModel(BaseChatModel):
             if specialist_responded:
                 return _specialist_end_result()
             decision = {"next": forced_agent, "reason": "Forced via slash command.", "briefing": ""}
+            if self._uses_delegation_tools():
+                return _delegation_result(forced_agent, decision)
             return _handoff_result(forced_agent, decision)
 
         if not available:
@@ -479,6 +563,7 @@ class AetherSupervisorModel(BaseChatModel):
                         if tc.name in MEMORY_TOOL_NAMES
                         or tc.name in SCREEN_TOOL_NAMES]
         transfer_calls = [tc for tc in tool_calls if tc.name.startswith(HANDOFF_PREFIX)]
+        delegate_calls = [tc for tc in tool_calls if tc.name.startswith(DELEGATION_PREFIX)]
         # Epic 3, E3-01 (issue 012 diagnosability): calls that are
         # neither memory nor handoff are NOT the supervisor's to run —
         # it is offered only memory + handoff tools, and real tool work
@@ -487,13 +572,45 @@ class AetherSupervisorModel(BaseChatModel):
         # recorded on the decision (delegation_log) so a vanished tool
         # call is diagnosable instead of a mystery.
         dropped_calls = [
-            tc.name for tc in tool_calls if tc not in memory_calls and tc not in transfer_calls
+            tc.name for tc in tool_calls
+            if tc not in memory_calls and tc not in transfer_calls
+            and tc not in delegate_calls
         ]
         if dropped_calls:
             logger.warning(
                 "Supervisor emitted non-supervisor tool calls, dropped (delegate to a specialist instead): %s",
                 dropped_calls,
             )
+
+        if delegate_calls:
+            # P1d native protocol: the model's own delegation call
+            # passes through with its id and its briefing argument;
+            # the decision is stamped from it, so the post-model
+            # hook's bookkeeping (and its briefing rule — a decision
+            # carrying a real briefing keeps it) works unchanged.
+            call = delegate_calls[0]
+            target = call.name[len(DELEGATION_PREFIX):]
+            if specialist_responded:
+                chain_end = _chain_end_reason(specialist_texts)
+                if chain_end is not None:
+                    logger.warning(
+                        "Post-specialist delegation to %s refused: %s; "
+                        "ending with the latest answer standing.",
+                        target, chain_end)
+                    return _specialist_end_result()
+            decision = {
+                "next": target,
+                "reason": (content or "").strip(),
+                "briefing": _provider_call_args(call).get("briefing", "") or "",
+            }
+            if dropped_calls:
+                decision["dropped_tool_calls"] = dropped_calls
+            if target not in available:
+                # Routing clamps to END, exactly like the old node; the
+                # attempted decision is still what gets logged (hook).
+                return _end_result(decision["reason"], decision=decision)
+            return _delegation_result(
+                target, decision, memory_calls, provider_call=call)
 
         if transfer_calls:
             target = transfer_calls[0].name[len(HANDOFF_PREFIX):]
@@ -524,7 +641,8 @@ class AetherSupervisorModel(BaseChatModel):
 
         if specialist_responded:
             return self._post_specialist_result(
-                content, available, dropped_calls, specialist_texts)
+                content, available, dropped_calls, specialist_texts,
+                delegation=self._uses_delegation_tools())
 
         decision = _decision_from_text(content or "", available)
         if not isinstance(decision, dict):
@@ -537,12 +655,14 @@ class AetherSupervisorModel(BaseChatModel):
             decision["dropped_tool_calls"] = dropped_calls
         next_node = decision.get("next", "END")
         if next_node != "END" and next_node in available:
+            if self._uses_delegation_tools():
+                return _delegation_result(next_node, decision)
             return _handoff_result(next_node, decision)
         return _end_result(decision.get("reason") or content or "", decision=decision)
 
     @staticmethod
     def _post_specialist_result(content, available, dropped_calls,
-                                specialist_texts) -> ChatResult:
+                                specialist_texts, delegation: bool = False) -> ChatResult:
         """Interpret the supervisor's reply after a specialist responded.
 
         The supervisor has the specialist's output in view, so its
@@ -584,6 +704,8 @@ class AetherSupervisorModel(BaseChatModel):
                         "ending with the latest answer standing.",
                         next_node, chain_end)
                     return _specialist_end_result()
+                if delegation:
+                    return _delegation_result(next_node, decision)
                 return _handoff_result(next_node, decision)
             return _end_result(decision.get("reason") or text, decision=decision)
         decision = {"next": "END", "reason": text, "briefing": ""}
@@ -697,11 +819,20 @@ def supervisor_routing_prompt(state: dict) -> list:
         "supervisor_spawn_allowlist", None)
     if _allowlist is not None:
         available = [a for a in available if a in _allowlist]
+    # P1d: the prompt teaches the delegation protocol the run's
+    # graph was built with — resolved from the same sources as
+    # graph.resolve_supervisor_pattern (the environment override
+    # first, then the run's UserConfig field), minus the
+    # compile-time argument the prompt cannot see.
+    _pattern = os.environ.get("AETHER_SUPERVISOR_PATTERN") or getattr(
+        (config.get("configurable", {}) or {}).get("user_config"),
+        "supervisor_pattern", None)
     text = _supervisor_system_prompt(
         state.get("original_prompt", "None"),
         state.get("plan", "No plan yet."),
         available,
         tool_mode=True,
+        delegation_tools=_pattern == "tools",
     )
     board = blackboard_briefing(state)
     if board:
@@ -863,12 +994,24 @@ def supervisor_post_model_hook(state: dict) -> dict:
     if not isinstance(last, AIMessage):
         return {}
     tool_calls = last.tool_calls or []
-    handoffs = [tc for tc in tool_calls if (tc.get("name") or "").startswith(HANDOFF_PREFIX)]
+    # A pending delegation, in either topology's protocol: the
+    # legacy transfer call or the P1d delegation call. Everything
+    # below (cap surface, spawn policy, briefing reconstruction,
+    # the counter increment) is protocol-independent — it judges
+    # the decision, not the call's shape.
+    handoffs = [
+        tc for tc in tool_calls
+        if (tc.get("name") or "").startswith((HANDOFF_PREFIX, DELEGATION_PREFIX))
+    ]
     additional = last.additional_kwargs or {}
     decision = additional.get("aether_decision")
 
     if handoffs:
-        target = handoffs[0]["name"][len(HANDOFF_PREFIX):]
+        pending_name = handoffs[0]["name"]
+        target = pending_name[
+            len(HANDOFF_PREFIX) if pending_name.startswith(HANDOFF_PREFIX)
+            else len(DELEGATION_PREFIX):
+        ]
         # S4 cap surface, judged BEFORE the spawn-policy denial: when
         # the authoritative counter already stands at the cap AND a
         # specialist answer is in view, the chain ends with that

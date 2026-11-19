@@ -11,7 +11,11 @@ try:
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
     from langgraph.types import Command
 
-    from aether_engine.langgraph.graph import GRAPH_RECURSION_LIMIT, compile_graph
+    from aether_engine.langgraph.graph import (
+        GRAPH_RECURSION_LIMIT,
+        compile_graph,
+        supervisor_pattern_context,
+    )
     from aether_engine.langgraph.state import (
         AetherState,
         message_dicts,
@@ -22,6 +26,12 @@ except ImportError:
     RunnableConfig = Any  # type: ignore
     AsyncSqliteSaver = Any  # type: ignore
     compile_graph = None  # type: ignore
+
+    from contextlib import contextmanager as _contextmanager
+
+    @_contextmanager
+    def supervisor_pattern_context(pattern=None):  # type: ignore
+        yield
     AetherState = Any  # type: ignore
     message_dicts = None  # type: ignore
     multimodal_user_content = None  # type: ignore
@@ -105,7 +115,9 @@ __all__ = [
     "EVENT_QUEUE_MAXSIZE",
     "GRAPH_EVENT_IDLE_TIMEOUT_SECONDS",
     "GRAPH_RECURSION_LIMIT",
-    "_DELEGATION_HANDOFF_PREFIX",
+    "_DELEGATION_HANDOFF_PREFIXES",
+    "_new_delegation_events",
+    "supervisor_pattern_context",
     "_LANGGRAPH_AVAILABLE",
     "_RUNNER_SHUTDOWN_GRACE_SECONDS",
     "_SUPERSTEP_LABELS",
@@ -222,10 +234,11 @@ async def _reap_runner(task: asyncio.Task) -> None:
 # the approval channel (TOOL_APPROVAL_REQUEST / TASK_INTERRUPTED) and
 # the final answer; while a delegation is outstanding its routing
 # rationale travels on the activity event, not in the answer stream.
-# Mirrors supervisor_model.HANDOFF_PREFIX (the transfer tool names);
-# defined here because supervisor_model is loaded by the graph, not
-# by this module.
-_DELEGATION_HANDOFF_PREFIX = "transfer_to_"
+# Mirrors supervisor_model.HANDOFF_PREFIX (the transfer tool names)
+# and supervisor_model.DELEGATION_PREFIX (the P1d delegation tool
+# names); defined here because supervisor_model is loaded by the
+# graph, not by this module.
+_DELEGATION_HANDOFF_PREFIXES = ("transfer_to_", "delegate_to_")
 
 
 def _is_handoff_message(msg: Any) -> bool:
@@ -235,7 +248,7 @@ def _is_handoff_message(msg: Any) -> bool:
     the supervisor's text alongside the transfer call IS the
     delegation reason (see supervisor_model), and that reason already
     rides the NODE_ACTIVITY payload — so the executor gate keeps the
-    message's content (and its transfer "tool call") out of the
+    message's content (and its delegation "tool call") out of the
     user-facing text stream entirely.
     """
     if not isinstance(msg, dict):
@@ -246,7 +259,7 @@ def _is_handoff_message(msg: Any) -> bool:
         fn = tc.get("function")
         name = fn.get("name") if isinstance(fn, dict) else None
         name = name or tc.get("name") or ""
-        if str(name).startswith(_DELEGATION_HANDOFF_PREFIX):
+        if str(name).startswith(_DELEGATION_HANDOFF_PREFIXES):
             return True
     return False
 
@@ -337,6 +350,85 @@ def _messages_have_images(messages: Any) -> bool:
     return False
 
 
+def _new_delegation_events(
+    *,
+    task_id: str,
+    request_id: str,
+    entries: list,
+    delegation_count: int | None,
+    user_prompt: str,
+    updated_plan: str,
+    response_parts: list[str],
+) -> list[Event]:
+    """Events for newly-seen delegation_log entries (run + resume).
+
+    One NODE_ACTIVITY per delegation transition (S12 — the only
+    signal for a delegation; non-delegation entries produce none)
+    and, for a denied delegation, the explanation as response text
+    (E1-11), appended to ``response_parts`` as well as emitted.
+
+    Every new entry is processed, not only the latest: under the
+    legacy topology a supervisor update grows the log by at most
+    one entry per hop, but a P1d tools-topology run delivers its
+    whole log inside the supervisor node's final update, and every
+    transition must still surface.
+
+    ``delegation_count`` is the counter's value at the delivering
+    update; each entry's event carries the counter as it stood when
+    that entry's delegation executed, reconstructed by walking the
+    batch in order (an executed delegation is the only entry kind
+    that increments the counter — the S4 rule). For the legacy
+    one-entry batches this yields exactly the delivered value.
+    """
+    def _counted(entry: dict) -> bool:
+        decision = entry.get("decision")
+        if not isinstance(decision, dict):
+            return False
+        target = decision.get("next")
+        if not target or str(target).upper() == "END" \
+                or str(target) == "supervisor":
+            return False
+        return not decision.get("denied")
+
+    running: int | None = None
+    if delegation_count is not None:
+        running = delegation_count - sum(
+            1 for e in entries if isinstance(e, dict) and _counted(e))
+    events: list[Event] = []
+    for log_entry in entries:
+        if not isinstance(log_entry, dict):
+            continue
+        decision = log_entry.get("decision", {})
+        if running is not None and _counted(log_entry):
+            running += 1
+        activity = _delegation_activity_event(
+            task_id, request_id, log_entry,
+            delegation_count=running,
+            user_prompt=user_prompt,
+            updated_plan=updated_plan,
+        )
+        if activity is not None:
+            events.append(activity)
+        if isinstance(decision, dict) and decision.get("denied"):
+            denial_text = (
+                f"Delegation to {decision.get('next', 'UNKNOWN')} was "
+                f"blocked by the spawn policy: {decision.get('reason', '')}"
+            )
+            response_parts.append(denial_text)
+            events.append(Event(
+                type=EventType.TASK_PROGRESS,
+                request_id=request_id,
+                payload={
+                    "task_id": task_id,
+                    "text_delta": denial_text,
+                    "full_text": denial_text,
+                    "turn": 0,
+                    "node": "assistant",
+                },
+            ))
+    return events
+
+
 async def run_langgraph_task(
     prompt: str,
     provider: BaseProvider,
@@ -389,9 +481,12 @@ async def run_langgraph_task(
     db_path.parent.mkdir(parents=True, exist_ok=True)
     async with AsyncSqliteSaver.from_conn_string(str(db_path)) as saver:
         await saver.setup()
-        
-        graph = compile_graph(checkpointer=saver)
-        
+
+        with supervisor_pattern_context(
+                getattr(kwargs.get("user_config"),
+                        "supervisor_pattern", None)):
+            graph = compile_graph(checkpointer=saver)
+
         # Use session_id as the thread_id so chat memory persists across turns (ADR 0011)
         thread_id = session_id or request_id or str(uuid.uuid4())
         config = {
@@ -797,48 +892,47 @@ async def run_langgraph_task(
                     if not isinstance(state_update, dict):
                         continue
                     if node_name == "supervisor" and isinstance(state_update.get("messages"), list):
+                        # P1d (tools topology): a specialist's answer
+                        # arrives inside the supervisor node's update,
+                        # carried by its delegation tool's result
+                        # message — surface it as response text, the
+                        # way a specialist node's own update surfaces
+                        # it under the legacy topology. (No such
+                        # messages exist under the legacy topology.
+                        # The scan normalises through message_dicts:
+                        # single-message writes inside the agent stay
+                        # BaseMessage objects in the update.)
+                        for _msg in message_dicts(state_update["messages"])[messages_seen:]:
+                            if (isinstance(_msg, dict)
+                                    and _msg.get("role") == "tool"
+                                    and str(_msg.get("name") or "").startswith("delegate_to_")
+                                    and _msg.get("content")):
+                                full_response_parts.append(_msg["content"])
+                                yield emit_event(Event(
+                                    type=EventType.TASK_PROGRESS,
+                                    request_id=request_id,
+                                    payload={
+                                        "task_id": task_id,
+                                        "text_delta": _msg["content"],
+                                        "full_text": _msg["content"],
+                                        "turn": 0,
+                                        "node": "assistant",
+                                    },
+                                ))
                         messages_seen = max(messages_seen, len(state_update["messages"]))
                     if isinstance(state_update.get("delegation_count"), int):
                         delegation_count_seen = state_update["delegation_count"]
                     if node_name == "supervisor" and len(state_update.get("delegation_log") or []) > delegation_seen:
+                        new_entries = state_update["delegation_log"][delegation_seen:]
                         delegation_seen = len(state_update["delegation_log"])
-                        log_entry = state_update["delegation_log"][-1]
-                        decision = log_entry.get("decision", {})
-                        next_step = decision.get("next", "UNKNOWN")
-                        reason = decision.get("reason", "")
-                        updated_plan = state_update.get("plan", "")
-
-                        # S12: the transition is signalled ONLY by
-                        # the structured activity event (None for the
-                        # END / memory-step bookkeeping entries) —
-                        # no "[Supervisor] -> Delegating..." text is
-                        # produced here any more, for the wire or for
-                        # the episode thinking log.
-                        activity = _delegation_activity_event(
-                            task_id, request_id, log_entry,
-                            delegation_count=delegation_count_seen,
-                            user_prompt=prompt,
-                            updated_plan=updated_plan,
-                        )
-                        if activity is not None:
-                            yield emit_event(activity)
-                        if decision.get("denied"):
-                            # E1-11: no specialist runs for a denied
-                            # delegation, so the explanation IS the
-                            # task's response — emit it as one.
-                            denial_text = f"Delegation to {next_step} was blocked by the spawn policy: {reason}"
-                            full_response_parts.append(denial_text)
-                            yield emit_event(Event(
-                                type=EventType.TASK_PROGRESS,
-                                request_id=request_id,
-                                payload={
-                                    "task_id": task_id,
-                                    "text_delta": denial_text,
-                                    "full_text": denial_text,
-                                    "turn": 0,
-                                    "node": "assistant",
-                                },
-                            ))
+                        for _delegation_event in _new_delegation_events(
+                                task_id=task_id, request_id=request_id,
+                                entries=new_entries,
+                                delegation_count=delegation_count_seen,
+                                user_prompt=prompt,
+                                updated_plan=state_update.get("plan", ""),
+                                response_parts=full_response_parts):
+                            yield emit_event(_delegation_event)
                     elif "messages" in state_update and isinstance(state_update["messages"], list):
                         new_messages = state_update["messages"][messages_seen:]
                         messages_seen = len(state_update["messages"])
@@ -1210,7 +1304,10 @@ async def resume_langgraph_task(
     db_path = DEFAULT_CHECKPOINT_DB
     async with AsyncSqliteSaver.from_conn_string(str(db_path)) as saver:
         await saver.setup()
-        graph = compile_graph(checkpointer=saver)
+        with supervisor_pattern_context(
+                getattr(kwargs.get("user_config"),
+                        "supervisor_pattern", None)):
+            graph = compile_graph(checkpointer=saver)
 
         config = {
             "recursion_limit": GRAPH_RECURSION_LIMIT,
@@ -1376,51 +1473,52 @@ async def resume_langgraph_task(
                         if not isinstance(state_update, dict):
                             continue
                         if node_name == "supervisor" and isinstance(state_update.get("messages"), list):
+                            # P1d (tools topology): as on the run
+                            # path, a specialist's answer arrives
+                            # inside the supervisor node's update on
+                            # its delegation tool's result message —
+                            # surface it as response text. (No such
+                            # messages exist under the legacy
+                            # topology.)
+                            for _msg in message_dicts(state_update["messages"])[messages_seen:]:
+                                if (isinstance(_msg, dict)
+                                        and _msg.get("role") == "tool"
+                                        and str(_msg.get("name") or "").startswith("delegate_to_")
+                                        and _msg.get("content")):
+                                    full_response_parts.append(_msg["content"])
+                                    yield Event(
+                                        type=EventType.TASK_PROGRESS,
+                                        request_id=thread_id,
+                                        payload={
+                                            "task_id": task_id,
+                                            "text_delta": _msg["content"],
+                                            "full_text": _msg["content"],
+                                            "turn": 0,
+                                            "node": "assistant",
+                                        },
+                                    )
                             messages_seen = max(messages_seen, len(state_update["messages"]))
                         if isinstance(state_update.get("delegation_count"), int):
                             delegation_count_seen = state_update["delegation_count"]
                         if node_name == "supervisor" and len(state_update.get("delegation_log") or []) > delegation_seen:
-                            delegation_seen = len(state_update["delegation_log"])
-                            log_entry = state_update["delegation_log"][-1]
-                            decision = log_entry.get("decision", {})
-                            next_step = decision.get("next", "UNKNOWN")
-                            reason = decision.get("reason", "")
                             # S12: resume delegations are signalled by
                             # the same structured NODE_ACTIVITY as the
-                            # run path — this path previously emitted
-                            # the "[Supervisor] -> Delegating..."
-                            # line as a TASK_PROGRESS text delta (with
-                            # literal "\n" escapes, so the UI filter
-                            # never matched it and the chatter showed).
-                            # Emitting the activity event also feeds
-                            # the S3 ledger tap, which this path used
-                            # to bypass entirely.
-                            activity = _delegation_activity_event(
-                                task_id, thread_id, log_entry,
-                                delegation_count=delegation_count_seen,
-                                user_prompt=state_obj.values.get(
-                                    "original_prompt", ""),
-                                updated_plan=state_update.get("plan", ""),
-                            )
-                            if activity is not None:
-                                yield activity
-                            if decision.get("denied"):
-                                # E1-11: same surfacing as the run path —
-                                # the explanation is the resumed task's
-                                # response when no specialist runs.
-                                denial_text = f"Delegation to {next_step} was blocked by the spawn policy: {reason}"
-                                full_response_parts.append(denial_text)
-                                yield Event(
-                                    type=EventType.TASK_PROGRESS,
-                                    request_id=thread_id,
-                                    payload={
-                                        "task_id": task_id,
-                                        "text_delta": denial_text,
-                                        "full_text": denial_text,
-                                        "turn": 0,
-                                        "node": "assistant",
-                                    },
-                                )
+                            # run path, via _new_delegation_events —
+                            # which also carries the E1-11 denial
+                            # surfacing (the explanation is the
+                            # resumed task's response when no
+                            # specialist runs).
+                            new_entries = state_update["delegation_log"][delegation_seen:]
+                            delegation_seen = len(state_update["delegation_log"])
+                            for _delegation_event in _new_delegation_events(
+                                    task_id=task_id, request_id=thread_id,
+                                    entries=new_entries,
+                                    delegation_count=delegation_count_seen,
+                                    user_prompt=state_obj.values.get(
+                                        "original_prompt", ""),
+                                    updated_plan=state_update.get("plan", ""),
+                                    response_parts=full_response_parts):
+                                yield _delegation_event
                         elif "messages" in state_update and isinstance(state_update["messages"], list):
                             new_messages = state_update["messages"][messages_seen:]
                             messages_seen = len(state_update["messages"])
