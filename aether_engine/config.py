@@ -198,6 +198,16 @@ class UserConfig:
     # keyed provider's failure happens ONLY when explicitly enabled.
     search_provider: str = "ddgs"
     search_fallback_to_ddgs: bool = False
+    # P4d step 4 (K-13): the knowledge-base reranker stage
+    # (knowledge/rerank.py) is wired into search but OPT-IN, and
+    # this is the switch. Measured reason, recorded in
+    # tests/test_p4d_collections_rerank.py: on the programme's
+    # offline eval harness the embedding-cosine reranker degrades
+    # retrieval (hit@3 1.00 → 0.95, MRR@3 0.942 → 0.867) because
+    # the harness's fake embedder makes cosine ranks noise. The
+    # stage ships ready; enable it when a measured real embedder
+    # (or the P3b local tier serving a cross-encoder) justifies it.
+    knowledge_rerank: bool = False
     # Epic 2, E2-08: approval mode. "ask" = today's behaviour (every
     # non-read-only call asks unless a path rule allows it). "write" =
     # WRITE-risk calls are auto-allowed like reads; EXECUTE and
@@ -616,6 +626,7 @@ class UserConfig:
             "approval_binding_mode": self.approval_binding_mode,
             "search_provider": self.search_provider,
             "search_fallback_to_ddgs": self.search_fallback_to_ddgs,
+            "knowledge_rerank": self.knowledge_rerank,
             "workspace_roots": self.workspace_roots,
             "repo_map_token_budget": self.repo_map_token_budget,
             "embedding_model": self.embedding_model,
@@ -770,6 +781,7 @@ class UserConfig:
             approval_binding_mode=d.get("approval_binding_mode") if d.get("approval_binding_mode") in ("rebind", "carry") else "rebind",
             search_provider=d.get("search_provider") if d.get("search_provider") in ("ddgs", "exa", "brave", "tavily", "firecrawl") else "ddgs",
             search_fallback_to_ddgs=bool(d.get("search_fallback_to_ddgs", False)),
+            knowledge_rerank=bool(d.get("knowledge_rerank", False)),
             workspace_roots=_clean_workspace_roots(d.get("workspace_roots")),
             repo_map_token_budget=_as_int(d.get("repo_map_token_budget"), 1000),
             embedding_model=str(d.get("embedding_model") or "qwen3-embedding:0.6b"),

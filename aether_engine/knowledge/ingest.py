@@ -1,19 +1,34 @@
-"""Ingestion + index for knowledge collections (P4d, steps 1–2).
+"""Ingestion + index for knowledge collections (P4d, steps 1–3).
 
-A collection's index is built from a source folder by LlamaIndex
-readers (PDF / Markdown / text / DOCX / code), chunked with
-``TokenTextSplitter``, embedded through Aether's one local-first
-embedder (``knowledge.embeddings``), and persisted as a
+A collection's index is built from its source folder — or, since
+step 3, its set of source folders — by LlamaIndex readers (PDF /
+Markdown / text / DOCX / code), chunked with ``TokenTextSplitter``,
+embedded through Aether's one local-first embedder
+(``knowledge.embeddings``), and persisted as a
 ``VectorStoreIndex`` under the collection's directory next to a
 ``manifest.json``.
+
+A file's identity (its citation path and its incremental-update
+key) is its path relative to its source folder. With several
+folders, each identity is prefixed with the folder's name
+(``notes/gardening.md``) so files from different folders never
+collide and citations say which folder a passage came from; a
+single-folder collection keeps the bare relative paths it has
+always used. One consequence, stated plainly: when a collection
+grows from one folder to several, every identity gains its prefix
+at once, so that one transition job re-indexes the existing files
+under their new identities (the bare identities are removed in
+the same run) — the hash map cannot match names that changed.
+Every run after the transition is incremental again.
 
 The manifest is the index's admin record: which embedder built it,
 when it was last indexed, and the sha256 of every indexed file.
 Re-running ingestion is **incremental by file hash** — unchanged
 files are not re-read or re-embedded, changed files are re-embedded
-and swapped in, deleted files are removed. The trigger for a run
-(owner action, folder watch) is a later slice (P4d step 3); this
-module is the engine-side job it will call.
+and swapped in, deleted files are removed. This module is the
+engine-side job; the owner-facing trigger and collection config
+live in ``knowledge.collections`` (P4d step 3), and indexing stays
+owner-triggered — nothing here runs on a watch or a timer.
 
 Embedder identity is part of the contract: an index records the
 embedder that built it, and opening or extending an index whose
@@ -98,12 +113,13 @@ class IndexStats:
     """The result of one ingestion run (also the manifest's shape)."""
 
     collection: str
-    source_root: str
+    source_root: str  # the first (or only) source folder
     embedder: str
     indexed_at: str
     doc_count: int
     chunk_count: int
     outcomes: list[FileOutcome] = field(default_factory=list)
+    source_roots: list[str] = field(default_factory=list)  # all of them
 
 
 def manifest_path(collection_dir: Path) -> Path:
@@ -186,8 +202,45 @@ async def _nodes_for_file(
     return nodes
 
 
+def _source_roots(
+    source_root: str | Path | list[str | Path],
+) -> list[Path]:
+    """Normalise the source argument to the collection's folders."""
+    if isinstance(source_root, (str, Path)):
+        roots = [Path(source_root).expanduser()]
+    else:
+        roots = [Path(root).expanduser() for root in source_root]
+    if not roots:
+        raise ValueError("a collection needs at least one source folder.")
+    for root in roots:
+        if not root.is_dir():
+            raise FileNotFoundError(f"source folder does not exist: {root}")
+    return roots
+
+
+def _root_prefixes(roots: list[Path]) -> list[str]:
+    """Per-folder identity prefixes (see the module docstring).
+
+    A single folder gets no prefix — its collections keep the bare
+    relative paths they have always used. Several folders are
+    prefixed by folder name; same-named folders are disambiguated
+    in order (``notes``, ``notes~2``, …) so identities stay unique
+    and deterministic for a given folder list.
+    """
+    if len(roots) == 1:
+        return [""]
+    prefixes: list[str] = []
+    used: dict[str, int] = {}
+    for root in roots:
+        base = root.name or "root"
+        count = used.get(base, 0) + 1
+        used[base] = count
+        prefixes.append(base if count == 1 else f"{base}~{count}")
+    return prefixes
+
+
 async def index_collection(
-    source_root: str | Path,
+    source_root: str | Path | list[str | Path],
     collection_dir: str | Path,
     *,
     config: UserConfig | None = None,
@@ -195,16 +248,14 @@ async def index_collection(
 ) -> IndexStats:
     """Index (or incrementally re-index) one collection.
 
-    ``source_root`` is the folder whose supported files form the
-    collection; ``collection_dir`` is where the persisted index and
-    manifest live. With ``force=True`` any existing index is
-    discarded and rebuilt — the required move after an embedder
-    change (see :class:`EmbedderMismatchError`).
+    ``source_root`` is the folder — or the list of folders — whose
+    supported files form the collection; ``collection_dir`` is
+    where the persisted index and manifest live. With ``force=True``
+    any existing index is discarded and rebuilt — the required move
+    after an embedder change (see :class:`EmbedderMismatchError`).
     """
-    source_root = Path(source_root).expanduser()
+    roots = _source_roots(source_root)
     collection_dir = Path(collection_dir).expanduser()
-    if not source_root.is_dir():
-        raise FileNotFoundError(f"source folder does not exist: {source_root}")
     collection_dir.mkdir(parents=True, exist_ok=True)
     persist_dir = collection_dir / INDEX_SUBDIR
 
@@ -232,28 +283,27 @@ async def index_collection(
     new_files: dict[str, dict[str, Any]] = {}
     seen: set[str] = set()
 
-    for path in _scan_source(source_root):
-        rel = path.relative_to(source_root).as_posix()
-        seen.add(rel)
+    async def _index_one(path: Path, rel: str) -> None:
+        """Index (or skip/remove-note) one candidate file."""
         try:
             size = path.stat().st_size
         except OSError as exc:
             outcomes.append(FileOutcome(rel, "failed", reason=str(exc)))
             if rel in old_files:
                 new_files[rel] = old_files[rel]
-            continue
+            return
         if size > MAX_FILE_BYTES:
             outcomes.append(FileOutcome(
                 rel, "skipped",
                 reason=f"{size} bytes exceeds the {MAX_FILE_BYTES}-byte cap"))
-            continue
+            return
         digest = _sha256(path)
         previous = old_files.get(rel)
         if previous and previous.get("sha256") == digest and not force:
             outcomes.append(FileOutcome(
                 rel, "unchanged", chunks=int(previous.get("chunks") or 0)))
             new_files[rel] = previous
-            continue
+            return
         try:
             nodes = await _nodes_for_file(path, rel, splitter, embed_model)
         except Exception as exc:  # noqa: BLE001 — per-file isolation: one unreadable or unembeddable file is recorded as failed and must not abort the run for the rest
@@ -261,13 +311,21 @@ async def index_collection(
             outcomes.append(FileOutcome(rel, "failed", reason=str(exc)))
             if previous:  # the previous version stays indexed
                 new_files[rel] = previous
-            continue
+            return
         if previous and loaded_existing:
             index.delete_ref_doc(rel, delete_from_docstore=True)
         if nodes:
             index.insert_nodes(nodes)
         outcomes.append(FileOutcome(rel, "indexed", chunks=len(nodes)))
         new_files[rel] = {"sha256": digest, "chunks": len(nodes)}
+
+    for root, prefix in zip(roots, _root_prefixes(roots), strict=True):
+        for path in _scan_source(root):
+            rel = path.relative_to(root).as_posix()
+            if prefix:
+                rel = f"{prefix}/{rel}"
+            seen.add(rel)
+            await _index_one(path, rel)
 
     for rel in sorted(set(old_files) - seen):
         index.delete_ref_doc(rel, delete_from_docstore=True)
@@ -277,16 +335,18 @@ async def index_collection(
     indexed_at = datetime.now(UTC).isoformat()
     stats = IndexStats(
         collection=collection_dir.name,
-        source_root=str(source_root),
+        source_root=str(roots[0]),
         embedder=embed_model.model_name,
         indexed_at=indexed_at,
         doc_count=len(new_files),
         chunk_count=sum(int(f.get("chunks") or 0) for f in new_files.values()),
         outcomes=outcomes,
+        source_roots=[str(root) for root in roots],
     )
     manifest_path(collection_dir).write_text(json.dumps({
         "collection": stats.collection,
         "source_root": stats.source_root,
+        "source_roots": stats.source_roots,
         "embedder": stats.embedder,
         "indexed_at": stats.indexed_at,
         "doc_count": stats.doc_count,

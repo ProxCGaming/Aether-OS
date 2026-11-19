@@ -1,4 +1,4 @@
-"""``search_knowledge_base`` tool (P4d, steps 1–2).
+"""``search_knowledge_base`` tool (P4d; engine steps 1–4).
 
 Deliberate retrieval over the owner's knowledge collections —
 named folders of documents (PDF, Markdown, text, DOCX, code)
@@ -19,6 +19,7 @@ import logging
 from pathlib import Path
 
 from aether_engine.config import UserConfig
+from aether_engine.knowledge.collections import default_knowledge_dir
 from aether_engine.knowledge.engine import (
     CollectionNotIndexedError,
     KnowledgeBase,
@@ -36,11 +37,6 @@ _SNIPPET_CHARS = 1200
 _DEFAULT_LIMIT = 5
 
 _bases: dict[str, KnowledgeBase] = {}
-
-
-def default_knowledge_dir() -> Path:
-    """Where collections live: ``~/.aether/knowledge/<collection>/``."""
-    return Path.home() / ".aether" / "knowledge"
 
 
 def available_collections(knowledge_dir: Path | None = None) -> list[str]:
@@ -86,6 +82,9 @@ def format_knowledge_outcome(query: str, outcome: SearchOutcome) -> str:
         lines.append(
             "(Semantic ranking is unavailable — the embedding endpoint "
             "is down — so these are lexical matches only.)")
+    elif outcome.reranked:
+        lines.append(
+            f"(Passages reranked locally by {outcome.reranker}.)")
     for i, hit in enumerate(outcome.hits, start=1):
         snippet = hit.text
         if len(snippet) > _SNIPPET_CHARS:
