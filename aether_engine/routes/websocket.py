@@ -151,6 +151,14 @@ from aether_engine.routes.ws_voice import (
     stop_read_aloud,
     stop_voice_session,
 )
+from aether_engine.routes.ws_workflows import (
+    handle_workflow_delete_request,
+    handle_workflow_list_request,
+    handle_workflow_run_list_request,
+    handle_workflow_run_request,
+    handle_workflow_run_stop_request,
+    handle_workflow_save_request,
+)
 from aether_engine.routing.intent import classify_intent  # noqa: F401 — patch target: tests patch it here; ws_task_exec/ws_voice resolve it through this module at call time
 from aether_engine.routing.policy import local_only_from_vision_override
 from aether_engine.secrets.storage import SecretStore
@@ -4591,6 +4599,12 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.TASK_LEDGER_LIST_REQUEST: _handle_task_ledger_list_request,
     EventType.TASK_RESUME_AUDIT_REQUEST: handle_task_resume_audit_request,
     EventType.TASK_RESUME_REQUEST: handle_task_resume_request,
+    EventType.WORKFLOW_LIST_REQUEST: handle_workflow_list_request,
+    EventType.WORKFLOW_SAVE_REQUEST: handle_workflow_save_request,
+    EventType.WORKFLOW_DELETE_REQUEST: handle_workflow_delete_request,
+    EventType.WORKFLOW_RUN_REQUEST: handle_workflow_run_request,
+    EventType.WORKFLOW_RUN_STOP_REQUEST: handle_workflow_run_stop_request,
+    EventType.WORKFLOW_RUN_LIST_REQUEST: handle_workflow_run_list_request,
     EventType.CONTEXT_BREAKDOWN_REQUEST: _handle_context_breakdown_request,
     EventType.DAILY_BUDGET_SET_REQUEST: _handle_daily_budget_set_request,
     EventType.BROWSER_TASK_PAUSE_REQUEST: _handle_browser_task_pause_request,

@@ -35,7 +35,7 @@ from aether_engine.routes import websocket, ws_connection, ws_task_exec
 # the pre-slice if/elif chain's set (123 branches; three are
 # membership tests over a pair, hence 126 types) and is
 # regenerated from the live table whenever a wave adds handlers
-# (last regenerated 19 Nov 2026 for Full Furnish: 153 types).
+# (last regenerated 19 Nov 2026 for Full Furnish: 159 types).
 # STEER_TASK is deliberately absent: the receive loop's pre-pass
 # handles it before the table is consulted.
 DISPATCHED_TYPES = (
@@ -184,6 +184,12 @@ DISPATCHED_TYPES = (
     "VOICE_RTC_OFFER_REQUEST",
     "VOICE_SESSION_START_REQUEST",
     "VOICE_SESSION_STOP_REQUEST",
+    "WORKFLOW_DELETE_REQUEST",
+    "WORKFLOW_LIST_REQUEST",
+    "WORKFLOW_RUN_LIST_REQUEST",
+    "WORKFLOW_RUN_REQUEST",
+    "WORKFLOW_RUN_STOP_REQUEST",
+    "WORKFLOW_SAVE_REQUEST",
     "WORKSPACE_ADD_REQUEST",
     "WORKSPACE_INDEX_CONFIG_REQUEST",
     "WORKSPACE_INDEX_PAUSE_REQUEST",
@@ -293,7 +299,7 @@ class TestDispatchTable:
         assert d[EventType.PROJECT_CONFIG_GET_REQUEST] is \
             d[EventType.PROJECT_CONFIG_UPDATE_REQUEST]
 
-    def test_handlers_are_coroutine_functions_150_distinct(self):
+    def test_handlers_are_coroutine_functions_156_distinct(self):
         handlers = list(websocket._DISPATCH.values())
         assert all(inspect.iscoroutinefunction(h) for h in handlers)
         # 123 at the Wave 5 split; +1 for the calendar layer's
@@ -311,11 +317,11 @@ class TestDispatchTable:
         # MCP/plugin update checks, skill search/install, calendar
         # create/cancel and the SPEC-6B memory reads (profile,
         # forget x4, stats, graph neighbourhood) — the table now
-        # carries 153 types over 150 distinct handlers (the three
+        # carries 159 types over 156 distinct handlers (the three
         # membership pairs above still share theirs). The list and
         # count were regenerated from the live table on 19 Nov
         # 2026; the pin had been stale since the master build.
-        assert len(set(handlers)) == 150
+        assert len(set(handlers)) == 156
 
 
 class _FakeSocket:
