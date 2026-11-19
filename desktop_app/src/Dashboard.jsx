@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Activity, Cpu, Database, FileText, Folder, HardDrive, HeartPulse, MessageSquare, Network, Plus, Zap } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Activity, Cpu, Database, FileText, Folder, HardDrive, HeartPulse, MessageSquare, Network, Plus, X, Zap } from 'lucide-react';
 import './chat.css';
 import LoadStateRow, { useSlowLoad, DEFAULT_SLOW_TEXT } from './components/Settings/LoadStateRow';
 import EmptyState from './components/EmptyState';
@@ -27,7 +27,7 @@ function formatStamp(value) {
 // WORKSPACE_LIST is a shared feed the shell already consumes from
 // any panel (the Projects pattern), so when no prop is passed the
 // dashboard fetches it over the same socket it already uses.
-export default function Dashboard({ status = 'Initializing', activeTasks = 0, pluginCount = null, memoryMb = null, providerHealth = null, providerHealthLoaded = null, wsRef = null, reconnectCount = 0, onStartWorkflow, onNewChat, recentSessions, recentArtifacts, activeWorkspace, onResumeSession }) {
+export default function Dashboard({ status = 'Initializing', activeTasks = 0, pluginCount = null, memoryMb = null, providerHealth = null, providerHealthLoaded = null, wsRef = null, reconnectCount = 0, onStartWorkflow, onCreateWorkflow, onNewChat, recentSessions, recentArtifacts, activeWorkspace, onResumeSession }) {
   // RUX-C-14: a metric the engine has not answered yet is unknown
   // ('—'), never 0. Provider health counts as answered when App
   // says a snapshot arrived, or — for standalone callers — when a
@@ -53,12 +53,54 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
   const [fetchedWorkspace, setFetchedWorkspace] = useState(undefined);
   const workspaceWired = activeWorkspace !== undefined;
   const effectiveWorkspace = workspaceWired ? activeWorkspace : fetchedWorkspace;
+  // The workflow picker: "Start New Workflow" fetches the saved
+  // workflows (WORKFLOW_LIST) and shows them here; choosing one
+  // sends WORKFLOW_RUN and, on the engine's success reply, hands
+  // the run's session to the shell through onStartWorkflow — the
+  // shell opens that session in Chat with the same machinery the
+  // recents list uses. A failed list read is an error state in
+  // the picker, never an empty list; a failed run start keeps the
+  // picker open with the engine's reason.
+  const [workflowPickerOpen, setWorkflowPickerOpen] = useState(false);
+  const [workflowListLoad, setWorkflowListLoad] = useState('loading');
+  const [workflowList, setWorkflowList] = useState([]);
+  const [workflowListError, setWorkflowListError] = useState(null);
+  const [workflowRunError, setWorkflowRunError] = useState(null);
+  const [startingWorkflowId, setStartingWorkflowId] = useState(null);
+  // The message listener below is registered on mount, so it
+  // reads the landing callback through a ref — the shell hands
+  // a fresh inline closure on every render, and the mount-time
+  // capture would go stale (the App shell's own mount-handler
+  // discipline, D1-A1).
+  const onStartWorkflowRef = useRef(onStartWorkflow);
+  useEffect(() => { onStartWorkflowRef.current = onStartWorkflow; }, [onStartWorkflow]);
   useEffect(() => {
     if (!wsRef?.current) return;
     const handleMessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'MEMORY_EPISODES_RESPONSE') {
+        if (data.type === 'WORKFLOW_LIST_RESPONSE') {
+          if (data.payload.success === false || data.payload.error) {
+            setWorkflowListError(data.payload.error || 'Your workflows could not be loaded.');
+            setWorkflowListLoad('error');
+          } else {
+            setWorkflowListError(null);
+            setWorkflowList(Array.isArray(data.payload.workflows) ? data.payload.workflows : []);
+            setWorkflowListLoad('ready');
+          }
+        } else if (data.type === 'WORKFLOW_RUN_RESPONSE') {
+          setStartingWorkflowId(null);
+          if (data.payload.success === false || data.payload.error || !data.payload.run) {
+            setWorkflowRunError(data.payload.error || 'The workflow could not be started.');
+          } else {
+            setWorkflowRunError(null);
+            setWorkflowPickerOpen(false);
+            const landInRunSession = onStartWorkflowRef.current;
+            if (typeof landInRunSession === 'function') {
+              landInRunSession(data.payload.run.session_id);
+            }
+          }
+        } else if (data.type === 'MEMORY_EPISODES_RESPONSE') {
           if (data.payload.error) {
             setMemoryError(data.payload.error);
             setMemoryStats(null);
@@ -96,6 +138,29 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
     // on reconnect instead of leaving the card stale for the whole
     // session (the Speech/Usage panels' RUX-A-17 pattern).
   }, [wsRef, reconnectCount]);
+  const openWorkflowPicker = () => {
+    setWorkflowPickerOpen(true);
+    setWorkflowRunError(null);
+    setWorkflowListLoad('loading');
+    setWorkflowListError(null);
+    if (wsRef?.current) {
+      wsRef.current.send(JSON.stringify({
+        type: 'WORKFLOW_LIST_REQUEST', schema_version: 1,
+        request_id: Date.now().toString(), payload: {},
+      }));
+    }
+  };
+
+  const chooseWorkflow = (workflow) => {
+    if (!wsRef?.current || startingWorkflowId) return;
+    setWorkflowRunError(null);
+    setStartingWorkflowId(workflow.id);
+    wsRef.current.send(JSON.stringify({
+      type: 'WORKFLOW_RUN_REQUEST', schema_version: 1,
+      request_id: Date.now().toString(), payload: { workflow_id: workflow.id },
+    }));
+  };
+
   const healthEntries = Object.entries(providerHealth || {});
   const healthCounts = healthEntries.reduce((acc, [, h]) => {
     const key = h && h.status ? h.status : 'unknown';
@@ -112,9 +177,10 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
 
       {/* S-4: quick starts that act, at the top with the recents.
           "New chat" creates a chat through the shell's real create
-          path. "Start New Workflow" keeps its existing wiring
-          unchanged — see the report: the engine has no prompt-less
-          workflow start to wire it to. */}
+          path. "Start New Workflow" opens the workflow picker
+          below: the saved workflows from WORKFLOW_LIST, and
+          choosing one starts a real run (WORKFLOW_RUN) whose
+          session the shell then opens in Chat. */}
       <div style={{ marginBottom: '32px' }}>
         <h2 style={{ fontSize: '18px', fontWeight: 500, marginBottom: '16px' }}>Quick Actions</h2>
         <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
@@ -123,11 +189,74 @@ export default function Dashboard({ status = 'Initializing', activeTasks = 0, pl
               <Plus size={16} /> New chat
             </button>
           )}
-          {/* Phase 9, B3: previously a dead button with no onClick — now navigates to Chat to start a task. */}
-          <button onClick={onStartWorkflow} style={{ background: 'var(--accent)', border: '1px solid var(--accent)', color: 'var(--accent-on)', padding: '12px 20px', borderRadius: 'var(--radius-lg)', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', transition: 'all var(--motion-base)' }}>
+          <button onClick={openWorkflowPicker} style={{ background: 'var(--accent)', border: '1px solid var(--accent)', color: 'var(--accent-on)', padding: '12px 20px', borderRadius: 'var(--radius-lg)', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', transition: 'all var(--motion-base)' }}>
             <Zap size={16} /> Start New Workflow
           </button>
         </div>
+
+        {workflowPickerOpen && (
+          <div data-testid="dashboard-workflow-picker" style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '20px', marginTop: '16px', maxWidth: '560px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <span style={{ fontSize: '15px', fontWeight: 500 }}>Start a workflow</span>
+              <button
+                type="button"
+                aria-label="Close workflow picker"
+                onClick={() => setWorkflowPickerOpen(false)}
+                style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', padding: '4px' }}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            {workflowListLoad !== 'ready' ? (
+              <LoadStateRow
+                loadState={workflowListLoad}
+                isConnected={isOnline}
+                variant="plain"
+                testId="dashboard-workflow-picker-load"
+                loadingText="Loading workflows…"
+                offlineText="Waiting for the engine — your workflows will appear here once it connects."
+                errorText={workflowListError || 'Your workflows could not be loaded.'}
+              />
+            ) : workflowList.length === 0 ? (
+              <EmptyState
+                compact
+                icon={<Zap size={20} color="var(--text-muted)" />}
+                title="No workflows yet"
+                description="Workflows are saved lists of steps that run in order as tasks. Create one in Settings to run it from here."
+                actionLabel={typeof onCreateWorkflow === 'function' ? 'Create your first workflow' : undefined}
+                onAction={typeof onCreateWorkflow === 'function' ? onCreateWorkflow : undefined}
+                testId="dashboard-workflow-picker-empty"
+              />
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {workflowList.map((workflow) => {
+                  const stepCount = Array.isArray(workflow.steps) ? workflow.steps.length : 0;
+                  const isStarting = startingWorkflowId === workflow.id;
+                  return (
+                    <button
+                      key={workflow.id}
+                      type="button"
+                      onClick={() => chooseWorkflow(workflow)}
+                      disabled={!!startingWorkflowId}
+                      style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '2px', background: 'transparent', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', padding: '10px 12px', cursor: startingWorkflowId ? 'default' : 'pointer', textAlign: 'left', width: '100%', opacity: startingWorkflowId && !isStarting ? 0.5 : 1 }}
+                    >
+                      <span style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{workflow.name}</span>
+                      <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                        {isStarting ? 'Starting…' : `${stepCount} ${stepCount === 1 ? 'step' : 'steps'}`}
+                      </span>
+                      {workflow.description && (
+                        <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{workflow.description}</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {workflowRunError && (
+              <div style={{ color: 'var(--danger)', fontSize: '13px', marginTop: '12px' }}>{workflowRunError}</div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* S-4: recents — where you left off, before system health.

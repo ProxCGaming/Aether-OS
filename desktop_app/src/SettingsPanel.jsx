@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info, CalendarDays, MessagesSquare, Monitor, Search, User } from 'lucide-react';
+import { Key, Cpu, Activity, Network, Box, Layers, Plug, Database, Sliders, Wrench, Server, Lock, Globe, CircleDollarSign, Mic, Info, CalendarDays, MessagesSquare, Monitor, Search, User, Workflow } from 'lucide-react';
 import './chat.css';
 import { resolveSnipHotkey, defaultSnipHotkey } from './snipHotkey';
 import ProviderSettings from './components/Settings/ProviderSettings';
 import MemoryManagement from './components/Settings/MemoryManagement';
 import ProfilePanel from './components/Settings/ProfilePanel';
+import WorkflowsPanel from './components/Settings/WorkflowsPanel';
 import DiagnosticsPanel from './components/Settings/DiagnosticsPanel';
 import WorkspaceIndexingPanel from './components/Settings/WorkspaceIndexingPanel';
 import BrowserPolicyPanel from './components/Settings/BrowserPolicyPanel';
@@ -1204,8 +1205,8 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
   // rather than faked. The sections the board does not name are
   // placed by function: Personal takes the user's own data and
   // habits (Usage, Password Vault, Calendar, Conversation),
-  // System takes machine and capability machinery (Workspace
-  // Indexing, Browser Agent, Computer Use, Capabilities,
+  // System takes machine and capability machinery (Workflows,
+  // Workspace Indexing, Browser Agent, Computer Use, Capabilities,
   // Advanced, About — About stays last, as it always has been).
   // Ids and labels are unchanged: App's palette mirror
   // (SETTINGS_SECTIONS, E6-F08) carries the same ids/labels in
@@ -1225,6 +1226,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     { group: 'System', keywords: 'tools approval grants policy risk path rules', id: 'Tools', icon: <Wrench size={18} />, label: 'Tools' },
     { group: 'System', keywords: 'skills slash commands enable disable', id: 'Skills', icon: <Box size={18} />, label: 'Skills' },
     { group: 'System', keywords: 'plugins install enable disable', id: 'Plugins', icon: <Plug size={18} />, label: 'Plugins' },
+    { group: 'System', keywords: 'workflows runs steps sequences automation tasks in order', id: 'Workflows', icon: <Workflow size={18} />, label: 'Workflows' },
     { group: 'System', keywords: 'workspace indexing rag prose embedder files pause resume search watcher exclusions', id: 'WorkspaceIndexing', icon: <Layers size={18} />, label: 'Workspace Indexing' },
     { group: 'System', keywords: 'browser agent policy payments envelopes confirmation autofill categories', id: 'BrowserPolicy', icon: <Globe size={18} />, label: 'Browser Agent' },
     { group: 'System', keywords: 'computer use desktop observe screen accessibility windows uia control vision capture', id: 'ComputerUse', icon: <Monitor size={18} />, label: 'Computer Use' },
@@ -1484,6 +1486,10 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             )}
             <DiagnosticsPanel activeMenu='Plugins' />
           </div>
+        )}
+
+        {activeMenu === 'Workflows' && (
+          <WorkflowsPanel />
         )}
 
         {activeMenu === 'Skills' && (

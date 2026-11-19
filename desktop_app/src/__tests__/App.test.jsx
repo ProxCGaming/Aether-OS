@@ -32,15 +32,19 @@ describe('App', () => {
     expect(screen.getByText('Settings')).toBeInTheDocument();
   });
 
-  it('switches to the Dashboard tab and back via Start New Workflow', () => {
+  it('switches to the Dashboard tab; Start New Workflow opens the workflow picker there instead of switching tabs', () => {
     render(<App />);
 
     fireEvent.click(screen.getByText('Dashboard'));
     expect(screen.getByText('System Dashboard')).toBeInTheDocument();
 
-    // Phase 9, B3: the button must actually do something (navigates to Chat).
+    // The button starts a real workflow now: it opens the picker
+    // over the saved workflows on the Dashboard itself. The tab
+    // switch happens later, when a chosen run's session opens in
+    // Chat — not on the button click.
     fireEvent.click(screen.getByText('Start New Workflow'));
-    expect(screen.queryByText('System Dashboard')).not.toBeInTheDocument();
+    expect(screen.getByTestId('dashboard-workflow-picker')).toBeInTheDocument();
+    expect(screen.getByText('System Dashboard')).toBeInTheDocument();
   });
 
   it('renders the decorative knowledge graph background without fabricated nodes', () => {

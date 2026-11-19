@@ -90,7 +90,10 @@ describe('App shell overlays mount on every tab (E6-F01)', () => {
   };
 
   const goToDashboard = () => fireEvent.click(screen.getByText('Dashboard'));
-  const goToChat = () => fireEvent.click(screen.getByText('Start New Workflow'));
+  // Back to Chat via the sidebar nav item: the Dashboard's
+  // "Start New Workflow" button opens the workflow picker now —
+  // it is no longer a tab switch.
+  const goToChat = () => fireEvent.click(screen.getByText('Chat'));
   const pressCtrlK = () => fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
 
   it('shows onboarding on the default Chat tab for a no-key, unfinished config', async () => {

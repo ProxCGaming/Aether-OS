@@ -76,11 +76,12 @@ async function writeFloatingTransferState(state) {
 // can jump straight to. Ids and labels mirror SettingsPanel's own menu
 // items (SettingsPanel.jsx `menuItems`); the palette entries run
 // through App's tab state + the panel's initial-section prop.
-// S-6: the mirror is now complete (all 20 sections — Calendar,
+// S-6: the mirror is now complete (all 21 sections — Calendar,
 // Conversation and Computer Use were missing; Profile joined as
-// its own section in Wave 6) and the order follows the panel's
-// grouped nav (Personal / Connect / System), 'About' last,
-// matching its place at the end of the panel nav.
+// its own section in Wave 6, Workflows with the workflow slice)
+// and the order follows the panel's grouped nav (Personal /
+// Connect / System), 'About' last, matching its place at the end
+// of the panel nav.
 const SETTINGS_SECTIONS = [
   // Personal
   { id: 'Profile', label: 'Profile' },
@@ -99,6 +100,7 @@ const SETTINGS_SECTIONS = [
   { id: 'Tools', label: 'Tools' },
   { id: 'Skills', label: 'Skills' },
   { id: 'Plugins', label: 'Plugins' },
+  { id: 'Workflows', label: 'Workflows' },
   { id: 'WorkspaceIndexing', label: 'Workspace Indexing' },
   { id: 'BrowserPolicy', label: 'Browser Agent' },
   { id: 'ComputerUse', label: 'Computer Use' },
@@ -2173,7 +2175,7 @@ function AppContent() {
                  />
                </div>
             )}
-            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} providerHealth={providerHealth} providerHealthLoaded={providerHealthLoaded} wsRef={wsRef} reconnectCount={reconnectCount} onStartWorkflow={() => setActiveTab('Chat')} onNewChat={() => { handleNewChat(); setActiveTab('Chat'); }} onResumeSession={(id) => { handleSessionSwitch(id); setActiveTab('Chat'); }} recentSessions={sessions} recentArtifacts={canvasArtifacts} activeWorkspace={activeWorkspaceRow} />}
+            {activeTab === 'Dashboard' && <Dashboard status={status} activeTasks={activeTaskIds.size} pluginCount={pluginCount} memoryMb={memoryMb} providerHealth={providerHealth} providerHealthLoaded={providerHealthLoaded} wsRef={wsRef} reconnectCount={reconnectCount} onStartWorkflow={(sessionId) => { if (sessionId) handleSessionSwitch(sessionId); setActiveTab('Chat'); }} onCreateWorkflow={() => { setSettingsSection('Workflows'); setActiveTab('Settings'); }} onNewChat={() => { handleNewChat(); setActiveTab('Chat'); }} onResumeSession={(id) => { handleSessionSwitch(id); setActiveTab('Chat'); }} recentSessions={sessions} recentArtifacts={canvasArtifacts} activeWorkspace={activeWorkspaceRow} />}
             {activeTab === 'Artifacts' && (
               <GlobalArtifactsView
                 wsRef={wsRef}

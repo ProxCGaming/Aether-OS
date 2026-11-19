@@ -208,14 +208,15 @@ describe('Dashboard home (Full Furnish S-4)', () => {
     expect(screen.queryByText('No sessions yet')).not.toBeInTheDocument();
   });
 
-  it('New chat fires the shell create callback; Start New Workflow keeps its existing wiring', () => {
+  it('New chat fires the shell create callback; Start New Workflow opens the picker instead of firing the landing callback', () => {
     const onNewChat = jest.fn();
     const onStartWorkflow = jest.fn();
     render(<Dashboard status="Online" onNewChat={onNewChat} onStartWorkflow={onStartWorkflow} />);
     fireEvent.click(screen.getByText('New chat'));
     expect(onNewChat).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByText('Start New Workflow'));
-    expect(onStartWorkflow).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('dashboard-workflow-picker')).toBeInTheDocument();
+    expect(onStartWorkflow).not.toHaveBeenCalled();
   });
 
   it('renders the active workspace from the prop; explicit null is a real "none"', () => {
@@ -270,5 +271,101 @@ describe('Dashboard home (Full Furnish S-4)', () => {
     rerender(<Dashboard status="Online" recentArtifacts={[]} />);
     expect(screen.getByTestId('dashboard-recents-artifacts-empty')).toBeInTheDocument();
     expect(screen.getByText('No artifacts yet')).toBeInTheDocument();
+  });
+});
+
+describe('Dashboard workflow picker', () => {
+  const { act } = require('@testing-library/react');
+
+  const makeWsRef = () => {
+    const ref = { handler: null };
+    ref.wsRef = {
+      current: {
+        readyState: 1,
+        send: jest.fn(),
+        addEventListener: jest.fn((ev, cb) => { ref.handler = cb; }),
+        removeEventListener: jest.fn(),
+      },
+    };
+    return ref;
+  };
+  const deliver = (handler, type, payload) => {
+    act(() => {
+      handler({ data: JSON.stringify({ type, payload }) });
+    });
+  };
+  const sentTypes = (wsRef) => wsRef.current.send.mock.calls.map(([raw]) => JSON.parse(raw));
+  const openPicker = (wsRef) => {
+    fireEvent.click(screen.getByText('Start New Workflow'));
+    expect(sentTypes(wsRef).map((f) => f.type)).toContain('WORKFLOW_LIST_REQUEST');
+  };
+
+  const WORKFLOWS = [
+    {
+      id: 'w1', name: 'Morning research', description: 'Headlines, then a summary',
+      steps: [{ title: 'Gather', prompt: 'Find headlines' }, { title: 'Summarise', prompt: 'Summarise them' }],
+    },
+    { id: 'w2', name: 'Inbox sweep', description: '', steps: [{ title: '', prompt: 'Triage my inbox' }] },
+  ];
+
+  it('lists the saved workflows with step counts; choosing one sends the run request and a success reply lands the shell in the run session', () => {
+    const ref = makeWsRef();
+    const onStartWorkflow = jest.fn();
+    render(<Dashboard status="Online" wsRef={ref.wsRef} activeWorkspace={null} onStartWorkflow={onStartWorkflow} />);
+    openPicker(ref.wsRef);
+    deliver(ref.handler, 'WORKFLOW_LIST_RESPONSE', { workflows: WORKFLOWS });
+    expect(screen.getByText('Morning research')).toBeInTheDocument();
+    expect(screen.getByText('2 steps')).toBeInTheDocument();
+    expect(screen.getByText('Headlines, then a summary')).toBeInTheDocument();
+    expect(screen.getByText('1 step')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Morning research'));
+    const frames = sentTypes(ref.wsRef);
+    const runFrame = frames.find((f) => f.type === 'WORKFLOW_RUN_REQUEST');
+    expect(runFrame.payload).toEqual({ workflow_id: 'w1' });
+    expect(onStartWorkflow).not.toHaveBeenCalled();
+
+    deliver(ref.handler, 'WORKFLOW_RUN_RESPONSE', {
+      success: true,
+      run: { run_id: 'r1', workflow_id: 'w1', session_id: 'sess-9', status: 'running', current_step: 0, steps: [] },
+    });
+    expect(onStartWorkflow).toHaveBeenCalledTimes(1);
+    expect(onStartWorkflow).toHaveBeenCalledWith('sess-9');
+    expect(screen.queryByTestId('dashboard-workflow-picker')).not.toBeInTheDocument();
+  });
+
+  it('an answered-empty list shows the shared empty state whose action routes to the manager', () => {
+    const ref = makeWsRef();
+    const onCreateWorkflow = jest.fn();
+    render(<Dashboard status="Online" wsRef={ref.wsRef} activeWorkspace={null} onCreateWorkflow={onCreateWorkflow} />);
+    openPicker(ref.wsRef);
+    deliver(ref.handler, 'WORKFLOW_LIST_RESPONSE', { workflows: [] });
+    expect(screen.getByTestId('dashboard-workflow-picker-empty')).toBeInTheDocument();
+    expect(screen.getByText('No workflows yet')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Create your first workflow'));
+    expect(onCreateWorkflow).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed list read shows the error state, never the empty picker', () => {
+    const ref = makeWsRef();
+    render(<Dashboard status="Online" wsRef={ref.wsRef} activeWorkspace={null} />);
+    openPicker(ref.wsRef);
+    deliver(ref.handler, 'WORKFLOW_LIST_RESPONSE', { success: false, error: 'The workflow store is unavailable.' });
+    expect(screen.getByTestId('dashboard-workflow-picker-load')).toBeInTheDocument();
+    expect(screen.getByText('The workflow store is unavailable.')).toBeInTheDocument();
+    expect(screen.queryByText('No workflows yet')).not.toBeInTheDocument();
+  });
+
+  it('a refused run start keeps the picker open with the engine reason and never lands the shell', () => {
+    const ref = makeWsRef();
+    const onStartWorkflow = jest.fn();
+    render(<Dashboard status="Online" wsRef={ref.wsRef} activeWorkspace={null} onStartWorkflow={onStartWorkflow} />);
+    openPicker(ref.wsRef);
+    deliver(ref.handler, 'WORKFLOW_LIST_RESPONSE', { workflows: WORKFLOWS });
+    fireEvent.click(screen.getByText('Inbox sweep'));
+    deliver(ref.handler, 'WORKFLOW_RUN_RESPONSE', { success: false, error: 'That workflow no longer exists.' });
+    expect(screen.getByText('That workflow no longer exists.')).toBeInTheDocument();
+    expect(screen.getByTestId('dashboard-workflow-picker')).toBeInTheDocument();
+    expect(onStartWorkflow).not.toHaveBeenCalled();
   });
 });

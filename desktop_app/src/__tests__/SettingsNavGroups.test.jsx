@@ -37,7 +37,7 @@ const NAV_TEXTS = [
   'Personal', 'Connect', 'System',
   'Profile', 'Memory & Storage', 'Voice Tuning', 'Usage', 'Password Vault', 'Calendar & Reminders', 'Conversation',
   'Models & Tasks', 'API Providers', 'MCP Servers',
-  'Agents', 'Tools', 'Skills', 'Plugins', 'Workspace Indexing', 'Browser Agent', 'Computer Use', 'Capabilities', 'Advanced', 'About',
+  'Agents', 'Tools', 'Skills', 'Plugins', 'Workflows', 'Workspace Indexing', 'Browser Agent', 'Computer Use', 'Capabilities', 'Advanced', 'About',
 ];
 function navOrder() {
   const sidebar = screen.getByText('Password Vault').parentElement;
@@ -55,11 +55,11 @@ describe('Settings nav grouping (S-6)', () => {
       'Connect',
       'Models & Tasks', 'API Providers', 'MCP Servers',
       'System',
-      'Agents', 'Tools', 'Skills', 'Plugins', 'Workspace Indexing', 'Browser Agent', 'Computer Use', 'Capabilities', 'Advanced', 'About',
+      'Agents', 'Tools', 'Skills', 'Plugins', 'Workflows', 'Workspace Indexing', 'Browser Agent', 'Computer Use', 'Capabilities', 'Advanced', 'About',
     ]);
   });
 
-  it('every one of the 20 sections is present exactly once in the nav', () => {
+  it('every one of the 21 sections is present exactly once in the nav', () => {
     renderPanel();
     // Scoped to the sidebar: a section's label can also appear in
     // its own panel's heading (e.g. 'API Providers').
@@ -67,7 +67,7 @@ describe('Settings nav grouping (S-6)', () => {
     const labels = [
       'Profile', 'Memory & Storage', 'Voice Tuning', 'Usage', 'Password Vault', 'Calendar & Reminders', 'Conversation',
       'Models & Tasks', 'API Providers', 'MCP Servers',
-      'Agents', 'Tools', 'Skills', 'Plugins', 'Workspace Indexing', 'Browser Agent', 'Computer Use', 'Capabilities', 'Advanced', 'About',
+      'Agents', 'Tools', 'Skills', 'Plugins', 'Workflows', 'Workspace Indexing', 'Browser Agent', 'Computer Use', 'Capabilities', 'Advanced', 'About',
     ];
     for (const label of labels) {
       expect(within(sidebar).getAllByText(label)).toHaveLength(1);
