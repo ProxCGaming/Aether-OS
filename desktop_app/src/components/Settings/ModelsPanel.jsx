@@ -3,6 +3,7 @@ import Dropdown from '../../Dropdown';
 import ModelPicker from '../ModelPicker';
 import LocalModelsTab from '../../LocalModelsTab';
 import LoadStateRow from './LoadStateRow';
+import LlamaCppPanel from './LlamaCppPanel';
 
 // Wave 5 (Annex C row 7): the Models & Tasks tab, extracted from
 // SettingsPanel.jsx — the shell keeps the config state, the one
@@ -162,20 +163,28 @@ export default function ModelsPanel({ providers, wsRef, safeSend, pendingMessage
       )}
 
       {modelTab === 'local' && (
-         <LocalModelsTab
-           wsRef={wsRef}
-           safeSend={safeSend}
-           pendingMessages={pendingMessages}
-           // Phase 10.3 C2: the active model lives on the providers
-           // array (the provider flagged is_default); LocalModelsTab
-           // needs it to show which downloaded model is Active.
-           defaultProvider={(Array.isArray(providers) ? providers : []).find(p => p.is_default)?.name || ''}
-           defaultModel={(Array.isArray(providers) ? providers : []).find(p => p.is_default)?.default_model || ''}
-           // The configured embedder lives on the applied
-           // config; the tab marks that downloaded row as the
-           // active Embedder.
-           currentEmbedder={engineConfig?.embedding_model || ''}
-         />
+         <>
+           <LocalModelsTab
+             wsRef={wsRef}
+             safeSend={safeSend}
+             pendingMessages={pendingMessages}
+             // Phase 10.3 C2: the active model lives on the providers
+             // array (the provider flagged is_default); LocalModelsTab
+             // needs it to show which downloaded model is Active.
+             defaultProvider={(Array.isArray(providers) ? providers : []).find(p => p.is_default)?.name || ''}
+             defaultModel={(Array.isArray(providers) ? providers : []).find(p => p.is_default)?.default_model || ''}
+             // The configured embedder lives on the applied
+             // config; the tab marks that downloaded row as the
+             // active Embedder.
+             currentEmbedder={engineConfig?.embedding_model || ''}
+           />
+           {/* The second local serving backend: the llama.cpp
+               router section sits under the hub/Ollama tab it
+               complements. The panel owns its LLAMACPP_* reads
+               through the socket context, so it takes no props
+               from here. */}
+           <LlamaCppPanel />
+         </>
       )}
     </div>
   );

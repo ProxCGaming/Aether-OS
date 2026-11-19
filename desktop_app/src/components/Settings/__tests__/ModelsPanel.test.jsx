@@ -6,6 +6,23 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import ModelsPanel from '../ModelsPanel';
+import { useAetherSocket } from '../../../contexts/SocketContext';
+
+// The local tab's hub machinery is stubbed: these tests pin the
+// panel's own composition, and the hub has its own suites. The
+// socket context is mocked so the llama.cpp section (which owns
+// its reads through it) can mount under the local tab.
+jest.mock('../../../LocalModelsTab', () => {
+  const ReactLib = require('react');
+  return {
+    __esModule: true,
+    default: () => ReactLib.createElement('div', { 'data-testid': 'local-models-tab-stub' }),
+  };
+});
+
+jest.mock('../../../contexts/SocketContext', () => ({
+  useAetherSocket: jest.fn(),
+}));
 
 function baseProps(overrides = {}) {
   return {
@@ -69,5 +86,27 @@ describe('ModelsPanel', () => {
   test('a control refusal renders in the tab', () => {
     render(<ModelsPanel {...baseProps({ controlRefusal: 'The reasoning effort change was refused.' })} />);
     expect(screen.getByText('The reasoning effort change was refused.')).toBeInTheDocument();
+  });
+
+  test('the local tab mounts the llama.cpp router section under the hub', () => {
+    const sendMessage = jest.fn();
+    useAetherSocket.mockReturnValue({
+      wsRef: { current: null },
+      sendMessage,
+      isConnected: true,
+    });
+    render(<ModelsPanel {...baseProps()} />);
+    expect(screen.queryByTestId('llamacpp-panel')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Local Models'));
+    expect(screen.getByTestId('local-models-tab-stub')).toBeInTheDocument();
+    expect(screen.getByTestId('llamacpp-panel')).toBeInTheDocument();
+    expect(sendMessage).toHaveBeenCalledWith(
+      'LLAMACPP_STATUS_REQUEST',
+      expect.objectContaining({ payload: {} }),
+    );
+    expect(sendMessage).toHaveBeenCalledWith(
+      'LLAMACPP_MODELS_REQUEST',
+      expect.objectContaining({ payload: {} }),
+    );
   });
 });
