@@ -73,6 +73,10 @@ from aether_engine.routes.ws_mcp_plugins import (
     send_plugin_uninstall_result,
     send_plugin_update_check_result,
 )
+from aether_engine.routes.ws_memory_insights import (
+    send_memory_graph_neighbourhood_result,
+    send_memory_stats_result,
+)
 from aether_engine.routes.ws_memory_media import (
     send_diagnostics_export_result,
     send_local_model_delete_result,
@@ -3423,6 +3427,18 @@ async def _handle_memory_profile_request(conn: WsConnection, msg: Event) -> None
     conn.spawn_background(send_memory_profile_result(
         conn, msg.request_id, msg.payload or {}))
 
+
+async def _handle_memory_stats_request(conn: WsConnection, msg: Event) -> None:
+    conn.spawn_background(send_memory_stats_result(conn, msg.request_id))
+
+
+async def _handle_memory_graph_neighbourhood_request(
+        conn: WsConnection, msg: Event) -> None:
+    payload = msg.payload or {}
+    conn.spawn_background(send_memory_graph_neighbourhood_result(
+        conn, msg.request_id, payload.get("entity_name"),
+        payload.get("depth", 1)))
+
 async def _handle_memory_forget_candidates_request(conn: WsConnection, msg: Event) -> None:
     conn.spawn_background(send_memory_forget_candidates_result(conn, msg.request_id))
 
@@ -4636,6 +4652,8 @@ _DISPATCH: dict[EventType, Callable[[WsConnection, Event], Awaitable[None]]] = {
     EventType.CALENDAR_CREATE_REQUEST: handle_calendar_create_request,
     EventType.CALENDAR_CANCEL_REQUEST: handle_calendar_cancel_request,
     EventType.MEMORY_PROFILE_REQUEST: _handle_memory_profile_request,
+    EventType.MEMORY_STATS_REQUEST: _handle_memory_stats_request,
+    EventType.MEMORY_GRAPH_NEIGHBOURHOOD_REQUEST: _handle_memory_graph_neighbourhood_request,
     EventType.MEMORY_FORGET_CANDIDATES_REQUEST: _handle_memory_forget_candidates_request,
     EventType.MEMORY_FORGET_EXECUTE_REQUEST: _handle_memory_forget_execute_request,
     EventType.MEMORY_FORGET_UNDO_REQUEST: _handle_memory_forget_undo_request,

@@ -31,10 +31,13 @@ import json
 from aether_common.contracts import Event, EventType
 from aether_engine.routes import websocket, ws_connection, ws_task_exec
 
-# Every event type the pre-slice if/elif chain dispatched on
-# (123 branches; three are membership tests over a pair, hence
-# 126 types). STEER_TASK is deliberately absent: the receive
-# loop's pre-pass handles it before the table is consulted.
+# Every event type the dispatch table resolves. This began as
+# the pre-slice if/elif chain's set (123 branches; three are
+# membership tests over a pair, hence 126 types) and is
+# regenerated from the live table whenever a wave adds handlers
+# (last regenerated 19 Nov 2026 for Full Furnish: 151 types).
+# STEER_TASK is deliberately absent: the receive loop's pre-pass
+# handles it before the table is consulted.
 DISPATCHED_TYPES = (
     "AGENT_LIST_REQUEST",
     "AGENT_ROUTING_REQUEST",
@@ -50,6 +53,9 @@ DISPATCHED_TYPES = (
     "BROWSER_POLICY_GET_REQUEST",
     "BROWSER_POLICY_SET_REQUEST",
     "BROWSER_TASK_PAUSE_REQUEST",
+    "CALENDAR_CANCEL_REQUEST",
+    "CALENDAR_CREATE_REQUEST",
+    "CALENDAR_LIST_REQUEST",
     "CANCEL_TASK",
     "CAPABILITY_CHECK_GET_HISTORY",
     "CAPABILITY_CHECK_RUN_NOW",
@@ -71,6 +77,7 @@ DISPATCHED_TYPES = (
     "LOCAL_MODEL_DOWNLOAD_CANCEL",
     "LOCAL_MODEL_DOWNLOAD_START",
     "LOCAL_MODEL_LIST_REQUEST",
+    "LOCAL_MODEL_UNLOAD_REQUEST",
     "MACHINE_CAPABILITY_REQUEST",
     "MCP_PROMPT_LIST_REQUEST",
     "MCP_PROMPT_RUN_REQUEST",
@@ -82,12 +89,12 @@ DISPATCHED_TYPES = (
     "MCP_SERVER_LIST_REQUEST",
     "MCP_SERVER_REMOVE_REQUEST",
     "MCP_SERVER_TEST_REQUEST",
+    "MCP_SERVER_UPDATE_CHECK_REQUEST",
     "MCP_SERVER_UPDATE_REQUEST",
     "MEDIA_DELETE_REQUEST",
     "MEDIA_LIST_REQUEST",
     "MEDIA_METADATA_UPDATE_REQUEST",
     "MEDIA_SEARCH_REQUEST",
-    "CALENDAR_LIST_REQUEST",
     "MEMORY_BACKENDS_REQUEST",
     "MEMORY_ENTITY_DELETE_REQUEST",
     "MEMORY_EPISODES_CLEAR_REQUEST",
@@ -96,8 +103,15 @@ DISPATCHED_TYPES = (
     "MEMORY_EXPORT_REQUEST",
     "MEMORY_FACT_DELETE_REQUEST",
     "MEMORY_FACT_UPDATE_REQUEST",
+    "MEMORY_FORGET_CANDIDATES_REQUEST",
+    "MEMORY_FORGET_EXECUTE_REQUEST",
+    "MEMORY_FORGET_HISTORY_REQUEST",
+    "MEMORY_FORGET_UNDO_REQUEST",
     "MEMORY_GRAPH_CLEAR_REQUEST",
+    "MEMORY_GRAPH_NEIGHBOURHOOD_REQUEST",
     "MEMORY_GRAPH_REQUEST",
+    "MEMORY_PROFILE_REQUEST",
+    "MEMORY_STATS_REQUEST",
     "MODEL_HUB_DELETE_REQUEST",
     "MODEL_HUB_DETAIL_REQUEST",
     "MODEL_HUB_DOWNLOADED_REQUEST",
@@ -111,6 +125,7 @@ DISPATCHED_TYPES = (
     "PLUGIN_LIST_REQUEST",
     "PLUGIN_TOGGLE_REQUEST",
     "PLUGIN_UNINSTALL_REQUEST",
+    "PLUGIN_UPDATE_CHECK_REQUEST",
     "PROJECT_CONFIG_GET_REQUEST",
     "PROJECT_CONFIG_UPDATE_REQUEST",
     "PROVIDER_LIST_REQUEST",
@@ -135,7 +150,10 @@ DISPATCHED_TYPES = (
     "SESSION_SEARCH_REQUEST",
     "SESSION_TRUNCATE_REQUEST",
     "SETTINGS_PROVIDER_VALIDATE_REQUEST",
+    "SKILL_INSTALL_PREPARE_REQUEST",
+    "SKILL_INSTALL_REQUEST",
     "SKILL_LIST_REQUEST",
+    "SKILL_SEARCH_REQUEST",
     "SKILL_TOGGLE_REQUEST",
     "SLASH_COMMAND_LIST_REQUEST",
     "START_TASK",
@@ -145,6 +163,7 @@ DISPATCHED_TYPES = (
     "TASK_REWIND_UNDO_REQUEST",
     "TOOL_APPROVAL_GRANTED",
     "TOOL_APPROVAL_REJECTED",
+    "TOOL_ENABLED_SET_REQUEST",
     "TOOL_LIST_REQUEST",
     "TOOL_POLICY_SET_REQUEST",
     "USAGE_LEDGER_QUERY_REQUEST",
@@ -158,6 +177,7 @@ DISPATCHED_TYPES = (
     "VAULT_TOTP_SAVE_REQUEST",
     "VERSION_CHECK_REQUEST",
     "VOICE_PLAYBACK_PROGRESS",
+    "VOICE_PREVIEW_REQUEST",
     "VOICE_RTC_ICE_REQUEST",
     "VOICE_RTC_OFFER_REQUEST",
     "VOICE_SESSION_START_REQUEST",
@@ -169,7 +189,7 @@ DISPATCHED_TYPES = (
     "WORKSPACE_INDEX_STATUS_REQUEST",
     "WORKSPACE_LIST_REQUEST",
     "WORKSPACE_REMOVE_REQUEST",
-    "WORKSPACE_SET_ACTIVE_REQUEST"
+    "WORKSPACE_SET_ACTIVE_REQUEST",
 )
 
 
@@ -271,7 +291,7 @@ class TestDispatchTable:
         assert d[EventType.PROJECT_CONFIG_GET_REQUEST] is \
             d[EventType.PROJECT_CONFIG_UPDATE_REQUEST]
 
-    def test_handlers_are_coroutine_functions_131_distinct(self):
+    def test_handlers_are_coroutine_functions_148_distinct(self):
         handlers = list(websocket._DISPATCH.values())
         assert all(inspect.iscoroutinefunction(h) for h in handlers)
         # 123 at the Wave 5 split; +1 for the calendar layer's
@@ -284,8 +304,16 @@ class TestDispatchTable:
         # agent routing report handler (master build S14,
         # 14 Nov 2026); +2 for the desktop control lane and
         # remembered-grants handlers (master build S20,
-        # 14 Nov 2026).
-        assert len(set(handlers)) == 131
+        # 14 Nov 2026). Full Furnish (Nov 2026) then added the
+        # voice preview, local-model unload, tool enable/disable,
+        # MCP/plugin update checks, skill search/install, calendar
+        # create/cancel and the SPEC-6B memory reads (profile,
+        # forget x4, stats, graph neighbourhood) — the table now
+        # carries 151 types over 148 distinct handlers (the three
+        # membership pairs above still share theirs). The list and
+        # count were regenerated from the live table on 19 Nov
+        # 2026; the pin had been stale since the master build.
+        assert len(set(handlers)) == 148
 
 
 class _FakeSocket:
