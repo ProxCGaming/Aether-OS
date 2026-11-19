@@ -50,6 +50,10 @@ dependencies = [
     "aiortc==1.15.0",
     "publicsuffix2==2.20191221",
     "playwright==1.64.1",
+    "llama-index-core==0.14.26",
+    "llama-index-readers-file==0.8.0",
+    "llama-index-retrievers-bm25==0.9.0",
+    "docx2txt==0.9",
 ]
 
 # Skill registry CLI (Epic 7, E7-F09; addendum omp #28): install /

@@ -81,6 +81,10 @@ async def test_plan_mode_offers_only_read_only_tools(monkeypatch):
         # Epic 8, E8-4.3: media_recall is READ_ONLY media-index
         # retrieval, offered on the same basis.
         "media_recall",
+        # P4d (orchestration programme): search_knowledge_base is
+        # READ_ONLY knowledge-collection retrieval, offered on the
+        # same basis.
+        "search_knowledge_base",
         # Calendar layer (14 Nov 2026): list_events is READ_ONLY
         # diary retrieval, offered on the same basis; its WRITE
         # siblings (add_event / cancel_event) stay out of plan mode.

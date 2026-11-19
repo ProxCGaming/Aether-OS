@@ -131,6 +131,15 @@ def build_tool_registry(
     from aether_engine.tools.media_recall import create_media_recall_tool
 
     registry.register(create_media_recall_tool())
+    # P4d (orchestration programme): deliberate retrieval over the
+    # owner's knowledge collections (knowledge/). READ_ONLY and
+    # self-limiting — with nothing indexed it answers "nothing
+    # indexed" instead of failing.
+    from aether_engine.tools.knowledge_search import (
+        create_search_knowledge_base_tool,
+    )
+
+    registry.register(create_search_knowledge_base_tool())
     # Calendar layer (14 Nov 2026): the schedule tools — add / list /
     # cancel over ~/.aether/calendar.db. WRITE tools ride the same
     # policy + approval pipeline as every other built-in.
