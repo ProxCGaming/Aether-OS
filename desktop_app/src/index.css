@@ -1,4 +1,27 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* S-11 — bundled fonts (were a remote Google Fonts @import; the
+   app now paints in Inter with the network off, and the CSP no
+   longer whitelists the Google font origins). Both families ship
+   as the variable fonts the css2 API itself serves today — one
+   file per family, its wght axis covering every weight the old
+   import requested (Inter 300–600 of its 100–900 axis; JetBrains
+   Mono 400–600 of its 400–800 axis). Files: src/assets/fonts/,
+   downloaded from fonts.gstatic.com (Inter v20, JetBrains
+   Mono v24, latin subset). */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 300 600;
+  font-display: swap;
+  src: url('./assets/fonts/inter.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('./assets/fonts/jetbrains-mono.woff2') format('woff2');
+}
 
 :root {
   /* Wave 4: --bg-color was removed — grep proves no var()

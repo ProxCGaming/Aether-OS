@@ -15,8 +15,23 @@
    shell panel and list buttons moved to the solid family in
    index.css, .ios-glass-input is solid under its existing name
    (see its block), and .ios-close-btn was removed — its last
-   consumers are solid now and grep proved no others exist. */
-.aether-glass {
+   consumers are solid now and grep proved no others exist.
+   Full Furnish FF1-12 (Wave 7): the recipe now lives in EXACTLY
+   ONE rule — the grouped selector below. .aether-glass is the
+   canonical class (JSX floating layers carry it directly);
+   .ios-glass is the same recipe under the legacy name the chat
+   window root and dropdown menu already use, plus its position /
+   transition / hover deltas in the small rule after. The chat
+   chrome classes that used to re-state the whole recipe block
+   (.step-menu, .rewind-confirm-dialog, .rewind-undo-toast,
+   .ios-context-menu, .ios-copy-toast) are grouped into the one
+   rule too; their own blocks keep only their extra declarations
+   (the undo toast / copy toast keep border-radius: 999px there —
+   later in the file, so it still wins). The modal scrim recipe
+   (dark wash + blur 6) is likewise defined once, as .aether-scrim
+   below, shared with .rewind-confirm-overlay. */
+.aether-glass, .ios-glass, .step-menu, .rewind-confirm-dialog,
+.rewind-undo-toast, .ios-context-menu, .ios-copy-toast {
   background-color: rgba(16, 16, 18, 0.66);
   background-image: none;
   backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
@@ -26,20 +41,27 @@
   border-radius: var(--radius-lg);
 }
 
+/* .ios-glass deltas: the chat window root and dropdown menu sit
+   in flow and animate their border on hover; the pure recipe
+   above is all .aether-glass carries. */
 .ios-glass {
   position: relative;
-  background-color: rgba(16, 16, 18, 0.66);
-  background-image: none;
-  backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
-  -webkit-backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
-  border: 1px solid var(--glass-edge);
-  box-shadow: inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45);
-  border-radius: var(--radius-lg);
   transition: border-color var(--motion-base) ease;
 }
 
 .ios-glass:hover {
   border-color: rgba(255, 255, 255, 0.32);
+}
+
+/* The modal scrim: a dark wash with a light blur, behind every
+   centred dialog (CommandPalette, media delete/detail, re-index
+   warning, shortcuts, rewind confirm). One definition — JSX
+   overlays carry .aether-scrim; .rewind-confirm-overlay is
+   grouped in and keeps its layout declarations in its own block. */
+.aether-scrim, .rewind-confirm-overlay {
+  background: rgba(5, 5, 6, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
 }
 
 /* Full Furnish S-1: every consumer of this class is a permanent
@@ -178,19 +200,15 @@
   background: var(--bg-hover);
 }
 
+/* Glass recipe: the grouped .aether-glass rule at the top of
+   this file (FF1-12) — this block keeps only the menu's own
+   layout declarations. */
 .step-menu {
   position: absolute;
   top: 22px;
   right: 0;
   min-width: 230px;
   max-width: 300px;
-  background-color: rgba(16, 16, 18, 0.66);
-  background-image: none;
-  backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
-  -webkit-backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
-  border: 1px solid var(--glass-edge);
-  box-shadow: inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45);
-  border-radius: var(--radius-lg);
   padding: 10px;
   z-index: 30;
   text-align: left;
@@ -248,12 +266,12 @@
 }
 
 /* Epic 8, E8-1.1b: rewind confirmation modal + 5-second undo toast. */
+/* Scrim wash/blur: the grouped .aether-scrim rule at the top of
+   this file (FF1-12); glass recipe for the dialog: the grouped
+   .aether-glass rule. Both blocks keep only their own layout. */
 .rewind-confirm-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(5, 5, 6, 0.55);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -261,13 +279,6 @@
 }
 
 .rewind-confirm-dialog {
-  background-color: rgba(16, 16, 18, 0.66);
-  background-image: none;
-  backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
-  -webkit-backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
-  border: 1px solid var(--glass-edge);
-  box-shadow: inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45);
-  border-radius: var(--radius-lg);
   padding: 20px 22px;
   max-width: 440px;
   width: calc(100% - 48px);
@@ -335,12 +346,8 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  background-color: rgba(16, 16, 18, 0.66);
-  background-image: none;
-  backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
-  -webkit-backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
-  border: 1px solid var(--glass-edge);
-  box-shadow: inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45);
+  /* Glass recipe: the grouped .aether-glass rule (FF1-12); the
+     pill radius below overrides its --radius-lg. */
   border-radius: 999px;
   padding: 8px 8px 8px 16px;
   font-size: 12px;
@@ -594,13 +601,8 @@
   position: fixed;
   z-index: 99999;
   min-width: 175px;
-  background-color: rgba(16, 16, 18, 0.66);
-  background-image: none;
-  backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
-  -webkit-backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
-  border: 1px solid var(--glass-edge);
-  box-shadow: inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45);
-  border-radius: var(--radius-lg);
+  /* Glass recipe: the grouped .aether-glass rule at the top of
+     this file (FF1-12). */
   padding: 5px;
   animation: contextMenuFadeIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
   user-select: none;
@@ -667,12 +669,8 @@
   left: 50%;
   transform: translateX(-50%);
   z-index: 100000;
-  background-color: rgba(16, 16, 18, 0.66);
-  background-image: none;
-  backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
-  -webkit-backdrop-filter: blur(16px) saturate(140%) url(#aether-glass-refraction);
-  border: 1px solid var(--glass-edge);
-  box-shadow: inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45);
+  /* Glass recipe: the grouped .aether-glass rule (FF1-12); the
+     pill radius below overrides its --radius-lg. */
   border-radius: 999px;
   color: var(--text-primary);
   padding: 8px 16px;

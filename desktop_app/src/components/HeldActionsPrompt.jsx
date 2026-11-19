@@ -46,6 +46,7 @@ export default function HeldActionsPrompt() {
       role="alertdialog"
       aria-label="Confirm queued actions"
       data-testid="held-actions-prompt"
+      className="aether-glass"
       style={{
         position: 'fixed',
         left: '20px',
@@ -53,14 +54,11 @@ export default function HeldActionsPrompt() {
         zIndex: 300,
         width: '340px',
         maxWidth: 'calc(100vw - 40px)',
-        background: 'rgba(16, 16, 18, 0.66)',
-        backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-        WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        // The accent border is this prompt's variant — it stays
+        // inline and overrides the glass class's edge border.
         border: '1px solid rgba(var(--accent-rgb), 0.45)',
-        borderRadius: 'var(--radius-lg)',
         padding: '14px 16px',
         color: 'var(--text-primary)',
-        boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
       }}
     >
       <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--accent)', marginBottom: '6px' }}>

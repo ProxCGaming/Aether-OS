@@ -2212,8 +2212,8 @@ function AppContent() {
         <CommandPalette open={paletteOpen} items={paletteItems} onClose={() => setPaletteOpen(false)} isConnected={isConnected} />
       )}
       {!isFloating && shortcutsOpen && (
-        <div data-testid="shortcuts-dialog" style={{ position: 'fixed', inset: 0, background: 'rgba(5, 5, 6, 0.55)', backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 205 }} onClick={() => setShortcutsOpen(false)}>
-          <div style={{ background: 'rgba(16, 16, 18, 0.66)', backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)', WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)', border: '1px solid var(--glass-edge)', borderRadius: 'var(--radius-lg)', boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)', padding: '24px', width: '380px', maxWidth: '92vw', color: 'var(--text-primary)' }} onClick={(e) => e.stopPropagation()}>
+        <div data-testid="shortcuts-dialog" className="aether-scrim" style={{ position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 205 }} onClick={() => setShortcutsOpen(false)}>
+          <div className="aether-glass" style={{ padding: '24px', width: '380px', maxWidth: '92vw', color: 'var(--text-primary)' }} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ margin: '0 0 14px 0' }}>Keyboard shortcuts</h3>
             {[
               ['Ctrl+K', 'Command palette'],

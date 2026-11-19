@@ -44,20 +44,15 @@ export default function ChatComposer({
   return (
     <div style={{ padding: '16px', background: 'var(--bg-raised)', borderTop: '1px solid var(--border-default)', position: 'relative' }}>
       {showSlashPopup && filteredCommands.length > 0 && (
-        <div 
+        <div
           ref={slashPopupRef}
-          className="chat-scroll"
+          className="chat-scroll aether-glass"
           style={{
             position: 'absolute',
             bottom: '100%',
             left: '16px',
             right: '16px',
             marginBottom: '8px',
-            background: 'rgba(16, 16, 18, 0.66)',
-            backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-            WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-            border: '1px solid var(--glass-edge)',
-            borderRadius: 'var(--radius-lg)',
             padding: '8px',
             display: 'flex',
             flexDirection: 'column',
@@ -65,7 +60,6 @@ export default function ChatComposer({
             maxHeight: '200px',
             overflowY: 'auto',
             zIndex: 100,
-            boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)'
           }}
         >
           {filteredCommands.map((cmd, idx) => (

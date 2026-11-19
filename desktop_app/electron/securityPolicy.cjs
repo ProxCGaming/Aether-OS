@@ -62,13 +62,12 @@ const { isTrustedSenderUrl, DEV_ORIGIN } = require('./ipcValidation.cjs');
  * The production policy. Every non-'self' source is tied to a
  * feature that provably needs it:
  *
- *   style-src https://fonts.googleapis.com
- *     src/index.css line 1 @imports the Inter stylesheet from
- *     Google Fonts; the @import is a style fetch.
- *   font-src https://fonts.gstatic.com
- *     The font files that stylesheet references are served from
- *     this origin. These two are the ONLY remote origins the
- *     renderer bundle uses anywhere.
+ *   (No remote origins at all. Until S-11 this policy whitelisted
+ *     fonts.googleapis.com in style-src and fonts.gstatic.com in
+ *     font-src for the Google Fonts @import in src/index.css; the
+ *     fonts are bundled now — src/assets/fonts/, @font-face in
+ *     src/index.css — so both origins are gone and the renderer
+ *     bundle uses NO remote origin anywhere.)
  *   img-src data:
  *     Snip captures arrive as data:image/png URLs (SnipOverlay),
  *     chat attachments carry data URIs (att.data in
@@ -123,8 +122,8 @@ function buildContentSecurityPolicy({ isDev = false, devOrigin = DEV_ORIGIN } = 
   const directives = [
     ['default-src', ["'self'"]],
     ['script-src', isDev ? ["'self'", "'unsafe-inline'", "'unsafe-eval'"] : ["'self'"]],
-    ['style-src', ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com']],
-    ['font-src', ["'self'", 'https://fonts.gstatic.com']],
+    ['style-src', ["'self'", "'unsafe-inline'"]],
+    ['font-src', ["'self'"]],
     ['img-src', ["'self'", 'data:', 'blob:', 'file:']],
     ['connect-src', isDev ? ["'self'", devOrigin.replace(/^http/, 'ws')] : ["'self'"]],
     ['frame-src', ["'self'"]],

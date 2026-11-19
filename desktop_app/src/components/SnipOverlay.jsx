@@ -142,7 +142,12 @@ export default function SnipOverlay({ isOpen, onCapture, onCancel, onError }) {
         flexDirection: 'column',
       }}
     >
-      {/* Top Banner Toolbar */}
+      {/* Top Banner Toolbar — FF1-12 exception: this bar keeps the
+          backdrop recipe inline on purpose. It is a full-width bar,
+          not a floating panel: it has no border (only a bottom
+          edge), no shadow and no radius, and the shared
+          .aether-glass class would add all three. The recipe
+          values below match the class exactly. */}
       <div
         style={{
           display: 'flex',

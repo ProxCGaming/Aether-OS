@@ -76,23 +76,18 @@ export default function CostHeaderPopover({ tasks = [], totalCostUsd = 0, runnin
   return (
     <div
       data-testid="cost-popover"
+      className="aether-glass"
       style={{
         position: 'absolute',
         top: '100%',
         right: 0,
         marginTop: '6px',
-        background: 'rgba(16, 16, 18, 0.66)',
-        backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-        WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-        border: '1px solid var(--glass-edge)',
-        borderRadius: 'var(--radius-lg)',
         padding: '10px 12px',
         minWidth: '320px',
         maxWidth: '380px',
         maxHeight: '60vh',
         overflowY: 'auto',
         zIndex: 1100,
-        boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
         color: 'var(--text-primary)',
         fontSize: '12px',
       }}

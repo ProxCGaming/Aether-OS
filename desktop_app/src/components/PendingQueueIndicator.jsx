@@ -17,14 +17,15 @@ export default function PendingQueueIndicator() {
   return (
     <div
       role="status"
+      className="aether-glass"
       style={{
         position: 'fixed',
         left: '20px',
         bottom: '20px',
         zIndex: 200,
-        background: 'rgba(16, 16, 18, 0.66)',
-        backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-        WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
+        // Pill shape, accent border and the specular-only shadow
+        // are this indicator's variants — they stay inline and
+        // override the glass class's edge / radius / shadow.
         border: '1px solid rgba(var(--accent-rgb), 0.35)',
         boxShadow: 'inset 0 1px 0 var(--glass-specular)',
         color: 'var(--accent)',

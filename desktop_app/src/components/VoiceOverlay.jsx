@@ -101,6 +101,7 @@ export default function VoiceOverlay({
   return (
     <div
       data-testid="voice-overlay"
+      className="aether-glass"
       style={{
         position: 'absolute',
         left: '50%',
@@ -109,14 +110,11 @@ export default function VoiceOverlay({
         zIndex: 1200,
         minWidth: '320px',
         maxWidth: '520px',
-        background: 'rgba(16, 16, 18, 0.66)',
-        backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-        WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-        border: '1px solid var(--glass-edge)',
+        // Pill radius stays inline — it overrides the glass
+        // class's --radius-lg.
         borderRadius: '999px',
         padding: '16px 18px',
         color: 'var(--text-primary)',
-        boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
       }}
     >
       {/* S3-M2: the waveform/mic-dot keyframes live in src/index.css,

@@ -89,17 +89,19 @@ describe('S3-M2 CSP: production policy', () => {
     // more, with per-render dynamic contents, so hashes cannot
     // cover them. Without this, the home graph view and diagram
     // rendering break. It grants inline STYLE, never script.
-    expect(map['style-src']).toEqual(["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com']);
+    expect(map['style-src']).toEqual(["'self'", "'unsafe-inline'"]);
   });
 
-  it('allows exactly the remote origins the app provably uses (Google Fonts)', () => {
-    // src/index.css line 1: @import url('https://fonts.googleapis.com/…')
-    // loads the stylesheet; the font files themselves are served
-    // from fonts.gstatic.com. No other remote origin is used by
-    // the renderer bundle.
-    expect(map['font-src']).toEqual(["'self'", 'https://fonts.gstatic.com']);
+  it('allows no remote origins at all — the fonts are bundled (S-11)', () => {
+    // Until S-11 the renderer loaded Inter / JetBrains Mono from
+    // Google Fonts (fonts.googleapis.com stylesheet +
+    // fonts.gstatic.com files), the only two remote origins this
+    // policy ever carried. The fonts ship in the bundle now
+    // (src/assets/fonts/, @font-face in src/index.css), so the
+    // policy is 'self'-only in every directive.
+    expect(map['font-src']).toEqual(["'self'"]);
     const remote = Object.values(map).flat().filter((s) => /^https?:/.test(s));
-    expect(remote.sort()).toEqual(['https://fonts.googleapis.com', 'https://fonts.gstatic.com']);
+    expect(remote).toEqual([]);
   });
 
   it('allows the image sources the UI provably renders', () => {

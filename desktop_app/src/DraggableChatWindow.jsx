@@ -1806,21 +1806,17 @@ export default function DraggableChatWindow({
               {showStepPicker && (
                 <div
                   data-testid="step-picker"
+                  className="aether-glass"
                   style={{
                     position: 'absolute',
                     top: '100%',
                     right: 0,
                     marginTop: '6px',
-                    background: 'rgba(16, 16, 18, 0.66)',
-                    backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)', WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-                    border: '1px solid var(--glass-edge)',
-                    borderRadius: 'var(--radius-lg)',
                     padding: '6px',
                     minWidth: '340px',
                     maxHeight: '340px',
                     overflowY: 'auto',
-                    zIndex: 1100,
-                    boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)'
+                    zIndex: 1100
                   }}
                 >
                   {stepPickerEntries.length > 0 ? (
@@ -1913,19 +1909,14 @@ export default function DraggableChatWindow({
                 <Download size={14} />
               </button>
               {showExportMenu && (
-                <div style={{
+                <div className="aether-glass" style={{
                   position: 'absolute',
                   top: '100%',
                   right: 0,
                   marginTop: '6px',
-                  background: 'rgba(16, 16, 18, 0.66)',
-                  backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)', WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-                  border: '1px solid var(--glass-edge)',
-                  borderRadius: 'var(--radius-lg)',
                   padding: '4px',
                   minWidth: '140px',
-                  zIndex: 1100,
-                  boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)'
+                  zIndex: 1100
                 }}>
                   <button
                     onClick={() => { setShowExportMenu(false); onExportSession('markdown'); }}

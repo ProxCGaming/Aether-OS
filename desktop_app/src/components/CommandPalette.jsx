@@ -239,8 +239,9 @@ export default function CommandPalette({ open, items = [], onClose, isConnected 
   return (
     <div
       data-testid="command-palette"
+      className="aether-scrim"
       style={{
-        position: 'fixed', inset: 0, background: 'rgba(5, 5, 6, 0.55)', backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)',
+        position: 'fixed', inset: 0,
         display: 'flex', justifyContent: 'center', alignItems: 'flex-start',
         paddingTop: '12vh', zIndex: 210,
       }}
@@ -251,11 +252,9 @@ export default function CommandPalette({ open, items = [], onClose, isConnected 
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
+        className="aether-glass"
         style={{
-          width: '560px', maxWidth: '92vw', background: 'rgba(16, 16, 18, 0.66)',
-          backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)', WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-          border: '1px solid var(--glass-edge)', borderRadius: 'var(--radius-lg)',
-          boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
+          width: '560px', maxWidth: '92vw',
           overflow: 'hidden', color: 'var(--text-primary)',
         }}
         onClick={(e) => e.stopPropagation()}

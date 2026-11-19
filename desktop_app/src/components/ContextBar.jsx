@@ -121,20 +121,17 @@ export function CompactContextBar({ breakdown, defaultModel = '', onClick }) {
   );
 }
 
+// Glass surface (background, backdrop filter, border, radius,
+// shadow) comes from the shared .aether-glass class (chat.css,
+// FF1-12); this object carries only the panel's own layout.
 const panelStyle = {
   position: 'absolute',
   top: '100%',
   right: 0,
   marginTop: '6px',
-  background: 'rgba(16, 16, 18, 0.66)',
-  backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-  WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-  border: '1px solid var(--glass-edge)',
-  borderRadius: 'var(--radius-lg)',
   padding: '12px 14px',
   minWidth: '340px',
   maxWidth: '400px',
-  boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)',
   color: 'var(--text-primary)',
   fontSize: '12px',
   zIndex: 1100,
@@ -158,7 +155,7 @@ export default function ContextBar({ breakdown = null, defaultModel = '' }) {
   // default model's name.
   if (breakdown == null) {
     return (
-      <div data-testid="context-bar-panel" style={panelStyle}>
+      <div data-testid="context-bar-panel" className="aether-glass" style={panelStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <Layers size={14} style={{ color: '#F5B942' }} />
@@ -181,6 +178,7 @@ export default function ContextBar({ breakdown = null, defaultModel = '' }) {
   return (
     <div
       data-testid="context-bar-panel"
+      className="aether-glass"
       style={panelStyle}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>

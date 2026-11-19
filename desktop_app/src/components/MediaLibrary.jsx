@@ -807,33 +807,26 @@ export default function MediaLibrary({
       {deleteTarget && (
         <div
           data-testid="delete-confirm-modal"
+          className="aether-scrim"
           style={{
             position: 'fixed',
             inset: 0,
-            background: 'rgba(5, 5, 6, 0.55)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             zIndex: 1100,
-            backdropFilter: 'blur(6px)',
-            WebkitBackdropFilter: 'blur(6px)'
           }}
           onClick={() => setDeleteTarget(null)}
         >
           <div
+            className="aether-glass"
             style={{
-              background: 'rgba(16, 16, 18, 0.66)',
-              backdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-              WebkitBackdropFilter: 'blur(16px) saturate(140%) url(#aether-glass-refraction)',
-              border: '1px solid var(--glass-edge)',
-              borderRadius: 'var(--radius-lg)',
               width: '420px',
               maxWidth: '90vw',
               padding: '24px',
               display: 'flex',
               flexDirection: 'column',
               gap: '16px',
-              boxShadow: 'inset 0 1px 0 var(--glass-specular), 0 16px 40px rgba(0, 0, 0, 0.45)'
             }}
             onClick={(e) => e.stopPropagation()}
           >
