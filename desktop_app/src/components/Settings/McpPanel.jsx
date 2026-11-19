@@ -9,6 +9,7 @@ import CapabilityFilterBar from './CapabilityFilterBar';
 import CapabilityItem from './CapabilityItem';
 import { capabilityFilterCounts, filterCapabilityItems } from './capabilityFilter';
 import { parseServerJson } from './mcpServerJson';
+import { ENABLE_TOGGLE_TYPES, pendingEnableChange, queuedEnableVerb } from './capabilityEnable';
 
 // Header / env editors (add form and edit form) model pairs as a
 // list of {key, value} rows so a server can carry any number of
@@ -139,7 +140,7 @@ function McpRunCard({ name, config, mode, confirmLabel, onConfirm, onCancel }) {
 }
 
 export default function McpPanel({ activeSession = null }) {
-  const { wsRef, sendMessage, isConnected } = useAetherSocket();
+  const { wsRef, sendMessage, isConnected, safeSend, pendingMessages } = useAetherSocket();
   // Wave 3 slice 1 (RUX-C-06, under the RUX-C-01 umbrella): the
   // server list tracks whether its engine answer has arrived.
   // Until then the section renders a load state (loading / offline
@@ -925,12 +926,18 @@ export default function McpPanel({ activeSession = null }) {
                     <input
                       type="checkbox"
                       checked={config.enabled !== false}
-                      onChange={(e) => sendMessage('MCP_SERVER_UPDATE_REQUEST', { schema_version: 1, request_id: Date.now().toString(), payload: { name, enabled: e.target.checked } })}
+                      disabled={Boolean(pendingEnableChange(pendingMessages, ENABLE_TOGGLE_TYPES.mcpServer, 'name', name))}
+                      onChange={(e) => safeSend('MCP_SERVER_UPDATE_REQUEST', { name, enabled: e.target.checked })}
                       style={{ marginRight: '6px', accentColor: 'var(--accent)' }}
                     />
                     Enabled
                   </label>
                 </div>
+                {pendingEnableChange(pendingMessages, ENABLE_TOGGLE_TYPES.mcpServer, 'name', name) && (
+                  <div style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '6px' }}>
+                    {queuedEnableVerb(pendingEnableChange(pendingMessages, ENABLE_TOGGLE_TYPES.mcpServer, 'name', name))} queued — will apply when the engine reconnects
+                  </div>
+                )}
                 {(mcpResources[name] || []).length > 0 && (
                   <div style={{ marginTop: '12px' }}>
                     <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '6px' }}>Resources:</div>
