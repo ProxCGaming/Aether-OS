@@ -235,6 +235,17 @@ class UserConfig:
     subagent_timeout_s: int = 120
     subagent_token_budget: int = 20000
     subagent_cost_budget_usd: float = 0.0
+    # Orchestration programme P4c: per-run budget for the GPT
+    # Researcher backend behind the researcher's deep_research tool
+    # (langgraph/backends/researcher_gpt.py). Modelled on the S13
+    # cost budget above: a PER-RUN cap in USD, judged from the
+    # library's own recorded costs between its research and report
+    # stages; 0 (the default) disables the budget, in which case the
+    # wrapper's stage caps (iteration limits in the library config)
+    # are the only bound and the tool result says so. P1e's
+    # per-delegation budget, when it lands, supersedes this field as
+    # the budget source; the wrapper reads it through one resolver.
+    deep_research_cost_budget_usd: float = 0.0
     # Master build S14: automatic per-agent model routing
     # (langgraph/model_routing.py). "off" (the default) is today's
     # behaviour exactly: an agent_models pin wins, "inherit" falls
@@ -511,6 +522,7 @@ class UserConfig:
             "subagent_timeout_s": self.subagent_timeout_s,
             "subagent_token_budget": self.subagent_token_budget,
             "subagent_cost_budget_usd": self.subagent_cost_budget_usd,
+            "deep_research_cost_budget_usd": self.deep_research_cost_budget_usd,
             "model_routing": self.model_routing,
             "agent_output_schemas": self.agent_output_schemas,
             "prewalk_agents": self.prewalk_agents,
@@ -656,6 +668,7 @@ class UserConfig:
             subagent_timeout_s=_as_int(d.get("subagent_timeout_s"), 120),
             subagent_token_budget=_as_int(d.get("subagent_token_budget"), 20000),
             subagent_cost_budget_usd=_as_float(d.get("subagent_cost_budget_usd"), 0.0),
+            deep_research_cost_budget_usd=_as_float(d.get("deep_research_cost_budget_usd"), 0.0),
             model_routing=d.get("model_routing") if d.get("model_routing") in ("off", "auto") else "off",
             agent_output_schemas=_as_dict(d.get("agent_output_schemas")),
             prewalk_agents=d.get("prewalk_agents") if isinstance(d.get("prewalk_agents"), list) else [],

@@ -334,6 +334,7 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
         })
 
     executed_write = False
+    deep_research_log_entry = None
     if not registry:
         result_text = f"Error: No tool registry provided to graph. Cannot execute {tool_name}."
     else:
@@ -425,6 +426,24 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
                 final_args_gate=final_args_gate,
             )
             result_text = json.dumps(result) if not isinstance(result, str) else (result or f"Tool {tool_name} completed.")
+            # Orchestration programme P4c: a deep_research run
+            # records its sources in the delegation log — the audit
+            # trail for the heavy backend (which retriever ran, what
+            # it read, what it cost, where the report artifact
+            # lives). The entry's shape is owned by the backend
+            # module; it carries no "decision" key, so every existing
+            # log reader skips it, exactly like the P2c
+            # offered-vs-called entries.
+            if tool_name == "deep_research":
+                try:
+                    from aether_engine.langgraph.backends.researcher_gpt import (
+                        delegation_log_entry,
+                    )
+
+                    deep_research_log_entry = delegation_log_entry(
+                        json.loads(result_text), state.get("active_specialist"))
+                except Exception:  # noqa: BLE001 — an unparseable result leaves no entry; the tool message itself is unaffected
+                    deep_research_log_entry = None
             # E1-13 prewalk marker: only a tool that actually executed
             # counts, and only if it can change something.
             try:
@@ -715,6 +734,8 @@ async def execute_tool_node(state: AetherState, config: RunnableConfig) -> dict:
         "tool_call_signature": signature,
         "tool_call_repeats": repeats,
     }
+    if deep_research_log_entry is not None:
+        update["delegation_log"] = [deep_research_log_entry]
     if executed_write:
         update["write_tool_used"] = True
     return _apply_pending_steers(state, config, update)

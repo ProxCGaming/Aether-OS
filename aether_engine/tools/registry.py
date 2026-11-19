@@ -155,6 +155,18 @@ def build_tool_registry(
     if include_web_tools:
         for tool in create_web_tools():
             registry.register(tool)
+    # Orchestration programme P4c: the deep_research tool — GPT
+    # Researcher behind the researcher specialist
+    # (langgraph/backends/researcher_gpt.py). READ_ONLY, so the
+    # researcher's P2c ceiling admits it; registered unconditionally
+    # like the browser/desktop tools — when the backend cannot run
+    # (no resolvable model, library missing) the tool itself returns
+    # an honest error result naming the cause.
+    from aether_engine.langgraph.backends.researcher_gpt import (
+        create_deep_research_tool,
+    )
+
+    registry.register(create_deep_research_tool())
     # Epic 8, E8-6.1: agent-browser tools. Registered like every
     # other built-in — risk levels attached, the policy pipeline
     # applies unchanged; the tools themselves fail closed when

@@ -462,6 +462,20 @@ async def ws_tasks(ws: WebSocket):
         lambda: default_vision_provider(
             engine_state.user_config, secret_store))
 
+    # Orchestration programme P4c: the deep_research backend (GPT
+    # Researcher) reads the live user config and THIS connection's
+    # secret store through the same module-global seam pattern —
+    # installed here, restored on disconnect with the rest (N-43).
+    from aether_engine.langgraph.backends.researcher_gpt import (
+        DeepResearchRuntime,
+        set_deep_research_runtime_loader,
+    )
+
+    _prev_deep_research_loader = set_deep_research_runtime_loader(
+        lambda: DeepResearchRuntime(
+            user_config=engine_state.user_config,
+            secret_store=secret_store))
+
     # N07: forward production-analyzer events (MEDIA_ANALYSIS_PROGRESS
     # / MEDIA_ANALYZED) to this connection so the Media Library
     # reflects analysis state live. Analysis is triggered from many
@@ -536,6 +550,7 @@ async def ws_tasks(ws: WebSocket):
         set_browser_policy_loader(_prev_browser_policy_loader)
         set_desktop_policy_loader(_prev_desktop_policy_loader)
         set_vision_provider_resolver(_prev_vision_resolver)
+        set_deep_research_runtime_loader(_prev_deep_research_loader)
 
     try:
         while True:

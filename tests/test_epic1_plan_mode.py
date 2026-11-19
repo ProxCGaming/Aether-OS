@@ -89,6 +89,11 @@ async def test_plan_mode_offers_only_read_only_tools(monkeypatch):
         # diary retrieval, offered on the same basis; its WRITE
         # siblings (add_event / cancel_event) stay out of plan mode.
         "list_events",
+        # Orchestration programme P4c: deep_research is READ_ONLY
+        # (the GPT Researcher backend reads the web; its only write
+        # is the task's own artifact record), offered on the same
+        # basis as the other readers.
+        "deep_research",
     }
 
 
