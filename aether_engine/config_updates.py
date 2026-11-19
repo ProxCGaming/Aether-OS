@@ -72,6 +72,7 @@ HANDED_OFF_FIELDS = (
     "subagent_timeout_s",
     "subagent_token_budget",
     "subagent_cost_budget_usd",
+    "delegation_settings",
     "model_routing",
     "learned_routing",
     "learned_router_artefact",
@@ -345,6 +346,23 @@ def validate_handed_off_updates(config_data: dict) -> dict[str, Any]:
         cleaned["subagent_cost_budget_usd"] = _bounded_float(
             "subagent_cost_budget_usd",
             config_data["subagent_cost_budget_usd"], 0.0, 10_000.0)
+
+    # P1e: the delegation settings block, validated strictly by
+    # its owning module (delegation_settings.py): enums, ranges,
+    # per-agent rows, unknown keys refused. The composed cap /
+    # cost fields are refused as block keys there — they are
+    # written through supervisor_delegation_cap /
+    # subagent_cost_budget_usd above and read into the schema by
+    # the resolver, so a block copy would store a value nothing
+    # reads. delegation_settings_version is engine-managed (the
+    # migration owns it) and is not Settings-writable.
+    if "delegation_settings" in config_data:
+        from aether_engine.delegation_settings import (
+            validate_delegation_settings,
+        )
+
+        cleaned["delegation_settings"] = validate_delegation_settings(
+            config_data["delegation_settings"])
 
     # S14: model routing is a closed two-value mode, validated like
     # memory_backend — an unknown value is refused (naming the valid

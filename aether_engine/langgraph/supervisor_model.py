@@ -46,6 +46,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.config import get_config
 from pydantic import Field
 
+from aether_engine.delegation_settings import resolve_delegation_settings
 from aether_engine.desktop import observe_permitted
 from aether_engine.langgraph.compaction import (
     context_summary_section,
@@ -226,15 +227,19 @@ def _delegation_count(state: dict) -> int:
 
 
 def _delegation_cap(config: dict | None = None) -> int:
-    """The configured per-turn delegation cap (default 8)."""
+    """The configured per-turn delegation cap (default 8).
+
+    P1e: read through the delegation-settings resolver — the
+    single read path for the cap (the resolver composes it from
+    ``supervisor_delegation_cap``, its storage field).
+    """
     if config is None:
         try:
             config = get_config()
         except Exception:  # noqa: BLE001 — outside a graph run there is no config; the default cap applies.
             config = {}
     user_config = ((config or {}).get("configurable", {}) or {}).get("user_config")
-    cap = getattr(user_config, "supervisor_delegation_cap", 8)
-    return cap if isinstance(cap, int) and cap >= 0 else 8
+    return resolve_delegation_settings(user_config).max_delegations_per_turn
 
 
 def _specialist_answers(state: dict) -> list:
@@ -790,7 +795,9 @@ def _spawn_policy_denial(state: dict, target: str, config: dict | None = None) -
         if user_config is None:
             return None
         allowlist = getattr(user_config, "supervisor_spawn_allowlist", None)
-        cap = getattr(user_config, "supervisor_delegation_cap", 8)
+        # P1e: the cap comes from the delegation-settings resolver
+        # (the single read path), as in _delegation_cap above.
+        cap = resolve_delegation_settings(user_config).max_delegations_per_turn
         if allowlist is not None and target not in allowlist:
             reason = f"'{target}' is not in the supervisor spawn allow-list ({', '.join(allowlist) or 'empty'})"
         # S4: the cap is judged against the authoritative delegation

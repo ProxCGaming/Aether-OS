@@ -107,6 +107,7 @@ async def run_specialist(
     # on the run's default provider — the model selected in Settings.
     # Without this, the pin constructs fine and the provider call
     # 404s mid-run, failing the whole task.
+    from aether_engine.delegation_settings import is_tier_alias
     from aether_engine.langgraph.model_routing import (
         note_pin_refused,
         pin_targets_unusable_model,
@@ -125,6 +126,26 @@ async def run_specialist(
     # the agent plans on the run's (strong) provider instead.
     _uc = config.get("configurable", {}).get("user_config")
     if agent_model_override and spec.name in (getattr(_uc, "prewalk_agents", None) or []) and not state.get("write_tool_used"):
+        agent_model_override = None
+    # P1e step 3: a tier alias ("strong" / "balanced" / "cheap" /
+    # "local") as the agent's model value is a pin-class directive
+    # that names a tier, not a model: it resolves through the S14
+    # registry tiers to a concrete provider for this run's pool, at
+    # the pin's own seam — so the pin doctrine (never auto-routed,
+    # never escalated, per _pin_present above) and the prewalk
+    # split apply unchanged. An alias that cannot resolve degrades
+    # to the run provider, the pin path's failure doctrine; either
+    # way the value is consumed here, so the "provider:model" split
+    # below never sees it.
+    if agent_model_override and is_tier_alias(agent_model_override):
+        if secret_store:
+            from aether_engine.langgraph import model_routing as _routing
+
+            _alias_provider = _routing.resolve_alias_provider(
+                agent=spec.name, alias=agent_model_override,
+                config=config, run_provider=provider)
+            if _alias_provider is not None:
+                provider = _alias_provider
         agent_model_override = None
     if agent_model_override and agent_model_override != "inherit" and secret_store:
         try:
@@ -208,6 +229,29 @@ async def run_specialist(
                 if isinstance(tc, dict):
                     used_tools.add(tc.get("function", {}).get("name"))
     _legacy_allowed = agent_tools.get(spec.name)
+    # P1e: the agent's tool_access mode (delegation settings,
+    # resolved through the single read path) governs how the
+    # legacy list participates. "manual" (the default) is today's
+    # behaviour — the list narrows the ceiling when one exists.
+    # "all-allowed" is Filter-1 ceiling only: the list is set
+    # aside entirely. "auto" (P2c Filter-2 retrieval) has not
+    # landed — until K-03 the manual semantics apply and the gap
+    # is logged, never silent (the schema reports the mode
+    # unavailable-with-reason; tool_top_k is read by Filter 2
+    # when it lands).
+    from aether_engine.delegation_settings import (
+        resolve_delegation_settings,
+    )
+
+    _tool_access = resolve_delegation_settings(_uc).agent(
+        spec.name).tool_access
+    if _tool_access == "all-allowed":
+        _legacy_allowed = None
+    elif _tool_access == "auto":
+        logger.warning(
+            "%s: tool_access 'auto' requested but P2c Filter-2 "
+            "retrieval has not landed; applying the Filter-1 "
+            "ceiling plus any manual list", spec.display_name)
     if registry is not None and hasattr(registry, "get_tools"):
         risk_by_name = {t.name: t.risk for t in registry.get_tools()}
     elif registry is not None:

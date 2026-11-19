@@ -470,6 +470,24 @@ def _resolve_supervisor_provider(config: RunnableConfig):
     if pin_targets_unusable_model(agent_model_override):
         note_pin_refused("supervisor", agent_model_override)
         agent_model_override = None
+    # P1e step 3: a tier alias as the supervisor's model value
+    # resolves through the S14 registry tiers, exactly as in the
+    # specialist runner — a pin-class directive naming a tier, not
+    # a model. Consumed here so the "provider:model" split below
+    # never sees it; an unresolvable alias degrades to the graph
+    # provider, the pin path's failure doctrine.
+    from aether_engine.delegation_settings import is_tier_alias
+
+    if agent_model_override and is_tier_alias(agent_model_override):
+        if secret_store:
+            from aether_engine.langgraph import model_routing as _routing
+
+            _alias_provider = _routing.resolve_alias_provider(
+                agent="supervisor", alias=agent_model_override,
+                config=config, run_provider=provider)
+            if _alias_provider is not None:
+                provider = _alias_provider
+        agent_model_override = None
     if agent_model_override and agent_model_override != "inherit" and secret_store:
         try:
             parts = agent_model_override.split(":", 1)

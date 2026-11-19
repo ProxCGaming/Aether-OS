@@ -2641,6 +2641,16 @@ async def _handle_agent_update_request(conn: WsConnection, msg: Event) -> None:
     else:
         if model is not None:
             engine_state.user_config.agent_models[agent_id] = model
+            # P1e: keep the delegation-settings row for this agent
+            # in step with the pin on the live object (the load
+            # migration folds agent_models into the rows; this is
+            # the same fold for a write that happens after load).
+            from aether_engine.delegation_settings import (
+                sync_agent_model_row,
+            )
+
+            sync_agent_model_row(
+                engine_state.user_config, agent_id, model)
         if tools is not None:
             engine_state.user_config.agent_tools[agent_id] = tools
         # E1-10: a save failure is reported in the same

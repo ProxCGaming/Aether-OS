@@ -51,6 +51,33 @@ def _clean_desktop_app_rules(raw: Any) -> list:
 
     return clean_app_rules(raw)
 
+
+def _default_delegation_settings() -> dict:
+    """P1e: the UserConfig default for the delegation settings
+    block — delegation_settings.py owns the schema; the lazy import
+    follows the desktop-policy pattern above."""
+    from aether_engine.delegation_settings import (
+        default_delegation_settings,
+    )
+
+    return default_delegation_settings()
+
+
+def _migrate_delegation_settings(d: dict) -> dict:
+    """P1e: run the delegation-settings migration over a stored
+    config dict (delegation_settings.py owns the migration; it
+    folds the legacy agent_models pins into the block's rows)."""
+    from aether_engine.delegation_settings import (
+        migrate_delegation_settings,
+    )
+
+    agent_models = d.get("agent_models")
+    return migrate_delegation_settings(
+        d.get("delegation_settings"),
+        agent_models=agent_models if isinstance(agent_models, dict) else {},
+        stored_version=d.get("delegation_settings_version"),
+    )
+
 # ---------------------------------------------------------------------------
 # Base provider registry metadata (URLs, icons, display names)
 # ---------------------------------------------------------------------------
@@ -265,6 +292,23 @@ class UserConfig:
     # per-delegation budget, when it lands, supersedes this field as
     # the budget source; the wrapper reads it through one resolver.
     deep_research_cost_budget_usd: float = 0.0
+    # Orchestration programme P1e (K-04): the delegation settings
+    # schema — aether_engine/delegation_settings.py owns the shape,
+    # defaults, validation, migration and the single read path
+    # (resolve_delegation_settings) the supervisor, the specialist
+    # runner and S13 consume. delegation_settings_version is the
+    # block's schema version — the config's first versioned section
+    # (the composed-stack audit, RA2-03: no versioning existed
+    # before this). The block deliberately does NOT store
+    # max_delegations_per_turn or the per-delegation cost budget:
+    # for this transition release those live in
+    # supervisor_delegation_cap / subagent_cost_budget_usd above
+    # (their long-standing fields, still written by Settings) and
+    # the resolver composes them into the schema view — one
+    # storage source per field, so the two can never diverge.
+    delegation_settings: dict = field(
+        default_factory=_default_delegation_settings)
+    delegation_settings_version: int = 1
     # Master build S14: automatic per-agent model routing
     # (langgraph/model_routing.py). "off" (the default) is today's
     # behaviour exactly: an agent_models pin wins, "inherit" falls
@@ -534,6 +578,21 @@ class UserConfig:
     transcription_stt_model: str = "small"
     speech_tts_voice: str = "af_heart"
 
+    def __post_init__(self) -> None:
+        # P1e: from the moment the object exists, the delegation
+        # rows' model fields mirror agent_models (the live-written
+        # pin map) — the fold the load migration also runs, so a
+        # config built by hand (tests, layering) resolves the same
+        # rows as one loaded from disk. agent_models wins on any
+        # disagreement; see delegation_settings.fold_agent_models.
+        if isinstance(self.delegation_settings, dict) and self.agent_models:
+            from aether_engine.delegation_settings import (
+                fold_agent_models,
+            )
+
+            self.delegation_settings = fold_agent_models(
+                self.delegation_settings, self.agent_models)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "default_provider": self.default_provider,
@@ -574,6 +633,8 @@ class UserConfig:
             "subagent_token_budget": self.subagent_token_budget,
             "subagent_cost_budget_usd": self.subagent_cost_budget_usd,
             "deep_research_cost_budget_usd": self.deep_research_cost_budget_usd,
+            "delegation_settings": self.delegation_settings,
+            "delegation_settings_version": self.delegation_settings_version,
             "model_routing": self.model_routing,
             "tool_retrieval": self.tool_retrieval,
             "tool_retrieval_top_k": self.tool_retrieval_top_k,
@@ -726,6 +787,13 @@ class UserConfig:
             subagent_token_budget=_as_int(d.get("subagent_token_budget"), 20000),
             subagent_cost_budget_usd=_as_float(d.get("subagent_cost_budget_usd"), 0.0),
             deep_research_cost_budget_usd=_as_float(d.get("deep_research_cost_budget_usd"), 0.0),
+            # P1e: the migration runs over the raw stored dict (it
+            # needs the stored agent_models alongside the block);
+            # the version floors at 1 and a newer stored version is
+            # kept, so re-saving a newer file does not downgrade it.
+            delegation_settings=_migrate_delegation_settings(d),
+            delegation_settings_version=max(
+                1, _as_int(d.get("delegation_settings_version"), 1)),
             model_routing=d.get("model_routing") if d.get("model_routing") in ("off", "auto") else "off",
             tool_retrieval=d.get("tool_retrieval") if d.get("tool_retrieval") in ("off", "auto") else "off",
             tool_retrieval_top_k=_as_int(d.get("tool_retrieval_top_k"), 10),

@@ -829,7 +829,7 @@ class RoutingChoice:
     provider: str
     model: str
     tier: int
-    source: str  # "auto" | "escalation"
+    source: str  # "auto" | "escalation" | "alias"
     reason: str
     escalated_from: str | None = None  # "provider:model" stepped up from
 
@@ -1170,6 +1170,130 @@ def resolve_for_specialist(
         return run_provider, None
 
 
+# ── Tier aliases (P1e step 3) ─────────────────────────────────────
+
+#: The S14 tier each tier alias names ("local" is a provider
+#: property, not a tier — it is handled separately in the pick).
+_ALIAS_TIERS = {"strong": TIER_STRONG, "balanced": TIER_STANDARD,
+                "cheap": TIER_SMALL}
+
+
+def pick_alias_candidate(
+    alias: str,
+    candidates: list[Candidate],
+    history: History,
+    agent: str,
+) -> RoutingChoice | None:
+    """The concrete model a tier alias names in this pool (pure).
+
+    Aliases resolve through the registry tiers S14 already
+    computes: ``strong`` / ``balanced`` / ``cheap`` pick the best
+    candidate of the strong / standard / small tier group (the
+    router's own nearest-tier grouping and within-tier ranking —
+    a tier with no member resolves to the nearest available tier,
+    never to nothing while the pool is non-empty); ``local``
+    picks the best-ranked candidate served by a local provider.
+    None only when the pool is empty (or, for ``local``, holds no
+    local candidate) — the caller then keeps the run provider.
+    """
+    pool = list(candidates)
+    if not pool:
+        return None
+    alias = str(alias or "").strip().lower()
+    if alias == "local":
+        local = [c for c in pool if is_local_provider(c.provider)]
+        if not local:
+            return None
+        chosen = min(local, key=lambda c: _rank_key(c, agent, history))
+        return RoutingChoice(
+            provider=chosen.provider, model=chosen.model,
+            tier=chosen.tier, source="alias",
+            reason=(f"Tier alias 'local' resolved to "
+                    f"{chosen.provider}:{chosen.model} "
+                    f"({TIER_NAMES.get(chosen.tier, chosen.tier)} tier) "
+                    "— the best-ranked local model in the pool"))
+    target = _ALIAS_TIERS.get(alias)
+    if target is None:
+        return None
+    group, tier = _tier_group(pool, target, None)
+    if not group:
+        return None
+    chosen = min(group, key=lambda c: _rank_key(c, agent, history))
+    return RoutingChoice(
+        provider=chosen.provider, model=chosen.model, tier=tier,
+        source="alias",
+        reason=(f"Tier alias '{alias}' resolved to "
+                f"{chosen.provider}:{chosen.model} "
+                f"({TIER_NAMES.get(tier, tier)} tier)"))
+
+
+def resolve_alias_provider(
+    *,
+    agent: str,
+    alias: str,
+    config: dict[str, Any],
+    run_provider: Any,
+) -> Any | None:
+    """Resolve one agent's tier-alias pin to a provider.
+
+    The alias counterpart of the pin path: the chosen provider is
+    constructed with the run's own constraints, the run provider
+    itself is returned when the alias picks the incumbent, and
+    None means resolution was impossible (no incumbent to anchor
+    the pool, an empty pool, no secret store for a non-incumbent
+    pick) — the caller then keeps the run provider, the pin
+    path's failure doctrine. Never raises into the run.
+    """
+    configurable = config.get("configurable", {}) or {}
+    incumbent_provider = getattr(run_provider, "provider_name", None)
+    incumbent_model = getattr(run_provider, "model", None)
+    if not incumbent_provider or not incumbent_model:
+        return None
+    try:
+        from aether_engine.state import engine_state
+
+        candidates = collect_candidates(
+            registry=engine_state.model_registry,
+            configured_providers=engine_state.configured_providers,
+            health_manager=engine_state.health_manager,
+            incumbent_provider=str(incumbent_provider),
+            incumbent_model=str(incumbent_model),
+            local_only=bool(configurable.get("local_only")),
+        )
+        history = collect_history(candidates)
+        choice = pick_alias_candidate(alias, candidates, history, agent)
+        if choice is None:
+            return None
+        if (choice.provider, choice.model) == (
+                str(incumbent_provider), str(incumbent_model)):
+            return run_provider
+        secret_store = configurable.get("secret_store")
+        if secret_store is None:
+            logger.warning(
+                "Tier alias %r for %s picked %s:%s but no secret "
+                "store is available to construct it; keeping the "
+                "run provider", alias, agent, choice.provider,
+                choice.model)
+            return None
+        from aether_engine.orchestration.core import _create_provider_instance
+
+        provider = _create_provider_instance(
+            choice.provider, choice.model, secret_store,
+            local_only=bool(configurable.get("local_only")),
+            require_vision=bool(configurable.get("require_vision")),
+            user_config=configurable.get("user_config"),
+        )
+        logger.info(
+            "Tier alias for %s: %s (%s)",
+            agent, f"{choice.provider}:{choice.model}", choice.reason)
+        return provider
+    except Exception:
+        logger.warning(
+            "Tier alias %r unavailable for %s; keeping the run "
+            "provider", alias, agent, exc_info=True)
+        return None
+
+
 def construct_choice_provider(
     choice: RoutingChoice, config: dict[str, Any],
 ) -> Any | None:
@@ -1223,9 +1347,15 @@ def effective_models_report(user_config: Any | None) -> dict[str, Any]:
     default_provider = getattr(config, "default_provider", None) or "google_gemini"
     default_model = getattr(config, "default_model", None) or ""
 
+    from aether_engine.delegation_settings import is_tier_alias
+
     candidates: list[Candidate] = []
     history = History()
-    if mode == "auto":
+    # P1e: tier-alias pins resolve through the tiers in ANY routing
+    # mode (an alias is a pin-class directive, not auto routing),
+    # so the pool is gathered when an alias needs it too.
+    if mode == "auto" or any(
+            is_tier_alias(v) for v in agent_models.values()):
         try:
             candidates = collect_candidates(
                 registry=engine_state.model_registry,
@@ -1242,6 +1372,38 @@ def effective_models_report(user_config: Any | None) -> dict[str, Any]:
     agents: list[dict[str, Any]] = []
     for agent in ("supervisor", "researcher", "planner", "coder"):
         pin = agent_models.get(agent)
+        if pin and is_tier_alias(pin):
+            # P1e: a tier alias — report what it resolves to in the
+            # current pool (the pick is re-made per delegation, so
+            # this is the standing resolution, labelled as such).
+            choice = pick_alias_candidate(
+                str(pin), candidates, history, agent) if candidates \
+                else None
+            if choice is None:
+                agents.append({
+                    "agent": agent,
+                    "provider": None,
+                    "model": str(pin),
+                    "source": "tier_alias",
+                    "tier": None,
+                    "reason": (
+                        f"Pinned to the '{pin}' tier alias — no "
+                        "eligible model is currently configured for "
+                        "it, so the run's model serves until one is."),
+                })
+            else:
+                agents.append({
+                    "agent": agent,
+                    "provider": choice.provider,
+                    "model": choice.model,
+                    "source": "tier_alias",
+                    "tier": TIER_NAMES.get(choice.tier),
+                    "reason": (
+                        f"Pinned to the '{pin}' tier alias — "
+                        f"{choice.reason}; the pick is re-made per "
+                        "delegation from the live pool."),
+                })
+            continue
         if pin and pin != "inherit":
             p_name, _, m_name = str(pin).partition(":")
             agents.append({
