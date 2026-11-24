@@ -39,6 +39,24 @@ describe('startup gate IPC wiring', () => {
     expect(mainSrc).toContain('startEngineAndTrack');
   });
 
+  it('native splash: preload sends startup-ready and main listens, tracks and reveals', () => {
+    expect(preloadSrc).toContain('notifyStartupReady');
+    expect(preloadSrc).toContain("ipcRenderer.send('startup-ready')");
+    expect(mainSrc).toContain("ipcMain.on('startup-ready'");
+    expect(mainSrc).toContain("require('./electron/splashWindow.cjs')");
+    expect(mainSrc).toContain('createSplashWindow()');
+    expect(mainSrc).toContain('markRendererSettled');
+    // The main window loads hidden behind the splash, on a solid
+    // background — never the old visible transparent hang.
+    expect(mainSrc).toContain('show: false');
+    expect(mainSrc).toContain("backgroundColor: '#0A0A0B'");
+    // The splash page and its preload ship in the packaged build.
+    const pkg = fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8');
+    expect(pkg).toContain('"splash.html"');
+    expect(fs.existsSync(path.join(appRoot, 'splash.html'))).toBe(true);
+    expect(fs.existsSync(path.join(appRoot, 'electron', 'splashPreload.cjs'))).toBe(true);
+  });
+
   it('opening the log resolves the path from the lifecycle, never the renderer', () => {
     const handlerStart = mainSrc.indexOf("ipcMain.handle('open-engine-log'");
     const handler = mainSrc.slice(handlerStart, handlerStart + 1600);

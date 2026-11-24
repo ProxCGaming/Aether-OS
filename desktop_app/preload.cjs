@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('engine-state', handler);
   },
   retryEngineStart: () => ipcRenderer.invoke('retry-engine-start'),
+  // Native splash (23 Nov 2026): the renderer tells main its
+  // startup gate has latched (ready or failed) so the splash can
+  // give way to the main window. Fire-and-forget; no payload.
+  notifyStartupReady: () => ipcRenderer.send('startup-ready'),
   openEngineLog: () => ipcRenderer.invoke('open-engine-log'),
   getMemoryUsage: () => ipcRenderer.invoke('get-memory-usage'),
   showOpenDialog: (options) => ipcRenderer.invoke('show-open-dialog', options),

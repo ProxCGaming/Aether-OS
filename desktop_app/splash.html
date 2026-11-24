@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Aether-OS</title>
+    <!--
+      Native splash page (23 Nov 2026, owner request). Loaded by
+      main.cjs into its own tiny BrowserWindow the moment the app
+      starts, while the main window loads hidden in the
+      background. Deliberately standalone: no bundle, no module
+      graph, no engine dependency — it must paint in milliseconds,
+      which is the entire point. The animation is pure CSS; the
+      only script wires main's stage channel (electron/
+      splashWindow.cjs via electron/splashPreload.cjs) and the
+      slow-start notice, mirroring StartupGate's timings and
+      design (dark ground #0A0A0B, amber #F5B942, the same ring
+      spinner) so splash -> gate -> app reads as one screen.
+    -->
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { height: 100%; }
+      body {
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+        background: #0A0A0B;
+        color: #F2F2F0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        -webkit-app-region: drag;
+        user-select: none;
+      }
+      .panel { text-align: center; padding: 24px; }
+      .wordmark {
+        font-size: 12px;
+        letter-spacing: 3px;
+        text-transform: uppercase;
+        color: #F5B942;
+        margin-bottom: 10px;
+      }
+      .title { font-size: 22px; font-weight: 600; margin-bottom: 6px; }
+      .subtitle { font-size: 13px; color: #A7A7A2; margin-bottom: 22px; }
+
+      /* The StartupGate ring, standalone: an amber arc spinning
+         over its own faint track, with a soft pulsing glow. */
+      .ring-wrap { display: flex; justify-content: center; margin-bottom: 22px; }
+      .ring {
+        width: 44px; height: 44px; border-radius: 50%;
+        border: 3px solid rgba(245, 185, 66, 0.22);
+        border-top-color: #F5B942;
+        animation: spin 0.9s linear infinite, glow 2.2s ease-in-out infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @keyframes glow {
+        0%, 100% { box-shadow: 0 0 0 rgba(245, 185, 66, 0); }
+        50% { box-shadow: 0 0 18px rgba(245, 185, 66, 0.35); }
+      }
+
+      /* Stage steps: real events only (shell / interface /
+         engine / ready). A step lights when main reports it —
+         there is no timer-driven fake progress here. */
+      .steps { display: flex; gap: 8px; justify-content: center; margin-bottom: 18px; }
+      .step {
+        font-size: 11px;
+        letter-spacing: 0.4px;
+        color: #6E6E6A;
+        border: 1px solid #26262A;
+        border-radius: 999px;
+        padding: 4px 10px;
+        transition: color 0.3s, border-color 0.3s, background 0.3s;
+      }
+      .step.active { color: #F5B942; border-color: rgba(245, 185, 66, 0.55); }
+      .step.done { color: #0A0A0B; background: #F5B942; border-color: #F5B942; }
+
+      /* Indeterminate shimmer bar: motion without a made-up %. */
+      .bar {
+        width: 220px; height: 3px; margin: 0 auto;
+        background: rgba(245, 185, 66, 0.15);
+        border-radius: 999px; overflow: hidden; position: relative;
+      }
+      .bar::after {
+        content: ""; position: absolute; top: 0; left: -40%;
+        width: 40%; height: 100%; border-radius: 999px;
+        background: #F5B942;
+        animation: shimmer 1.4s ease-in-out infinite;
+      }
+      @keyframes shimmer { to { left: 100%; } }
+
+      .stage-text { font-size: 12px; color: #A7A7A2; margin-top: 14px; min-height: 15px; }
+      .slow {
+        font-size: 12px; color: #F5B942; margin-top: 8px;
+        opacity: 0; transition: opacity 0.4s;
+      }
+      .slow.visible { opacity: 1; }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <div class="wordmark">Aether-OS</div>
+      <div class="ring-wrap"><div class="ring"></div></div>
+      <div class="title">Starting Aether</div>
+      <div class="subtitle">Getting everything ready.</div>
+      <div class="steps">
+        <span class="step" data-step="shell">Shell</span>
+        <span class="step" data-step="interface">Interface</span>
+        <span class="step" data-step="engine">Engine</span>
+        <span class="step" data-step="ready">Ready</span>
+      </div>
+      <div class="bar"></div>
+      <div class="stage-text" id="stageText">Starting the shell…</div>
+      <div class="slow" id="slowNotice">Cold starts can take a while — the engine is given up to two minutes to come up.</div>
+    </div>
+    <script>
+      (function () {
+        var ORDER = ['shell', 'interface', 'engine', 'ready'];
+        var TEXT = {
+          shell: 'Starting the shell…',
+          interface: 'Loading the interface…',
+          engine: 'Connecting to the engine…',
+          ready: 'Ready…'
+        };
+        var stageText = document.getElementById('stageText');
+        function applyStage(stage) {
+          var idx = ORDER.indexOf(stage);
+          if (idx < 0) return;
+          var steps = document.querySelectorAll('.step');
+          for (var i = 0; i < steps.length; i++) {
+            var stepIdx = ORDER.indexOf(steps[i].getAttribute('data-step'));
+            steps[i].className = 'step' + (stepIdx < idx ? ' done' : stepIdx === idx ? ' active' : '');
+          }
+          stageText.textContent = TEXT[stage] || '';
+        }
+        applyStage('shell');
+        if (window.splashAPI && typeof window.splashAPI.onStage === 'function') {
+          window.splashAPI.onStage(function (value) {
+            if (value && typeof value.stage === 'string') applyStage(value.stage);
+          });
+        }
+        // StartupGate's slow notice (20s): calms, never declares
+        // failure. Main force-reveals at the 120s budget, where
+        // the gate's own recovery view takes over.
+        setTimeout(function () {
+          document.getElementById('slowNotice').className = 'slow visible';
+        }, 20000);
+      })();
+    </script>
+  </body>
+</html>

@@ -65,6 +65,7 @@
       "dist/**/*",
       "main.cjs",
       "preload.cjs",
+      "splash.html",
       "package.json",
       "electron/**/*"
     ],

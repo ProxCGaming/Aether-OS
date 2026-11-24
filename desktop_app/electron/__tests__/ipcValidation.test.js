@@ -354,6 +354,10 @@ const EXPECTED_CHANNELS = [
   // 'engine-state' broadcast is a webContents.send, not a handler,
   // so it is not a registered channel here.
   'get-engine-state', 'retry-engine-start', 'open-engine-log',
+  // Native splash channel (23 Nov 2026) — same sender guard;
+  // 'startup-ready' is an ipcMain.on (fire-and-forget), like
+  // append-ui-log.
+  'startup-ready',
   // Unified logging channels (5 Nov 2026) — same sender guard;
   // append-ui-log is an ipcMain.on (fire-and-forget), the rest are
   // handles for the Diagnostics log viewer / bundle export.

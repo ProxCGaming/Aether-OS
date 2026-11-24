@@ -25,6 +25,7 @@ const WebSocket = require('ws');
 const { createWindowStateStore, ensureVisibleOnDisplays } = require('./electron/windowState.cjs');
 const { createEngineLifecycle } = require('./electron/engineLifecycle.cjs');
 const { createReconnectGuard } = require('./electron/wsReconnect.cjs');
+const { createSplashTracker, SPLASH_MAX_WAIT_MS } = require('./electron/splashWindow.cjs');
 const { createEngineSocket } = require('./electron/engineSocket.cjs');
 const { createLogIpc } = require('./electron/logIpc.cjs');
 const { createIpcDialogs } = require('./electron/ipcDialogs.cjs');
@@ -213,6 +214,7 @@ if (!gotSingleInstanceLock) {
 }
 app.on('second-instance', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    dismissSplash();
     if (!mainWindow.isVisible()) mainWindow.show();
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
@@ -244,6 +246,9 @@ function showMainWindow() {
     createWindow();
     return;
   }
+  // An explicit show (tray, notification, second instance) is the
+  // user asking for the window — it ends the splash wait too.
+  dismissSplash();
   if (!mainWindow.isVisible()) mainWindow.show();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.focus();
@@ -304,6 +309,12 @@ function setEngineStartupState(state) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('engine-state', engineStartupState);
   }
+  // Native splash: the engine stage feeds the tracker (a failure
+  // reveals once the interface loaded — the gate's failure screen
+  // must be reachable).
+  splashTracker.setEngineState(state);
+  syncSplashStage();
+  maybeRevealMainWindow();
 }
 
 // Drives one lifecycle start attempt and mirrors its outcome into
@@ -432,6 +443,83 @@ function notifyEngineMessage(msgStr) {
   }
 }
 
+// Native splash (23 Nov 2026, owner request): a small standalone
+// window shows the loading animation from the first frame while
+// the main window loads HIDDEN in the background — replacing the
+// old sequence where the transparent main window hung empty and
+// the renderer's StartupGate appeared only after first paint.
+// Stage/reveal decisions live in electron/splashWindow.cjs (pure,
+// unit-tested); this is the wiring. The splash is not the main
+// window: it carries no saved bounds, no tray identity, and it is
+// closed — never hidden — at reveal.
+let splashWindow = null;
+let splashFallbackTimer = null;
+const splashTracker = createSplashTracker();
+
+function syncSplashStage() {
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.webContents.send('splash-stage', splashTracker.snapshot());
+  }
+}
+
+function dismissSplash() {
+  if (splashFallbackTimer) {
+    clearTimeout(splashFallbackTimer);
+    splashFallbackTimer = null;
+  }
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.close();
+  }
+  splashWindow = null;
+}
+
+function maybeRevealMainWindow() {
+  if (!splashTracker.shouldReveal()) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  dismissSplash();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+function createSplashWindow() {
+  if (splashWindow && !splashWindow.isDestroyed()) return;
+  splashWindow = new BrowserWindow({
+    width: 420,
+    height: 340,
+    frame: false,
+    resizable: false,
+    movable: true,
+    center: true,
+    show: false,
+    backgroundColor: '#0A0A0B',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      // Sandboxed like every shell window (S3-M2); the splash
+      // preload requires only 'electron', the allowed set.
+      sandbox: true,
+      preload: path.join(__dirname, 'electron', 'splashPreload.cjs')
+    }
+  });
+  splashWindow.on('closed', () => { splashWindow = null; });
+  splashWindow.loadFile(path.join(__dirname, 'splash.html'));
+  splashWindow.once('ready-to-show', () => {
+    if (splashWindow && !splashWindow.isDestroyed()) {
+      splashWindow.show();
+      syncSplashStage();
+    }
+  });
+  // Fallback budget: the engine's full 120s health budget. Past
+  // it, reveal whatever state the main window is in — its
+  // StartupGate recovery view (Retry / Open engine log) takes
+  // over, so nobody is trapped on the splash.
+  splashFallbackTimer = setTimeout(() => {
+    splashTracker.forceReveal();
+    maybeRevealMainWindow();
+  }, SPLASH_MAX_WAIT_MS);
+  if (splashFallbackTimer.unref) splashFallbackTimer.unref();
+}
+
 function createWindow() {
   // D4-02: the saved POSITION is only honoured if the window would
   // actually be visible on a currently-connected display — a
@@ -450,6 +538,13 @@ function createWindow() {
     transparent: true,
     vibrancy: 'ultra-dark', // macOS
     backgroundMaterial: 'acrylic', // Windows 11
+    // Native splash (23 Nov 2026): the main window loads hidden
+    // behind the splash and is revealed by maybeRevealMainWindow;
+    // the solid background colour covers the pre-paint gap if the
+    // window is ever shown before the renderer paints (the old
+    // see-through acrylic hang).
+    show: false,
+    backgroundColor: '#0A0A0B',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -472,7 +567,24 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, 'dist/index.html'));
   }
-  
+
+  // Native splash: the renderer's load finishing (or failing —
+  // a failed load must still reveal, so the user sees the error
+  // instead of an endless splash; -3 is ERR_ABORTED, a superseded
+  // load, which the replacement load reports on its own) is the
+  // tracker's interface stage.
+  mainWindow.webContents.on('did-finish-load', () => {
+    splashTracker.markInterfaceLoaded();
+    syncSplashStage();
+    maybeRevealMainWindow();
+  });
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode) => {
+    if (errorCode === -3) return;
+    splashTracker.markInterfaceLoaded();
+    syncSplashStage();
+    maybeRevealMainWindow();
+  });
+
   mainWindow.on('resize', scheduleSaveBounds);
   mainWindow.on('move', scheduleSaveBounds);
   mainWindow.on('close', () => {
@@ -613,6 +725,9 @@ app.whenReady().then(() => {
   } catch { /* logging never breaks startup */ }
   mainLog('App ready.');
   installSecurityPolicy();
+  // Native splash first: it paints in milliseconds while the
+  // main window loads hidden behind it.
+  createSplashWindow();
   createWindow();
   // E10-F06: if no engine already answers on the engine port, start
   // the bundled one first (packaged builds); connectEngine() itself
@@ -751,6 +866,19 @@ ipcMain.handle('get-engine-state', (event) => {
   if (!isTrustedIpcSender(event, 'get-engine-state')) return { state: 'starting', logFilePath: null };
   const logFilePath = engineLifecycle ? engineLifecycle.logFilePath() : engineStartupState.logFilePath;
   return { ...engineStartupState, logFilePath };
+});
+
+// Native splash (23 Nov 2026): the renderer's startup gate
+// latched — ready OR failed, both mean the main window should
+// take over from the splash (the failed screen carries Retry /
+// Open engine log). Fire-and-forget like append-ui-log; the
+// payload is empty and the sender is validated, so the renderer
+// can only ever report its own gate, nothing else.
+ipcMain.on('startup-ready', (event) => {
+  if (!isTrustedIpcSender(event, 'startup-ready')) return;
+  splashTracker.markRendererSettled();
+  syncSplashStage();
+  maybeRevealMainWindow();
 });
 
 // The gate's Retry: only a definitively failed start is retried here

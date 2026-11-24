@@ -210,6 +210,18 @@ function AppContent() {
   useEffect(() => {
     if (engineReady) setGatePassed(true);
   }, [engineReady]);
+  // Native splash (23 Nov 2026): when this gate latches ready, or
+  // the engine start definitively fails, tell main so its splash
+  // window gives way to this window (the failed gate screen must
+  // be visible for its Retry / Open-log actions). Main also
+  // force-reveals at the 120s budget if this signal never comes.
+  const startupFailed = engineStartState === 'failed';
+  useEffect(() => {
+    if (!startupGateActive || (!gatePassed && !startupFailed)) return;
+    if (window.electronAPI && typeof window.electronAPI.notifyStartupReady === 'function') {
+      try { window.electronAPI.notifyStartupReady(); } catch { /* the splash fallback covers a lost signal */ }
+    }
+  }, [startupGateActive, gatePassed, startupFailed]);
   useEffect(() => {
     if (!startupGateActive) return undefined;
     let cancelled = false;

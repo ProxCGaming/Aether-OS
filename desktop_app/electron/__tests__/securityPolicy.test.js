@@ -383,8 +383,10 @@ describe('S3-M2 main.cjs wiring contract', () => {
     expect(mainSource).toContain('shouldGuardWebContents(contents)');
   });
 
-  it('both windows run their renderers sandboxed', () => {
-    expect(mainSource.match(/sandbox:\s*true/g)).toHaveLength(2);
+  it('all windows run their renderers sandboxed', () => {
+    // Main + floating chat + the native splash (23 Nov 2026):
+    // every BrowserWindow in main.cjs is sandboxed, no exceptions.
+    expect(mainSource.match(/sandbox:\s*true/g)).toHaveLength(3);
   });
 
   it('the security policy is installed before the first window is created', () => {
