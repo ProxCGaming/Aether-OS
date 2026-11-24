@@ -39,6 +39,12 @@ dependencies = [
     "aiosqlite==0.22.1",
     # Windows-only: no Linux/macOS wheels exist; uv skips it elsewhere.
     "pywin32==312; sys_platform == 'win32'",
+    # Windows-only: Computer Use (aether_engine/desktop/) reads and
+    # actuates the accessibility tree through this package; it was
+    # imported lazily but never declared, so every install reported
+    # Desktop control "Degraded" (found 23 Nov 2026). uv skips it
+    # off Windows, like pywin32 above.
+    "uiautomation==2.0.29; sys_platform == 'win32'",
     "pydantic==2.14.1",
     "langgraph-supervisor==0.0.31",
     "trafilatura==2.3.1",
