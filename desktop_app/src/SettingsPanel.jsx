@@ -1108,6 +1108,27 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
     }
   }, [activeMenu, wsRef, reconnectCount]);
 
+  // 23 Nov 2026: the applied config is Settings-wide state — every
+  // config-gated tab renders from it, but the per-menu fetch below
+  // only fires for the menus it names. Fetch the config on mount
+  // and on every reconnect as well, so a config-gated tab opened
+  // FIRST in a visit is never stranded on its load state because
+  // nobody asked (the Computer Use / Conversation / Capabilities
+  // bug: those menus were missing from the per-menu list, so
+  // opening Computer Use first showed "Loading your saved computer
+  // use settings…" forever, and the Capabilities feature-state
+  // card sat on "Waiting for the applied config").
+  useEffect(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'CONFIG_GET_REQUEST',
+        schema_version: 1,
+        request_id: Date.now().toString(),
+        payload: {}
+      }));
+    }
+  }, [wsRef, reconnectCount]);
+
   useEffect(() => {
     if (activeMenu === 'Tools' && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
@@ -1163,7 +1184,7 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
       // D2-04: the Memory branch that used to sit here sent
       // MEMORY_EPISODES_REQUEST + MEMORY_GRAPH_REQUEST for fossil
       // state — MemoryManagement fetches both itself on mount.
-    } else if ((activeMenu === 'Advanced' || activeMenu === 'Models' || activeMenu === 'Voice' || activeMenu === 'Calendar') && wsRef.current?.readyState === WebSocket.OPEN) {
+    } else if ((activeMenu === 'Advanced' || activeMenu === 'Models' || activeMenu === 'Voice' || activeMenu === 'Calendar' || activeMenu === 'ComputerUse' || activeMenu === 'Conversation' || activeMenu === 'Capabilities') && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'CONFIG_GET_REQUEST',
         schema_version: 1,
@@ -1539,6 +1560,8 @@ export default function SettingsPanel({ wsRef, safeSend = null, pendingMessages 
             configAnswered={!!answered.config}
             isConnected={isConnected}
             configError={configUpdateError}
+            configLoadError={configLoadError}
+            onRetryConfigLoad={retryConfigLoad}
             computerUseEnabled={computerUseEnabled}
             onComputerUseEnabledChange={handleComputerUseEnabledChange}
             computerUseObserve={computerUseObserve}

@@ -131,6 +131,48 @@ describe('D2-05 — config load failure is an error state with a retry', () => {
   });
 });
 
+describe('23 Nov 2026 — config-gated tabs opened first still get their config', () => {
+  // Regression: Computer Use / Conversation / Capabilities were
+  // missing from the per-menu CONFIG_GET list, so opening one of
+  // them FIRST in a Settings visit stranded it on its load state
+  // forever (Computer Use: "Loading your saved computer use
+  // settings…"; Capabilities: "Waiting for the applied config").
+  // The mount fetch + the extended per-menu list both cover it.
+  test('Computer Use opened first: CONFIG_GET is sent and the tab renders when the answer lands', () => {
+    const { wsRef, feed, sentTypes } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} />);
+    fireEvent.click(screen.getByText('Computer Use'));
+    expect(sentTypes()).toContain('CONFIG_GET_REQUEST');
+    expect(screen.getByTestId('computer-use-config-load-state')).toBeInTheDocument();
+    feed('CONFIG_GET_RESPONSE', { config: {} });
+    expect(screen.queryByTestId('computer-use-config-load-state')).not.toBeInTheDocument();
+    expect(screen.getByTestId('computer-use-enabled-toggle')).toBeInTheDocument();
+  });
+
+  test('Computer Use opened first: a failed CONFIG_GET is an error with a retry, not endless loading', () => {
+    const { wsRef, feed, sentTypes } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} />);
+    fireEvent.click(screen.getByText('Computer Use'));
+    feed('CONFIG_GET_RESPONSE', { success: false, error: 'config store unavailable' });
+    const row = screen.getByTestId('computer-use-config-load-state');
+    expect(row).toHaveAttribute('data-load-display', 'error');
+    expect(row).toHaveTextContent(/config store unavailable/);
+    wsRef.current.send.mockClear();
+    fireEvent.click(screen.getByText('Retry'));
+    expect(sentTypes()).toContain('CONFIG_GET_REQUEST');
+  });
+
+  test('Capabilities opened first: the applied config lands and the feature-state rows leave the waiting state', () => {
+    const { wsRef, feed, sentTypes } = makeWsRef();
+    render(<SettingsPanel wsRef={wsRef} providers={[]} />);
+    fireEvent.click(screen.getByText('Capabilities'));
+    expect(sentTypes()).toContain('CONFIG_GET_REQUEST');
+    feed('CONFIG_GET_RESPONSE', { config: { memory_backend: 'native', model_routing: 'off' } });
+    expect(screen.getByTestId('feature-state-memory')).toHaveTextContent(/Configured backend: native/);
+    expect(screen.getByTestId('feature-state-model_routing')).toHaveTextContent(/Off: specialists run/);
+  });
+});
+
 describe('D2-06 — optimistic selectors roll back on refusal', () => {
   test('approval mode: refusal restores the confirmed mode and names the error', () => {
     const { wsRef, feed } = makeWsRef();

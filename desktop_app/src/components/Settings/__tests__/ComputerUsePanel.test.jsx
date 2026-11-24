@@ -124,6 +124,16 @@ describe('ComputerUsePanel (S20)', () => {
     expect(screen.queryByTestId('computer-use-enabled-toggle')).not.toBeInTheDocument();
   });
 
+  test('a failed config load is an error state with a retry, not endless loading', () => {
+    const onRetryConfigLoad = jest.fn();
+    renderPanel({ configAnswered: false, configLoadError: 'config store unavailable', onRetryConfigLoad });
+    const row = screen.getByTestId('computer-use-config-load-state');
+    expect(row).toHaveAttribute('data-load-display', 'error');
+    expect(row).toHaveTextContent(/config store unavailable/);
+    fireEvent.click(screen.getByText('Retry'));
+    expect(onRetryConfigLoad).toHaveBeenCalledTimes(1);
+  });
+
   test('a refused write is surfaced verbatim', () => {
     renderPanel({
       configError:

@@ -154,6 +154,8 @@ export default function ComputerUsePanel({
   configAnswered = true,
   isConnected = true,
   configError = '',
+  configLoadError = '',
+  onRetryConfigLoad,
   computerUseEnabled = false,
   onComputerUseEnabledChange,
   computerUseObserve = false,
@@ -269,13 +271,25 @@ export default function ComputerUsePanel({
       </div>
 
       {!configAnswered && (
-        <LoadStateRow
-          loadState="loading"
-          isConnected={isConnected}
-          loadingText="Loading your saved computer use settings…"
-          offlineText="Waiting for the engine — your saved computer use settings will appear when it reconnects."
-          testId="computer-use-config-load-state"
-        />
+        <div>
+          <LoadStateRow
+            loadState={configLoadError ? 'error' : 'loading'}
+            isConnected={isConnected}
+            loadingText="Loading your saved computer use settings…"
+            offlineText="Waiting for the engine — your saved computer use settings will appear when it reconnects."
+            errorText={configLoadError || 'Your saved computer use settings could not be loaded.'}
+            testId="computer-use-config-load-state"
+          />
+          {configLoadError && onRetryConfigLoad && (
+            <button
+              type="button"
+              onClick={onRetryConfigLoad}
+              style={{ marginTop: '8px', background: 'transparent', color: 'var(--accent)', border: '1px solid rgba(var(--accent-rgb),0.4)', padding: '6px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}
+            >
+              Retry
+            </button>
+          )}
+        </div>
       )}
 
       {configAnswered && (
